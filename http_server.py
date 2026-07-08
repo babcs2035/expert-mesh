@@ -1,4 +1,4 @@
-"""FastAPIによるノード間通信サーバー：/advertise, /probe, /dispatch を提供する．"""
+"""FastAPI server exposing the inter-node protocol endpoints."""
 
 import asyncio
 import time
@@ -21,26 +21,26 @@ from protocol import (
 )
 from router import estimate_confidence
 
-# 専門家モデルの本回答生成トークン数の上限．num_predict未指定だとollamaは無制限に
-# 生成し続けるため，dispatch_timeout_s内に収まる現実的な上限を明示的に課す．
-# qwen3.5:9bの実測生成速度（約3 tok/s，CPU推論）を踏まえ，
-# config.yamlのdispatch_timeout_s内に収まる値としている．
+# Maximum tokens for full answer generation. Without an explicit cap,
+# ollama generates indefinitely. 512 tokens is sufficient for typical
+# answers and fits within the configured dispatch timeout.
 DISPATCH_MAX_TOKENS = 512
 
-# 起動時ウォームアップ関連の定数．モデルロード時間がprobe/dispatchの計測値に
-# 混入しないよう，起動時に一度モデルをollamaのメモリへ読み込ませておく．
+# Startup warmup settings. Pre-loading the model prevents its latency
+# from contaminating probe and dispatch timing measurements.
 WARMUP_MAX_TOKENS = 1
 WARMUP_TIMEOUT_S = 120.0
 WARMUP_RETRY_INTERVAL_S = 2.0
 WARMUP_MAX_RETRIES = 30
 
 
-async def warmup_model(ollama_client: OllamaClient, model: str) -> None:
-    """モデルをollamaのメモリに読み込ませる．
+def build_dispatch_prompt(domain: str, full_query: str) -> str:
+    """Build the answer-generation prompt with the node's domain context."""
+    return f"あなたは「{domain}」分野の専門家です．次の質問に，あなたの専門知識を活かして具体的に回答してください．\n質問: {full_query}"
 
-    コンテナ起動直後はollama自体のAPIがまだ受け付けられないことがあるため，
-    接続エラー時は一定回数リトライする．
-    """
+
+async def warmup_model(ollama_client: OllamaClient, model: str) -> None:
+    """Load a model into ollama memory on startup."""
     for attempt in range(WARMUP_MAX_RETRIES):
         try:
             await ollama_client.generate(
@@ -54,7 +54,7 @@ async def warmup_model(ollama_client: OllamaClient, model: str) -> None:
 
 
 class NodeState:
-    """1ノード分の設定（config.yaml由来）と実行時状態を保持する．"""
+    """Mutable runtime state and configuration for a single mesh node."""
 
     def __init__(
         self,
@@ -79,20 +79,20 @@ class NodeState:
         self._probe_confidence_cache: dict[str, float] = {}
 
     def cache_probe_confidence(self, request_id: str, confidence: float) -> None:
-        """probe時に算出したconfidenceを，対応するdispatch応答で再利用するため保持する．"""
+        """Store the confidence score from probe for later reuse in dispatch."""
         self._probe_confidence_cache[request_id] = confidence
 
     def pop_probe_confidence(self, request_id: str) -> float:
-        """dispatch時にprobe時のconfidenceを取り出す．対応するprobeがなければ0.0とする．"""
+        """Retrieve and remove the cached probe confidence; returns 0.0 if absent."""
         return self._probe_confidence_cache.pop(request_id, 0.0)
 
 
 def create_app(state: NodeState) -> FastAPI:
-    """NodeStateを束縛したFastAPIアプリケーションを構築する．"""
+    """Create and wire up the FastAPI application with the given node state."""
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        """起動時にlight_model/expert_modelをウォームアップする．"""
+        """Warm up models before the server starts accepting requests."""
         await warmup_model(state.ollama_client, state.light_model)
         if state.expert_model != state.light_model:
             await warmup_model(state.ollama_client, state.expert_model)
@@ -104,18 +104,18 @@ def create_app(state: NodeState) -> FastAPI:
     async def handle_validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        """JSON形式不正等のリクエストバリデーションエラーを400+共通エラー形式に変換する．"""
+        """Return a standardized 400 error for malformed requests."""
         return JSONResponse(status_code=400, content=ErrorResponse(error="invalid request").model_dump())
 
     @app.post("/advertise", response_model=AdvertiseResponse)
     async def advertise(body: AdvertiseRequest) -> AdvertiseResponse:
-        """ピアからのハートビートを受け取り，既知ピア情報を更新する．"""
+        """Record or update a peer's advertised state."""
         state.known_peers[body.node_id] = body
         return AdvertiseResponse()
 
     @app.post("/probe", response_model=None)
     async def probe(body: ProbeRequest) -> ProbeResponse | JSONResponse:
-        """軽量モデルで担当可否confidenceを算出して返す．"""
+        """Score whether this node can handle the query and return the confidence."""
         start = time.monotonic()
         try:
             confidence = await estimate_confidence(
@@ -142,12 +142,12 @@ def create_app(state: NodeState) -> FastAPI:
 
     @app.post("/dispatch", response_model=None)
     async def dispatch(body: DispatchRequest) -> DispatchResponse | JSONResponse:
-        """専門家モデルで本文の回答を生成して返す．"""
+        """Generate the full answer and return it with timing and confidence."""
         start = time.monotonic()
         try:
             answer_text = await state.ollama_client.generate(
                 state.expert_model,
-                body.full_query,
+                build_dispatch_prompt(state.domain, body.full_query),
                 timeout_s=state.dispatch_timeout_s,
                 max_tokens=DISPATCH_MAX_TOKENS,
             )

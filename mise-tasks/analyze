@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 各ノードからログを回収する．Phase 0時点では簡易な回収・行数表示のみを行い，
-# 指標計算（4章の評価指標）はPhase 2でbenchmark/metrics.pyとして追加する．
+# Collect logs from all nodes. Phase 0 only does basic collection and line counts;
+# metric calculations (Chapter 4 evaluation metrics) will be added in Phase 2
+# as benchmark/metrics.py.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -18,4 +19,4 @@ for host in $(uv run python tools/list_peers.py); do
   echo "  -> $LOG_DIR/$host/expert-mesh.log (${line_count} lines)"
 done
 
-echo "[analyze] done. 詳細な指標計算はPhase 2のbenchmark/metrics.pyで行う"
+echo "[analyze] done. Detailed metrics will be computed in Phase 2's benchmark/metrics.py"

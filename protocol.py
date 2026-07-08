@@ -1,37 +1,37 @@
-"""ノード間通信（/advertise, /probe, /dispatch）で用いるJSONメッセージのpydanticスキーマを定義する．"""
+"""Pydantic models for inter-node communication over HTTP."""
 
 from pydantic import BaseModel, Field
 
 
 class AdvertiseRequest(BaseModel):
-    """自ノードの現在状態をピアに周知するハートビートのリクエスト．"""
+    """Heartbeat payload: a node announces its identity, domain, and current load."""
 
     node_id: str
     domain: str
     domain_embedding: list[float]
     load: float = Field(ge=0.0, le=1.0)
-    timestamp: int = Field(description="UNIX epoch秒")
+    timestamp: int = Field(description="UNIX epoch seconds")
 
 
 class AdvertiseResponse(BaseModel):
-    """advertiseの受理応答．"""
+    """Acknowledgment for a successful /advertise call."""
 
     status: str = "ok"
 
 
 class ProbeRequest(BaseModel):
-    """依頼者から各ノードへ担当可否のみを問い合わせるリクエスト．"""
+    """Question sent to all peers to ask whether they can handle it."""
 
     request_id: str
     query_summary: str
     query_embedding: list[float]
-    from_: str = Field(alias="from", description="依頼元ノードのnode_id")
+    from_: str = Field(alias="from", description="Source node ID")
 
     model_config = {"populate_by_name": True}
 
 
 class ProbeResponse(BaseModel):
-    """担当可否問い合わせへの応答．confidenceは0〜1の自己申告スコア．"""
+    """Peer's answer to a probe: self-reported confidence and estimated latency."""
 
     request_id: str
     node_id: str
@@ -40,14 +40,14 @@ class ProbeResponse(BaseModel):
 
 
 class DispatchRequest(BaseModel):
-    """選定された専門家へ本文の回答生成を依頼するリクエスト．"""
+    """Request to the selected peer to generate the full answer."""
 
     request_id: str
     full_query: str
 
 
 class DispatchResponse(BaseModel):
-    """回答生成の結果．"""
+    """Result from the selected peer after answer generation."""
 
     request_id: str
     node_id: str
@@ -57,6 +57,6 @@ class DispatchResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    """全エンドポイント共通のエラー応答（400/503/504で使用）．"""
+    """Standardized error payload used for 400, 503, and 504 responses."""
 
     error: str

@@ -1,4 +1,4 @@
-"""config.yaml記載の全ノードへ/advertiseを送り，生存確認を行うツール（distributed-llmの移植方針を踏襲）．"""
+"""Send dummy /advertise requests to all configured nodes and report reachability."""
 
 import argparse
 import asyncio
@@ -13,11 +13,7 @@ SELF_HOST_OVERRIDE = "localhost"
 
 
 async def check_one(peer: dict) -> tuple[str, bool, str]:
-    """1ノードへ/advertiseのダミーリクエストを送り，(node_id, 成功可否, メッセージ)を返す．
-
-    domain_embedding/timestampは疎通確認のみが目的のダミー値であり，
-    実際のノード状態としては扱われない．
-    """
+    """Send a dummy /advertise to a single node and return (node_id, success, message)."""
     url = f"http://{peer['host']}:{peer['port']}/advertise"
     dummy_request = {
         "node_id": "healthcheck",
@@ -36,12 +32,7 @@ async def check_one(peer: dict) -> tuple[str, bool, str]:
 
 
 def _resolve_peers(config: dict) -> list[dict]:
-    """config.yamlのnodesをpeerのリストに変換する．
-
-    自ノード（環境変数NODE_IDと一致するノード）は，外部IP経由でのhairpin NAT
-    （コンテナから自ホストの公開ポートへの折り返し接続）が環境によって機能しない
-    ことがあるため，hostをlocalhostに置き換える．
-    """
+    """Convert config nodes to peer dicts, overriding host to localhost for the self node."""
     self_node_id = os.environ.get("NODE_ID")
     peers = []
     for node_id, node_config in config["nodes"].items():
@@ -53,7 +44,7 @@ def _resolve_peers(config: dict) -> list[dict]:
 
 
 async def run_healthcheck(config_path: str) -> bool:
-    """全ノードの生存確認を実行し，結果を表示する．全ノード成功ならTrueを返す．"""
+    """Check all nodes and print results. Return True only if every node is reachable."""
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
     peers = _resolve_peers(config)
@@ -67,8 +58,8 @@ async def run_healthcheck(config_path: str) -> bool:
 
 
 def main() -> None:
-    """CLIエントリポイント．全ノードが生存していない場合は非ゼロで終了する．"""
-    parser = argparse.ArgumentParser(description="全ノードの/advertise疎通確認を行う")
+    """CLI entry point: exit 0 if all nodes are healthy, 1 otherwise."""
+    parser = argparse.ArgumentParser(description="Health-check all nodes via /advertise")
     parser.add_argument("--config", default="config.yaml")
     args = parser.parse_args()
     all_ok = asyncio.run(run_healthcheck(args.config))

@@ -1,20 +1,20 @@
-# mise タスク定義．各タスクの実体はmise-tasks/以下の実行可能スクリプト．
+# mise task definitions. Task implementations are executable scripts in mise-tasks/.
 [tasks.setup]
-description = "ローカル環境構築：uv sync／レジストリ起動／mesh-nodeイメージのbuild&push"
+description = "Local setup: uv sync / registry start / mesh-node image build and push"
 run = "mise-tasks/setup"
 
 [tasks.deploy]
-description = "各ノードへのデプロイ：SSHリバーストンネル確立／config配布／イメージpull／モデルpull"
+description = "Deploy to all nodes: SSH reverse tunnel / config distribution / image pull / model pull"
 run = "mise-tasks/deploy"
 
 [tasks.start]
-description = "各ノードでdocker compose up -dを実行し実験を開始する"
+description = "Start docker compose up -d on all nodes to begin the experiment"
 run = "mise-tasks/start"
 
 [tasks.analyze]
-description = "各ノードからログを回収する（Phase 0時点は簡易収集のみ．指標計算はPhase 2）"
+description = "Collect logs from all nodes (Phase 0: basic collection only; metrics in Phase 2)"
 run = "mise-tasks/analyze"
 
 [tasks.clean]
-description = "各ノードをクリーンアップする（デフォルト:コンテナのみ．'-- --full'でモデルデータ含め完全削除）"
+description = "Clean up all nodes (default: containers only; '-- --full' removes model data too)"
 run = "mise-tasks/clean"

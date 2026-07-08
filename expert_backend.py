@@ -1,4 +1,4 @@
-"""ollamaのHTTP API（/api/chat, /api/embeddings）を呼び出す非同期クライアント．"""
+"""Async client for the ollama inference and embedding APIs."""
 
 import os
 
@@ -9,10 +9,10 @@ DEFAULT_TIMEOUT_S = 30.0
 
 
 class OllamaClient:
-    """ollamaサーバーへの推論・埋め込みリクエストを行うクライアント．
+    """Communicate with an ollama server for generation and embeddings.
 
-    接続先はコンストラクタ引数を優先し，未指定の場合は環境変数OLLAMA_HOST
-    （docker-composeが同一ホスト内のollamaサービスを指すために設定する）を用いる．
+    Uses the provided host when given, otherwise reads OLLAMA_HOST from
+    the environment (configured by docker-compose for same-host access).
     """
 
     def __init__(self, host: str | None = None) -> None:
@@ -26,19 +26,20 @@ class OllamaClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> str:
-        """指定モデルでプロンプトに対する非ストリーミング応答を返す．
+        """Generate a non-streaming response using the chat endpoint.
 
-        /api/chat（/api/generateではない）をthink: falseで呼び出す．qwen3.5等の
-        thinkingモデルは/api/generateではthink: falseが無視されるバグがあり
-        （ollama/ollama#14793），内部思考過程の出力にnum_predictを使い切って
-        最終応答が空になることがあるため，/api/chatを用いる．
+        Uses /api/chat instead of /api/generate because thinking models
+        (qwen3.5, etc.) ignore the think: false flag on the generate
+        endpoint — a known ollama issue (#14793). This can exhaust the
+        token budget on internal reasoning and leave the final answer
+        empty.
 
-        max_tokensはollamaのoptions.num_predictに渡す生成トークン数の上限．
-        ollamaは指定しない場合num_predict=-1（無制限）で動作し，モデルが指示に
-        従わずJSON等の短い出力を求めるプロンプトでも延々と生成を続けることが
-        あるため，用途に応じた上限を必ず指定する．
-        temperatureはollamaのデフォルト(0.8前後)だと同一プロンプトでも出力が
-        大きく揺れるため，confidence算出のような決定性を要する用途で下げて使う．
+        max_tokens maps to ollama's num_predict option. Without it,
+        generation is unlimited and models may loop on short-output
+        prompts. Always set a reasonable cap.
+
+        temperature controls output randomness. The default (~0.8) is
+        too high for deterministic tasks like confidence scoring.
         """
         options: dict = {}
         if max_tokens is not None:
@@ -59,7 +60,7 @@ class OllamaClient:
             return response.json()["message"]["content"]
 
     async def embed(self, model: str, text: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> list[float]:
-        """指定モデルでテキストの埋め込みベクトルを返す．"""
+        """Return the embedding vector for a text string."""
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             response = await client.post(
                 f"{self._host}/api/embeddings",

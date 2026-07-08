@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# 各ノードへのデプロイ：SSHリバーストンネル確立／compose・config配布／イメージpull／モデルpull．
+# Deploy to all nodes: establish SSH reverse tunnels, distribute compose/config,
+# pull images, and pull LLM models.
 #
-# レジストリへのリバーストンネル確立に失敗する場合（ProxyJump越しにポート転送が
-# 許可されていない等）は，本スクリプトはエラーで停止する．その際は
-# `docker save localhost:5001/expert-mesh:latest | ssh <host> docker load` による
-# イメージ転送への切り替えを検討すること（意図的にフォールバックを自動化していない．
-# 接続性の問題を握りつぶさず，原因を確認してから対処するため）．
+# If establishing a reverse tunnel to the registry fails (e.g., port forwarding
+# is not allowed through ProxyJump), this script exits with an error. In that
+# case, consider switching to manual image transfer:
+# `docker save localhost:5001/expert-mesh:latest | ssh <host> docker load`
+# We intentionally do not auto-fallback here so that connectivity issues are
+# surfaced rather than silently swallowed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REMOTE_DIR=$(uv run python tools/remote_dir.py)
-# 5000番はこのラボ環境で別プロジェクト（WAFL-PEFT）が持続的に使用しているため5001を使う
+# Port 5000 is persistently used by another project (WAFL-PEFT) in this lab,
+# so we use 5001 instead.
 REGISTRY_PORT=5001
 
 ensure_tunnel() {
@@ -28,7 +31,10 @@ for host in $(uv run python tools/list_peers.py); do
   ensure_tunnel "$host"
 
   ssh "$host" "mkdir -p $REMOTE_DIR"
-  rsync -az docker-compose.yml config.yaml "$host:$REMOTE_DIR/"
+  # Use --inplace to overwrite files directly. The default rsync behavior
+  # (write to a temp file then rename) changes the inode, which can cause
+  # docker compose bind mounts to still serve the old content.
+  rsync -az --inplace docker-compose.yml config.yaml "$host:$REMOTE_DIR/"
   ssh "$host" "echo NODE_ID=$host > $REMOTE_DIR/.env"
 
   echo "[deploy] $host: docker compose pull"

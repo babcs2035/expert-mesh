@@ -1,10 +1,14 @@
-# 全ノード共通設定とノードごとの設定（host/port/domain/モデル名）を一本化した設定ファイル．
-# ホスト名・IPアドレス・モデル名・デプロイ先パスはこのファイルにのみ記載し，コード側にハードコードしない．
+# Unified configuration for all nodes: shared settings and per-node settings
+# (host/port/domain/model names). Hostnames, IPs, model names, and deploy
+# paths are documented ONLY in this file — never hardcode them in code.
 embedding_model: nomic-embed-text
 confidence_threshold: 0.5
-# qwen3.5:2b(軽量)の実測応答時間(数秒)・qwen3.5:9b(専門家,約3 tok/s)でのDISPATCH_MAX_TOKENS=512
-# 生成完了時間(約170秒)を踏まえた値．CPU推論のためlocalhost以外への到達性も含めマージンを持たせる．
-probe_timeout_s: 20.0
+# light_model uses qwen3.5:9b (verified: qwen3.5:2b incorrectly assigns
+# high confidence to out-of-domain questions). probe_timeout_s is based
+# on measured confidence scoring time with 9b (20-40s) plus margin.
+probe_timeout_s: 60.0
+# dispatch_timeout_s is based on qwen3.5:9b expert model generation
+# time for DISPATCH_MAX_TOKENS=512 (~170s) plus margin for CPU inference.
 dispatch_timeout_s: 200.0
 remote_dir: "~/workspace/ktakahashi/expert-mesh"
 
@@ -13,17 +17,17 @@ nodes:
     host: 192.168.15.100
     port: 8080
     domain: general
-    light_model: qwen3.5:2b
+    light_model: qwen3.5:9b
     expert_model: qwen3.5:9b
   wafl502:
     host: 192.168.15.102
     port: 8080
     domain: legal
-    light_model: qwen3.5:2b
+    light_model: qwen3.5:9b
     expert_model: qwen3.5:9b
   wafl503:
     host: 192.168.15.103
     port: 8080
     domain: medical
-    light_model: qwen3.5:2b
+    light_model: qwen3.5:9b
     expert_model: qwen3.5:9b

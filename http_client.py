@@ -1,4 +1,4 @@
-"""他ノードへのHTTP POST（/probe, /dispatch）を行う非同期クライアント．"""
+"""Async HTTP client for peer-to-peer /probe and /dispatch calls."""
 
 import asyncio
 
@@ -8,18 +8,18 @@ from protocol import DispatchRequest, DispatchResponse, ProbeRequest, ProbeRespo
 
 
 class PeerClient:
-    """peers.yamlに記載された各ピアへHTTP POSTリクエストを送るクライアント．"""
+    """Send requests to all peers declared in peers.yaml."""
 
     def __init__(self, peers: list[dict]) -> None:
-        """peersはpeers.yamlのnodesリスト（node_id, host, port, domainを持つ辞書）を想定する．"""
+        """peers: list of dicts containing node_id, host, port, domain."""
         self._peers = peers
 
     async def probe_all(self, request: ProbeRequest, timeout_s: float) -> list[ProbeResponse]:
-        """全ピアへ並行して/probeを送り，制限時間内に応答したものだけを返す．
+        """Send /probe to every peer concurrently and collect responses within the deadline.
 
-        peers.yamlに記載された順序でタスクを組み立ててasyncio.gatherに渡すため，
-        戻り値の順序は完了順ではなく記載順になる．これはaggregator.pyの
-        confidence同点タイブレーク（記載順で先勝ち）の前提となる．
+        The tasks are created in peers.yaml order and passed to asyncio.gather,
+        so the result list preserves declaration order rather than completion
+        order. This ordering is required for deterministic tie-breaking.
         """
         results = await asyncio.gather(
             *(self._probe_one(peer, request, timeout_s) for peer in self._peers)
@@ -29,7 +29,7 @@ class PeerClient:
     async def _probe_one(
         self, peer: dict, request: ProbeRequest, timeout_s: float
     ) -> ProbeResponse | None:
-        """単一ピアへの/probe送信．タイムアウト・接続エラー時はNone（不在扱い）を返す．"""
+        """Send /probe to a single peer; return None on any failure."""
         url = f"http://{peer['host']}:{peer['port']}/probe"
         try:
             async with httpx.AsyncClient(timeout=timeout_s) as client:
@@ -42,7 +42,7 @@ class PeerClient:
     async def dispatch(
         self, peer: dict, request: DispatchRequest, timeout_s: float
     ) -> DispatchResponse | None:
-        """選定した1ピアへ/dispatchを送り，回答生成結果を取得する．失敗時はNoneを返す．"""
+        """Send /dispatch to a single peer and return the answer, or None on failure."""
         url = f"http://{peer['host']}:{peer['port']}/dispatch"
         try:
             async with httpx.AsyncClient(timeout=timeout_s) as client:

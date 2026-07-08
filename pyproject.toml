@@ -1,7 +1,7 @@
 [project]
 name = "encounter-expert-mesh"
 version = "0.1.0"
-description = "出会い型専門家メッシュ（Encounter-based Expert Mesh）Phase 0: 有線LAN常時接続・HTTP POSTプロトコル版の自律分散ルーティング実装"
+description = "Encounter-based Expert Mesh Phase 0: Distributed routing implementation for always-on wired LAN with HTTP POST protocol"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

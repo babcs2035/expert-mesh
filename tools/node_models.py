@@ -1,7 +1,4 @@
-"""config.yamlから指定node_idが使用するモデル名（軽量・専門家・embedding）を空白区切りで出力する．
-
-mise-tasks/deployが `docker compose exec ollama ollama pull` に渡すモデル名を得るために使う．
-"""
+"""Print the model names used by a specific node (light, expert, embedding)."""
 
 import argparse
 
@@ -9,7 +6,7 @@ import yaml
 
 
 def get_models(config_path: str, node_id: str) -> list[str]:
-    """指定ノードが使用するモデル名一覧（軽量モデル・専門家モデル・embeddingモデル）を返す．"""
+    """Return [light_model, expert_model, embedding_model] for the given node."""
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
     node_config = config["nodes"][node_id]
@@ -17,8 +14,8 @@ def get_models(config_path: str, node_id: str) -> list[str]:
 
 
 def main() -> None:
-    """CLIエントリポイント．"""
-    parser = argparse.ArgumentParser(description="指定ノードが使用するモデル名一覧を出力する")
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(description="Print model names for a node")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("node_id")
     args = parser.parse_args()

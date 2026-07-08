@@ -1,8 +1,4 @@
-"""各ノードのエントリポイント．expert（serve）・requester（ask）の役割をCLIサブコマンドで切り替える．
-
-Phase 0では，advertiseの定期送信（ハートビート）は設計書上「低頻度でよい・任意」とされて
-いるため実装せず，受信側（http_server.pyの/advertiseハンドラ）のみを用意している．
-"""
+"""CLI entry point: switch between serve (expert) and ask (requester) modes."""
 
 import argparse
 import asyncio
@@ -17,17 +13,21 @@ from http_client import PeerClient
 from http_server import NodeState, create_app
 from protocol import DispatchRequest, ProbeRequest
 
-QUERY_SUMMARY_MAX_LENGTH = 200  # 軽量モデルへのprobeプロンプトを長大化させないための上限
+# Truncate the query summary sent to the lightweight probe model.
+QUERY_SUMMARY_MAX_LENGTH = 200
+# When this node also owns the target domain, reach it via localhost.
+# External IP + hairpin NAT does not work reliably in all environments.
+SELF_HOST_OVERRIDE = "localhost"
 
 
 def load_yaml(path: str) -> dict:
-    """YAML設定ファイルを読み込む．"""
+    """Load and parse a YAML configuration file."""
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 def build_node_state(config: dict, node_id: str) -> NodeState:
-    """config.yamlから指定node_id分のNodeStateを構築する．"""
+    """Construct a NodeState for the specified node from the config."""
     node_config = config["nodes"][node_id]
     return NodeState(
         node_id=node_id,
@@ -42,7 +42,7 @@ def build_node_state(config: dict, node_id: str) -> NodeState:
 
 
 def run_serve(args: argparse.Namespace) -> None:
-    """FastAPIサーバーを起動し，本ノードをexpertとして待ち受けさせる．"""
+    """Start the FastAPI server so this node acts as an expert."""
     config = load_yaml(args.config)
     state = build_node_state(config, args.node_id)
     app = create_app(state)
@@ -50,13 +50,14 @@ def run_serve(args: argparse.Namespace) -> None:
 
 
 async def _ask(args: argparse.Namespace) -> None:
-    """requesterとして質問を受け付け，probe→dispatchを実行して回答を表示する．"""
+    """Run the requester flow: embed the query, probe peers, dispatch to the best one."""
     config = load_yaml(args.config)
-    peers = [
-        {"node_id": node_id, **node_config}
-        for node_id, node_config in config["nodes"].items()
-        if node_id != args.node_id
-    ]
+    peers = []
+    for node_id, node_config in config["nodes"].items():
+        peer = {"node_id": node_id, **node_config}
+        if node_id == args.node_id:
+            peer = {**peer, "host": SELF_HOST_OVERRIDE}
+        peers.append(peer)
     ollama_client = OllamaClient()
 
     request_id = str(uuid.uuid4())
@@ -77,7 +78,7 @@ async def _ask(args: argparse.Namespace) -> None:
         probe_responses, confidence_threshold=config.get("confidence_threshold", 0.5)
     )
     if not targets:
-        print("担当できる専門家が見つかりませんでした．")
+        print("No available expert found.")
         return
 
     chosen = targets[0]
@@ -87,7 +88,7 @@ async def _ask(args: argparse.Namespace) -> None:
         chosen_peer, dispatch_request, timeout_s=config.get("dispatch_timeout_s", 30.0)
     )
     if dispatch_response is None:
-        print(f"{chosen.node_id} への/dispatchが失敗しました．")
+        print(f"Dispatch to {chosen.node_id} failed.")
         return
     print(
         f"[{dispatch_response.node_id}] "
@@ -97,23 +98,23 @@ async def _ask(args: argparse.Namespace) -> None:
 
 
 def run_ask(args: argparse.Namespace) -> None:
-    """_askの同期エントリポイント．"""
+    """Synchronous wrapper around the async _ask coroutine."""
     asyncio.run(_ask(args))
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    """serve/askサブコマンドを持つCLIパーサーを構築する．"""
-    parser = argparse.ArgumentParser(description="出会い型専門家メッシュ ノードプロセス")
+    """Build the CLI parser with serve and ask subcommands."""
+    parser = argparse.ArgumentParser(description="Encounter expert-mesh node process")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    serve_parser = subparsers.add_parser("serve", help="本ノードをHTTPサーバーとして起動する")
+    serve_parser = subparsers.add_parser("serve", help="Start this node as an HTTP server")
     serve_parser.add_argument("--node-id", required=True)
     serve_parser.add_argument("--config", default="config.yaml")
     serve_parser.add_argument("--host", default="0.0.0.0")
     serve_parser.add_argument("--port", type=int, default=8080)
     serve_parser.set_defaults(func=run_serve)
 
-    ask_parser = subparsers.add_parser("ask", help="requesterとして質問を投げる")
+    ask_parser = subparsers.add_parser("ask", help="Send a question as a requester")
     ask_parser.add_argument("--node-id", required=True)
     ask_parser.add_argument("--config", default="config.yaml")
     ask_parser.add_argument("query")
@@ -123,7 +124,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """CLIエントリポイント．"""
+    """Parse arguments and dispatch to the appropriate handler."""
     parser = build_arg_parser()
     args = parser.parse_args()
     args.func(args)

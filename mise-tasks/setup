@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# ローカル（操作端末）側の環境構築：uv sync，Dockerレジストリ起動，expert-meshイメージのbuild&push．
-# レジストリは各リモートホストからのSSHリバーストンネル経由でのみ到達させるため127.0.0.1限定で公開する．
+# Set up the local (operator terminal) environment: uv sync, Docker registry,
+# build and push the expert-mesh image.
+# The registry is published on 127.0.0.1 only, reachable via SSH reverse
+# tunnels from remote hosts.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "[setup] uv sync"
 uv sync
 
-# 5000番はこのラボ環境で別プロジェクト（WAFL-PEFT）が持続的に使用しているため5001を使う
+# Port 5000 is persistently used by another project (WAFL-PEFT) in this lab,
+# so we use 5001 instead.
 REGISTRY_NAME="expert-mesh-registry"
 REGISTRY_PORT=5001
 
@@ -17,7 +20,7 @@ elif docker ps -a --format '{{.Names}}' | grep -qx "$REGISTRY_NAME"; then
   echo "[setup] starting existing registry container"
   docker start "$REGISTRY_NAME"
 else
-  echo "[setup] creating registry container (127.0.0.1限定で公開)"
+  echo "[setup] creating registry container (published on 127.0.0.1 only)"
   docker run -d --name "$REGISTRY_NAME" \
     -p "127.0.0.1:${REGISTRY_PORT}:5000" \
     --restart=always \

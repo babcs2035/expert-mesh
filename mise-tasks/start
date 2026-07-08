@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# 各ノードでdocker compose up -dを実行し，ollama・expert-meshの2コンテナを起動する（実験開始）．
+# Start all nodes: run docker compose up -d for ollama and expert-mesh containers.
+#
+# expert-mesh always uses --force-recreate. docker compose does not detect
+# changes to the content of bind-mounted config.yaml, so without
+# --force-recreate the container continues running with the old config
+# even after config.yaml is updated.
+# ollama starts on-demand via depends_on, and model data (named volume)
+# is preserved even with --force-recreate.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REMOTE_DIR=$(uv run python tools/remote_dir.py)
 
 for host in $(uv run python tools/list_peers.py); do
-  echo "[start] $host: docker compose up -d"
-  ssh "$host" "cd $REMOTE_DIR && docker compose up -d"
+  echo "[start] $host: docker compose up -d --force-recreate expert-mesh"
+  ssh "$host" "cd $REMOTE_DIR && docker compose up -d --force-recreate expert-mesh"
 done
 
-# 起動時に軽量・専門家モデルのウォームアップ（ollamaへのモデルロード）を行うため，
-# 数十秒〜数分かかることがある．healthcheckが通るまでリトライする．
-# 操作端末はノードのLAN(192.168.15.0/24)に直接到達できないため，healthcheckは
-# 先頭ノードのコンテナ内から同一LAN経由で全ノードへの疎通確認を行う．
+# Model warmup (loading into ollama) takes tens of seconds to several minutes.
+# Retry the healthcheck until all nodes pass.
+# The operator terminal cannot reach the node LAN (192.168.15.0/24) directly,
+# so the healthcheck runs from the first node's container over the same LAN.
 echo "[start] waiting for warmup to complete (may take a few minutes)"
 first_host=$(uv run python tools/list_peers.py | head -1)
 
