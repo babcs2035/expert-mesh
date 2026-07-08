@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# 各ノードでdocker compose up -dを実行し，ollama・expert-meshの2コンテナを起動する（実験開始）．
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REMOTE_DIR=$(uv run python tools/remote_dir.py)
+
+for host in $(uv run python tools/list_peers.py); do
+  echo "[start] $host: docker compose up -d"
+  ssh "$host" "cd $REMOTE_DIR && docker compose up -d"
+done
+
+# 起動時に軽量・専門家モデルのウォームアップ（ollamaへのモデルロード）を行うため，
+# 数十秒〜数分かかることがある．healthcheckが通るまでリトライする．
+# 操作端末はノードのLAN(192.168.15.0/24)に直接到達できないため，healthcheckは
+# 先頭ノードのコンテナ内から同一LAN経由で全ノードへの疎通確認を行う．
+echo "[start] waiting for warmup to complete (may take a few minutes)"
+first_host=$(uv run python tools/list_peers.py | head -1)
+
+MAX_RETRIES=30
+RETRY_INTERVAL_S=10
+for i in $(seq 1 "$MAX_RETRIES"); do
+  if ssh "$first_host" "cd $REMOTE_DIR && docker compose exec -T expert-mesh .venv/bin/python tools/healthcheck.py"; then
+    echo "[start] all nodes healthy"
+    exit 0
+  fi
+  echo "[start] not ready yet (attempt $i/$MAX_RETRIES), retrying in ${RETRY_INTERVAL_S}s..."
+  sleep "$RETRY_INTERVAL_S"
+done
+
+echo "[start] ERROR: nodes did not become healthy within timeout" >&2
+exit 1

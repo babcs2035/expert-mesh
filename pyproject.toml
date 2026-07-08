@@ -1,0 +1,26 @@
+[project]
+name = "encounter-expert-mesh"
+version = "0.1.0"
+description = "出会い型専門家メッシュ（Encounter-based Expert Mesh）Phase 0: 有線LAN常時接続・HTTP POSTプロトコル版の自律分散ルーティング実装"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]

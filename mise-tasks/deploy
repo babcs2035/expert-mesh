@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# 各ノードへのデプロイ：SSHリバーストンネル確立／compose・config配布／イメージpull／モデルpull．
+#
+# レジストリへのリバーストンネル確立に失敗する場合（ProxyJump越しにポート転送が
+# 許可されていない等）は，本スクリプトはエラーで停止する．その際は
+# `docker save localhost:5001/expert-mesh:latest | ssh <host> docker load` による
+# イメージ転送への切り替えを検討すること（意図的にフォールバックを自動化していない．
+# 接続性の問題を握りつぶさず，原因を確認してから対処するため）．
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REMOTE_DIR=$(uv run python tools/remote_dir.py)
+# 5000番はこのラボ環境で別プロジェクト（WAFL-PEFT）が持続的に使用しているため5001を使う
+REGISTRY_PORT=5001
+
+ensure_tunnel() {
+  local host="$1"
+  if ssh "$host" "curl -fsS -o /dev/null http://localhost:${REGISTRY_PORT}/v2/" 2>/dev/null; then
+    echo "[deploy] $host: registry tunnel already up"
+  else
+    echo "[deploy] $host: opening reverse tunnel to local registry"
+    ssh -fNT -R "${REGISTRY_PORT}:localhost:${REGISTRY_PORT}" "$host"
+  fi
+}
+
+for host in $(uv run python tools/list_peers.py); do
+  echo "=== $host ==="
+  ensure_tunnel "$host"
+
+  ssh "$host" "mkdir -p $REMOTE_DIR"
+  rsync -az docker-compose.yml config.yaml "$host:$REMOTE_DIR/"
+  ssh "$host" "echo NODE_ID=$host > $REMOTE_DIR/.env"
+
+  echo "[deploy] $host: docker compose pull"
+  ssh "$host" "cd $REMOTE_DIR && docker compose pull"
+
+  echo "[deploy] $host: starting ollama container for model pull"
+  ssh "$host" "cd $REMOTE_DIR && docker compose up -d ollama"
+
+  for model in $(uv run python tools/node_models.py "$host"); do
+    echo "[deploy] $host: ollama pull $model"
+    ssh "$host" "cd $REMOTE_DIR && docker compose exec -T ollama ollama pull $model"
+  done
+done
+
+echo "[deploy] done"

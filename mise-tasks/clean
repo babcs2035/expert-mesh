@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# 各ノードのクリーンアップ．
+# デフォルト：docker compose down（コンテナのみ停止・削除．ollamaのモデルデータ=named
+# volumeは保持するため，次回startでのモデル再ダウンロードが不要）．
+# --full 指定時：docker compose down -v --rmi all（named volumeとイメージも削除）に
+# 加え，配布済みのリモートディレクトリ一式を削除し，ノードを完全にまっさらな状態へ戻す．
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REMOTE_DIR=$(uv run python tools/remote_dir.py)
+FULL_CLEAN=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --full) FULL_CLEAN=true ;;
+    *)
+      echo "[clean] unknown option: $arg" >&2
+      echo "usage: mise run clean [-- --full]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+for host in $(uv run python tools/list_peers.py); do
+  echo "=== $host ==="
+  if [ "$FULL_CLEAN" = true ]; then
+    echo "[clean] $host: docker compose down -v --rmi all (モデルデータ・イメージも削除)"
+    ssh "$host" "[ -d $REMOTE_DIR ] && (cd $REMOTE_DIR && docker compose down -v --rmi all) || echo '  (not deployed, skip)'"
+    echo "[clean] $host: removing $REMOTE_DIR"
+    ssh "$host" "rm -rf $REMOTE_DIR"
+  else
+    echo "[clean] $host: docker compose down (ollamaモデルデータは保持)"
+    ssh "$host" "[ -d $REMOTE_DIR ] && (cd $REMOTE_DIR && docker compose down) || echo '  (not deployed, skip)'"
+  fi
+done
+
+echo "[clean] done"

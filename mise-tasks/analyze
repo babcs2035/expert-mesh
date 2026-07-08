@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# 各ノードからログを回収する．Phase 0時点では簡易な回収・行数表示のみを行い，
+# 指標計算（4章の評価指標）はPhase 2でbenchmark/metrics.pyとして追加する．
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REMOTE_DIR=$(uv run python tools/remote_dir.py)
+LOG_DIR="logs"
+
+mkdir -p "$LOG_DIR"
+
+for host in $(uv run python tools/list_peers.py); do
+  echo "=== $host ==="
+  mkdir -p "$LOG_DIR/$host"
+  ssh "$host" "cd $REMOTE_DIR && docker compose logs --no-color expert-mesh" \
+    > "$LOG_DIR/$host/expert-mesh.log" 2>&1 || true
+  line_count=$(wc -l < "$LOG_DIR/$host/expert-mesh.log")
+  echo "  -> $LOG_DIR/$host/expert-mesh.log (${line_count} lines)"
+done
+
+echo "[analyze] done. 詳細な指標計算はPhase 2のbenchmark/metrics.pyで行う"
