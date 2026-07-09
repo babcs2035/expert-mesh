@@ -1,5 +1,6 @@
 """Tests for the FastAPI endpoint contracts in http_server.py."""
 
+import json
 from unittest.mock import AsyncMock
 
 import httpx
@@ -9,7 +10,12 @@ from expert_backend import OllamaClient
 from http_server import ROUTING_METHOD_EMBEDDING, NodeState, create_app
 
 
-def _build_client(ollama_client: OllamaClient, **state_kwargs: object) -> TestClient:
+def _build_client(
+    ollama_client: OllamaClient,
+    light_model: str = "qwen3.5:2b",
+    expert_model: str = "qwen3.5:9b",
+    **state_kwargs: object,
+) -> TestClient:
     """Create a TestClient wired to a NodeState with the given OllamaClient.
 
     Does not enter the lifespan context (no `with`), matching how uvicorn's
@@ -20,8 +26,8 @@ def _build_client(ollama_client: OllamaClient, **state_kwargs: object) -> TestCl
     state = NodeState(
         node_id="node-b",
         domain="medical",
-        light_model="qwen3.5:2b",
-        expert_model="qwen3.5:9b",
+        light_model=light_model,
+        expert_model=expert_model,
         confidence_threshold=0.5,
         probe_timeout_s=2.0,
         dispatch_timeout_s=30.0,
@@ -207,6 +213,7 @@ def test_advertise_heartbeat_reaches_configured_peer(monkeypatch) -> None:
 
     ollama_client = AsyncMock(spec=OllamaClient)
     ollama_client.generate.return_value = '{"confidence": 0.5}'
+    ollama_client.get_running_models.return_value = []
     peers = [{"node_id": "peer-a", "host": "peer-a.invalid", "port": 8080, "domain": "legal"}]
     client = _build_client(ollama_client, peers=peers)
 
@@ -218,3 +225,94 @@ def test_advertise_heartbeat_reaches_configured_peer(monkeypatch) -> None:
     assert len(sent_requests) >= 1
     assert sent_requests[0].node_id == "node-b"
     assert sent_requests[0].domain == "medical"
+
+
+def _parse_log_events(stdout: str, event: str) -> list[dict]:
+    """Extract log_event JSON payloads for a given event name from captured stdout."""
+    records = []
+    for line in stdout.splitlines():
+        _, _, payload = line.partition("] ")
+        try:
+            record = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") == event:
+            records.append(record)
+    return records
+
+
+def test_lifespan_logs_gpu_status_when_model_uses_vram(capsys) -> None:
+    """After warmup, a model with size_vram > 0 is logged as using_gpu=True."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = "ok"
+    ollama_client.get_running_models.return_value = [
+        {"name": "qwen3.5:9b", "size_vram": 5_000_000_000},
+    ]
+    client = _build_client(ollama_client, light_model="qwen3.5:9b", expert_model="qwen3.5:9b")
+
+    with client:
+        pass
+
+    records = _parse_log_events(capsys.readouterr().out, "gpu_status")
+    assert len(records) == 1
+    assert records[0]["model"] == "qwen3.5:9b"
+    assert records[0]["using_gpu"] is True
+
+
+def test_lifespan_logs_cpu_only_status_when_model_has_no_vram(capsys) -> None:
+    """A model with size_vram == 0 is logged as using_gpu=False (CPU-only)."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = "ok"
+    ollama_client.get_running_models.return_value = [
+        {"name": "qwen3.5:9b", "size_vram": 0},
+    ]
+    client = _build_client(ollama_client, light_model="qwen3.5:9b", expert_model="qwen3.5:9b")
+
+    with client:
+        pass
+
+    records = _parse_log_events(capsys.readouterr().out, "gpu_status")
+    assert len(records) == 1
+    assert records[0]["using_gpu"] is False
+
+
+def test_lifespan_logs_gpu_status_for_both_light_and_expert_models(capsys) -> None:
+    """Warmup logs GPU status separately for the light and expert models when they differ."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = "ok"
+    ollama_client.get_running_models.return_value = [
+        {"name": "qwen3.5:2b", "size_vram": 0},
+        {"name": "qwen3.5:9b", "size_vram": 5_000_000_000},
+    ]
+    client = _build_client(ollama_client, light_model="qwen3.5:2b", expert_model="qwen3.5:9b")
+
+    with client:
+        pass
+
+    records = {r["model"]: r for r in _parse_log_events(capsys.readouterr().out, "gpu_status")}
+    assert records["qwen3.5:2b"]["using_gpu"] is False
+    assert records["qwen3.5:9b"]["using_gpu"] is True
+
+
+def test_lifespan_continues_when_gpu_status_check_fails(capsys) -> None:
+    """A /api/ps failure is logged but does not prevent the node from serving requests."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = "ok"
+    ollama_client.get_running_models.side_effect = httpx.ConnectError("connection refused")
+    client = _build_client(ollama_client, light_model="qwen3.5:9b", expert_model="qwen3.5:9b")
+
+    with client:
+        response = client.post(
+            "/advertise",
+            json={
+                "node_id": "peer-a",
+                "domain": "legal",
+                "domain_embedding": [],
+                "load": 0.0,
+                "timestamp": 0,
+            },
+        )
+        assert response.status_code == 200
+
+    records = _parse_log_events(capsys.readouterr().out, "gpu_status_check_failed")
+    assert len(records) == 1

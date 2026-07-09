@@ -63,8 +63,19 @@ for host in $(uv run python tools/list_peers.py); do
   ensure_tunnel "$host"
 
   ssh "$host" "mkdir -p $REMOTE_DIR"
-  rsync -az --inplace docker-compose.yml config.yaml "$host:$REMOTE_DIR/"
-  ssh "$host" "echo NODE_ID=$host > $REMOTE_DIR/.env"
+  rsync -az --inplace docker-compose.yml docker-compose.gpu.yml config.yaml "$host:$REMOTE_DIR/"
+
+  # GPU detection: docker-compose.gpu.yml's device reservation makes
+  # `docker compose up` fail outright on hosts without an nvidia runtime,
+  # so it must only be applied via COMPOSE_FILE on hosts that actually
+  # have an NVIDIA GPU.
+  if ssh "$host" "command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1"; then
+    echo "[deploy] $host: NVIDIA GPU detected, enabling GPU pass-through for ollama"
+    ssh "$host" "echo NODE_ID=$host > $REMOTE_DIR/.env && echo COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml >> $REMOTE_DIR/.env"
+  else
+    echo "[deploy] $host: no NVIDIA GPU detected, using CPU-only compose file"
+    ssh "$host" "echo NODE_ID=$host > $REMOTE_DIR/.env"
+  fi
 
   echo "[deploy] $host: docker compose pull"
   ssh "$host" "cd $REMOTE_DIR && docker compose pull"
@@ -133,12 +144,60 @@ while [ $# -gt 0 ]; do
 done
 
 CONTAINER_OUTPUT="/app/results/$DATETIME/$OUTPUT"
+RUN_LOG="/app/results/$DATETIME/run_experiment.log"
+# Host-side paths mirroring the two container paths above via
+# docker-compose.yml's `./results:/app/results` bind mount, so the polling
+# loop below can read them straight over SSH without going through `docker
+# compose exec` each time. This also sidesteps a subtlety: `docker compose
+# exec app wc -l < "$RUN_LOG"` would have the *remote host's* shell (not the
+# container's) resolve the `<` redirect, since redirection is parsed by
+# whichever shell is executing the `exec ... <` command line — here, reading
+# the bind-mounted host path directly is both correct and simpler.
+HOST_RUN_LOG="$REMOTE_DIR/results/$DATETIME/run_experiment.log"
+HOST_DONE_MARKER="$REMOTE_DIR/results/$DATETIME/$OUTPUT.done"
 
 # Create the output directory inside the container (volume mount creates /app/results/ only).
 ssh "$FIRST_HOST" "cd $REMOTE_DIR && docker compose exec -T app mkdir -p /app/results/$DATETIME"
 
-echo "[start] running experiment: node=$NODE_ID dataset=$DATASET output=$RESULTS_DIR/$OUTPUT"
-ssh "$FIRST_HOST" "cd $REMOTE_DIR && docker compose exec -T app .venv/bin/python run_experiment.py --node-id $NODE_ID --dataset $DATASET --output $CONTAINER_OUTPUT" || true
+# Launched detached (-d) rather than kept in the foreground of this SSH
+# session: dispatch_timeout_s (config.yaml) times the dataset size can add
+# up to hours, and a single long-lived `docker compose exec` over one SSH
+# session has been observed to die mid-run with "No such exec instance"
+# once that session drops. Detaching means the run keeps going inside the
+# container regardless of SSH connectivity; completion is detected below by
+# polling for HOST_DONE_MARKER (written by run_experiment.py itself) instead
+# of waiting on this exec's own exit status. run_experiment.py's own
+# progress output (stderr, one line per question) is redirected to RUN_LOG
+# inside the container so it survives the detach; the polling loop below
+# tails it back to this terminal.
+echo "[start] launching experiment (detached): node=$NODE_ID dataset=$DATASET output=$RESULTS_DIR/$OUTPUT"
+ssh "$FIRST_HOST" "cd $REMOTE_DIR && docker compose exec -d -T app sh -c '.venv/bin/python run_experiment.py --node-id $NODE_ID --dataset $DATASET --output $CONTAINER_OUTPUT > $RUN_LOG 2>&1'"
+
+echo "[start] waiting for experiment to finish (progress below; transient SSH disconnects during this wait are harmless)"
+POLL_INTERVAL_S=15
+MAX_POLL_RETRIES=1000
+shown_lines=0
+finished=false
+for i in $(seq 1 "$MAX_POLL_RETRIES"); do
+  current_lines=$(ssh "$FIRST_HOST" "wc -l < $HOST_RUN_LOG" 2>/dev/null) || current_lines=""
+  if [ -n "$current_lines" ] && [ "$current_lines" -gt "$shown_lines" ]; then
+    next_line=$((shown_lines + 1))
+    ssh "$FIRST_HOST" "tail -n +$next_line $HOST_RUN_LOG" 2>/dev/null
+    shown_lines="$current_lines"
+  fi
+
+  if ssh "$FIRST_HOST" "test -f $HOST_DONE_MARKER" 2>/dev/null; then
+    finished=true
+    break
+  fi
+  sleep "$POLL_INTERVAL_S"
+done
+
+if [ "$finished" != true ]; then
+  echo "[start] ERROR: experiment did not finish within the polling window (${MAX_POLL_RETRIES}x${POLL_INTERVAL_S}s)" >&2
+  exit 1
+fi
+echo "[start] experiment finished"
 
 # Copy results from remote host to local results directory.
 echo "[start] copying results from $FIRST_HOST:$REMOTE_DIR/results/$DATETIME/$OUTPUT"

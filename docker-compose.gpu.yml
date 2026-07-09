@@ -1,0 +1,16 @@
+# GPU pass-through override for hosts with an NVIDIA GPU and the
+# nvidia-container-toolkit installed. `mise run deploy` applies this file
+# automatically (via COMPOSE_FILE in .env) only on hosts where it detects
+# an NVIDIA GPU; `docker compose up` fails immediately on GPU-less hosts if
+# this override is applied there, since no nvidia runtime would be found.
+# Only the ollama service needs GPU access — the app service only calls
+# ollama's HTTP API and never touches the model runtime directly.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

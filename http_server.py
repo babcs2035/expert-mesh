@@ -75,6 +75,36 @@ async def warmup_model(ollama_client: OllamaClient, model: str) -> None:
             await asyncio.sleep(WARMUP_RETRY_INTERVAL_S)
 
 
+async def log_gpu_status(node_id: str, ollama_client: OllamaClient, models: list[str]) -> None:
+    """Log whether each warmed-up model ended up running on GPU or CPU only.
+
+    ollama decides GPU placement itself (Docker only needs to expose the
+    device via docker-compose.gpu.yml); this just surfaces that outcome so
+    an operator can confirm a GPU host is actually using its GPU. Best
+    effort: /api/ps failures (e.g. an older ollama version) are logged
+    instead of raised, since this check must never block node startup.
+    """
+    try:
+        running_models = await ollama_client.get_running_models()
+    except httpx.HTTPError as exc:
+        log_event(node_id, LOG_LEVEL_ERROR, "gpu_status_check_failed", error=str(exc))
+        return
+    running_by_name = {entry["name"]: entry for entry in running_models}
+    for model in models:
+        entry = running_by_name.get(model)
+        if entry is None:
+            continue
+        size_vram = entry.get("size_vram", 0)
+        log_event(
+            node_id,
+            LOG_LEVEL_INFO,
+            "gpu_status",
+            model=model,
+            size_vram_bytes=size_vram,
+            using_gpu=size_vram > 0,
+        )
+
+
 class NodeState:
     """Mutable runtime state and configuration for a single mesh node."""
 
@@ -148,6 +178,8 @@ def create_app(state: NodeState) -> FastAPI:
         await warmup_model(state.ollama_client, state.light_model)
         if state.expert_model != state.light_model:
             await warmup_model(state.ollama_client, state.expert_model)
+        warmed_models = sorted({state.light_model, state.expert_model})
+        await log_gpu_status(state.node_id, state.ollama_client, warmed_models)
         if state.embedding_model is not None:
             state.domain_embedding = await state.ollama_client.embed(
                 state.embedding_model, state.domain

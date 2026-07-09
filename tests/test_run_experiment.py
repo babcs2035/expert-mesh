@@ -2,9 +2,12 @@
 
 import io
 import json
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from run_experiment import run_experiment
+import run_experiment
+from run_experiment import run_experiment as run_experiment_rows
 from http_client import PeerClient
 from protocol import DispatchResponse, ProbeResponse
 
@@ -61,7 +64,7 @@ async def test_run_experiment_records_dispatch_outcome(monkeypatch) -> None:
         patch.object(PeerClient, "dispatch", AsyncMock(return_value=dispatch_response)),
     ):
         output = io.StringIO()
-        count = await run_experiment(_config(), "requester", "unused", output)
+        count = await run_experiment_rows(_config(), "requester", "unused", output)
 
     assert count == 1
     record = json.loads(output.getvalue().strip())
@@ -89,7 +92,7 @@ async def test_run_experiment_records_fallback_outcome(monkeypatch) -> None:
     )
     with patch.object(PeerClient, "probe_all", AsyncMock(return_value=[low_confidence])):
         output = io.StringIO()
-        count = await run_experiment(_config(), "requester", "unused", output)
+        count = await run_experiment_rows(_config(), "requester", "unused", output)
 
     assert count == 1
     record = json.loads(output.getvalue().strip())
@@ -121,7 +124,7 @@ async def test_run_experiment_records_dispatch_failure_outcome(monkeypatch) -> N
         patch.object(PeerClient, "dispatch", AsyncMock(return_value=None)),
     ):
         output = io.StringIO()
-        count = await run_experiment(_config(), "requester", "unused", output)
+        count = await run_experiment_rows(_config(), "requester", "unused", output)
 
     assert count == 1
     record = json.loads(output.getvalue().strip())
@@ -130,3 +133,51 @@ async def test_run_experiment_records_dispatch_failure_outcome(monkeypatch) -> N
     assert record["selected_domain"] is None
     assert record["selected_node_id"] is None
     assert record["answer_text"] is None
+
+
+def test_main_touches_done_marker_only_after_output_is_written(monkeypatch, tmp_path) -> None:
+    """main() writes `<output>.done` after the output file, not before or instead of it.
+
+    `mise run start` launches this script via `docker compose exec -d` (see
+    mise.toml's start task) so it never observes this process's own exit
+    status; it polls for this marker instead. If the marker existed before
+    the output file were fully written, that polling loop could copy a
+    truncated result file.
+    """
+    monkeypatch.setattr(run_experiment, "load_yaml", lambda path: _config())
+    monkeypatch.setattr(
+        run_experiment,
+        "OllamaClient",
+        lambda: AsyncMock(
+            embed=AsyncMock(return_value=[0.1]), generate=AsyncMock(return_value="hedge")
+        ),
+    )
+    monkeypatch.setattr(
+        run_experiment,
+        "_read_dataset",
+        lambda path: [{"id": "general-001", "query": "test", "expected_domains": ["general"]}],
+    )
+    output_path = tmp_path / "results.jsonl"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_experiment.py",
+            "--node-id",
+            "requester",
+            "--dataset",
+            "unused",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    low_confidence = ProbeResponse(
+        request_id="ignored", node_id="expert", confidence=0.1, estimated_latency_ms=10
+    )
+    with patch.object(PeerClient, "probe_all", AsyncMock(return_value=[low_confidence])):
+        run_experiment.main()
+
+    assert output_path.exists()
+    assert json.loads(output_path.read_text().strip())["selected_domain"] == "general"
+    assert Path(f"{output_path}.done").exists()

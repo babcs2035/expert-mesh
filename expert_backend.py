@@ -72,6 +72,20 @@ class OllamaClient:
                 else:
                     raise
 
+    async def get_running_models(self, timeout_s: float = DEFAULT_TIMEOUT_S) -> list[dict]:
+        """Return ollama's /api/ps list of currently loaded models.
+
+        Each entry includes size_vram (bytes resident on GPU); size_vram of
+        0 means the model is running CPU-only. Used to verify GPU
+        utilization after warmup (see http_server.py's log_gpu_status).
+        Not retried like generate/embed since it is a best-effort
+        diagnostic call, not one on the request-serving path.
+        """
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            response = await client.get(f"{self._host}/api/ps")
+            response.raise_for_status()
+            return response.json().get("models", [])
+
     async def embed(self, model: str, text: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> list[float]:
         """Return the embedding vector for a text string.
 

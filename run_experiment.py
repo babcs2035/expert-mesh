@@ -118,6 +118,13 @@ def main() -> None:
     else:
         with open(args.output, "w", encoding="utf-8") as f:
             count = asyncio.run(run_experiment(config, args.node_id, args.dataset, f))
+        # Written only after the output file is closed (all rows flushed to
+        # disk), so `mise run start`'s polling loop never observes the
+        # marker before the results it is about to copy are complete. The
+        # marker (not the process exit code) is what that loop waits on,
+        # since it launches this script via `docker compose exec -d` and so
+        # never sees this process's own exit status.
+        Path(f"{args.output}.done").touch()
     print(f"[run_experiment] completed {count} questions", file=sys.stderr)
 
 
