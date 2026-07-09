@@ -1,11 +1,14 @@
 """Async client for the ollama inference and embedding APIs."""
 
+import asyncio
 import os
 
 import httpx
 
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_TIMEOUT_S = 30.0
+DEFAULT_RETRIES = 3
+RETRY_DELAY_S = 15.0
 
 
 class OllamaClient:
@@ -13,6 +16,7 @@ class OllamaClient:
 
     Uses the provided host when given, otherwise reads OLLAMA_HOST from
     the environment (configured by docker-compose for same-host access).
+    Retries failed requests on transient connection errors.
     """
 
     def __init__(self, host: str | None = None) -> None:
@@ -40,6 +44,8 @@ class OllamaClient:
 
         temperature controls output randomness. The default (~0.8) is
         too high for deterministic tasks like confidence scoring.
+
+        Retries up to DEFAULT_RETRIES times on transient connection errors.
         """
         options: dict = {}
         if max_tokens is not None:
@@ -54,17 +60,34 @@ class OllamaClient:
         }
         if options:
             payload["options"] = options
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
-            response = await client.post(f"{self._host}/api/chat", json=payload)
-            response.raise_for_status()
-            return response.json()["message"]["content"]
+        for attempt in range(DEFAULT_RETRIES):
+            try:
+                async with httpx.AsyncClient(timeout=timeout_s) as client:
+                    response = await client.post(f"{self._host}/api/chat", json=payload)
+                    response.raise_for_status()
+                    return response.json()["message"]["content"]
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError, httpx.RemoteProtocolError):
+                if attempt < DEFAULT_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY_S)
+                else:
+                    raise
 
     async def embed(self, model: str, text: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> list[float]:
-        """Return the embedding vector for a text string."""
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
-            response = await client.post(
-                f"{self._host}/api/embeddings",
-                json={"model": model, "prompt": text},
-            )
-            response.raise_for_status()
-            return response.json()["embedding"]
+        """Return the embedding vector for a text string.
+
+        Retries up to DEFAULT_RETRIES times on transient connection errors.
+        """
+        for attempt in range(DEFAULT_RETRIES):
+            try:
+                async with httpx.AsyncClient(timeout=timeout_s) as client:
+                    response = await client.post(
+                        f"{self._host}/api/embeddings",
+                        json={"model": model, "prompt": text},
+                    )
+                    response.raise_for_status()
+                    return response.json()["embedding"]
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError, httpx.RemoteProtocolError):
+                if attempt < DEFAULT_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY_S)
+                else:
+                    raise

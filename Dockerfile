@@ -11,11 +11,16 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY protocol.py expert_backend.py router.py aggregator.py http_client.py http_server.py node.py ./
+COPY protocol.py expert_backend.py router.py aggregator.py http_client.py http_server.py node.py logging_utils.py ./
 # tools/healthcheck.py etc. are needed to run connectivity checks and queries
 # from within a node's container when the operator terminal cannot directly
 # reach the node LAN (192.168.15.0/24).
 COPY tools/ ./tools/
+# run_experiment.py makes real /probe and /dispatch calls against
+# the mesh, so it must run inside a node's container for the same reason as
+# tools/healthcheck.py above.
+COPY run_experiment.py build_dataset.py metrics.py ./
+COPY data/ ./data/
 
 EXPOSE 8080
 

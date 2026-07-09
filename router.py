@@ -1,6 +1,7 @@
-"""Calculate domain-matching confidence using a lightweight LLM."""
+"""Calculate domain-matching confidence via a lightweight LLM (method B) or embeddings (method A)."""
 
 import json
+import math
 import re
 
 from expert_backend import OllamaClient
@@ -95,7 +96,10 @@ async def estimate_confidence(
     query_summary: str,
     timeout_s: float,
 ) -> float:
-    """Send a confidence-scoring request to the lightweight model and return the result."""
+    """Send a confidence-scoring request to the lightweight model and return the result.
+
+    This is routing method B (self-reported score) from design doc 2.4.
+    """
     prompt = build_confidence_prompt(domain, query_summary)
     raw_response = await ollama_client.generate(
         light_model,
@@ -105,3 +109,36 @@ async def estimate_confidence(
         temperature=CONFIDENCE_TEMPERATURE,
     )
     return parse_confidence(raw_response)
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Return the cosine similarity of two vectors.
+
+    Returns 0.0 for a zero-length or dimension-mismatched vector instead of
+    raising, since this can legitimately happen at runtime: domain_embedding
+    starts as [] until the /probe-serving node finishes its lifespan warmup
+    (or has no embedding_model configured at all), and confidence 0.0 is
+    the safe default that keeps such a node out of dispatch consideration.
+    """
+    if len(a) != len(b) or not a:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def estimate_embedding_confidence(
+    query_embedding: list[float], domain_embedding: list[float]
+) -> float:
+    """Score domain match via cosine similarity, rescaled from [-1, 1] to [0, 1].
+
+    This is routing method A (embedding-based semantic routing) from design
+    doc 2.4. Unlike method B it requires no LLM call, trading routing
+    accuracy for near-zero probe latency; the two methods are compared
+    directly since both plug into the same /probe response shape.
+    """
+    similarity = cosine_similarity(query_embedding, domain_embedding)
+    return min(max((similarity + 1.0) / 2.0, 0.0), 1.0)

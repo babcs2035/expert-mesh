@@ -7,27 +7,39 @@ confidence_threshold: 0.5
 # high confidence to out-of-domain questions). probe_timeout_s is based
 # on measured confidence scoring time with 9b (20-40s) plus margin.
 probe_timeout_s: 60.0
-# dispatch_timeout_s is based on qwen3.5:9b expert model generation
-# time for DISPATCH_MAX_TOKENS=512 (~170s) plus margin for CPU inference.
-dispatch_timeout_s: 200.0
+# dispatch_timeout_s is based on qwen3.5:9b expert model generation time
+# for DISPATCH_MAX_TOKENS=512. The original estimate (170s + margin = 200s)
+# proved insufficient: real-machine measurement on wafl503 (medical, 3
+# questions) showed 238-259s of actual generation time, so 200s caused every
+# dispatch to time out. Raised to 400s (~1.5x the observed max) to restore
+# margin for CPU inference variance.
+dispatch_timeout_s: 400.0
 remote_dir: "~/workspace/ktakahashi/expert-mesh"
+# routing_method selects method A ("embedding": cosine similarity between
+# query_embedding and each node's domain_embedding, no LLM call) or method B
+# ("self_report": the light_model self-scores confidence). Design doc 2.4
+# prioritizes B first; A is kept opt-in for the comparison experiment.
+routing_method: self_report
+# dispatch_top_k > 1 sends /dispatch to multiple confidence-qualifying nodes
+# in parallel (design doc 2.5); the highest-confidence answer is kept.
+dispatch_top_k: 1
 
 nodes:
   wafl500:
     host: 192.168.15.100
     port: 8080
     domain: general
-    light_model: qwen3.5:9b
-    expert_model: qwen3.5:9b
+    light_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
+    expert_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
   wafl502:
     host: 192.168.15.102
     port: 8080
     domain: legal
-    light_model: qwen3.5:9b
-    expert_model: qwen3.5:9b
+    light_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
+    expert_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
   wafl503:
     host: 192.168.15.103
     port: 8080
     domain: medical
-    light_model: qwen3.5:9b
-    expert_model: qwen3.5:9b
+    light_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
+    expert_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL

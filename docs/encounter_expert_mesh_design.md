@@ -145,10 +145,11 @@ encounter-expert-mesh/
 ├── aggregator.py                  # 複数応答の集約・フォールバック処理
 ├── protocol.py                     # JSONメッセージのスキーマ定義（pydantic等）
 ├── config.yaml                      # ノードごとのモデル名・タイムアウト設定
-├── benchmark/
-│   ├── build_dataset.py              # 評価用ベンチマーク構築スクリプト
-│   ├── run_experiment.py             # 実験自動実行（質問投入・ログ収集）
-│   └── metrics.py                    # 評価指標の計算
+├── data/
+│   └── dataset.jsonl                # 評価用データセット
+├── build_dataset.py                 # 評価用データセット生成
+├── run_experiment.py                # 実験自動実行（質問投入・ログ収集）
+├── metrics.py                       # 評価指標の計算
 └── tools/
     ├── healthcheck.py                # 全ノードの生存確認（distributed-llmから移植）
     └── show_logs.py                   # ログ収集（distributed-llmから移植）

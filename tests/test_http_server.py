@@ -6,11 +6,17 @@ import httpx
 from fastapi.testclient import TestClient
 
 from expert_backend import OllamaClient
-from http_server import NodeState, create_app
+from http_server import ROUTING_METHOD_EMBEDDING, NodeState, create_app
 
 
-def _build_client(ollama_client: OllamaClient) -> TestClient:
-    """Create a TestClient wired to a NodeState with the given OllamaClient."""
+def _build_client(ollama_client: OllamaClient, **state_kwargs: object) -> TestClient:
+    """Create a TestClient wired to a NodeState with the given OllamaClient.
+
+    Does not enter the lifespan context (no `with`), matching how uvicorn's
+    own TestClient usage in these tests predates the warmup/advertise/embed
+    startup steps added later; those steps are covered separately by tests
+    that do use the `with` form.
+    """
     state = NodeState(
         node_id="node-b",
         domain="medical",
@@ -20,6 +26,7 @@ def _build_client(ollama_client: OllamaClient) -> TestClient:
         probe_timeout_s=2.0,
         dispatch_timeout_s=30.0,
         ollama_client=ollama_client,
+        **state_kwargs,
     )
     return TestClient(create_app(state))
 
@@ -156,3 +163,58 @@ def test_dispatch_confidence_defaults_to_zero_without_prior_probe() -> None:
     response = client.post("/dispatch", json={"request_id": "unknown", "full_query": "question"})
     assert response.status_code == 200
     assert response.json()["confidence"] == 0.0
+
+
+def test_probe_uses_embedding_similarity_when_routing_method_is_embedding() -> None:
+    """Method A (embedding) skips the LLM call and scores via cosine similarity."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    client = _build_client(ollama_client, routing_method=ROUTING_METHOD_EMBEDDING)
+
+    response = client.post(
+        "/probe",
+        json={
+            "request_id": "uuid-1",
+            "query_summary": "headache and fever",
+            "query_embedding": [1.0, 0.0],
+            "from": "node-a",
+        },
+    )
+    assert response.status_code == 200
+    # domain_embedding defaults to [] (not yet warmed up outside lifespan),
+    # so no LLM call should occur regardless of the resulting score; the
+    # score itself is covered by test_router.py's cosine_similarity tests.
+    assert ollama_client.generate.await_count == 0
+
+
+def test_advertise_heartbeat_reaches_configured_peer(monkeypatch) -> None:
+    """On startup, the node sends /advertise to every configured peer."""
+    import http_server
+
+    monkeypatch.setattr(http_server, "ADVERTISE_INTERVAL_S", 0.05)
+
+    sent_requests: list[object] = []
+
+    class _StubPeerClient:
+        """Records every AdvertiseRequest instead of performing real HTTP calls."""
+
+        def __init__(self, peers: list[dict]) -> None:
+            self.peers = peers
+
+        async def advertise_all(self, request: object, timeout_s: float) -> None:
+            sent_requests.append(request)
+
+    monkeypatch.setattr(http_server, "PeerClient", _StubPeerClient)
+
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = '{"confidence": 0.5}'
+    peers = [{"node_id": "peer-a", "host": "peer-a.invalid", "port": 8080, "domain": "legal"}]
+    client = _build_client(ollama_client, peers=peers)
+
+    with client:
+        import time
+
+        time.sleep(0.2)
+
+    assert len(sent_requests) >= 1
+    assert sent_requests[0].node_id == "node-b"
+    assert sent_requests[0].domain == "medical"

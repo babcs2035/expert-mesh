@@ -1,20 +1,217 @@
-# mise task definitions. Task implementations are executable scripts in mise-tasks/.
+# mise task definitions. All tasks are defined inline below.
+# This file is self-contained — no external scripts required.
+
 [tasks.setup]
-description = "Local setup: uv sync / registry start / mesh-node image build and push"
-run = "mise-tasks/setup"
+description = "Local setup: uv sync, Docker registry, image build/push, dataset generation"
+run = """
+set -e
+
+echo "[setup] uv sync"
+uv sync
+
+# Port 5000 is persistently used by another project (WAFL-PEFT) in this lab,
+# so we use 5001 instead.
+REGISTRY_NAME="expert-mesh-registry"
+REGISTRY_PORT=5001
+
+if docker ps --filter "name=$REGISTRY_NAME" | grep -q .; then
+  echo "[setup] registry container already running"
+elif docker ps -a --filter "name=$REGISTRY_NAME" | grep -q .; then
+  echo "[setup] starting existing registry container"
+  docker start "$REGISTRY_NAME"
+else
+  echo "[setup] creating registry container (published on 127.0.0.1 only)"
+  docker run -d --name "$REGISTRY_NAME" -p "127.0.0.1:${REGISTRY_PORT}:5000" --restart=always registry:2
+fi
+
+echo "[setup] building expert-mesh image"
+docker build -t "localhost:${REGISTRY_PORT}/expert-mesh:latest" .
+
+echo "[setup] pushing expert-mesh image to local registry"
+docker push "localhost:${REGISTRY_PORT}/expert-mesh:latest"
+
+# Generate the evaluation dataset (tier-2 community-consultation questions).
+echo "[setup] building evaluation dataset"
+uv run python build_dataset.py --output data/dataset.jsonl
+
+# Create results/ directory for experiment output.
+mkdir -p results
+
+echo "[setup] done"
+"""
 
 [tasks.deploy]
-description = "Deploy to all nodes: SSH reverse tunnel / config distribution / image pull / model pull"
-run = "mise-tasks/deploy"
+description = "Deploy: SSH reverse tunnel, config distribution, image/model pull, start, healthcheck"
+run = """
+set -e
+
+REMOTE_DIR=$(uv run python tools/remote_dir.py)
+REGISTRY_PORT=5001
+
+ensure_tunnel() {
+  local host="$1"
+  if ssh "$host" "curl -fsS -o /dev/null http://localhost:${REGISTRY_PORT}/v2/" 2>/dev/null; then
+    echo "[deploy] $host: registry tunnel already up"
+  else
+    echo "[deploy] $host: opening reverse tunnel to local registry"
+    ssh -fNT -R "${REGISTRY_PORT}:localhost:${REGISTRY_PORT}" "$host"
+  fi
+}
+
+for host in $(uv run python tools/list_peers.py); do
+  echo "=== $host ==="
+  ensure_tunnel "$host"
+
+  ssh "$host" "mkdir -p $REMOTE_DIR"
+  rsync -az --inplace docker-compose.yml config.yaml "$host:$REMOTE_DIR/"
+  ssh "$host" "echo NODE_ID=$host > $REMOTE_DIR/.env"
+
+  echo "[deploy] $host: docker compose pull"
+  ssh "$host" "cd $REMOTE_DIR && docker compose pull"
+
+  echo "[deploy] $host: starting ollama container for model pull"
+  ssh "$host" "cd $REMOTE_DIR && docker compose up -d ollama"
+
+  for model in $(uv run python tools/node_models.py "$host"); do
+    echo "[deploy] $host: ollama pull $model"
+    ssh "$host" "cd $REMOTE_DIR && docker compose exec -T ollama ollama pull $model"
+  done
+done
+
+echo "[deploy] done"
+
+# ── Container startup, warm-up, healthcheck ─────────────────────────────────
+
+echo "[deploy] Starting containers on all nodes"
+for host in $(uv run python tools/list_peers.py); do
+  echo "[deploy] $host: docker compose up -d --force-recreate app"
+  ssh "$host" "cd $REMOTE_DIR && docker compose up -d --force-recreate app"
+done
+
+echo "[deploy] waiting for warmup to complete (may take a few minutes)"
+first_host=$(uv run python tools/list_peers.py | head -1)
+
+MAX_RETRIES=30
+RETRY_INTERVAL_S=10
+for i in $(seq 1 "$MAX_RETRIES"); do
+  if ssh "$first_host" "cd $REMOTE_DIR && docker compose exec -T app .venv/bin/python tools/healthcheck.py"; then
+    echo "[deploy] all nodes healthy"
+    exit 0
+  fi
+  echo "[deploy] not ready yet (attempt $i/$MAX_RETRIES), retrying in ${RETRY_INTERVAL_S}s..."
+  sleep "$RETRY_INTERVAL_S"
+done
+
+echo "[deploy] ERROR: nodes did not become healthy within timeout" >&2
+exit 1
+"""
 
 [tasks.start]
-description = "Start docker compose up -d on all nodes to begin the experiment"
-run = "mise-tasks/start"
+description = "Run a benchmark experiment: probe -> dispatch -> record results"
+run = """
+set -e
+
+REMOTE_DIR=$(uv run python tools/remote_dir.py)
+FIRST_HOST=$(uv run python tools/list_peers.py | head -1)
+
+DATETIME=$(date +"%Y%m%d_%H%M%S")
+RESULTS_DIR="results/${DATETIME}"
+mkdir -p "$RESULTS_DIR"
+
+# Parse arguments from $ARGV (mise passes args as a single string)
+NODE_ID="$FIRST_HOST"
+DATASET="data/dataset.jsonl"
+OUTPUT="results.jsonl"
+set -- $ARGV
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --node-id) NODE_ID="$2"; shift 2 ;;
+    --dataset) DATASET="$2"; shift 2 ;;
+    --output) OUTPUT="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+CONTAINER_OUTPUT="/app/results/$DATETIME/$OUTPUT"
+
+# Create the output directory inside the container (volume mount creates /app/results/ only).
+ssh "$FIRST_HOST" "cd $REMOTE_DIR && docker compose exec -T app mkdir -p /app/results/$DATETIME"
+
+echo "[start] running experiment: node=$NODE_ID dataset=$DATASET output=$RESULTS_DIR/$OUTPUT"
+ssh "$FIRST_HOST" "cd $REMOTE_DIR && docker compose exec -T app .venv/bin/python run_experiment.py --node-id $NODE_ID --dataset $DATASET --output $CONTAINER_OUTPUT" || true
+
+# Copy results from remote host to local results directory.
+echo "[start] copying results from $FIRST_HOST:$REMOTE_DIR/results/$DATETIME/$OUTPUT"
+ssh "$FIRST_HOST" "cd $REMOTE_DIR && cat results/$DATETIME/$OUTPUT" > "$RESULTS_DIR/$OUTPUT" || echo "[start] WARNING: failed to copy results"
+
+echo "[start] experiment done. Results saved to $RESULTS_DIR/"
+"""
 
 [tasks.analyze]
-description = "Collect logs from all nodes (Phase 0: basic collection only; metrics in Phase 2)"
-run = "mise-tasks/analyze"
+description = "Collect structured logs into results/<datetime>/logs/<node_id>/"
+run = """
+set -e
+
+REMOTE_DIR=$(uv run python tools/remote_dir.py)
+
+if [ $# -ge 1 ]; then
+  DATETIME="$1"
+else
+  if [ -d results ] && [ "$(ls -d results/*/ 2>/dev/null | wc -l)" -gt 0 ]; then
+    DATETIME=$(ls -1d results/*/ | sed 's|results/||;s|/||' | sort | tail -1)
+  else
+    echo "[analyze] no results/ directory found" >&2
+    exit 1
+  fi
+fi
+
+RESULTS_DIR="results/${DATETIME}"
+LOG_DIR="$RESULTS_DIR/logs"
+
+mkdir -p "$LOG_DIR"
+
+for host in $(uv run python tools/list_peers.py); do
+  echo "=== $host ==="
+  mkdir -p "$LOG_DIR/$host"
+  ssh "$host" "cd $REMOTE_DIR && docker compose logs --no-color app" > "$LOG_DIR/$host/expert-mesh.log" 2>&1 || true
+  line_count=$(wc -l < "$LOG_DIR/$host/expert-mesh.log")
+  echo "  -> $LOG_DIR/$host/expert-mesh.log (${line_count} lines)"
+done
+
+echo "[analyze] done. Results in $RESULTS_DIR/"
+echo "  Run 'uv run python tools/show_logs.py --node-id <node_id> --summary' for per-node metrics"
+"""
 
 [tasks.clean]
-description = "Clean up all nodes (default: containers only; '-- --full' removes model data too)"
-run = "mise-tasks/clean"
+description = "Stop and remove containers on all nodes; '--full' removes model data too"
+usage = '''
+flag "--full" help="Remove model data and remote directory"
+'''
+run = """
+set -e
+
+REMOTE_DIR=$(uv run python tools/remote_dir.py)
+REGISTRY_PORT=5001
+FULL_CLEAN=${usage_full:-false}
+
+for host in $(uv run python tools/list_peers.py); do
+  echo "=== $host ==="
+  if [ "$FULL_CLEAN" = true ]; then
+    echo "[clean] $host: docker compose down -v --rmi all (removes model data and images)"
+    ssh "$host" "[ -d $REMOTE_DIR ] && (cd $REMOTE_DIR && docker compose down -v --rmi all) || echo '  (not deployed, skip)'"
+    echo "[clean] $host: removing $REMOTE_DIR"
+    ssh "$host" "rm -rf $REMOTE_DIR 2>/dev/null || sudo rm -rf $REMOTE_DIR 2>/dev/null || echo '  (some files could not be removed; check permissions)'"
+  else
+    echo "[clean] $host: docker compose down (ollama model data preserved)"
+    ssh "$host" "[ -d $REMOTE_DIR ] && (cd $REMOTE_DIR && docker compose down) || echo '  (not deployed, skip)'"
+  fi
+
+  # Remove the SSH reverse tunnel to the local registry when no longer needed.
+  echo "[clean] $host: closing registry reverse tunnel"
+  for pid in $(pgrep -f "ssh -fNT -R ${REGISTRY_PORT}:localhost:${REGISTRY_PORT}.*$host" 2>/dev/null); do
+    kill "$pid" 2>/dev/null || true
+  done
+done
+
+echo "[clean] done"
+"""

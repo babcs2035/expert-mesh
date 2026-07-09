@@ -1,10 +1,16 @@
-"""Async HTTP client for peer-to-peer /probe and /dispatch calls."""
+"""Async HTTP client for peer-to-peer /advertise, /probe, and /dispatch calls."""
 
 import asyncio
 
 import httpx
 
-from protocol import DispatchRequest, DispatchResponse, ProbeRequest, ProbeResponse
+from protocol import (
+    AdvertiseRequest,
+    DispatchRequest,
+    DispatchResponse,
+    ProbeRequest,
+    ProbeResponse,
+)
 
 
 class PeerClient:
@@ -13,6 +19,28 @@ class PeerClient:
     def __init__(self, peers: list[dict]) -> None:
         """peers: list of dicts containing node_id, host, port, domain."""
         self._peers = peers
+
+    async def advertise_all(self, request: AdvertiseRequest, timeout_s: float) -> None:
+        """Send /advertise to every peer concurrently, ignoring individual failures.
+
+        A heartbeat is best-effort: a peer that is temporarily unreachable
+        should not block or fail the sending node's own operation.
+        """
+        await asyncio.gather(
+            *(self._advertise_one(peer, request, timeout_s) for peer in self._peers)
+        )
+
+    async def _advertise_one(
+        self, peer: dict, request: AdvertiseRequest, timeout_s: float
+    ) -> None:
+        """Send /advertise to a single peer; failures are swallowed by design."""
+        url = f"http://{peer['host']}:{peer['port']}/advertise"
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s) as client:
+                response = await client.post(url, json=request.model_dump())
+                response.raise_for_status()
+        except (httpx.HTTPError, httpx.TimeoutException):
+            pass
 
     async def probe_all(self, request: ProbeRequest, timeout_s: float) -> list[ProbeResponse]:
         """Send /probe to every peer concurrently and collect responses within the deadline.
