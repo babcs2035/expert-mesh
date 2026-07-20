@@ -6,6 +6,11 @@ repo_name: expert-mesh
 
 # 実験の起動系（実機 3 ノード: wafl500/general(依頼者兼任)・wafl502/legal・wafl503/medical，
 # Docker + ローカル registry(5001番，WAFL-PEFTの5000番と衝突回避)，mise タスク）
+# 2026-07-20 ユーザー通達: 192.168.15.100〜109（最大10台，同一スペック）が実機として利用可能．
+# VRAMは常に確保（コンテナ常時起動．docker-compose.ymlにOLLAMA_KEEP_ALIVE=-1設定済み，commit 94d4b50）．
+# ノード拡張の活用方向はユーザー承認済み（新規専門ドメインの追加，research_frontier参照）．
+# Iteration 2（routing_method）は単一レバー原則を守るため現行3ノード構成のまま実施し，
+# ノード拡張は別イテレーションとして着手する．
 tasks:
   setup:   "mise run setup"
   deploy:  "mise run deploy"
@@ -35,10 +40,18 @@ levers:
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 research_frontier:
+  - "【ユーザー承認・2026-07-20】新規専門ドメインの追加: 192.168.15.100〜109（最大10台，同一スペック）への
+     拡張が可能になったことを受け，medical/legal/general以外の専門ドメインを追加してメッシュの専門分野を
+     拡充する．具体的なドメイン候補選定・データセット拡充(build_dataset.py)・新規モデル準備・
+     config.yamlへのノード追加・router.pyのドメイン別プロンプト(few-shot例含む)整備が必要な大きめの変更．
+     次期rc-planner着手時に具体化すること．単一レバー原則のため，Iteration 2(routing_method)完了後，
+     かつ既存3ノードの構成を変えない形で着手する（新規ノード追加は既存ノードの挙動に影響しないため
+     並行可能だが，比較対象の交絡を避けるため順序を守る）"
   - "評価用データセットの本格化: build_dataset.pyの仮データ→設計書4.3節が定義する実際のドメインQAベンチマーク(階層1)・社会実装シナリオデータセット(階層2)"
   - "回答品質評価(評価軸②，LLM-as-judge)・End-to-End評価(評価軸③)の実装（現状metrics.pyはルーティング精度(評価軸①)のみ）"
   - "ベースライン比較(設計書4.2節): 単一汎用小型モデル・中央集権ルーター・オラクルルーティングとの比較実験（未実装）"
-  - "top-k dispatchの高度な集約方式: 現状は自己申告confidenceの単純最大値選択(aggregator.select_best_dispatch_response)のみ"
+  - "top-k dispatchの高度な集約方式: 現状は自己申告confidenceの単純最大値選択(aggregator.select_best_dispatch_response)のみ．
+     ノード冗長化(同一ドメイン複数ノード)による多数決・LLM-as-judge集約の実験基盤としても位置づけられる"
   - "無線アドホック化・ネットワーク不安定性への対応（設計書Phase3，本フェーズのスコープ外）"
 
 baselines: []   # ベースライン比較は research_frontier の項目であり levers 探索後に着手

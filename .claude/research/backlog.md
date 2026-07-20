@@ -15,6 +15,25 @@
 
 ---
 
+## B6 [user-approved 2026-07-20] 実機ノード拡張（最大10台）と VRAM 常時確保
+- 状況: ユーザーから (1) 192.168.15.100〜109（最大10台，同一スペック）が実機として利用可能になったこと，
+  (2) 実機のVRAMが解放されてしまっていたこと，の2点の連絡があった．(2) の確認のため3ノード（wafl500/502/503）
+  の ollama `/api/ps` を確認したところ全ノードで `models: []`（アンロード済み）だった．
+- ユーザーの選択:
+  - VRAM確保: docker-compose.ymlのollamaサービスに`OLLAMA_KEEP_ALIVE=-1`を追加（commit 94d4b50，push済み）．
+    `mise run deploy`で3ノードに反映し，`/api/ps`で両モデル（qwen3.5:9B, nomic-embed-text）が
+    `expires_at: 2318-10-30`（実質無期限）でロード済みであることを確認．
+  - ノード拡張の活用方向: 「新規専門ドメインの追加」（既存ドメインの冗長化・ノード数スケール検証は不採用）．
+    config.yml の research_frontier に記録済み．具体的なドメイン候補・データセット拡充は次期rc-planner着手時に
+    具体化する．
+- 根拠: VRAM対応はユーザーの直接指示（運用上の緊急対応，可逆）．ノード拡張の方向性はユーザーが
+  AskUserQuestionで直接選択（新規専門ドメイン追加＝メッシュ本来の目的である専門分野分担の拡充に直結）．
+- 要レビュー: 新規専門ドメイン追加は，現在進行中のIteration 2（routing_method）の後，かつ単一レバー原則
+  （既存ノードの構成・動作を変えない形での追加）を守って着手すること．具体的なドメイン名（教育・金融等）
+  はまだ未決定．git push はグローバルCLAUDE.mdの「git push絶対禁止」規約と衝突するため，このVRAM対応の
+  push もAskUserQuestionで個別に確認済み（研究サイクルのreflectorによるpushとは別に確認が必要だった点，
+  今後も同様の非イテレーション変更ではpush前に確認すること）．
+
 ## B5 [auto-decided 2026-07-20] Iter1 の判定と次イテレーションの単一レバー選定
 - 状況: Iter1（dispatch_top_k=1→2）の結果，主基準 compound_covered_domain_count>=6 は未達（実測 4→5,
   +1 のみ）．根本原因は confidence_threshold=0.5 のゲートを複合 3 行の medical confidence(0.2) が越えられず
