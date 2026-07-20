@@ -24,6 +24,7 @@ from typing import TextIO
 # No sys.path manipulation needed — pytest's pythonpath = ["."] handles it.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from aggregator import select_dispatch_targets  # noqa: E402
 from expert_backend import OllamaClient  # noqa: E402 (see sys.path setup above)
 from node import load_yaml, run_ask_flow  # noqa: E402
 
@@ -69,6 +70,28 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         selected_node_id = None
         confidence = None
 
+    # Recompute the dispatch target set from the probe_responses already
+    # fetched above (no extra /probe or /dispatch calls) using the same
+    # aggregator function and config values run_ask_flow used internally,
+    # so this reproduces the actual candidate/dispatch sets for set-valued
+    # coverage metrics (metrics.py's compute_compound_coverage_metrics)
+    # without changing routing/aggregation behavior itself. Empty when no
+    # node cleared confidence_threshold (the fallback case).
+    dispatch_targets = select_dispatch_targets(
+        result.probe_responses,
+        confidence_threshold=config.get("confidence_threshold", 0.5),
+        top_k=config.get("dispatch_top_k", 1),
+    )
+    dispatched_domains = [config["nodes"][t.node_id]["domain"] for t in dispatch_targets]
+    probe_candidates = [
+        {
+            "node_id": r.node_id,
+            "domain": config["nodes"][r.node_id]["domain"],
+            "confidence": r.confidence,
+        }
+        for r in result.probe_responses
+    ]
+
     return {
         "id": row["id"],
         "query": row["query"],
@@ -80,6 +103,8 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         "confidence": confidence,
         "answer_text": answer_text,
         "duration_ms": duration_ms,
+        "dispatched_domains": dispatched_domains,
+        "probe_candidates": probe_candidates,
     }
 
 

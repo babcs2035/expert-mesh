@@ -1,0 +1,69 @@
+# research-cycle 設定: expert-mesh
+# サイクル全体の手順はグローバル skill（~/.claude/skills/research-cycle/SKILL.md）が規定する．
+# ここにはこのリポジトリ固有の差分だけを書く．
+
+repo_name: expert-mesh
+
+# 実験の起動系（実機 3 ノード: wafl500/general(依頼者兼任)・wafl502/legal・wafl503/medical，
+# Docker + ローカル registry(5001番，WAFL-PEFTの5000番と衝突回避)，mise タスク）
+tasks:
+  setup:   "mise run setup"
+  deploy:  "mise run deploy"
+  run:     "mise run start"
+  analyze: "mise run analyze"
+  clean:   "mise run clean"        # 破壊的（--full はモデルデータも削除）．自動実行しない（backlog 経由で人間判断）
+
+experiment:
+  name_scheme: "Iter{n}"                          # results/<YYYYMMDD_HHMMSS>/ を Iter{n} に対応付けて journal に記録
+  results_glob: "results/*/results.jsonl"
+  # metrics.py は --results 必須のため，最新の実行結果を動的に解決してから渡す．
+  metrics_cmd: "uv run python metrics.py --results $(ls -1dt results/*/ | head -1)results.jsonl --json"
+  timeout_min: 90                  # 直近の完走実験（20260709_205442→20260709_214113）は34問で約46分．CPU推論のばらつきを見て倍程度の余裕を確保
+  poll_interval_sec: 120
+
+# journal.md に残す直近イテレーション数．超過分は自動で journal_archive.md へ移す
+# （reflector が rotate_journal.sh を呼ぶ）．journal.md の肥大化・毎フェーズの Read コストを抑えるため．
+journal_retention: 3
+
+# 単一レバー原則で振る候補（順序＝優先度）．1 イテレーションで動かすのは 1 つだけ．
+# 全て config.yaml の値変更のみで検証可能（コード変更不要）．2026-07-20 ユーザー承認済みの優先順位．
+levers:
+  - {name: dispatch_top_k, values: [1, 2, 3], note: "直近完走実験(results/20260709_214113)でmedical recallが0.79（legal 0.93, general 1.0）と低いことが判明．top_k>1の並行dispatchで改善するか検証．aggregator.select_best_dispatch_responseは対応済み・新規実装不要"}
+  - {name: routing_method, values: [self_report, embedding], note: "Phase1実装済みの方式A(embedding)とB(self_report,既定)を比較．probeレイテンシと精度のトレードオフを定量比較"}
+  - {name: confidence_threshold, values: [0.3, 0.5, 0.7], note: "フォールバック率とのトレードオフ．直近実験ではfallback_rate=0.0のため効果が薄い可能性あり"}
+
+# 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
+# levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
+research_frontier:
+  - "評価用データセットの本格化: build_dataset.pyの仮データ→設計書4.3節が定義する実際のドメインQAベンチマーク(階層1)・社会実装シナリオデータセット(階層2)"
+  - "回答品質評価(評価軸②，LLM-as-judge)・End-to-End評価(評価軸③)の実装（現状metrics.pyはルーティング精度(評価軸①)のみ）"
+  - "ベースライン比較(設計書4.2節): 単一汎用小型モデル・中央集権ルーター・オラクルルーティングとの比較実験（未実装）"
+  - "top-k dispatchの高度な集約方式: 現状は自己申告confidenceの単純最大値選択(aggregator.select_best_dispatch_response)のみ"
+  - "無線アドホック化・ネットワーク不安定性への対応（設計書Phase3，本フェーズのスコープ外）"
+
+baselines: []   # ベースライン比較は research_frontier の項目であり levers 探索後に着手
+
+success_criteria: "Iter1（dispatch_top_k=1→2，複合ドメイン行4件・Σexpected_domains=8）:
+  主基準はcompound_covered_domain_count>=6（ベースライン≈4から+2以上，等価にcompound_domain_set_recall>=0.75）．
+  コスト保護はcompound_mean_dispatched_count<=2.0かつ単一ドメイン30問のdispatch数が1のまま．
+  非退行はtop1_accuracy>=0.97かつmisrouting_rate<=0.03（selected_domainロジック自体は不変のためprobeノイズ以外では動かない想定）．
+  N=4のため1行の揺らぎ（set_recall±0.125）を超える変化を要件とする．"
+
+slack:
+  channel: "#times-ktakahashi"
+  channel_id: "C0BHR9YLR47"
+  mention_user_id: "U08GLKY1QCW"
+
+notion:
+  parent_page: "Lab/Research"
+  database_id: "12c71cc0-c905-49b4-810f-247c230b3964"   # data_source_id（Research Cycle Log，他リポジトリと共通）
+  repo_page_id: "3a35abda-e3f1-81fa-83cf-f4c23fa64898"  # expert-mesh 行のページ ID（2026-07-20 作成）
+
+git:
+  enabled: true
+  branch: "main"
+  commit_per_iteration: true
+  push: true
+
+autonomy:
+  destructive_requires_human: true  # clean --full 等の破壊的操作は停止して人間へ

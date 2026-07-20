@@ -1,7 +1,8 @@
 """Tests for the routing-accuracy metrics computed from run_experiment.py output."""
 
-from benchmark.metrics import (
+from metrics import (
     compute_all_metrics,
+    compute_compound_coverage_metrics,
     compute_dispatch_failure_rate,
     compute_fallback_rate,
     compute_mean_duration_ms,
@@ -17,14 +18,23 @@ def _result(
     used_fallback: bool = False,
     dispatch_failed: bool = False,
     duration_ms: int = 100,
+    dispatched_domains: list[str] | None = None,
 ) -> dict:
-    """Build a minimal result row matching run_experiment.py's output shape."""
+    """Build a minimal result row matching run_experiment.py's output shape.
+
+    `dispatched_domains` defaults to None so existing callers keep
+    producing rows that match the pre-Iter1 results.jsonl schema (no such
+    key at all in practice, but `.get(...)` treats a present-but-None value
+    the same way) — this is what compute_compound_coverage_metrics's
+    backward-compatibility skip is meant to exercise.
+    """
     return {
         "selected_domain": selected_domain,
         "expected_domains": expected_domains,
         "used_fallback": used_fallback,
         "dispatch_failed": dispatch_failed,
         "duration_ms": duration_ms,
+        "dispatched_domains": dispatched_domains,
     }
 
 
@@ -115,3 +125,72 @@ def test_compute_all_metrics_splits_single_and_compound_domain_accuracy() -> Non
     assert metrics["single_domain_top1_accuracy"] == 1.0
     assert metrics["compound_domain_question_count"] == 1
     assert metrics["compound_domain_top1_accuracy"] == 0.0
+
+
+def test_compute_compound_coverage_metrics_mixed_full_and_partial_coverage() -> None:
+    """Coverage/set-recall/Jaccard are averaged across compound rows only.
+
+    Row 1: dispatch covered both expected domains (full coverage, Jaccard 1.0).
+    Row 2: dispatch covered only one of the two expected domains (half coverage).
+    A single-domain row is included to confirm it is excluded from the aggregate.
+    """
+    results = [
+        _result(
+            "medical", ["medical", "legal"], dispatched_domains=["medical", "legal"]
+        ),
+        _result("legal", ["medical", "legal"], dispatched_domains=["legal"]),
+        _result("medical", ["medical"], dispatched_domains=["medical"]),  # single-domain, excluded
+    ]
+    coverage = compute_compound_coverage_metrics(results)
+    assert coverage["compound_coverage_available"] is True
+    assert coverage["compound_rows_evaluated"] == 2
+    assert coverage["compound_covered_domain_count"] == 3  # 2 (row1) + 1 (row2)
+    assert coverage["compound_expected_domain_total"] == 4  # 2 + 2
+    assert coverage["compound_domain_set_recall"] == 0.75  # 3/4
+    assert coverage["compound_domain_coverage_ratio_mean"] == 0.75  # mean(1.0, 0.5)
+    assert coverage["compound_domain_jaccard_mean"] == 0.75  # mean(1.0, 0.5)
+    assert coverage["compound_mean_dispatched_count"] == 1.5  # mean(2, 1)
+
+
+def test_compute_compound_coverage_metrics_skips_rows_missing_the_new_field() -> None:
+    """Rows from results.jsonl files written before this metric existed are skipped, not errored.
+
+    run_experiment.py only started emitting `dispatched_domains` in Iter1;
+    older results rows have no such key at all. `_result(...)`'s default
+    (present-but-None) covers the same `.get(...) is None` skip path, and a
+    raw dict here additionally exercises true key-absence, matching the
+    actual shape of a pre-Iter1 results.jsonl line.
+    """
+    legacy_row_missing_key = {
+        "selected_domain": "medical",
+        "expected_domains": ["medical", "legal"],
+    }
+    results = [
+        legacy_row_missing_key,
+        _result("medical", ["medical", "legal"]),  # present but None (dispatched_domains defaults to None)
+    ]
+    coverage = compute_compound_coverage_metrics(results)
+    assert coverage["compound_coverage_available"] is False
+    assert coverage["compound_rows_evaluated"] == 0
+
+
+def test_compute_compound_coverage_metrics_empty_results_is_unavailable() -> None:
+    """An empty result set reports compound_coverage_available=False, not a ZeroDivisionError."""
+    coverage = compute_compound_coverage_metrics([])
+    assert coverage["compound_coverage_available"] is False
+    assert coverage["compound_rows_evaluated"] == 0
+    assert coverage["compound_domain_set_recall"] == 0.0
+    assert coverage["compound_mean_dispatched_count"] == 0.0
+
+
+def test_compute_all_metrics_includes_compound_coverage_key() -> None:
+    """compute_all_metrics exposes compound_coverage without altering pre-existing keys."""
+    results = [
+        _result("medical", ["medical", "legal"], dispatched_domains=["medical", "legal"]),
+    ]
+    metrics = compute_all_metrics(results)
+    assert metrics["compound_coverage"]["compound_coverage_available"] is True
+    assert metrics["compound_coverage"]["compound_rows_evaluated"] == 1
+    # Pre-existing keys/values are untouched by this addition.
+    assert metrics["compound_domain_question_count"] == 1
+    assert metrics["compound_domain_top1_accuracy"] == 1.0

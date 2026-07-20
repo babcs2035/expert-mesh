@@ -110,6 +110,77 @@ def compute_mean_duration_ms(results: list[dict]) -> float:
     return sum(r["duration_ms"] for r in results) / len(results)
 
 
+def compute_compound_coverage_metrics(results: list[dict]) -> dict:
+    """Set-valued coverage of compound-domain rows by the actual dispatch candidate set.
+
+    Motivation (journal.md Iter1, backlog.md B2/B3): with the current
+    aggregator (aggregator.select_best_dispatch_response picks a single
+    highest-confidence answer), a compound-domain row's `selected_domain`
+    can only ever match one of its `expected_domains`, so `dispatch_top_k`
+    has no effect on top1_accuracy/misrouting_rate for those rows. This
+    function instead asks "did the dispatch candidate set (before final
+    selection) cover the expected domain set?", which is the quantity
+    `dispatch_top_k` can actually move.
+
+    Requires run_experiment.py's `dispatched_domains` field (added
+    alongside this function; see run_experiment.py's `_run_one`). Rows from
+    older results.jsonl files that predate that field lack the key
+    entirely, so `r.get("dispatched_domains")` is used (not `r[...]`) and
+    such rows are skipped — this keeps the function backward compatible
+    with results produced before this metric existed, rather than raising.
+
+    Only compound rows (more than one expected domain) are considered:
+    single-domain rows are covered by top1_accuracy already and diluting
+    the average with them would blur the "did dispatch reach both experts"
+    signal this metric exists to isolate.
+    """
+    compound_rows = [
+        r
+        for r in results
+        if len(r["expected_domains"]) > 1 and r.get("dispatched_domains") is not None
+    ]
+    if not compound_rows:
+        return {
+            "compound_rows_evaluated": 0,
+            "compound_covered_domain_count": 0,
+            "compound_expected_domain_total": 0,
+            "compound_domain_set_recall": 0.0,
+            "compound_domain_coverage_ratio_mean": 0.0,
+            "compound_domain_jaccard_mean": 0.0,
+            "compound_mean_dispatched_count": 0.0,
+            "compound_coverage_available": False,
+        }
+
+    covered_domain_count = 0
+    expected_domain_total = 0
+    coverage_ratio_sum = 0.0
+    jaccard_sum = 0.0
+    dispatched_count_sum = 0
+    for r in compound_rows:
+        expected = set(r["expected_domains"])
+        dispatched = set(r["dispatched_domains"])
+        intersection_size = len(dispatched & expected)
+        union_size = len(dispatched | expected)
+
+        covered_domain_count += intersection_size
+        expected_domain_total += len(expected)
+        coverage_ratio_sum += intersection_size / len(expected)
+        jaccard_sum += intersection_size / union_size if union_size > 0 else 0.0
+        dispatched_count_sum += len(dispatched)
+
+    row_count = len(compound_rows)
+    return {
+        "compound_rows_evaluated": row_count,
+        "compound_covered_domain_count": covered_domain_count,
+        "compound_expected_domain_total": expected_domain_total,
+        "compound_domain_set_recall": covered_domain_count / expected_domain_total,
+        "compound_domain_coverage_ratio_mean": coverage_ratio_sum / row_count,
+        "compound_domain_jaccard_mean": jaccard_sum / row_count,
+        "compound_mean_dispatched_count": dispatched_count_sum / row_count,
+        "compound_coverage_available": True,
+    }
+
+
 def compute_all_metrics(results: list[dict]) -> dict:
     """Bundle every axis-1 metric plus supporting counts into one summary dict."""
     by_compound = defaultdict(list)
@@ -128,6 +199,7 @@ def compute_all_metrics(results: list[dict]) -> dict:
         "single_domain_top1_accuracy": compute_top1_accuracy(by_compound[False]),
         "compound_domain_question_count": len(by_compound[True]),
         "compound_domain_top1_accuracy": compute_top1_accuracy(by_compound[True]),
+        "compound_coverage": compute_compound_coverage_metrics(results),
     }
 
 
@@ -153,6 +225,22 @@ def print_summary(metrics: dict, output: TextIO) -> None:
     for domain, scores in metrics["precision_recall_per_domain"].items():
         print(
             f"  {domain}: precision={scores['precision']:.3f}, recall={scores['recall']:.3f}",
+            file=output,
+        )
+    compound_coverage = metrics.get("compound_coverage", {})
+    if compound_coverage.get("compound_coverage_available"):
+        print("複合ドメイン行の dispatch 被覆率（dispatch_top_k の効果測定用）:", file=output)
+        print(
+            f"  対象行数: {compound_coverage['compound_rows_evaluated']}, "
+            f"set recall(micro): {compound_coverage['compound_domain_set_recall']:.3f} "
+            f"({compound_coverage['compound_covered_domain_count']}/"
+            f"{compound_coverage['compound_expected_domain_total']})",
+            file=output,
+        )
+        print(
+            f"  被覆率(macro平均): {compound_coverage['compound_domain_coverage_ratio_mean']:.3f}, "
+            f"Jaccard(macro平均): {compound_coverage['compound_domain_jaccard_mean']:.3f}, "
+            f"平均dispatch数: {compound_coverage['compound_mean_dispatched_count']:.2f}",
             file=output,
         )
 

@@ -3,7 +3,7 @@
 import io
 import json
 
-from benchmark.build_dataset import write_dataset
+from build_dataset import write_dataset
 
 
 def test_write_dataset_produces_one_json_object_per_line() -> None:
