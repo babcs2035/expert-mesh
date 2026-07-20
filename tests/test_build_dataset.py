@@ -52,4 +52,4 @@ def test_write_dataset_covers_all_configured_domains() -> None:
     single_domain_labels = {
         row["expected_domains"][0] for row in rows if not row["is_compound"]
     }
-    assert single_domain_labels == {"medical", "legal", "general"}
+    assert single_domain_labels == {"medical", "legal", "general", "education"}

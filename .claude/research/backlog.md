@@ -15,6 +15,36 @@
 
 ---
 
+## B9 [auto-decided 2026-07-20] Iter3=confidence_threshold の no-op 確定と config-only レバー探索の収束・移行方針
+- 状況: Iter3 対象レバー `confidence_threshold`（candidates [0.3, 0.5, 0.7]，既定 0.5）について，調査で二峰・
+  空帯域分布による構造的 no-op が示唆されていた．ゲートは requester 側 aggregator が記録済み probe_responses に
+  適用するだけのため，計画フェーズで**新規実験なしに**ベースライン結果 results/20260720_171532（34 行）の
+  probe_candidates から閾値掃引をオフライン再計算し，thr=0.3/0.5/0.7/0.85 で fallback=0・total_dispatch=34・
+  selected_domain 全 34 行一致（帯域 (0.3,0.7) に値 0 件，fallback は 0.9 以上でのみ発生かつ品質退行側）を確認．
+  no-op が決定的に確定した．これで config.yml levers 3 本（dispatch_top_k=Iter1 棄却，routing_method=Iter2
+  棄却，confidence_threshold=Iter3 no-op）を試し切り，config-only レバー探索が収束した．次にどの大きな
+  方向へ進むかの判断（可逆だが実装量の大きい方向転換）が必要になった．
+- 自動選択: 案C3 を採用．(1) 案C1（no-op を新規 run で実証）は棄却＝ゲートがオフライン再計算可能で新規 run
+  （約 46 分）が冗長．(2) 案C2（levers.values を稠密域 ~0.15/~0.9 へ差し替え，config-only 単一レバー維持）は
+  棄却＝top_k=1 固定下で ~0.15 は依然 no-op，~0.9 は専門ノードを general へ落とす品質退行で改善余地なし．
+  (3) 案C3 を採り，本イテレーションは実験・実装をスキップ（config.yaml 無変更）し，**停止して人間判断を仰ぐ**
+  形で移行方針を提示する．
+- 根拠: 3 イテレーション連続で「config 値では confidence 信号の質を baseline 以上にできない」ことが示され，
+  真のボトルネックが confidence 信号の較正（過信・飽和）という config-only の枠外にあることが確定した
+  （Iter1: self_report 複合行 confidence 飽和 / Iter2: embedding cosine が [0.67,0.74] に潰れ弁別喪失・
+  top1 0.53 / Iter3: 二峰分布で閾値どの候補値でも無反応）．config.yml research_frontier の順序規約
+  「levers を試し切ってから research_frontier へ」の発火条件を満たす．
+- 要レビュー（人間が選ぶ方向）: 次サイクルの重心を以下 A/B のどちらに置くか判断すること．
+  - A: research_frontier「新規専門ドメイン追加」（B6 で方向性はユーザー承認済み）．ただし具体ドメイン選定・
+    build_dataset.py 拡充・新規モデル準備・config.yaml ノード追加・router.py ドメイン別プロンプト整備を伴う
+    大きめの変更で，次期 rc-planner での具体化と，どのドメイン/何ノードかの人間入力が要る．
+  - B: confidence 信号の較正改良（B7 起点の nomic-embed-text task prefix 付与，複数 utterance ルート定義，
+    ドメイン別 few-shot プロンプト整備）．いずれもコード変更を伴い config-only 単一レバー原則の外側（未承認）で，
+    計測基盤・比較 baseline の再定義が必要．
+  いずれも「単一レバー原則の再設計（config-only の枠を出る）」が前提になる点，および 3 イテレーション一貫の
+  知見（ボトルネック=信号較正）が A/B どちらにも通底する点を判断材料とすること．C3 のためこのイテレーションでは
+  config.yaml は無変更・deploy 不要．
+
 ## B8 [auto-decided 2026-07-20] Iter2 の判定と次イテレーション（Iter3）の単一レバー選定
 - 状況: Iter2（routing_method: self_report→embedding）の結果，主基準（信号の質）が決定的未達
   （positive-margin 率 0.529 vs 基準 0.971，mean margin -0.0040 vs 0.60），非退行 3 指標も決定的未達

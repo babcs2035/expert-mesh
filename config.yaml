@@ -43,3 +43,9 @@ nodes:
     domain: medical
     light_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
     expert_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
+  wafl501:
+    host: 192.168.15.101
+    port: 8080
+    domain: education
+    light_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
+    expert_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL

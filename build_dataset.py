@@ -59,6 +59,19 @@ _GENERAL_QUESTIONS: list[tuple[str, list[str]]] = [
     ("最近話題のカフェについて教えてください．", ["general"]),
 ]
 
+_EDUCATION_QUESTIONS: list[tuple[str, list[str]]] = [
+    ("子育て中の夜泣きに対応するには？", ["education"]),
+    ("学校の給食でアレルギー対応は必須ですか？", ["education"]),
+    ("小学生の勉強を見る際，親はどこまで介入すべきですか？", ["education"]),
+    ("習い事はいつから始めるのが良いですか？", ["education"]),
+    ("不登校になった子どもに親ができることは何ですか？", ["education"]),
+    ("高校の選択で，進学校か定時制か迷っています．", ["education"]),
+    ("幼稚園と保育園の違いを教えてください．", ["education"]),
+    ("儿童の読書習慣をつけるにはどうすればよいですか？", ["education"]),
+    ("中学校の部活動で怪我をした場合，どのような手続きが必要ですか？", ["education"]),
+    ("進学塾と通信教育，どちらが効果的ですか？", ["education"]),
+]
+
 # Compound-domain questions (design doc 4.3: "questions spanning multiple
 # domains") where more than one node's specialty is genuinely relevant.
 _COMPOUND_QUESTIONS: list[tuple[str, list[str]]] = [
@@ -78,6 +91,14 @@ _COMPOUND_QUESTIONS: list[tuple[str, list[str]]] = [
         "ペットが近隣トラブルの原因で怪我をさせてしまいました．治療費と責任について知りたいです．",
         ["medical", "legal"],
     ),
+    (
+        "学校で子供のアレルギー対応について，給食と保健室の両方の配慮が必要です．",
+        ["education", "medical"],
+    ),
+    (
+        "いじめの問題で，学校への対応と法的なアドバイスが必要です．",
+        ["education", "legal"],
+    ),
 ]
 
 
@@ -87,6 +108,7 @@ def _build_rows() -> list[dict]:
         ("medical", _MEDICAL_QUESTIONS),
         ("legal", _LEGAL_QUESTIONS),
         ("general", _GENERAL_QUESTIONS),
+        ("education", _EDUCATION_QUESTIONS),
         ("compound", _COMPOUND_QUESTIONS),
     ]
     rows = []

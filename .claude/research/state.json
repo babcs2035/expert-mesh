@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter3",
-  "iteration_name": "confidence_threshold 掃引による fallback 率と general 過信リークのトレードオフ検証",
+  "iteration": "Iter5",
+  "iteration_name": "education ノード few-shot 例の education 固有話題への差し替え",
   "phase": "investigate",
   "status": "running",
-  "current_lever": "confidence_threshold",
+  "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": "2026-07-20T18:45:00+09:00",
-  "last_slack_ts": "1784540163.541939",
+  "updated_at": "2026-07-21T01:15:00+09:00",
+  "last_slack_ts": null,
   "iteration_thread_ts": null,
   "notion_toggle_created": false,
-  "last_commit": "f4b7be7"
+  "last_commit": null
 }

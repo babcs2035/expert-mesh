@@ -63,8 +63,8 @@ success_criteria: "Iter1（dispatch_top_k=1→2，複合ドメイン行4件・Σ
   N=4のため1行の揺らぎ（set_recall±0.125）を超える変化を要件とする．"
 
 slack:
-  channel: "#times-ktakahashi"
-  channel_id: "C0BHR9YLR47"
+  channel: "#research-cycle"
+  channel_id: "C0BJHRL037B"
   mention_user_id: "U08GLKY1QCW"
 
 notion:

@@ -69,11 +69,11 @@ for host in $(uv run python tools/list_peers.py); do
   # `docker compose up` fail outright on hosts without an nvidia runtime,
   # so it must only be applied via COMPOSE_FILE on hosts that actually
   # have an NVIDIA GPU.
-  if ssh "$host" "command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1"; then
-    echo "[deploy] $host: NVIDIA GPU detected, enabling GPU pass-through for ollama"
+  if ssh "$host" "command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1 && docker info 2>/dev/null | grep -q nvidia"; then
+    echo "[deploy] $host: NVIDIA GPU detected with nvidia runtime, enabling GPU pass-through for ollama"
     ssh "$host" "echo NODE_ID=$host > $REMOTE_DIR/.env && echo COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml >> $REMOTE_DIR/.env"
   else
-    echo "[deploy] $host: no NVIDIA GPU detected, using CPU-only compose file"
+    echo "[deploy] $host: no NVIDIA GPU or nvidia runtime detected, using CPU-only compose file"
     ssh "$host" "echo NODE_ID=$host > $REMOTE_DIR/.env"
   fi
 
