@@ -11,6 +11,11 @@ services:
     # allowing connectivity checks from the host for debugging.
     ports:
       - "127.0.0.1:11434:11434"
+    environment:
+      # Ollama's default keep_alive (5m) unloads idle models from VRAM/RAM,
+      # which defeats the lab's requirement to keep model weights resident
+      # across experiments. -1 disables the idle unload entirely.
+      - OLLAMA_KEEP_ALIVE=-1
     restart: unless-stopped
 
   app:
