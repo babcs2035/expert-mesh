@@ -15,6 +15,50 @@
 
 ---
 
+## B8 [auto-decided 2026-07-20] Iter2 の判定と次イテレーション（Iter3）の単一レバー選定
+- 状況: Iter2（routing_method: self_report→embedding）の結果，主基準（信号の質）が決定的未達
+  （positive-margin 率 0.529 vs 基準 0.971，mean margin -0.0040 vs 0.60），非退行 3 指標も決定的未達
+  （single_domain_top1_accuracy 0.500，top1_accuracy 0.529，misrouting_rate 0.471）．embedding は決定的計算
+  （cosine のみ）で run 間ノイズがほぼ 0 のため構造的劣化と断定，追加反復は不要．よって routing_method
+  レバーは棄却．config levers 優先順位 1（dispatch_top_k, Iter1 棄却）・2（routing_method, Iter2 棄却）を
+  使い切り，残る config-only レバーの選定が必要だった（可逆な判断）．
+- 自動選択: 次の単一レバーを `confidence_threshold`（config levers 優先順位 3，values: [0.3, 0.5, 0.7]）とし，
+  ベースライン 0.5 を基準に振る．次イテレーション（Iter3）名は「confidence_threshold 掃引による fallback 率と
+  general 過信リークのトレードオフ検証」．routing_method は交絡回避のため config.yaml でベースライン
+  （self_report）に戻した．
+- 根拠: (1) levers 優先順位で confidence_threshold が唯一未試行の config-only レバー（1・2 は棄却済み）．
+  (2) Iter2 で「self_report 方式では閾値ゲートが機能している（Iter1 で複合行 medical=0.2 が閾値 0.5 に
+  ブロックされ dispatch 未発火）」ことと，「embedding 方式では閾値 0.5 が 102/102 probe で全通過し無意味化」
+  という対照的な新知見が得られており，self_report ベースラインで閾値を動かす効果を測る素地がある．
+  (3) research_frontier（新規専門ドメイン追加）はコード・データセット・ノード追加を伴う大きめの変更で，
+  config-only レバーを試し切ってから着手する順序（config.yml research_frontier に明記）を守る．
+- 要レビュー: (1) B5 で記録したトレードオフ「confidence_threshold を下げると general の過信リーク
+  （Iter1 で general-008 の余分 dispatch を実測）が悪化する」を rc-planner が非退行基準に組み込み数値化する
+  こと．具体的には fallback_rate（直近実験では 0.0 のため閾値を上げた側で初めて動く可能性）・単一ドメイン行の
+  over-dispatch・general の precision を監視項目に含める．(2) 直近実験は fallback_rate=0.0 のため
+  confidence_threshold の効果自体が薄い可能性がある（config levers の note にも記載済み）．null 結果になった
+  場合は config-only レバーを試し切ったと判断し，停止条件（グローバル skill）か research_frontier（新規
+  専門ドメイン追加）への移行を rc-planner が検討すること．(3) 閾値を下げる方向（0.3）と上げる方向（0.7）で
+  効くメカニズムが異なる（下げる＝over-dispatch/リーク，上げる＝fallback 増）ため，どちらを主眼に置くか
+  rc-planner が仮説を明確化すること．
+
+## B7 [auto-decided 2026-07-20] nomic-embed-text の task prefix 未付与（Iter2 スコープ外・劣化時の切り分け課題）
+- 状況: Iter2（routing_method: self_report→embedding）の調査で，nomic-embed-text は非対称タスク用の
+  task instruction prefix（search_query: / search_document: / classification: 等）を前提に学習されているが，
+  現行コードは query（node.py:143）にも domain（http_server.py:184）にも prefix を付けていないと判明．
+  prefix 無し＋英単語(domain)対日本語(query)のクロスリンガル比較は較正上不利で，embedding ルーティングの
+  単一ドメイン精度が退行する既知の落とし穴になり得る．
+- 自動選択: Iter2 では prefix 付与を行わず，prefix 無しの現状のまま routing_method=embedding を config-only で
+  評価する．退行（特に single_domain_top1_accuracy の低下）が観測された場合に，prefix 起因かの切り分けを
+  次段階の課題としてここに残す．
+- 根拠: prefix 付与は両 embed 経路（node.py・http_server.py）のコード変更が必要で，Iter2 の config-only
+  単一レバー原則と衝突する．まず現状構成で embedding の素の性能を測り，交絡なく劣化要因を特定するのが妥当
+  （調査の提案どおり）．
+- 要レビュー: Iter2 で embedding が非退行基準を割った場合，(1) prefix 付与（query に search_query:，domain に
+  search_document: 等）を加えた再実験を別イテレーションで行うか，(2) domain 定義をドメイン名 1 単語から
+  複数代表発話(utterances)へ拡張するか（Semantic Router ベストプラクティス，調査参照），を rc-planner が
+  検討すること．いずれもコード変更を伴うため単一レバー原則との整合を人間判断すること．
+
 ## B6 [user-approved 2026-07-20] 実機ノード拡張（最大10台）と VRAM 常時確保
 - 状況: ユーザーから (1) 192.168.15.100〜109（最大10台，同一スペック）が実機として利用可能になったこと，
   (2) 実機のVRAMが解放されてしまっていたこと，の2点の連絡があった．(2) の確認のため3ノード（wafl500/502/503）

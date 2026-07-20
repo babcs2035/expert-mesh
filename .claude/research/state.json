@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter1",
-  "iteration_name": "複合ドメイン行の被覆率指標追加による dispatch_top_k 検証",
-  "phase": "analyze",
+  "iteration": "Iter3",
+  "iteration_name": "confidence_threshold 掃引による fallback 率と general 過信リークのトレードオフ検証",
+  "phase": "investigate",
   "status": "running",
-  "current_lever": "dispatch_top_k",
-  "experiment_dir": "results/20260720_172557",
+  "current_lever": "confidence_threshold",
+  "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": "2026-07-20T17:34:53+09:00",
-  "last_slack_ts": "1784533400.740829",
-  "iteration_thread_ts": "1784533400.740829",
-  "notion_toggle_created": true,
-  "last_commit": null
+  "updated_at": "2026-07-20T18:45:00+09:00",
+  "last_slack_ts": "1784540163.541939",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
+  "last_commit": "8427bf5"
 }
