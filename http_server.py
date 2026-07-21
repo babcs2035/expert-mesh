@@ -21,7 +21,11 @@ from protocol import (
     ProbeRequest,
     ProbeResponse,
 )
-from router import estimate_confidence, estimate_embedding_confidence
+from router import (
+    estimate_confidence,
+    estimate_confidence_multi_sample,
+    estimate_embedding_confidence,
+)
 
 # Maximum tokens for full answer generation. Without an explicit cap,
 # ollama generates indefinitely. 512 tokens is sufficient for typical
@@ -121,6 +125,8 @@ class NodeState:
         peers: list[dict] | None = None,
         embedding_model: str | None = None,
         routing_method: str = ROUTING_METHOD_SELF_REPORT,
+        confidence_signal_method: str = "self_report",
+        multi_sample_count: int = 1,
     ) -> None:
         self.node_id = node_id
         self.domain = domain
@@ -136,6 +142,8 @@ class NodeState:
         self.peers = peers or []
         self.embedding_model = embedding_model
         self.routing_method = routing_method
+        self.confidence_signal_method = confidence_signal_method
+        self.multi_sample_count = multi_sample_count
         self.domain_embedding: list[float] = []
         self.known_peers: dict[str, AdvertiseRequest] = {}
         self._probe_confidence_cache: dict[str, float] = {}
@@ -221,6 +229,16 @@ def create_app(state: NodeState) -> FastAPI:
                 confidence = estimate_embedding_confidence(
                     body.query_embedding, state.domain_embedding
                 )
+            elif state.confidence_signal_method == "multi_sample":
+                mean_c, _var_c = await estimate_confidence_multi_sample(
+                    state.ollama_client,
+                    state.light_model,
+                    state.domain,
+                    body.query_summary,
+                    timeout_s=state.probe_timeout_s,
+                    n_samples=state.multi_sample_count,
+                )
+                confidence = mean_c  # Use mean as the routing signal
             else:
                 confidence = await estimate_confidence(
                     state.ollama_client,

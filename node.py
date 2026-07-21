@@ -61,6 +61,8 @@ def build_node_state(config: dict, node_id: str) -> NodeState:
         peers=_build_peers(config, node_id),
         embedding_model=config.get("embedding_model"),
         routing_method=config.get("routing_method", ROUTING_METHOD_SELF_REPORT),
+        confidence_signal_method=config.get("confidence_signal_method", "self_report"),
+        multi_sample_count=config.get("multi_sample_count", 1),
     )
 
 

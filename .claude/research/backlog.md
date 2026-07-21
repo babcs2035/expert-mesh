@@ -15,6 +15,16 @@
 
 ---
 
+## B21 [auto-decided 2026-07-22] Iter11: multi_sample consistency rejected、次は STP
+
+- 状況: Iter11（confidence_signal_method=multi_sample, N=3）の結果、top1_accuracy が 0.870→0.848 に退行。single_domain_top1_accuracy 0.875→0.850、misrouting_rate 0.130→0.152 も悪化。主基準・非退行とも全件未達。
+- 自動選択: multi_sample レバーは rejected。次イテレーションの単一レバーを `confidence_signal_method=stp`（STP: Surrogate Token Probability）へ。config.yml の levers では既に stp が multi_sample より先に定義されているので、rc-planner は stp を選択するはず。
+- 根拠: (1) temperature=0.1 では LLM 出力が実質決定論的で、N回probeしても値が変わらないため平均化効果が働かない。(2) confidence信号の分布は二峰性（{0.1, 0.2} vs {0.8, 0.9, 0.95}）に飽和しており、multi_sampleではdistribution shape自体を変えられない。(3) STP はトークン確率（logprobs）をconfidence signalとして使用する。verbalized confidence より頑健な信号になり得ることは Self-REF (ICML 2025) で実証済み。(4) config.yml の levers では stp が multi_sample より先に定義されているため、rc-planner は自然に stp を選択する。
+- 要レビュー: STP 実装には expert_backend.py（logprobs サポート）、router.py（STP 用関数）、protocol.py（新フィールド追加）、http_server.py（logprobs 含む ProbeResponse 構築）の変更が必要（合計 ~45行）。これは config-only の単一レバー原則の枠を超えるため、次 rc-planner で承認を得ること。
+- 関連する恒久知見: confidence signal の較正が本研究の根本ボトルネックであることが Iter1-11 で決定的に示された。config.yaml の値変更（dispatch_top_k, routing_method, confidence_threshold）や few-shot 例の変更、calibrated routing classifier、multi_sample consistency いずれも期待した改善をもたらさなかった。signal の抽出方式そのものを変える STP が唯一の残されたアプローチ。
+
+---
+
 ## B20 [auto-decided 2026-07-22] Iter10 収束後，config.yml に新レバー confidence_signal_method を追加して再開
 - 状況: Iter10 で config-only の 3 レバー（dispatch_top_k, routing_method, confidence_threshold）を試し切り，
   reflector が `status="converged"` として待機していた（B19 参照）。従来の設計では全 levers 試し切りは

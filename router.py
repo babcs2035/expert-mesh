@@ -116,6 +116,29 @@ async def estimate_confidence(
     return parse_confidence(raw_response)
 
 
+async def estimate_confidence_multi_sample(
+    ollama_client: OllamaClient,
+    light_model: str,
+    domain: str,
+    query_summary: str,
+    timeout_s: float,
+    n_samples: int = 3,
+) -> tuple[float, float]:
+    """Call estimate_confidence N times and return (mean_confidence, variance).
+
+    Running the probe LLM multiple times on the same query averages out
+    run-to-run noise (e.g. temperature=0.1 induced jitter of +/-0.05),
+    producing a more stable confidence signal for routing decisions.
+    """
+    confidences = []
+    for _ in range(n_samples):
+        c = await estimate_confidence(ollama_client, light_model, domain, query_summary, timeout_s)
+        confidences.append(c)
+    mean_c = sum(confidences) / len(confidences)
+    var_c = sum((x - mean_c) ** 2 for x in confidences) / len(confidences)
+    return mean_c, var_c
+
+
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Return the cosine similarity of two vectors.
 

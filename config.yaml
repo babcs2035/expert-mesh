@@ -19,6 +19,9 @@ remote_dir: "~/workspace/ktakahashi/expert-mesh"
 # query_embedding and each node's domain_embedding, no LLM call) or method B
 # ("self_report": the light_model self-scores confidence). Design doc 2.4
 # prioritizes B first; A is kept opt-in for the comparison experiment.
+calibrated_routing: false
+confidence_signal_method: multi_sample
+multi_sample_count: 3
 routing_method: self_report
 # dispatch_top_k > 1 sends /dispatch to multiple confidence-qualifying nodes
 # in parallel (design doc 2.5); the highest-confidence answer is kept.

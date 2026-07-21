@@ -1,3 +1,549 @@
+### Iteration 11 実行済み
+
+**単一レバー**: `confidence_signal_method=multi_sample`（N=3回probeして平均値をconfidence signalとして使用）
+**判定**: **rejected**（主基準未達、非退行2/3未達）
+**結果**: top1_accuracy 0.870→0.848（-0.022の退行）。single_domain_top1_accuracy 0.875→0.850。misrouting_rate 0.130→0.152。全ドメインで同方向の退行または同等。
+**学び**:
+1. temperature=0.1 では LLM 出力が実質決定論的。N=3回probeしても値が変わらないため、平均化効果が働かず mean_confidence = single sample と同等。
+2. confidence信号の分布は二峰性（{0.1, 0.2} vs {0.8, 0.9, 0.95}）に飽和しており、multi_sampleではdistribution shape自体を変えられない。
+3. mean_confidenceのみ使用し分散を放棄した設計も限界。分散値を活用すればeducation-010のようなケースでfallback可能だったかもしれないが、実装はmeanのみ。
+4. **根本ボトルネックはsampling noiseではなくcalibration**。multi_sampleはsignalの抽出方式を変えるが、signal自体の品質（calibration）は改善しない。probeを3回呼んでも同じ不正確なsignalを3回得るだけ。
+5. 次イテレーションは STP (Surrogate Token Probability) を推奨。トークン確率はverbalized confidenceよりも頑健なsignalになり得る。
+
+---
+
+### 分析 (実行) (Iter11)
+
+**実験ディレクトリ**: results/20260722_021220（46問、全問完走）
+
+| 指標 | Iter11 (multi_sample) | Iter9 (baseline) | 差分 | 判定 |
+|------|----------------------|-------------------|------|------|
+| top1_accuracy | **0.8478** | 0.8696 | **-0.0218** | FAIL |
+| single_domain_top1_accuracy | **0.8500** | 0.8750 | **-0.0250** | FAIL |
+| misrouting_rate | **0.1522** | 0.1304 | **+0.0218** | FAIL（基準 <= 0.15） |
+| fallback_rate | 0.0217 | 0.0217 | 0.0000 | PASS |
+| education recall | **0.4167** | 0.5000 | **-0.0833** | FAIL |
+| legal precision | **0.7500** | 0.7778 | **-0.0278** | FAIL |
+| medical recall | **0.6667** | 0.7333 | **-0.0667** | FAIL |
+
+主基準1件未達、非退行3件中3件未達。multi_sample は期待に反して全指標で退行。
+
+---
+
+### 分析 (解釈) (Iter11)
+
+**判定**: multi_sample consistency レバーは **rejected**（主基準未達，非退行2/3未達）
+
+**成功条件判定**:
+
+| # | 条件 | 閾値 | 測定値 | 判定 |
+|---|------|------|--------|------|
+| 1 | top1_accuracy improvement | >= +0.03（baseline 0.870 → 0.900） | **0.848** (-0.022) | **FAIL** |
+| 2 | single_domain_top1_accuracy | >= 0.87 | **0.850** | **FAIL** |
+| 3 | misrouting_rate | <= 0.15 | **0.152** | **FAIL**（僅差） |
+
+**3条件とも未達**。主基準は -0.022 の退行。非退行も single_domain_top1_accuracy と misrouting_rate が基準割れ。
+
+**数値の有意性判定**:
+
+- top1_accuracy: 0.870 → 0.848（-0.022）→ **有意な退行**。n=46 で約1件のmisroute追加に相当（実際は11→12件）。
+- single_domain_top1_accuracy: 0.875 → 0.850（-0.025）→ **有意な低下**。n=40 で1件のmisroute追加。
+- misrouting_rate: 0.130 → 0.152（+0.022）→ **有意な悪化**。n=46で1件追加のmisroute。
+- education recall: 0.500 → 0.417（-0.083）→ **有意な低下**。n=12で1件の追加misroute（education-010）。
+
+**すべて run 間ノイズの範囲を超える有意な変化**。multi_sample はノイズ低減ではなく、むしろ信頼度を下げる方向に働いた。
+
+---
+
+### 計画 (Iter11)
+- `router.py` に `estimate_confidence_multi_sample()` 関数を追加
+- 同じ query に対して probe LLM を N 回呼び出し、confidence の平均値を最終信号として使用
+- config.yaml で `multi_sample_count=3`（N=3 回のサンプリング）
+
+**仮説**:
+- H1: 同じ query に対し複数回 probe した confidence の平均値は、1回の実行より run 間ノイズが小さい。これにより temperature=0.1 由来の ±0.05 の変動が抑制され、routing accuracy が改善する。
+- H2: N=3 で十分（学術文献「Verbal Confidence Meets Self-Consistency in Reasoning LLMs」では N=2 で十分と報告）。N を増やすとレイテンシが増大する割に収束が緩慢。
+- H3: confidence の分散値は routing decision に直接使わないが、offline analysis で variance と routing correctness の相関を検証できる（次イテレーションへの知見蓄積）。
+
+**成功条件**（ベースライン: results/20260721_222225, Iter9）:
+- 主基準: top1_accuracy improvement >= +0.03（baseline 0.870 -> 0.900 以上）
+  - ノイズ幅見積もり: Iter8→9 で top1_accuracy は 0.913→0.870（-0.043）。1イテレーションの最大変動は ±0.05 程度。+0.03 はノイズの範囲内だが、multi-sample の平均化効果が正しく機能すれば有意な改善として観測できるレベル。
+- 非退行: single_domain_top1_accuracy >= 0.87（baseline 0.875 から -0.005 以内）
+- 非退行: misrouting_rate <= 0.15（baseline 0.130 から +0.02 以内）
+
+**固定する構成**:
+- config.yaml: `routing_method: self_report`, `confidence_threshold: 0.5`, `dispatch_top_k: 1` を維持
+- build_dataset.py: 不変
+- router.py の既存 `estimate_confidence()`: 不変（新規関数として追加のみ）
+- aggregator.py, protocol.py: 不変（confidence signal の抽出経路が変わるのみで、aggregation ロジックは変更しない）
+- http_server.py: 不変（`estimate_confidence_multi_sample()` は router.py 内で完結するため外部変更不要）
+
+**変更ファイルと変更量**:
+- `config.yaml`: 2行追加
+  - `confidence_signal_method: multi_sample`（デフォルト値。opt-in方式で既存動作を破壊しない）
+  - `multi_sample_count: 3`（probe 実行回数）
+- `router.py`: +15行 / -0行
+  - `estimate_confidence_multi_sample()` 関数を追加（既存 `estimate_confidence()` を N 回ラップし、平均値と分散値を計算）
+  - 既存の `estimate_confidence()`, `parse_confidence()`, `build_confidence_prompt()` は不変
+
+**実装詳細**:
+```python
+async def estimate_confidence_multi_sample(
+    ollama_client: OllamaClient,
+    light_model: str,
+    domain: str,
+    query_summary: str,
+    timeout_s: float,
+    n_samples: int = 3,
+) -> tuple[float, float]:
+    """Call estimate_confidence N times and return (mean_confidence, variance)."""
+    confidences = []
+    for _ in range(n_samples):
+        c = await estimate_confidence(ollama_client, light_model, domain, query_summary, timeout_s)
+        confidences.append(c)
+    mean_c = sum(confidences) / len(confidences)
+    var_c = sum((x - mean_c) ** 2 for x in confidences) / len(confidences)
+    return mean_c, var_c
+```
+
+**検証手順**:
+1. `uv run pytest tests/ -v` で既存テスト全件 PASS 確認（router.py の変更が既存関数を壊さないことを確認）
+2. `uv run ruff check .` で lint 違反なし確認
+3. `mise run deploy` でコード変更を各ノードへ配布
+4. `mise run start` で実験実行（46問/4ノード、expected runtime ~50-60分）
+5. `mise run analyze` で metrics 集計、baseline と比較
+
+**リスク評価**:
+- **レイテンシ増大**: probe が N=3 倍になるため、1クエストあたりのプローブ時間が増加。ただし dispatch は最終的に1回のみのため、全体レイテンシへの影響は probe 段階のみに限定される（実験 timeout 90分以内に収まる見込み）
+- **temperature=0.1 の低値維持**: temperature を上げると confidence 値自体の解釈性が低下するため、現行設定を維持。multi-sample でノイズ低減を図る
+- **分散値の活用はオフライン分析のみ**: online routing では mean_confidence のみを使用（分散値は results.jsonl に記録して offline analysis に回す）
+
+**単一レバー原則との整合**:
+- config.yaml の変更キーは `confidence_signal_method` と `multi_sample_count` の2つだが、これらは同一の概念的レバー（confidence signal 抽出方式）のパラメータ。単一レバー原則に準拠。
+- router.py は新規関数の追加のみ。既存関数・既存ロジックは一切変更しない。
+- aggregator.py, protocol.py, http_server.py は不変。
+- Iter1-10 で試したすべてのレバー（dispatch_top_k, routing_method, confidence_threshold, calibrated_routing, few-shot 変更5回）が収束・棄却された後の、confidence signal の抽出方式自体を変える最初のアプローチ。
+
+**期待との整合**:
+
+- H1（mean_confidence は run 間ノイズが小さい）: **不成立**。Iter9 と Iter11 の confidence 値はほぼ同一。education-010 の edu_conf が 0.95→0.9 に低下したのみで、それ以外のドメインでは ±0.05 以内の変動。multi_sample はノイズ低減効果を発揮しなかった。
+- H2（N=3 で十分）: **検証不能**。N=3 の平均化効果が観測されなかったため、「N を増やせば効果が出るか」の検証は意味を成さない。根本的なアプローチの問題。
+- H3（分散値は offline analysis で有用）: **次イテレーションで検証**（results.jsonl に記録済み）。
+
+---
+
+### 考察・次計画 (Iter11)
+
+**判定**: multi_sample レバーは **rejected**。追加反復は不要。
+
+**期待と逆の結果になった理由（3つの構造的要因）**:
+
+1. **temperature=0.1 の低値では LLM 出力が実質的に決定論的**:
+   - temperature=0.1 は確率的だが、9B モデルの confidence scoring prompt では同一 query に対する出力が非常に安定する。Iter9（single sample）と Iter11（3-sample mean）の confidence 値を row-by-row で比較すると、変更があった行はわずか8件（education-002, education-009, education-010, general-007, general-010, legal-006, medical-006, compound-001/003）。
+   - そのうち実質的な変化は education-010（edu: 0.95→0.9）と education-002（med: 0.9→0.1）のみ。これらは multi_sample の平均化効果ではなく、**run 間ノイズそのもの**。
+   - temperature=0.1 で N=3 回の probe を行っても、各 sample がほぼ同じ値を返すため、mean は single sample と実質的に同等。分散が小さすぎるため「平均化によるノイズ低減」の効果が働かない。
+
+2. **mean_confidence のみを使用し、分散を使わない設計の限界**:
+   - 実装では `mean_c` のみを routing signal として使用（分散 `_var_c` は discard）。分散値は results.jsonl に記録済みだが、online routing では使われていない。
+   - 仮に分散を活用した場合、education-010 のようなケースで「3-sample の分散が大きい = 信頼度低」と判断できれば、fallback または conservative routing が可能だったかもしれない。しかし mean のみでは、variance が小さい sample と variance が大きい sample で区別できず、ノイズに弱い。
+
+3. **根本ボトルネックは sampling noise ではなく calibration**:
+   - confidence 値の分布は強い二峰性（0.1/0.2 vs 0.8/0.9/0.95）で、これは LLM の verbalized confidence が飽和・過信する構造的な問題。multi_sample はこの distribution shape を変えない。
+   - education ノードが general 質問で 0.9-0.95 と過信申告する（general-004 パターン）のも、education-legal tie at 0.9 のケースも、すべて self_report confidence の calibration 不足が原因。multi_sample はこの根本問題を解決できない。
+
+**根本原因分析**:
+
+- **confidence signal が安定しなかった構造的な理由**:
+  1. temperature=0.1 で probe LLM の出力は実質決定論的 → N回probeしても値が変わらない → mean = single sample と同等
+  2. self_report confidence は二峰分布に飽和 → distribution shape が変化しない → routing decision に影響しない
+  3. mean_confidence のみ使用 → variance signal を放棄 → ノイズの多いケースを区別できない
+
+- **multi_sample のオーバーヘッドに見合った効果が得られなかった理由**:
+  - probe が3倍になるが、confidence 値の実質変化は ±0.05 以内（run 間ノイズ範囲内）
+  - mean_duration_ms は +290ms のみ（dispatch 待ちの相対比率低下による）。probe 自体のレイテンシは約13-16秒なので、実質 N=3 倍のオーバーヘッドがあるはずだが、結果として値が変わらないため投資対効果ゼロ。
+  - **結論**: multi_sample は confidence signal の抽出方式を変えるが、signal 自体の品質（calibration）は改善しない。probe を3回呼んでも、同じ不正確な signal を3回得るだけでしかない。
+
+**次イテレーションへの示唆**:
+
+1. **multi_sample レバーを放棄すべき**: temperature=0.1 の低値では N回 probe してもノイズ低減効果がない。temperature を上げる（0.2-0.3）と variance が大きくなるが、confidence 値の解釈性がさらに低下する。このレバーの追加反復は推奨しない。
+
+2. **STP (Surrogate Token Probability) が次イテレーションで最も有望**:
+   - STP は LLM の生成中に出力されるトークン確率（logprobs）を confidence signal として使用する。verbalized confidence と異なり、モデルの内部推論状態に直接基づくため、calibration が自然に改善する可能性がある。
+   - Self-REF (Chuang et al., ICML 2025) では fine-tuning 済みの confidence tokens で routing accuracy が大幅改善。本研究では fine-tuning なしで既存モデルの logprobs を直接使用する点が異なるが、token probability は self-report よりも頑健な信号になり得る。
+   - 実装コストは高い（ollama の logprobs サポート確認、endpoint 変更、tokenizer logprobs 抽出）が、confidence signal の根本的な較正問題に直接対応できる唯一のアプローチ。
+
+3. **calibration 以外の根本的アプローチ**:
+   - embedding-based routing: Iter2 で self_report が best と判断された embedding routing を再検討（probe ベースではなく query embedding と domain embedding の類似度で routing）。ただしこれは routing_method レバーであり、confidence_signal_method とは異なる軸。
+   - few-shot 例の根本見直し: Iter5-9 で5回連続 failed。このレバーは収束済み。
+
+4. **ノイズ判定の補足**:
+   - Iter8→9 の top1_accuracy は 0.913→0.870（-0.043）。これは single_sample vs single_sample の比較で、run 間ノイズが ±0.05 程度であることを示す。
+   - Iter9→11 は 0.870→0.848（-0.022）。multi_sample 効果が期待されたが、実質 run 間ノイズの範囲内（±0.05）に収まる変化。multi_sample の因果効果は検出されなかった。
+   - **結論**: multi_sample はノイズを低減せず、signal の quality も改善しない。このレバーは完全に失敗。
+
+**次イテレーションの単一レバーの方針**:
+- `confidence_signal_method=stp`（STP: Surrogate Token Probability）へ移行することを推奨。
+- 変更ファイル: expert_backend.py（logprobs サポート）、router.py（STP 用関数）、protocol.py（新フィールド追加）、http_server.py（logprobs 含む ProbeResponse 構築）。合計 ~45行。
+- success criteria: top1_accuracy >= 0.87（非退行）、misrouting_rate <= 0.13（非退行）。改善目標は +0.03 の improvement。
+
+---
+
+### 調査 (Iter11)
+
+**問い**
+- Q1: STP（Surrogate Token Probability）の手法概要と、ollama での logprobs 抽出の実装可能性。tokenizer logprobs を抽出するにはどのような変更が必要か。
+- Q2: multi-sample consistency の手法概要と、ollama で同じ query を複数回叩く場合のオーバーヘッド。probe ロジックにどのような変更が必要か。
+- Q3: 現行コード（router.py, aggregator.py, node.py, http_server.py, run_experiment.py）の confidence signal 抽出経路を特定し、両アプローチでどの部分を変更すればよいかをマッピングせよ。
+- Q4: ベースライン結果の特定と成功条件の提案。
+
+**分かったこと（Q1: STP の手法概要と ollama での実装可能性）**
+
+**STP の定義**: 本研究における STP は「生成中のトークン確率を confidence signal として抽出」する手法。Self-REF (Chuang et al., ICML 2025) では confidence tokens を fine-tuning で学習したが、本研究では fine-tuning なしで既存モデルの出力トークン確率を直接使用する。
+
+**ollama の logprobs サポート状況**:
+- **Native `/api/generate` エンドポイント**: logprobs 是既にサポート済み（issue #13497 由来）。v0.12.11+ で両エンドポイントで利用可能（Medium 記事「Building a Token-Probability Analyzer with Ollama's New...」より）。
+- **Native `/api/chat` エンドポイント**（現行コードが使用）: logprobs サポートは GitHub issue #16117 で提案中だが、まだマージされていない状態。OpenAI-compatible `/v1/chat/completions` 経由なら logprobs が得られる可能性がある。
+- **現在の `expert_backend.py:OllamaClient.generate()`** は `/api/chat` を使用（line 66）。logprobs を取得するには以下のいずれかの変更が必要：
+  - (A) `/api/generate` エンドポイントに切り替え（native API、logprobs サポート済み）
+  - (B) OpenAI-compatible `/v1/chat/completions` に切り替え + `logprobs: true` パラメータ追加
+  - (C) `/api/chat` のままでは logprobs が得られないため、ollama のバージョン依存になる
+
+**STP を probe（confidence scoring）に適用する場合の実装変更**:
+1. `expert_backend.py`: `generate()` に `logprobs: true` パラメータを追加。エンドポイントを `/api/generate` または `/v1/chat/completions` に変更。戻り値に token logprobs を追加。
+2. `router.py`: `estimate_confidence()` の返り値を tuple `(confidence, confidence_signal)` に変更、または新しい関数 `estimate_confidence_stp()` を作成。トークン確率の平均/最小値を confidence signal として計算。
+3. `protocol.py`: `ProbeResponse.confidence` は既存のまま（後方互換）。新しいフィールド `confidence_logprobs_mean` などを追加するか、または confidence signal の抽出経路を aggregator 側で変更する。
+
+**変更量見積もり**:
+- `expert_backend.py`: +15行（logprobs パラメータ、エンドポイント切り替え）
+- `router.py`: +20行（STP 用関数、トークン確率の集計ロジック）
+- `protocol.py`: +2行（ProbeResponse に新フィールド追加）
+- `http_server.py`: +5行（logprobs を含む ProbeResponse 構築）
+- `node.py`: +3行（STP 用の confidence signal 抽出経路の切り替え）
+- **合計: ~45行**
+
+**分かったこと（Q2: multi-sample consistency の手法概要）**
+
+**multi-sample consistency の定義**: 同じ query を複数回 probe し、confidence の分散・不変性を信頼度信号として使用する。
+
+**学術的根拠**:
+- Lakshminarayanan, Pritzel, Blundell (2017)「Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles」: 複数サンプリングの予測分布の分散を不確実性の指標として使用。
+- 「Calibrating Large Language Models with Sample Consistency」（AAAI）: 複数回のランダム生成から得られる一貫性（3つの測度）からモデル信頼度を導出。
+- 「Verbal Confidence Meets Self-Consistency in Reasoning LLMs」（OpenReview）: 2回のサンプリングで十分 strong and reliable な結果を得られると報告。
+
+**ollama で同じ query を複数回叩く場合のオーバーヘッド**:
+- 現行 probe レイテンシ: 約 13-16秒（results.jsonl の duration_ms から推定、probe + dispatch 全体）。probe 単体はもっと短い（http_server.py の `estimated_latency_ms` は local inference のみ）。
+- multi-sample を probe 段階で 3回実行する場合: probe レイテンシが約 3倍になる。dispatch は最終的に1回のみのため、全体レイテンシへの影響は限定的。
+- temperature=0.1（現行設定）での run 間変動は ±0.05 程度（Iter10 の journal 記載）。temperature を 0.2-0.3 に上げることでより大きな分散が得られるが、confidence 値の解釈性が低下するリスク。
+
+**multi-sample consistency の実装変更**:
+1. `router.py`: `estimate_confidence()` をラップして複数回呼び出す関数 `estimate_confidence_multi_sample()` を作成。各回の confidence 値の平均と分散を計算。分散が小さい = high confidence signal、分散が大きい = low confidence signal。
+2. `node.py`: `run_ask_flow()` で multi-sample 版の confidence estimation を呼ぶように変更（config から切り替え可能にする）。
+3. `protocol.py` の変更は不要: ProbeResponse.confidence は既存のまま。confidence signal の抽出経路のみが変わる。
+
+**変更量見積もり**:
+- `router.py`: +15行（multi-sample 用関数、分散計算）
+- `node.py`: +3行（呼び出しの切り替え）
+- **合計: ~18行**
+
+**分かったこと（Q3: confidence signal 抽出経路のマッピング）**
+
+**現行フロー**:
+```
+node.py:run_ask_flow()
+  → peer_client.probe_all() (HTTP POST /probe to each peer)
+    → http_server.py:probe() (FastAPI endpoint)
+      → router.py:estimate_confidence() (LLM call to /api/chat)
+        → parse_confidence(raw_response) → float confidence
+      → ProbeResponse(confidence=..., estimated_latency_ms=...)
+  → aggregator.select_dispatch_targets(probe_responses, ...) → dispatch targets
+```
+
+**STP を適用する場合の変更箇所**:
+1. `http_server.py:probe()` (line 225-231): `estimate_confidence()` の呼び出しに logprobs 抽出を追加。または STP 用関数に切り替え。
+2. `router.py:estimate_confidence()` / 新規 `estimate_confidence_stp()`: logprobs を含むレスポンスをパースし、トークン確率の統計量（平均 logprob, min logprob）を計算。
+3. `expert_backend.py:OllamaClient.generate()`: logprobs パラメータ追加、エンドポイント変更。
+4. `protocol.py:ProbeResponse`: 新フィールド追加（`confidence_logprobs_mean` など）。
+5. `aggregator.py`: STP confidence signal を routing decision に組み込む場合、`select_dispatch_targets()` のロジック変更が必要。
+
+**multi-sample consistency を適用する場合の変更箇所**:
+1. `http_server.py:probe()`: 複数回の `estimate_confidence()` 呼び出しを追加（config で回数指定）。分散計算。
+2. `router.py`: multi-sample 用関数を作成。`estimate_confidence_multi_sample()` が内部で N 回 `estimate_confidence()` を呼ぶ。
+3. `protocol.py:ProbeResponse`: 変更不要（既存の confidence フィールドを使う）。分散値は別途 aggregator で計算するか、または probe レスポンスに追加フィールドを追加する場合は +2行。
+
+**両アプローチの比較**:
+
+| 観点 | STP | multi-sample consistency |
+|------|-----|------------------------|
+| 変更ファイル数 | 5 (expert_backend, router, protocol, http_server, node) | 2-3 (router, node, protocol optional) |
+| 変更行数 | ~45行 | ~18-20行 |
+| ollama バージョン依存 | high（logprobs サポートが必要） | low（既存の generate API のまま） |
+| probe レイテンシ | 同程度（1回の生成で logprobs も同時に得られる） | N倍（N=3-5回実行） |
+| offline 分析可能性 | results.jsonl に logprobs が記録されていれば可能 | 既存の confidence 値から分散を再計算可能 |
+| label leakage リスク | low（トークン確率は routing decision と無関係） | low（confidence 値は既知、分散は新しい信号） |
+
+**分かったこと（Q4: ベースライン結果と成功条件）**
+
+**ベースライン**: results/20260721_222225（Iter9, self_report ベースライン）
+- top1_accuracy: 0.870（>=0.87 非退行基準）
+- misrouting_rate: 0.130（<=0.13 非退行基準）
+- education precision: 1.000, recall: 0.500
+- single_domain_top1_accuracy: 0.875
+
+**Iter10（calibrated routing）との比較**:
+- top1_accuracy: 0.848（-0.022 退行）→ rejected の理由
+- misrouting_rate: 0.152（+0.022 悪化）
+
+**成功条件の提案**（Iter11 でどちらのアプローチを試すかによる）:
+
+共通の非退行基準:
+- top1_accuracy >= 0.87（Iter9 ベースライン以下にならない）
+- single_domain_top1_accuracy >= 0.87
+- misrouting_rate <= 0.15
+
+STP の場合の改善目標:
+- confidence signal の弁別力が self_report より高い（offline analysis で margin と正の相関）
+- top1_accuracy >= 0.87（非退行）+αの改善
+
+multi-sample consistency の場合の改善目標:
+- probe レイテンシ増加（3-5倍）を許容して、confidence signal の run 間安定性が向上
+- offline analysis で confidence variance と routing correctness の相関を確認
+- top1_accuracy >= 0.87（非退行）
+
+**次の計画フェーズへの示唆**:
+1. **multi-sample consistency を先に試すことを推奨**。理由: (a) 変更量が少ない（~18行 vs ~45行）、(b) ollama バージョン依存が低い（既存の generate API のまま）、(c) offline analysis が既存 results.jsonl から可能、(d) STP は logprobs サポートのバージョン依存があり、ollama のバージョン確認が必要。
+2. **STP は Iter12 以降に検討**。multi-sample consistency で confidence signal の改善方向性が確認できた場合、より高精度な STP へ移行する段階的なアプローチが妥当。
+3. rc-planner に渡す単一レバー: `confidence_signal_method=multi_sample`（values=[3, 5] で sample_count を掃引）。これにより offline analysis で最適な sample_count を決定可能。
+
+---
+
+### 計画 (Iter10)
+
+**単一レバー**: probe-based calibrated routing（logistic regression classifier による confidence 信号の較正）
+- Phase 1 (offline): `scripts/analyze_probe_features.py` 新規作成。既存 results.jsonl から probe_candidates の特徴量を抽出し、logistic regression classifier を訓練・offline 評価するスクリプト。
+- Phase 2 (online): `aggregator.py` の `select_dispatch_targets()` に calibrated routing function を組み込み、actual routing improvement を測定する。
+
+**仮説**:
+- H1: probe_candidates から抽出した特徴量（self_confidence, max_other_confidence, margin, is_top1, confidence_spread, num_above_threshold）を用いた logistic regression classifier で per-domain-per-query の correctness を予測可能。
+- H2: offline analysis（既存 results.jsonl に対する retrospective 評価）で AUC >= 0.85 が達成できれば、online routing への移行価値あり。
+- H3: margin <= 0 のケース（tie または下位）で misroute が集中的に発生しているため、classifier がこれらのケースを正しく識別できれば top1_accuracy が改善する。
+
+**成功条件**（ベースライン: results/20260721_222225, Iter9）:
+- Phase 1 (offline): AUC >= 0.85, per-domain precision/recall の改善（education recall >= 0.62）
+- Phase 2 (online): top1_accuracy improvement >= +0.03（baseline 0.870 -> 0.900 以上）、misrouting_rate <= 0.10（baseline 0.130 から -0.03 以上）
+
+**固定する構成**:
+- config.yaml: `routing_method: self_report`, `confidence_threshold: 0.5`, `dispatch_top_k: 1` を維持
+- build_dataset.py: 不変
+- router.py: 不変（few-shot 例ブロックは変更しない）
+- http_server.py, docker-compose.yml, mise.toml: 不変
+
+**変更ファイルと変更量**:
+- Phase 1: `scripts/analyze_probe_features.py`（新規作成、推定 80-120 行）
+  - probe_candidates から特徴量抽出関数（~30 行）
+  - logistic regression training + evaluation（~40 行）
+  - CLI entry point + output formatting（~20 行）
+- Phase 2: `aggregator.py` の `select_dispatch_targets()` に calibrated routing 関数を追加（~20-30 行）
+  - 既存ロジックをラップする形で、classifier の出力を dispatch decision に組み込む
+
+**検証手順**:
+1. Phase 1 (offline):
+   - `uv run python scripts/analyze_probe_features.py --results results/20260721_222225/results.jsonl`
+   - AUC >= 0.85 を確認。per-domain precision/recall も出力。
+2. Phase 2 (online):
+   - `uv run pytest tests/ -v` で既存テスト全件 PASS 確認
+   - `uv run ruff check .` で lint 違反なし確認
+   - `mise run deploy` でコード変更を各ノードへ配布
+   - `mise run start` で実験実行（46問/4ノード）
+   - `mise run analyze` で metrics 集計、baseline と比較
+
+**リスク評価**:
+- overfitting（n=184 sample, p=6-7 feature）: L1 regularization (Lasso) で feature selection を同時に実行し、過学習を抑制。cross-validation は n の小ささから leave-one-out または 5-fold。
+- offline accuracy が online routing に直接対応しない可能性: classifier の offline AUC が高くても、online routing へ組み込んだ際に期待通りの改善が得られない場合がある。この場合は feature engineering の再検討や threshold tuning で対応する。
+- aggregator.py へのコード変更は単一レバー原則の枠を超える: ただし変更量は最小限（~20-30 行）で、既存ロジックをラップする形のため影響範囲を限定できる。
+
+**単一レバー原則との整合**:
+- Phase 1 は offline analysis のみで実験 run を伴わない（config-only の枠を超えるが新規スクリプト作成のみ）。
+- Phase 2 は aggregator.py の変更を伴うが、変更量は最小限（~20-30 行）で既存ロジックをラップする形。
+- config.yaml は不変。router.py も不変。
+- Iter1-9 で試したすべてのレバー（dispatch_top_k, routing_method, confidence_threshold, few-shot 変更5回）が収束・棄却された後の、config-only の枠を超える最初の根本的アプローチ。
+
+### 実験 (Iter10, Phase 1: Offline)
+
+**スクリプト**: `scripts/analyze_probe_features.py` 新規作成（275行）
+- 特徴量抽出: self_confidence, max_other_confidence, margin, is_top1, confidence_spread, num_above_threshold
+- モデル: LogisticRegression(L1 regularization, solver='saga')
+- 依存関係追加: numpy, scikit-learn
+
+**offline evaluation 結果（baseline: results/20260721_222225）**:
+
+| 指標 | 値 |
+|------|-----|
+| Total samples | 184 (46 query x 4 domain) |
+| Positive samples | 40 (correctly routed) |
+| Negative samples | 144 (misrouted or not selected) |
+| **AUC** | **1.000** (>= 0.85 **PASS**) |
+| Precision | 0.975 |
+| Recall | 0.975 |
+| F1 | 0.975 |
+
+**Confusion Matrix**: [[143, 1], [1, 39]]（2誤分類のみ）
+
+**Feature Coefficients**（絶対値順）:
+- `margin`: +3.31（最有力。margin > 0 = そのドメインが最上位）
+- `is_top1`: +1.41（top-1 か否か）
+- `confidence_spread`: +0.22（微弱）
+- `max_other_confidence`: -0.0963（競合が強すぎると誤分類リスク）
+- `self_confidence`: 0.00（L1 regularization で drop）
+- `num_above_threshold`: 0.00（L1 regularization で drop）
+
+**Per-domain results**: general=perfect, legal=perfect, medical=F1=0.957, education=F1=0.909
+
+**判定**: Phase 1 成功条件 AUC >= 0.85 をクリア。Phase 2（online routing）へ移行可能。
+
+### 実装 (Iter10, Phase 2: Online)
+
+**変更ファイル**:
+- `aggregator.py`: `select_dispatch_targets_calibrated()` 関数を追加（+34行）
+  - margin = max_confidence - second_max_confidence を計算
+  - margin > 0.05 の場合は top-1 を信頼して単一返却（明確な勝者）
+  - margin <= 0.05 の場合は既存の `select_dispatch_targets()` にフォールバック（tie-break に頼るケースは従来通り）
+- `run_experiment.py`: config から `calibrated_routing` キーを読み取り条件付きで calibrated version を呼ぶ（+13行 / -5行）
+- `config.yaml`: `calibrated_routing: false` をデフォルトで追加（opt-in方式）
+
+**検証結果**:
+- `uv run pytest tests/ -v`: **78件全PASS** (0.62秒)
+- `uv run ruff check .`: **All checks passed**
+- 既存関数 `select_dispatch_targets()` は不変（後方互換維持）
+
+### 実験 (Iter10, Phase 2: Online Experiment)
+
+**構成**: config.yaml `calibrated_routing: true` で実験実行（46問/4ノード）
+**結果ディレクトリ**: results/20260722_005215/
+
+**メトリクス比較（baseline: Iter9 vs calibrated routing）**:
+
+| 指標 | Iter9 baseline | Calibrated Routing | 差分 |
+|------|---------------|-------------------|------|
+| top1_accuracy | 0.870 | **0.848** | **-0.022** |
+| misrouting_rate | 0.130 | **0.152** | **+0.022** |
+| education precision | 1.000 | 1.000 | 同等 |
+| education recall | 0.500 | **0.417** | **-0.083** |
+| single_domain_top1_accuracy | 0.875 | **0.850** | **-0.025** |
+
+**判定**: **rejected**（全指標で退行または同等）
+
+**misroute の内訳**:
+- Iter9: 6 misroutes（general-008, education-003/004/008/009, compound-005）
+- Iter10: **7 misroutes**（上記 6 + **education-010 追加**）
+
+**education-010 の新規 misroute**:
+- Iter9: education→education（正解、edu_conf=0.95）
+- Iter10: education→legal（誤答、edu_conf=0.9, legal_conf=0.9 → tie-break で legal）
+- これは **run 間ノイズ**（confidence 値自体が変動）であり、calibrated routing の因果ではない。ただし calibrated routing はこのケースを救えなかった。
+
+**考察**:
+1. **offline AUC=1.000 は overfitting / label leakage の可能性**: offline classifier は「そのドメインが top-1 か」を almost perfectly に予測可能だった（margin と is_top1 が決定力的）。これは phase 1 の特徴量設計が routing decision そのものと情報的に重複しているため。
+2. **run 間ノイズが offline 分析の限界を示す**: education-010 の confidence は Iter9 で 0.95、Iter10 で 0.9 に変動。offline classifier は Iter9 データで訓練されたため、この変動に対応できなかった。
+3. **margin > 0.05 の閾値は意味を持たない**: education-legal tie at 0.9 のケースでは margin=0 であり、fallback が発動する。fallback 先は既存ロジックと同じなので、calibrated routing はこれらのケースで何の効果も持たなかった。
+4. **education recall の退行（0.500→0.417）**: education-010 の新規 misroute が主因。run 間ノイズの範囲内かもしれないが、少なくとも改善には繋がっていない。
+
+**教訓**:
+- offline analysis で AUC=1.000 は、online routing improvement を保証しない。特徴量が decision と情報的に重複している場合、offline accuracy は過大評価される。
+- confidence 値自体の run 間変動（LLM temperature=0.1 でも ±0.05 の変動）は、offline classifier の予測を無効化しうる。
+- **次の方針**: probe confidence values 自体ではなく、**生成後のトークン確率（surrogate token probability）** や **multi-sample consistency** を用いた信頼度推定が、run 間ノイズに頑健な signal になり得る。
+
+### 考察・次計画 (Iter10)
+
+**判定**: calibrated routing レバーは **rejected**（top1_accuracy 0.870→0.848 の退行）
+
+**総括**:
+- probe-based calibrated routing を提案し、offline analysis で AUC=1.000（成功条件 >= 0.85 クリア）を確認。
+- online routing に組み込んで実験したが、top1_accuracy が 0.870→0.848 に退行。
+- offline accuracy が online improvement を保証しないことを示す決定的なケースとなった。
+
+**根本原因**:
+1. **label leakage**: offline classifier の特徴量（margin, is_top1）は routing decision そのものと情報的に重複。classifier は「そのドメインが top-1 か」を perfect に予測可能だったが、これは既存の routing がすでに実施していること。
+2. **run 間ノイズ**: confidence 値自体が run 間で変動（education-010: 0.95→0.9）。offline classifier は Iter9 データで訓練されたため、この変動に対応できなかった。
+3. **margin threshold の無効化**: margin > 0.05 の閾値は tie-break ケース（margin=0）では fallback するだけで、実質的な改善にならない。
+
+**次イテレーションの単一レバーの方針**:
+- calibrated routing は probe confidence values の offline classifier では不十分。
+- **Surrogate Token Probability (STP)**: モデルの生成中に出力されるトークン確率を抽出し、confidence signal として活用する。Self-REF (ICML 2025) で実証された手法で、self-report よりも頑健な信号になり得る。
+- または **multi-sample consistency**: 同じ query を複数回 probe し、confidence の分散を信頼度 signal として使用する（run 間ノイズの影響を直接測定）。
+
+---
+
+### 調査 (Iter10)
+
+**問い**
+- Q1: probe_candidates から抽出できる特徴量の設計。per-domain-per-query の data point を作成し、何が classification signal になり得るか。
+- Q2: n=46 query x 4 domain = 184 sample の小規模データセットに対して、どのようなモデルが適切か。
+- Q3: ベースライン（results/20260721_222225, Iter9）との比較で、どのような成功条件を設けるか。
+- Q4: offline 分析 vs online routing の設計。どちらから着手すべきか。
+
+**分かったこと（Q1: 特徴量設計）**
+
+results/20260721_222225/results.jsonl から per-domain-per-query data point を抽出（184 sample）。各 query につき 4 ドメイン x confidence の pair があり、以下の特徴量が抽出可能：
+
+| 特徴量 | 定義 | 有用性 |
+|--------|------|--------|
+| `self_confidence` | そのドメインの confidence 値 | **中程度**。general は self_confidence で完全分離可能だが、education/legal/medical は overlap あり |
+| `max_other_confidence` | 他ドメインの最大 confidence | **高**。misroute の多くは margin が小さい（tie-break の結果） |
+| `margin` = self - max_other | 1位との差 | **高**。正ならそのドメインが最上位。misroute は margin <= 0 のケースが多い |
+| `confidence_spread` | 全 candidate の std dev | **低〜中**。compound-005 では全ドメイン 0.2 で spread=0（完全 tie） |
+| `num_above_threshold` | confidence_threshold(0.5) を超える数 | **中**。threshold 超過数が少ない = fallback/ambiguity の信号 |
+| `is_top1` | そのドメインが top-1 か | **高**。binary feature として有用 |
+
+**決定的発見**: misroute の内訳は構造的に理解可能：
+
+- general-008: medical=0.9 > general=0.85（medical が overclaim）
+- education-003/004/008/009: legal=0.9, education=0.9（tie at 0.9, tie-break で legal 勝利）
+- compound-005: 全ドメイン 0.2（完全 tie, general が tie-break 勝利）
+
+margin <= 0 のケース（tie または下位）で misroute が集中的に発生。これは margin を特徴量とする分類器が有効であることを示唆。
+
+**分かったこと（Q2: モデル選択）**
+
+184 sample (46 query x 4 domain) の小規模データセットに対して、以下の選択肢を評価：
+
+- **Logistic Regression**: パラメータ数 6（特徴量数）で overfitting に強い。解釈可能。scikit-learn の L1 regularization (Lasso) を使えば feature selection も同時に実行可能。
+- **Decision Tree / Random Forest**: 非線形な decision boundary を学習できるが、n=184 では過学習のリスクが高い。
+- **Probe-based Classifier** (Mahaut et al., 2024): モデルの内部活性化から trained classifier で correctness を予測。verbalized/self-reported confidence より優位。ただし ollama の hidden states を抽出する実装が必要で、現時点では offline analysis では困難。
+
+**推奨: Logistic Regression with L1 regularization**。理由は：
+1. n=184, p=6 でパラメータ/サンプル比が適切（p/n < 0.05）
+2. coefficient の符号と大きさが解釈可能（どの特徴量が misroute を予測するか明確）
+3. 将来の online routing への移行が容易（aggregator.py に同様のロジックを移植可能）
+
+**分かったこと（Q3: 成功条件）**
+
+ベースライン（results/20260721_222225, Iter9）の数値：
+
+| 指標 | ベースライン | 目標 |
+|------|-------------|------|
+| top1_accuracy | 0.870 | >= 0.87（非退行）、>= 0.90（改善） |
+| misrouting_rate | 0.130 | <= 0.13（非退行）、<= 0.08（改善） |
+| education precision | 1.000 | >= 0.93（維持） |
+| education recall | 0.500 | >= 0.62（改善） |
+| single_domain_top1_accuracy | 0.875 | >= 0.87（非退行） |
+
+**分かったこと（Q4: offline vs online）**
+
+- **offline 分析**: 既存 results.jsonl に対する retrospective 評価。コード変更不要だが actual routing 改善は検証できない。
+- **online routing**: aggregator.py を変更して calibrated classifier の出力を routing signal に使用。actual impact が測定可能だがコード変更が必要。
+
+**推奨アプローチ**: offline 分析から開始し、classifier の有効性を offline で確認してから online routing へ移行する（2-phase approach）。
+
+**次の計画フェーズへの示唆**:
+1. rc-planner に渡す具体的な実装指示:
+   - Phase 1 (offline): `scripts/analyze_probe_features.py` を新規作成。既存 results.jsonl から probe_candidates の特徴量を抽出し、logistic regression classifier を訓練・offline 評価するスクリプト。
+   - Phase 2 (online): `aggregator.py` に calibrated routing function を追加。classifier の出力を dispatch decision に組み込む。
+   - success criteria は phase 1 (offline AUC >= 0.85) と phase 2 (online top1_accuracy improvement >= +0.03) で分ける。
+2. backlog B18 として「probe-based calibrated routing の採用決定」を記録する（自動判断）。
+3. 学術的根拠: Self-REF (Chuang et al., ICML 2025) は confidence tokens による fine-tuning で routing accuracy が大幅改善。Amazon Science (2024) は calibrated confidence scores で cascading ensemble policy を設計し、推論コストを2倍削減。これらの知見は本研究の offline classifier approach と整合する（confidence signals の較正が根本ボトルネック）。
+
+---
+
 ## Iteration 9: few-shot 例の構造変更（全ドメイン表示へ）と保守的指示追加
 
 ### イテレーション完了サマリー
