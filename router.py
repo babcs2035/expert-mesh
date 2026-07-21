@@ -62,13 +62,14 @@ def build_confidence_prompt(domain: str, query_summary: str) -> str:
         f"評価基準:\n"
         f"- 主題が明確に{domain}分野に属する: 0.7〜1.0\n"
         f"- 主題が{domain}分野と無関係，または他分野がより適切: 0.0〜0.3\n"
-        f"- 判断に迷う: 0.4〜0.6\n\n"
+        f"- 判断に迷う: 0.4〜0.6\n"
+        f"- {domain}関連の語句が含まれていても，主題が他分野であれば{domain} confidence は低くする（例: 読書・勉強・習い事は general 分野）．\n\n"
         f'例1：質問「歯の痛みが続いています」はmedical分野に該当するため，'
-        f'domainがmedicalなら{{"confidence": 0.9}}，domainがlegalなら{{"confidence": 0.1}}．\n'
+        f'domainがmedicalなら{{"confidence": 0.9}}，domainがeducationなら{{"confidence": 0.1}}，domainがgeneralなら{{"confidence": 0.1}}，domainがlegalなら{{"confidence": 0.1}}．\n'
         f'例2：質問「賃貸契約を解除したい」はlegal分野に該当するため，'
-        f'domainがlegalなら{{"confidence": 0.9}}，domainがmedicalなら{{"confidence": 0.1}}．\n'
+        f'domainがlegalなら{{"confidence": 0.9}}，domainがmedicalなら{{"confidence": 0.1}}，domainがeducationなら{{"confidence": 0.1}}，domainがgeneralなら{{"confidence": 0.1}}．\n'
         f'例3：質問「学習指導要領における探究的学習の位置付けは」はeducation分野に該当するため，'
-        f'domainがeducationなら{{"confidence": 0.9}}，domainがmedicalなら{{"confidence": 0.1}}．\n'
+        f'domainがeducationなら{{"confidence": 0.9}}，domainがmedicalなら{{"confidence": 0.1}}，domainがlegalなら{{"confidence": 0.1}}，domainがgeneralなら{{"confidence": 0.1}}．\n'
         f'例4：質問「読書感想文の書き方」はgeneral分野に該当するため，'
         f'domainがgeneralなら{{"confidence": 0.9}}，domainがeducationなら{{"confidence": 0.1}}，domainがmedicalなら{{"confidence": 0.1}}，domainがlegalなら{{"confidence": 0.1}}，educationノードは{{"confidence": 0.1}}とする（general分野でありeducation分野ではない）．\n\n'
         f"質問: {query_summary}\n\n"

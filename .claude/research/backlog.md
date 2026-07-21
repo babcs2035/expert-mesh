@@ -15,6 +15,24 @@
 
 ---
 
+## B17 [auto-decided 2026-07-21] Iter9: few-shot 構造変更は rejected（education precision 改善だが recall 低下）
+- 状況: Iter9（全ドメイン表示 + 保守的指示追加）の結果、education precision=1.0（>=0.93 PASS）だが、recall=0.5（>=0.62 FAIL）。general/legal precision も退行。
+- 自動選択: few_shot_structure_change レバーは rejected。router.py の few-shot 例変更は 5 回連続（Iter5-9）で試されたが、いずれも期待した効果を持たなかった。このレバーは収束。
+- 根拠: (1) education precision は改善したが、recall が大幅に低下（0.667→0.5）。全ドメイン表示 + 保守的指示により education ノードが過剰抑制。(2) general/legal precision も退行。(3) misrouting_rate が悪化（0.087→0.130）。
+- 要レビュー: 次 rc-planner は config-only の枠を出る根本的なアプローチ（probe ロジック変更、新しいルーティング方式）を提示すること。few-shot 例の変更は限界に達している。
+
+## B16 [auto-decided 2026-07-21] Iter9: 単一レバーの決定（few_shot_structure_change）
+- 状況: confidence_threshold レバーは Iter9 調査で education 過信抑制の文脈でも no-op 確定。4回連続 few-shot 変更（Iter5-8）は「書き方」の変更にとどまり限界。
+- 自動選択: 単一レバーを `few_shot_structure_change`（router.py の few-shot 例ブロックの構造変更）へ。具体案: (1) 例1-3を全ドメイン表示へ変更（現在2ドメイン→4ドメイン）(2) 評価基準に保守的指示を追加。
+- 根拠: (1) 直近 few-shot 変更は「書き方」の問題（例4の教育ノード視点追加）であり、構造的な問題（例1-3の2ドメイン表示のみで cross-domain 対比が弱い）は放置されたまま。(2) 全ドメイン表示により education ノードは general=0.9 > education=0.1 の対比を few-shot 例から直接学習可能。(3) 変更量: 例1-3の各行に2ドメイン分追記 + 評価基準に1行追加。計5行弱。
+- 要レビュー: 単一レバー原則（config-only の枠を出る変更）の承認。router.py の few-shot 例ブロック変更が影響範囲限定（5行弱）のため承認可能か。
+
+## B15 [auto-decided 2026-07-21] Iter9: confidence_threshold の再検討結果（education 過信抑制の文脈でも no-op 確定）
+- 状況: Iter9 で confidence_threshold の再検討を実施。results/20260721_185132 の probe_candidates から offline 掃引。
+- 自動選択: confidence_threshold レバーは rejected。values [0.3, 0.5, 0.7] は education 過信抑制の文脈でも no-op（空帯域 (0.3,0.7) に値 0 件は同じ）。閾値 0.85+ は意味があるが、education 過信の根本原因（confidence 信号の較正）には対処できない。
+- 根拠: (1) general-004（education 過信の主要ケース）は education=0.95 > general=0.9 で、どの threshold でも education が勝つ。threshold 非効力。(2) education-002（tie at 0.95）と education-009（tie at 0.8）も threshold で解決不可。(3) threshold=0.85 で education-009 が fallback になるのみ（1 件）。
+- 要レビュー: confidence_threshold は education 過信抑制のレバーとして不適。次 rc-planner は config-only の枠を出る変更（router.py の few-shot 例修正、probe ロジック変更）を提示すること。
+
 ## B14 [auto-decided 2026-07-21] Iter9: confidence_threshold の再検討（education 過信抑制の文脈）
 - 状況: Iter5-8 で 4 回連続 few-shot 例の変更を試したが、いずれも期待した効果を持たなかった。Iter8 では「education ノード視点」への変更が過剰抑制の副作用（education recall -0.166）を引き起こし、few_shot_node_perspective レバーは収束確定。
 - 自動選択: config.yml levers の次候補 `confidence_threshold`（values: [0.3, 0.5, 0.7]）へ移行。Iter3 で「二峰・空帯域分布による no-op」と判定されたが、当時の目的は「フォールバック率とのトレードオフ」であり、今回は「education の過信抑制」という新たな文脈で再検討する。

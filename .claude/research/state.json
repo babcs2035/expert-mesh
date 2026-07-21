@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
   "iteration": "Iter9",
-  "iteration_name": null,
-  "phase": "investigate",
-  "status": "running",
-  "current_lever": "confidence_threshold",
-  "experiment_dir": null,
+  "iteration_name": "few-shot例の構造変更（全ドメイン表示へ）と保守的指示追加",
+  "phase": "reflect",
+  "status": "converged",
+  "current_lever": "few_shot_structure_change",
+  "experiment_dir": "results/20260721_222225",
   "experiment_deadline": null,
-  "updated_at": "2026-07-21T20:00:00+09:00",
+  "updated_at": "2026-07-21T23:00:00+09:00",
   "last_slack_ts": null,
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
+  "iteration_thread_ts": "1784631289.800599",
+  "notion_toggle_created": true,
   "last_commit": null
 }
