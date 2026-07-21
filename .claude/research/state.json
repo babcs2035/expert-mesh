@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter5",
-  "iteration_name": "education ノード few-shot 例の education 固有話題への差し替え",
+  "iteration": "Iter6",
+  "iteration_name": null,
   "phase": "investigate",
   "status": "running",
   "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": "2026-07-21T01:15:00+09:00",
-  "last_slack_ts": null,
-  "iteration_thread_ts": null,
+  "updated_at": "2026-07-21T19:00:00+09:00",
+  "last_slack_ts": "1784592906.346419",
+  "iteration_thread_ts": "1784567574.602639",
   "notion_toggle_created": false,
-  "last_commit": null
+  "last_commit": "0000000"
 }

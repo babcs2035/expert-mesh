@@ -15,6 +15,26 @@
 
 ---
 
+## B10 [auto-decided 2026-07-21] Iter5: few-shot 差し替えが router.py 側でしか効かない構造的原因の特定と次レバーの方針
+- 状況: Iter5（education ノード few-shot 例の education 固有話題への差し替え）は rejected（主基準 2 件未達，非退行 2 件未達）．
+  分析で決定的な構造的要因が特定された: build_dataset.py の _EDUCATION_QUESTIONS はテストクエリであり few-shot 例ではない．
+  confidence 自己申告ロジックの few-shot 例は router.py の build_confidence_prompt() でハードコード（「歯の痛み→medical」「賃貸契約→legal」）され，
+  全ドメイン共通で使われる．education ノードの評価にも medical/legal の例が使われるため，build_dataset.py の変更は confidence 信号に一切影響しない．
+  決定的証拠: education ノードの confidence 値が Iter5 とベースラインで完全に同一．
+- 自動選択: 次イテレーションの単一レバーを「router.py の build_confidence_prompt() に education 固有の few-shot 例を追加」へ方向付け．
+  ただしこれはコード変更を伴うため単一レバー原則（config-only）の枠を超え，ユーザーの判断を仰ぐべき．
+  次 rc-planner は以下の 2 選択肢のいずれかを提示する:
+  - A: router.py の few-shot 例に education 関連話題を追加（コード変更，単一レバー原則の再設計が必要）
+  - B: confidence_threshold の実質的な再較正（0.9 付近の閾値で education の過信を抑制，config-only 維持可能か検証）
+  両方とも「単一レバー原則の再設計」が前提．B7 で記録した nomic-embed-text task prefix 未付与の問題も
+  信号較正の文脈で並行検討すべき．
+- 根拠: 3 イテレーション連続（Iter1: confidence飽和, Iter2: embedding弁別喪失, Iter3: 閾値no-op）で
+  config-only の枠内で改善できないことが確定．Iteration 4-5 で education ドメイン追加および few-shot 差し替えを試したが，
+  router.py 側の few-shot 構造が根本原因であることが判明．次は router.py の修正または confidence_threshold の実質的再較正へ．
+- 要レビュー: 次 rc-planner が具体的な仮説と成功条件を提示する際，(1) router.py の few-shot 例追加が単一レバーとして成立するか，
+  (2) 既存 results との比較に使う baseline は results/20260721_085735（Iter5）か results/20260721_011117（Iter4 ベースライン）か，
+  (3) education ドメインの追加評価指標（precision/recall 目標値）をどう再定義するか，を明確化すること．
+
 ## B9 [auto-decided 2026-07-20] Iter3=confidence_threshold の no-op 確定と config-only レバー探索の収束・移行方針
 - 状況: Iter3 対象レバー `confidence_threshold`（candidates [0.3, 0.5, 0.7]，既定 0.5）について，調査で二峰・
   空帯域分布による構造的 no-op が示唆されていた．ゲートは requester 側 aggregator が記録済み probe_responses に
