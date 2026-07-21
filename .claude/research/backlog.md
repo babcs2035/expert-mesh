@@ -15,6 +15,30 @@
 
 ---
 
+## B14 [auto-decided 2026-07-21] Iter9: confidence_threshold の再検討（education 過信抑制の文脈）
+- 状況: Iter5-8 で 4 回連続 few-shot 例の変更を試したが、いずれも期待した効果を持たなかった。Iter8 では「education ノード視点」への変更が過剰抑制の副作用（education recall -0.166）を引き起こし、few_shot_node_perspective レバーは収束確定。
+- 自動選択: config.yml levers の次候補 `confidence_threshold`（values: [0.3, 0.5, 0.7]）へ移行。Iter3 で「二峰・空帯域分布による no-op」と判定されたが、当時の目的は「フォールバック率とのトレードオフ」であり、今回は「education の過信抑制」という新たな文脈で再検討する。
+- 根拠: (1) levers 優先順で confidence_threshold が唯一未試行の config-only レバー（dispatch_top_k=Iter1 棄却、routing_method=Iter2 棄却）。(2) education ノードの confidence 分布 {0.2, 0.8, 0.85, 0.9, 0.95} において、0.9 閾値は high-clusters の education 過信（0.9, 0.95）を fallback へ落とす可能性がある。(3) config-only 変更で検証可能。
+- 要レビュー: Iter3 で no-op と判定された confidence_threshold を再検証する根拠。閾値を上げすぎると fallback_rate が急増し品質退行するリスク。次 rc-planner は具体的な成功条件（閾値候補，fallback_rate の許容範囲）を提示すること。
+
+## B13 [auto-decided 2026-07-21] Iter8: few-shot 例の構造変更（education ノード視点へ）
+- 状況: Iter7（router.py の few-shot 例ブロックに一般質問のネガティブ例追加）は rejected（主基準2件未達）。例4は general ドメインの視点（「読書感想文→general=0.9, education=0.1」）で書かれており、education ノードの過信を抑制できなかった。
+- 自動選択: 例4の書き方だけを「education ノード視点」へ変更。例: 「質問「読書感想文の書き方」は general 分野であり、education ドメインではない。education ノードは low confidence (0.1) を出すべき」。既存の例1-3は不変。変更量: 1行の書き換え。
+- 根拠: 分析(解釈)で「視点の不一致」が根本原因と特定。例4の「読書感想文」語彙は general-004 と完全に一致するため、語彙的アンカリングで逆効果。education ノードが self-report する際の few-shot 例として、education ノードの視点で書かれたネガティブ例が効果的。
+- 要レビュー: 例4の education ノード視点への変更が有効か。次イテレーション（Iter8）で router.py の few-shot 例ブロックを修正し、education ノードの過信抑制効果を測定する。
+
+## B12 [auto-decided 2026-07-21] Iter7: 単一レバーが config-only の枠を超えるためユーザー承認必要
+- 状況: 調査フェーズで「few-shot 例へのネガティブ例追加」が推奨。ただし router.py のコード変更を伴う。
+- 自動選択: 変更量2行で影響範囲が限定されるため、単一レバーとして承認可能と判断。
+- 根拠: 3イテレーション連続（Iter4-6）で config-only の枠内では改善できず、few-shot 構造の修正が唯一の有効なアプローチ。
+- 要レビュー: router.py の few-shot 例追加が単一レバーとして承認されるか。却下時は confidence_threshold 再較正（B）に留めること。
+
+## B11 [auto-decided 2026-07-21] Iter6: few-shot 追加が rejected と判定され、抑制アンカリングの必要性が確定
+- 状況: Iter6（router.py build_confidence_prompt() に education 固有 few-shot 例を1件追加）は rejected（主基準2件未達，非退行2件未達）。education ノードの confidence 値が Iter5 と10問中10件完全に同一。few-shot 追加は confidence 信号に何の影響も与えなかった。
+- 自動選択: 次イテレーションの単一レバーの方針を「抑制アンカリング few-shot 例への差し替え」へ方向付け。具体的には (A) general 質問→medical/legal/education すべて low confidence のパターンを few-shot 例に追加、(B) confidence_threshold を 0.9 付近へ引き上げ（Iter3 再検証）、(C) education ノードのプロンプトに「読書、勉強、習い事等は general 分野」と明確に指示する文を追加、の3方向を rc-planner が提示する。
+- 根拠: Iter5-6 で「few-shot 例は該当する→high confidence のパターンしか示さない」という構造的要因が確定。抑制のアンカリング（general 質問で education 関連の言葉が出ても low confidence）が欠如していることが根本原因。config-only レバー探索は3イテレーション連続で限界が確定しており、router.py の few-shot 構造修正が唯一の有効なアプローチ候補。
+- 要レビュー: rc-planner は (A)(B)(C) のうちいずれを単一レバーとして提案するか。単一レバー原則（config-only）の枠を超える router.py 変更を承認するか、config-only のまま confidence_threshold 再較正（B）に留めるか、ユーザー判断を仰ぐこと。
+
 ## B10 [auto-decided 2026-07-21] Iter5: few-shot 差し替えが router.py 側でしか効かない構造的原因の特定と次レバーの方針
 - 状況: Iter5（education ノード few-shot 例の education 固有話題への差し替え）は rejected（主基準 2 件未達，非退行 2 件未達）．
   分析で決定的な構造的要因が特定された: build_dataset.py の _EDUCATION_QUESTIONS はテストクエリであり few-shot 例ではない．

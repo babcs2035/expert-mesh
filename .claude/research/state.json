@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter6",
+  "iteration": "Iter9",
   "iteration_name": null,
   "phase": "investigate",
   "status": "running",
-  "current_lever": null,
+  "current_lever": "confidence_threshold",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": "2026-07-21T19:00:00+09:00",
-  "last_slack_ts": "1784592906.346419",
-  "iteration_thread_ts": "1784567574.602639",
+  "updated_at": "2026-07-21T20:00:00+09:00",
+  "last_slack_ts": null,
+  "iteration_thread_ts": null,
   "notion_toggle_created": false,
-  "last_commit": "0000000"
+  "last_commit": null
 }
