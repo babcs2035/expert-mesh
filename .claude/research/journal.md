@@ -1,3 +1,465 @@
+### 調査 (Iter12)
+
+**問い**
+- Q1: STP（Surrogate Token Probability）の手法概要と、ollama での logprobs 抽出の実装可能性。tokenizer logprobs を抽出するにはどのような変更が必要か。
+- Q2: multi-sample consistency の手法概要と、ollama で同じ query を複数回叩く場合のオーバーヘッド。probe ロジックにどのような変更が必要か。
+- Q3: 現行コード（router.py, aggregator.py, node.py, http_server.py, run_experiment.py）の confidence signal 抽出経路を特定し、STP でどの部分を変更すればよいかをマッピングせよ。
+- Q4: ベースライン結果の特定と成功条件の提案。
+
+**分かったこと（Q1: STP の手法概要と ollama での実装可能性）**
+
+**STP の定義**: 本研究における STP は「生成中のトークン確率を confidence signal として抽出」する手法。Self-REF (Chuang et al., ICML 2025) では confidence tokens を fine-tuning で学習したが、本研究では fine-tuning なしで既存モデルの出力トークン確率を直接使用する。
+
+**ollama の logprobs サポート状況**:
+- **Native `/api/generate` エンドポイント**: logprobs は v0.12.11+ でサポート済み（issue #13497 由来）。Medium 記事「Building a Token-Probability Analyzer with Ollama's New...」より。
+- **Native `/api/chat` エンドポイント**（現行コードが使用）: logprobs サポートは GitHub issue #16117 で提案中だが、まだマージされていない状態。
+- **OpenAI-compatible `/v1/chat/completions`**: logprobs パラメータのサポートも issue #16117 で同じく未マージ。
+- **現在の `expert_backend.py:OllamaClient.generate()`** は `/api/chat` を使用（line 66）。logprobs を取得するには以下のいずれかの変更が必要：
+  - (A) `/api/generate` エンドポイントに切り替え（native API、logprobs サポート済み）
+  - (B) OpenAI-compatible `/v1/chat/completions` に切り替え + `logprobs: true` パラメータ追加
+
+**STP を probe（confidence scoring）に適用する場合の実装変更**:
+1. `expert_backend.py`: `generate()` に `logprobs: true` パラメータを追加。エンドポイントを `/api/generate` または `/v1/chat/completions` に変更。戻り値に token logprobs を追加。
+2. `router.py`: `estimate_confidence()` の返り値を tuple `(confidence, confidence_signal)` に変更、または新しい関数 `estimate_confidence_stp()` を作成。トークン確率の平均/最小値を confidence signal として計算。
+3. `protocol.py`: `ProbeResponse.confidence` は既存のまま（後方互換）。新しいフィールド `confidence_logprobs_mean` などを追加するか、または confidence signal の抽出経路を aggregator 側で変更する。
+
+**変更量見積もり**:
+- `expert_backend.py`: +15行（logprobs パラメータ、エンドポイント切り替え）
+- `router.py`: +20行（STP 用関数、トークン確率の集計ロジック）
+- `protocol.py`: +2行（ProbeResponse に新フィールド追加）
+- `http_server.py`: +5行（logprobs を含む ProbeResponse 構築）
+- `node.py`: +3行（STP 用の confidence signal 抽出経路の切り替え）
+- **合計: ~45行**
+
+**分かったこと（Q2: multi-sample consistency の手法概要）**
+
+**multi-sample consistency の定義**: 同じ query を複数回 probe し、confidence の分散・不変性を信頼度信号として使用する。
+
+**学術的根拠**:
+- Lakshminarayanan, Pritzel, Blundell (2017)「Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles」: 複数サンプリングの予測分布の分散を不確実性の指標として使用。
+- 「Calibrating Large Language Models with Sample Consistency」（AAAI）: 複数回のランダム生成から得られる一貫性（3つの測度）からモデル信頼度を導出。
+- 「Verbal Confidence Meets Self-Consistency in Reasoning LLMs」（OpenReview）: 2回のサンプリングで十分 strong and reliable な結果を得られると報告。
+
+**ollama で同じ query を複数回叩く場合のオーバーヘッド**:
+- 現行 probe レイテンシ: 約 13-16秒（results.jsonl の duration_ms から推定、probe + dispatch 全体）。probe 単体はもっと短い（http_server.py の `estimated_latency_ms` は local inference のみ）。
+- multi-sample を probe 段階で 3回実行する場合: probe レイテンシが約 3倍になる。dispatch は最終的に1回のみのため、全体レイテンシへの影響は限定的。
+- temperature=0.1（現行設定）での run 間変動は ±0.05 程度（Iter10 の journal 記載）。temperature を 0.2-0.3 に上げることでより大きな分散が得られるが、confidence 値の解釈性が低下するリスク。
+
+**multi-sample consistency の実装変更**:
+1. `router.py`: `estimate_confidence()` をラップして複数回呼び出す関数 `estimate_confidence_multi_sample()` を作成。各回の confidence 値の平均と分散を計算。分散が小さい = high confidence signal、分散が大きい = low confidence signal。
+2. `node.py`: `run_ask_flow()` で multi-sample 版の confidence estimation を呼ぶように変更（config から切り替え可能にする）。
+3. `protocol.py` の変更は不要: ProbeResponse.confidence は既存のまま。confidence signal の抽出経路のみが変わる。
+
+**変更量見積もり**:
+- `router.py`: +15行（multi-sample 用関数、分散計算）
+- `node.py`: +3行（呼び出しの切り替え）
+- **合計: ~18行**
+
+**分かったこと（Q3: confidence signal 抽出経路のマッピング）**
+
+**現行フロー**:
+```
+node.py:run_ask_flow()
+  → peer_client.probe_all() (HTTP POST /probe to each peer)
+    → http_server.py:probe() (FastAPI endpoint)
+      → router.py:estimate_confidence() (LLM call to /api/chat)
+        → parse_confidence(raw_response) → float confidence
+      → ProbeResponse(confidence=..., estimated_latency_ms=...)
+  → aggregator.select_dispatch_targets(probe_responses, ...) → dispatch targets
+```
+
+**STP を適用する場合の変更箇所**:
+1. `http_server.py:probe()` (line 225-231): `estimate_confidence()` の呼び出しに logprobs 抽出を追加。または STP 用関数に切り替え。
+2. `router.py:estimate_confidence()` / 新規 `estimate_confidence_stp()`: logprobs を含むレスポンスをパースし、トークン確率の統計量（平均 logprob, min logprob）を計算。
+3. `expert_backend.py:OllamaClient.generate()`: logprobs パラメータ追加、エンドポイント変更。
+4. `protocol.py:ProbeResponse`: 新フィールド追加（`confidence_logprobs_mean` など）。
+5. `aggregator.py`: STP confidence signal を routing decision に組み込む場合、`select_dispatch_targets()` のロジック変更が必要。
+
+**multi-sample consistency を適用する場合の変更箇所**:
+1. `http_server.py:probe()`: 複数回の `estimate_confidence()` 呼び出しを追加（config で回数指定）。分散計算。
+2. `router.py`: multi-sample 用関数を作成。`estimate_confidence_multi_sample()` が内部で N 回 `estimate_confidence()` を呼ぶ。
+3. `protocol.py:ProbeResponse`: 変更不要（既存の confidence フィールドを使う）。分散値は別途 aggregator で計算するか、または probe レスポンスに追加フィールドを追加する場合は +2行。
+
+**両アプローチの比較**:
+
+| 観点 | STP | multi-sample consistency |
+|------|-----|------------------------|
+| 変更ファイル数 | 5 (expert_backend, router, protocol, http_server, node) | 2-3 (router, node, protocol optional) |
+| 変更行数 | ~45行 | ~18-20行 |
+| ollama バージョン依存 | high（logprobs サポートが必要） | low（既存の generate API のまま） |
+| probe レイテンシ | 同程度（1回の生成で logprobs も同時に得られる） | N倍（N=3-5回実行） |
+| offline 分析可能性 | results.jsonl に logprobs が記録されていれば可能 | 既存の confidence 値から分散を再計算可能 |
+| label leakage リスク | low（トークン確率は routing decision と無関係） | low（confidence 値は既知、分散は新しい信号） |
+
+**分かったこと（Q4: ベースライン結果と成功条件）**
+
+**ベースライン**: results/20260721_222225（Iter9, self_report ベースライン）
+- top1_accuracy: 0.870（>=0.87 非退行基準）
+- misrouting_rate: 0.130（<=0.13 非退行基準）
+- education precision: 1.000, recall: 0.500
+- single_domain_top1_accuracy: 0.875
+
+**Iter10（calibrated routing）との比較**:
+- top1_accuracy: 0.848（-0.022 退行）→ rejected の理由
+- misrouting_rate: 0.152（+0.022 悪化）
+
+**成功条件の提案**（Iter11 でどちらのアプローチを試すかによる）:
+
+共通の非退行基準:
+- top1_accuracy >= 0.87（Iter9 ベースライン以下にならない）
+- single_domain_top1_accuracy >= 0.87
+- misrouting_rate <= 0.15
+
+STP の場合の改善目標:
+- confidence signal の弁別力が self_report より高い（offline analysis で margin と正の相関）
+- top1_accuracy >= 0.87（非退行）+αの改善
+
+multi-sample consistency の場合の改善目標:
+- probe レイテンシ増加（3-5倍）を許容して、confidence signal の run 間安定性が向上
+- offline analysis で confidence variance と routing correctness の相関を確認
+- top1_accuracy >= 0.87（非退行）
+
+**次の計画フェーズへの示唆**:
+1. **multi-sample consistency を先に試すことを推奨**。理由: (a) 変更量が少ない（~18行 vs ~45行）、(b) ollama バージョン依存が低い（既存の generate API のまま）、(c) offline analysis が既存 results.jsonl から可能、(d) STP は logprobs サポートのバージョン依存があり、ollama のバージョン確認が必要。
+2. **STP は Iter12 以降に検討**。multi-sample consistency で confidence signal の改善方向性が確認できた場合、より高精度な STP へ移行する段階的なアプローチが妥当。
+3. rc-planner に渡す単一レバー: `confidence_signal_method=multi_sample`（values=[3, 5] で sample_count を掃引）。これにより offline analysis で最適な sample_count を決定可能。
+
+### 計画 (Iter12)
+
+**単一レバー**: `confidence_signal_method=stp`（STP: Surrogate Token Probability）
+- エンドポイント: `/api/generate`（ollama native API、logprobs サポート済み。v0.12.11+ で利用可能）
+- logprob 集計方法: mean（全出力トークンの logprob の平均値を confidence signal として使用）
+
+**仮説**:
+- H1: LLM が生成中に出力するトークン確率（logprobs）は、verbalized self-report confidence よりも calibration が高い。self_report で飽和していた二峰分布（{0.1,0.2} vs {0.8,0.9,0.95}）が、STP では連続的な値として観測され、margin の弁別力が向上する。
+- H2: `/api/generate` への切り替えは、使用モデル（isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL）には thinking モードの機能がないため影響しない。`num_predict=100` の cap も generate エンドポイントで有効に機能する。
+- H3: mean logprob は min より robust（単一の outlier token に左右されない）。confidence signal としての signal-to-noise ratio が self_report を上回る。
+
+**成功条件**（ベースライン: results/20260721_222225, Iter9）:
+- 主基準: top1_accuracy >= 0.87（非退行）。改善目標は +0.03 の improvement（0.90 以上）。
+  - ノイズ幅見積もり: Iter8→9 で top1_accuracy は 0.913→0.870（-0.043）。Iter9→11（multi_sample）で 0.870→0.848（-0.022）。1イテレーションの最大変動は +/-0.05 程度。+0.03 はノイズの範囲内だが、STP が calibration を改善すれば有意な改善として観測できるレベル。
+- 非退行: single_domain_top1_accuracy >= 0.87（baseline 0.875 から -0.005 以内）
+- 非退行: misrouting_rate <= 0.15（baseline 0.130 から +0.02 以内）
+
+**固定する構成**:
+- config.yaml: `routing_method: self_report`, `confidence_threshold: 0.5`, `dispatch_top_k: 1` を維持
+- `confidence_signal_method` の値を `multi_sample` から `stp` へ変更（これが唯一の変更不能レバー）
+- logprob 集計方法は mean に固定（mean vs min の比較は次イテレーションへ回す）
+- build_dataset.py: 不変
+- router.py の既存 `estimate_confidence()`, `parse_confidence()`, `build_confidence_prompt()`: 不変（新規関数として追加のみ）
+- aggregator.py: 不変（confidence signal の抽出経路が変わるのみ）
+
+**変更ファイルと変更量**:
+- `expert_backend.py`: +12行 / -0行
+  - `generate()` に `logprobs: int | None = None` パラメータ追加
+  - `logprobs > 0` の場合、`/api/generate` エンドポイントを使用（logprobs サポートのため）
+  - レスポンスに `token_logprobs: list[dict]` を追加
+- `router.py`: +18行 / -0行
+  - `estimate_confidence_stp()` 新規関数追加（既存の `estimate_confidence()` をラップし、logprobs から mean logprob を計算）
+  - 既存関数は不変
+- `protocol.py`: +2行
+  - `ProbeResponse` に `confidence_logprobs_mean: float | None = None` フィールド追加
+- `http_server.py`: +5行 / -0行
+  - `/probe` endpoint で `confidence_signal_method == "stp"` の場合、STP 経路を呼ぶ
+  - ProbeResponse 構築時に `confidence_logprobs_mean` を設定
+- `node.py`: +3行 / -0行
+  - STP 用の confidence signal 抽出経路の切り替え（config から判定）
+- **合計: ~40行**
+
+**実装詳細**:
+
+1. `expert_backend.py:OllamaClient.generate()`:
+```python
+async def generate(
+    self,
+    model: str,
+    prompt: str,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    logprobs: int | None = None,  # NEW: number of top-logprobs to return (0 = disabled)
+) -> dict:  # CHANGED: returns full response dict instead of just content string
+    """Generate text with optional token-level logprobs.
+
+    When logprobs is set (> 0), uses /api/generate endpoint which supports
+    token probability extraction. Otherwise falls back to /api/chat for
+    thinking-model compatibility.
+
+    Returns a dict with 'content' (str) and optionally 'token_logprobs'
+    (list[dict] with 'token', 'logprob' keys).
+    """
+    options: dict = {}
+    if max_tokens is not None:
+        options["num_predict"] = max_tokens
+    if temperature is not None:
+        options["temperature"] = temperature
+
+    if logprobs and logprobs > 0:
+        # Use /api/generate for logprobs support (ollama v0.12.11+)
+        payload: dict = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": options,
+        }
+        if logprobs > 0:
+            payload["logprobs"] = logprobs
+    else:
+        # Use /api/chat for thinking-model compatibility
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "think": False,
+        }
+        if options:
+            payload["options"] = options
+
+    # ... (retry logic same as before) ...
+    response_data = response.json()
+    result: dict = {"content": response_data.get("response", "")}
+    if "token_logprobs" in response_data:
+        result["token_logprobs"] = response_data["token_logprobs"]
+    return result
+```
+
+2. `router.py`: 新規関数追加
+```python
+async def estimate_confidence_stp(
+    ollama_client: OllamaClient,
+    light_model: str,
+    domain: str,
+    query_summary: str,
+    timeout_s: float,
+) -> tuple[float, float | None]:
+    """Estimate confidence via Surrogate Token Probability (STP).
+
+    Calls the LLM with logprobs enabled and uses the mean of all output
+    token logprob values as a calibration signal. Unlike verbalized
+    self-report confidence, this reflects the model's internal probability
+    distribution over its vocabulary at each generation step.
+
+    Returns (confidence_from_logprobs, raw_mean_logprob) where:
+      - confidence_from_logprobs: normalized to [0, 1] for routing compatibility
+      - raw_mean_logprob: the unnormalized mean logprob (or None if unavailable)
+    """
+    result = await ollama_client.generate(
+        light_model,
+        build_confidence_prompt(domain, query_summary),
+        timeout_s=timeout_s,
+        max_tokens=CONFIDENCE_MAX_TOKENS,
+        temperature=CONFIDENCE_TEMPERATURE,
+        logprobs=1,  # Request 1 top-logprob per token
+    )
+    token_logprobs = result.get("token_logprobs")
+    if not token_logprobs:
+        # Fallback to self-report if logprobs unavailable
+        return parse_confidence(result["content"]), None
+
+    mean_logprob = sum(entry["logprob"] for entry in token_logprobs) / len(token_logprobs)
+    # Normalize: typical logprob range is [-10, 0]. Map to [0, 1] via sigmoid-like transform.
+    normalized = 1.0 / (1.0 + math.exp(-mean_logprob - 2.0))  # shift=2.0 centers the scale
+    return normalized, mean_logprob
+```
+
+3. `protocol.py`: ProbeResponse に新フィールド追加
+```python
+class ProbeResponse(BaseModel):
+    request_id: str
+    node_id: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    estimated_latency_ms: int
+    confidence_logprobs_mean: float | None = None  # NEW: STP mean logprob signal
+```
+
+4. `http_server.py:probe()`: STP 経路の追加（multi_sample の後の else-if ブロックとして）
+```python
+elif state.confidence_signal_method == "stp":
+    stp_conf, raw_logprob = await estimate_confidence_stp(
+        state.ollama_client,
+        state.light_model,
+        state.domain,
+        body.query_summary,
+        timeout_s=state.probe_timeout_s,
+    )
+    confidence = stp_conf  # Use STP as the routing signal
+```
+
+**検証手順**:
+1. `uv run pytest tests/ -v` で既存テスト全件 PASS 確認（router.py の変更が既存関数を壊さないことを確認）
+2. `uv run ruff check .` で lint 違反なし確認
+3. `mise run deploy` でコード変更を各ノードへ配布
+4. `mise run start` で実験実行（46問/4ノード、expected runtime ~50-70分。STP は1回生成なので multi_sample と同程度の latency）
+5. `mise run analyze` で metrics 集計、baseline と比較
+
+**リスク評価**:
+- **エンドポイント切り替えの影響**: `/api/generate` は `/api/chat` と仕様が異なる（messages->prompt, response->response）。thinking モデルの動作変化がないか注意。ただし使用モデルは thinking 非対応と推測されるため影響なしの見込み。
+- **logprobs のレスポンス形式**: ollama の `/api/generate` で `logprobs: 1` を指定した場合、レスポンスに `token_logprobs` フィールドが含まれることが期待されるが、ollama バージョンによって形式が異なる可能性あり。fallback 経路（self_report）を確保する。
+- **mean logprob の正規化**: logprob の絶対値はモデルの vocab size に依存するため、[0,1] への正規化方法が結果に与える影響を評価する。sigmoid を使用して -inf〜+inf の範囲を [0,1] にマッピングする。
+- **レイテンシ**: STP は1回の生成で logprobs も同時に得られるため、multi_sample（N=3）より約 1/3 の latency で済む。
+
+**単一レバー原則との整合**:
+- config.yaml の変更キーは `confidence_signal_method` の値のみ（`multi_sample` -> `stp`）。logprob 集計方法（mean）は固定。
+- コード変更は ~40行で、すべて confidence signal の抽出経路に限定される。routing logic（aggregator.py）、dispatch、few-shot prompt は不変。
+- Iter1-11 で試したすべてのレバーが収束・棄却された後の、confidence signal の抽出方式そのものを変える最初のアプローチ。
+
+**期待との整合**:
+- H1 が正しい場合: STP confidence signal は self_report よりも連続的な分布を示し、margin の弁別力が向上する。education misroute（general-004, education-002/009）が是正される可能性。
+- H2 が正しい場合: `/api/generate` への切り替えは正常に動作し、generate timeout や空回答の問題は発生しない。
+- H3 が正しい場合: mean logprob は outlier token に左右されず、stable な confidence signal を提供する。
+
+### 実装 (Iter12)
+
+**単一レバー**: confidence_signal_method=stp（STP: Surrogate Token Probability）
+
+**実行した変更**:
+1. `protocol.py`: ProbeResponse に `confidence_logprobs_mean: float | None = None` フィールド追加（+2行）
+2. `expert_backend.py`: `generate()` に `logprobs: int | None = None` パラメータ追加。`logprobs > 0` で `/api/generate` エンドポイントを使用し、`token_logprobs` を含む dict を返す。既存呼び出しは文字列を返すので後方互換維持（+27行 / -4行）
+3. `router.py`: `estimate_confidence_stp()` 新規関数追加。logprobs 付き generate で得た token logprob の平均値を sigmoid 正規化して [0,1] にマッピング。fallback 時は self_report にフォールバック（+38行）
+4. `http_server.py`: `/probe` endpoint で `confidence_signal_method == "stp"` の場合、STP 経路を呼ぶ elif ブロック追加。import に `estimate_confidence_stp` を追加。ProbeResponse 構築時に `confidence_logprobs_mean` を設定（+15行 / -2行）
+5. `node.py`: 変更不要（`build_node_state()` は既に `confidence_signal_method` を config から読み込んで NodeState に渡している）
+
+**検証結果**:
+- `uv run pytest tests/ -v`: **78件全PASS** (0.60秒)
+- `uv run ruff check .`: **All checks passed**
+
+**config.yaml は不変**: コード変更のみ。`confidence_signal_method=stp` の値設定は実験フェーズで実施。
+
+**次フェーズへの引き継ぎ**: コード変更完了・テスト全PASS。次は実験フェーズで `mise run deploy` → `mise run start` → `mise run analyze` を実行。
+
+### 実験 (Iter12)
+
+**デプロイ**: 4ノード（wafl500, wafl501, wafl502, wafl503）すべて正常完了。初期warmupでwafl503/wafl501が一時NGだが、10秒後に回復。
+
+**実行結果**: results/20260722_050046（46問、全問完走、used_fallback=1, dispatch_failed=0）
+- 平均応答時間: 13834ms
+
+**メトリクス比較（baseline: Iter9 vs STP）**:
+| 指標 | Iter9 (baseline) | Iter12 (STP) | 差分 |
+|------|-------------------|--------------|------|
+| top1_accuracy | 0.8696 | 0.8478 | -0.0218 |
+| single_domain_top1_accuracy | 0.8750 | 0.8500 | -0.0250 |
+| misrouting_rate | 0.1304 | 0.1522 | +0.0218 |
+| fallback_rate | 0.0217 | 0.0217 | 0.0000 |
+| education precision/recall | 1.0/0.5000 | 1.0/0.4167 | recall -0.0833 |
+| legal precision/recall | 0.7778/0.9333 | 0.7368/0.9333 | precision -0.0410 |
+| medical precision/recall | 0.9167/0.7333 | 0.9167/0.7333 | 同等 |
+| mean_duration_ms | 13731 | 13834 | +103 |
+
+**成功条件判定**:
+- top1_accuracy >= 0.87: **FAIL**（0.8478 < 0.87）
+- single_domain_top1_accuracy >= 0.87: **FAIL**（0.8500 < 0.87）
+- misrouting_rate <= 0.15: **FAIL**（0.1522 > 0.15）
+
+**次フェーズへの引き継ぎ**: 分析フェーズへ。mise run analyze の結果を rc-analyst に渡す。
+
+### 分析 (実行) (Iter12)
+
+**実験ディレクトリ**: results/20260722_050046（46問、全問完走）
+
+| 指標 | Iter12 (STP) | Iter9 (baseline) | 差分 | 判定 |
+|------|-------------|-------------------|------|------|
+| top1_accuracy | **0.8478** | 0.8696 | **-0.0218** | FAIL |
+| single_domain_top1_accuracy | **0.8500** | 0.8750 | **-0.0250** | FAIL |
+| misrouting_rate | **0.1522** | 0.1304 | **+0.0218** | FAIL（基準 <= 0.15） |
+| fallback_rate | 0.0217 | 0.0217 | 0.0000 | PASS |
+| education recall | **0.4167** | 0.5000 | **-0.0833** | FAIL |
+| legal precision | **0.7368** | 0.7778 | **-0.0410** | FAIL |
+| medical recall | **0.7333** | 0.7333 | 0.0000 | PASS（同等） |
+
+主基準未達、非退行も未達。ただし以下の重大なインフラ事象により、この数値はSTPの効果を一切反映していない。
+
+### 分析 (解釈) (Iter12)
+
+**判定**: STP レバーは **infrastructure_failure**（Dockerイメージのデプロイ不備によりSTPコードが実行されていない）
+
+---
+
+#### 重大発見: STPコードはデプロイされていなかった
+
+`mise run deploy` の動作を確認した結果、以下の問題が特定された。
+
+**デプロイフローの問題**:
+1. `mise run deploy` は rsync で `docker-compose.yml`, `docker-compose.gpu.yml`, `config.yaml` だけを配布し、Dockerイメージは再ビルドせずに `docker compose pull` で既存イメージを取得する。
+2. Pythonソースコード（`expert_backend.py`, `http_server.py`, `router.py`, `protocol.py`）はDockerイメージ内に bake されている。デプロイ時に更新されない。
+3. STP関連のコード変更（expert_backend.py +63行, http_server.py +15行, router.py +40行, protocol.py +1行）は**uncommitted な状態**で、Dockerイメージに含まれていない。
+
+**検証結果**:
+- git commit `0c49ce2`（deploy対象）の http_server.py には STP ブランチが存在しない（multi_sample のみ）。
+- git commit `0c49ce2` の config.yaml は `confidence_signal_method: multi_sample`（stp ではない）。
+- 現在の working tree の config.yaml は `confidence_signal_method: stp` に変更済み。
+- results.jsonl に `confidence_logprobs_mean` フィールドが**1件も存在しない**（0/46行）。
+- wafl500のログでは全 probe が `"routing_method": "self_report"` として記録されている。STPやlogprobの言及はゼロ。
+
+**結論**: Iter12の実験は STP をテストしていない。config.yaml の値は `stp` に変更されていたが、実行中のDockerコンテナは Iter11 のコード（multi_sample → self_report fallback）で動作していた。すべての probe が self_report 経路を通ったため、結果は baseline と同等の自己申告confidenceによるroutingである。
+
+---
+
+**数値の有意性判定**:
+
+- top1_accuracy: 0.870 → 0.848（-0.022）→ **STPの因果効果ではない**。同一コード（self_report）での run 間ノイズ。
+- single_domain_top1_accuracy: 0.875 → 0.850（-0.025）→ **run 間ノイズの範囲内**。
+- misrouting_rate: 0.130 → 0.152（+0.022）→ **run 間ノイズの範囲内**。
+
+実際の変化は Iter9 と Iter12 で同一コード（self_report）を別回実行した差であり、これは run 間ノイズとして観測されるもの。過去イテレーションとの比較:
+- Iter8 → 0.913 (dispatch_top_k=2)
+- Iter9 → 0.870 (self_report baseline)
+- Iter11 → 0.848 (multi_sample/self_report fallback)
+- Iter12 → 0.848 (stp config / self_report code)
+
+top1_accuracy の変動範囲は 0.848〜0.913（±0.033）。Iter9→12 は -0.022 で、このノイズ範囲内に収まる。ただし Iter11 と Iter12 が同一値（0.848）なのは、両方とも self_report コードで実行されたことの裏付け。
+
+---
+
+### 考察・次計画 (Iter12)
+
+**判定**: STP レバーは **infrastructure_failure（未検証）**
+
+**総括**:
+- STP コード変更は完了済み（テスト全PASS）。`expert_backend.py`, `router.py`, `protocol.py`, `http_server.py` の合計 ~97行追加・24行削除。
+- しかし `mise run deploy` の不備により Docker イメージが再ビルドされず、STP コードが実行されていない。
+- 実験結果（top1_accuracy 0.848）は self_report コードの run 間ノイズであり、STP の効果ではない。
+
+**根本原因**:
+1. `mise run deploy` は rsync で `docker-compose.yml`, `docker-compose.gpu.yml`, `config.yaml` だけを配布し、Dockerイメージは再ビルドせずに `docker compose pull` で既存イメージを取得する。
+2. Pythonソースコード（`expert_backend.py`, `http_server.py`, `router.py`, `protocol.py`）はDockerイメージ内に bake されている。デプロイ時に更新されない。
+3. STP関連のコード変更は uncommitted な状態のまま deploy されたため、コンテナ内では Iter11 のコード（multi_sample → self_report fallback）が実行されていた。
+
+**検証証拠**:
+- git commit `0c49ce2`（deploy対象）の http_server.py には STP ブランチが存在しない
+- results.jsonl に `confidence_logprobs_mean` フィールドが 0/46 行に存在
+- wafl500 のログでは全 probe が `"routing_method": "self_report"` として記録
+
+**次イテレーションへの示唆**:
+1. **STP の再実験を推奨**: Dockerイメージの再ビルド（`mise run setup` または `docker compose build`）を追加した上で STP レバーを再実験する。変更ファイル・変更量は前回と同じ。
+2. **デプロイフローの修正**: `mise run deploy` に docker build ステップを組み込むか、rsync で Python ソースファイルをコンテナ内に配布する方式へ変更すべき。これは研究サイクル全体のインフラ課題。
+
+**次イテレーションの単一レバーの方針**:
+- STP を再テストすることを推奨。Dockerイメージの再ビルドを前提とする。
+- デプロイフローの修正は並行して行う（または Iter13 の中で再実験時に同時に修正する）。
+
+**コミット**: STP コード変更（expert_backend.py, router.py, protocol.py, http_server.py）+ journal/state/backlog の更新
+
+---
+
+**multi_sample (Iter11) との比較**:
+- Iter11: config `confidence_signal_method=multi_sample` / コード multi_sample経路 → 結果 0.848
+- Iter12: config `confidence_signal_method=stp`（変更済み）/ コード self_report fallback → 結果 0.848
+
+両イテレーションが同一の数値（0.8478...）を示したのは、最終的に同じコード経路（self_report）を通ったため。この一致は偶然ではなく、インフラ不備の決定的証拠。
+
+---
+
+**次イテレーションへの示唆**:
+
+1. **Dockerイメージの再ビルドが必要**: STPコードをテストするには `mise run setup`（= docker build + push）→ `mise run deploy` の順で実行する必要がある。現在は `deploy` だけでコード変更が反映されない構造。
+2. **構成変更案**: `mise run deploy` に docker build ステップを組み込むか、または rsync で Python ソースファイルをコンテナ内に配布し、コンテナを再起動する方式に変更すべき。後者はより軽量。
+3. **STPの再テスト**: Dockerイメージを再ビルドした上で、同じ構成（`confidence_signal_method=stp`, `routing_method=self_report`, `dispatch_top_k=1`）で実験をやり直す。
+4. **追加反復の必要性**: STPが本来期待どおりに動作するかは未検証。Infrastructure fix 後に少なくとも1回の再実験が必要。
+5. **confidence_threshold レバーの検討**: config-only の最終レバー（values=[0.3, 0.5, 0.7]）は Iter3 で試し切り済みだが、STPと併用する形での再検討も可能。
+
+---
+
 ### Iteration 11 実行済み
 
 **単一レバー**: `confidence_signal_method=multi_sample`（N=3回probeして平均値をconfidence signalとして使用）

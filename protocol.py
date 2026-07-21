@@ -37,6 +37,7 @@ class ProbeResponse(BaseModel):
     node_id: str
     confidence: float = Field(ge=0.0, le=1.0)
     estimated_latency_ms: int
+    confidence_logprobs_mean: float | None = None  # STP mean logprob signal (null when not used)
 
 
 class DispatchRequest(BaseModel):

@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter12",
-  "iteration_name": "STP(Surrogate Token Probability)によるconfidence信号の較正",
-  "phase": "reflect",
+  "iteration": "Iter13",
+  "iteration_name": "STP(Surrogate Token Probability)再実験 - Dockerイメージ再ビルド後",
+  "phase": "investigate",
   "status": "running",
   "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": "2026-07-22T04:30:00+0900",
-  "last_slack_ts": "1784643760.822029",
-  "iteration_thread_ts": "1784653747.649319",
+  "updated_at": "2026-07-22T06:00:00+0900",
+  "last_slack_ts": null,
+  "iteration_thread_ts": null,
   "notion_toggle_created": false,
-  "last_commit": "0c49ce25638c97635b23c78a5d788dcfd225ffe5"
+  "last_commit": null
 }

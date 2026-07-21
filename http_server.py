@@ -24,6 +24,7 @@ from protocol import (
 from router import (
     estimate_confidence,
     estimate_confidence_multi_sample,
+    estimate_confidence_stp,
     estimate_embedding_confidence,
 )
 
@@ -229,6 +230,7 @@ def create_app(state: NodeState) -> FastAPI:
                 confidence = estimate_embedding_confidence(
                     body.query_embedding, state.domain_embedding
                 )
+                logprobs_mean: float | None = None
             elif state.confidence_signal_method == "multi_sample":
                 mean_c, _var_c = await estimate_confidence_multi_sample(
                     state.ollama_client,
@@ -239,6 +241,17 @@ def create_app(state: NodeState) -> FastAPI:
                     n_samples=state.multi_sample_count,
                 )
                 confidence = mean_c  # Use mean as the routing signal
+                logprobs_mean = None
+            elif state.confidence_signal_method == "stp":
+                stp_conf, raw_logprob = await estimate_confidence_stp(
+                    state.ollama_client,
+                    state.light_model,
+                    state.domain,
+                    body.query_summary,
+                    timeout_s=state.probe_timeout_s,
+                )
+                confidence = stp_conf  # Use STP as the routing signal
+                logprobs_mean = raw_logprob
             else:
                 confidence = await estimate_confidence(
                     state.ollama_client,
@@ -247,6 +260,7 @@ def create_app(state: NodeState) -> FastAPI:
                     body.query_summary,
                     timeout_s=state.probe_timeout_s,
                 )
+                logprobs_mean = None
         except httpx.TimeoutException:
             log_event(
                 state.node_id, LOG_LEVEL_ERROR, "probe_timeout", request_id=body.request_id
@@ -281,6 +295,7 @@ def create_app(state: NodeState) -> FastAPI:
             node_id=state.node_id,
             confidence=confidence,
             estimated_latency_ms=estimated_latency_ms,
+            confidence_logprobs_mean=logprobs_mean,
         )
 
     @app.post("/dispatch", response_model=None)

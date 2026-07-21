@@ -15,6 +15,16 @@
 
 ---
 
+## B22 [auto-decided 2026-07-22] Iter12: infrastructure_failure - デプロイフローの修正と STP 再実験
+
+- 状況: Iter12（STP）の結果は無効。`mise run deploy` が Docker イメージを再ビルドせず、Python コード変更がコンテナ内に反映されなかった。全 probe が self_report 経路を通り、結果は baseline と同等の run 間ノイズ。
+- 自動選択: Iter13 を STP 再実験とする。その前にデプロイフローを修正する（rc-investigator で調査 → rc-implementer で修正）。単一レバー方針: `confidence_signal_method=stp`（前回と同じ構成）+ デプロイフロー修正（並行）。
+- 根拠: (1) STP コード変更は完了済み（テスト全PASS）。(2) 問題はコードではなくインフラ。Docker イメージの再ビルドまたは rsync での Python ソース配布を追加すれば、STP レバーを正しくテスト可能。(3) config levers は試し切り済み（B18, B20 参照）。STP が有効なら研究継続、無効なら research_frontier へ移行。
+- 要レビュー: デプロイフローの修正方針。(A) `mise run deploy` に docker build ステップを組み込む（確実だが時間がかかる）、(B) rsync で Python ソースファイルをコンテナ内に配布 + コンテナ再起動（軽量だが新しい手順が必要）。rc-investigator が調査し、rc-planner が承認すること。
+- 関連する恒久知見: Docker イメージにコードを bake する場合、デプロイ時は必ずイメージの再ビルドが必要。config.yaml のみ rsync で配布しても、Python コードの変更は反映されない。この教訓は研究サイクル全体の skill ドキュメントにも記録済み（B20）。
+
+---
+
 ## B21 [auto-decided 2026-07-22] Iter11: multi_sample consistency rejected、次は STP
 
 - 状況: Iter11（confidence_signal_method=multi_sample, N=3）の結果、top1_accuracy が 0.870→0.848 に退行。single_domain_top1_accuracy 0.875→0.850、misrouting_rate 0.130→0.152 も悪化。主基準・非退行とも全件未達。

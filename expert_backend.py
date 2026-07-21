@@ -29,21 +29,17 @@ class OllamaClient:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_tokens: int | None = None,
         temperature: float | None = None,
-    ) -> str:
-        """Generate a non-streaming response using the chat endpoint.
+        logprobs: int | None = None,
+    ) -> str | dict:
+        """Generate text with optional token-level logprobs.
 
-        Uses /api/chat instead of /api/generate because thinking models
-        (qwen3.5, etc.) ignore the think: false flag on the generate
-        endpoint — a known ollama issue (#14793). This can exhaust the
-        token budget on internal reasoning and leave the final answer
-        empty.
+        When logprobs is set (> 0), uses /api/generate endpoint which supports
+        token probability extraction (ollama v0.12.11+). Otherwise falls back
+        to /api/chat for thinking-model compatibility.
 
-        max_tokens maps to ollama's num_predict option. Without it,
-        generation is unlimited and models may loop on short-output
-        prompts. Always set a reasonable cap.
-
-        temperature controls output randomness. The default (~0.8) is
-        too high for deterministic tasks like confidence scoring.
+        Returns a string (content only) when logprobs is not requested, or a
+        dict with 'content' (str) and optionally 'token_logprobs'
+        (list[dict] with 'token', 'logprob' keys) when logprobs is set.
 
         Retries up to DEFAULT_RETRIES times on transient connection errors.
         """
@@ -52,20 +48,41 @@ class OllamaClient:
             options["num_predict"] = max_tokens
         if temperature is not None:
             options["temperature"] = temperature
-        payload: dict = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "think": False,
-        }
-        if options:
-            payload["options"] = options
+
+        if logprobs and logprobs > 0:
+            # Use /api/generate for logprobs support (ollama v0.12.11+)
+            payload: dict = {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": options,
+            }
+            if logprobs > 0:
+                payload["logprobs"] = logprobs
+        else:
+            # Use /api/chat for thinking-model compatibility
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "think": False,
+            }
+            if options:
+                payload["options"] = options
+
         for attempt in range(DEFAULT_RETRIES):
             try:
+                endpoint = "/api/generate" if (logprobs and logprobs > 0) else "/api/chat"
                 async with httpx.AsyncClient(timeout=timeout_s) as client:
-                    response = await client.post(f"{self._host}/api/chat", json=payload)
+                    response = await client.post(f"{self._host}{endpoint}", json=payload)
                     response.raise_for_status()
-                    return response.json()["message"]["content"]
+                    data = response.json()
+                    if logprobs and logprobs > 0:
+                        result: dict = {"content": data.get("response", "")}
+                        if "token_logprobs" in data:
+                            result["token_logprobs"] = data["token_logprobs"]
+                        return result
+                    return data["message"]["content"]
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError, httpx.RemoteProtocolError):
                 if attempt < DEFAULT_RETRIES - 1:
                     await asyncio.sleep(RETRY_DELAY_S)

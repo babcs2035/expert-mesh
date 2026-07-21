@@ -139,6 +139,46 @@ async def estimate_confidence_multi_sample(
     return mean_c, var_c
 
 
+async def estimate_confidence_stp(
+    ollama_client: OllamaClient,
+    light_model: str,
+    domain: str,
+    query_summary: str,
+    timeout_s: float,
+) -> tuple[float, float | None]:
+    """Estimate confidence via Surrogate Token Probability (STP).
+
+    Calls the LLM with logprobs enabled and uses the mean of all output
+    token logprob values as a calibration signal. Unlike verbalized
+    self-report confidence, this reflects the model's internal probability
+    distribution over its vocabulary at each generation step.
+
+    Returns (confidence_from_logprobs, raw_mean_logprob) where:
+      - confidence_from_logprobs: normalized to [0, 1] for routing compatibility
+      - raw_mean_logprob: the unnormalized mean logprob (or None if unavailable)
+    """
+    result = await ollama_client.generate(
+        light_model,
+        build_confidence_prompt(domain, query_summary),
+        timeout_s=timeout_s,
+        max_tokens=CONFIDENCE_MAX_TOKENS,
+        temperature=CONFIDENCE_TEMPERATURE,
+        logprobs=1,  # Request 1 top-logprob per token
+    )
+    if isinstance(result, str):
+        # Fallback to self-report if logprobs unavailable (e.g. old ollama)
+        return parse_confidence(result), None
+
+    token_logprobs = result.get("token_logprobs")
+    if not token_logprobs:
+        return parse_confidence(result["content"]), None
+
+    mean_logprob = sum(entry["logprob"] for entry in token_logprobs) / len(token_logprobs)
+    # Normalize: typical logprob range is [-10, 0]. Map to [0, 1] via sigmoid.
+    normalized = 1.0 / (1.0 + math.exp(-mean_logprob - 2.0))
+    return normalized, mean_logprob
+
+
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Return the cosine similarity of two vectors.
 
