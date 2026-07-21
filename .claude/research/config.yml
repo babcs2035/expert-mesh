@@ -36,6 +36,7 @@ levers:
   - {name: dispatch_top_k, values: [1, 2, 3], note: "直近完走実験(results/20260709_214113)でmedical recallが0.79（legal 0.93, general 1.0）と低いことが判明．top_k>1の並行dispatchで改善するか検証．aggregator.select_best_dispatch_responseは対応済み・新規実装不要"}
   - {name: routing_method, values: [self_report, embedding], note: "Phase1実装済みの方式A(embedding)とB(self_report,既定)を比較．probeレイテンシと精度のトレードオフを定量比較"}
   - {name: confidence_threshold, values: [0.3, 0.5, 0.7], note: "フォールバック率とのトレードオフ．直近実験ではfallback_rate=0.0のため効果が薄い可能性あり"}
+  - {name: confidence_signal_method, values: [stp, multi_sample], note: "[auto-decided 2026-07-22 B20] Iter10でconfig-onlyの3レバーを試し切り，probe-based calibrated routingもlabel leakageでrejected（backlog B19）．次はconfidence信号の抽出方式自体を変える．stp=Surrogate Token Probability（生成中のトークン確率をconfidence signalとして抽出，tokenizer logprobs抽出が必要で実装コスト高）．multi_sample=複数回probeしたconfidenceの分散を信頼度信号として使用（実装は簡単だがprobe複数回実行でlatency増）．rc-plannerがどちらを先に試すか判断すること"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
@@ -65,7 +66,7 @@ success_criteria: "Iter1（dispatch_top_k=1→2，複合ドメイン行4件・Σ
 slack:
   channel: "#research-cycle"
   channel_id: "C0BJHRL037B"
-  mention_user_id: "U08GLKY1QCW"
+  mention_user_id: "U055AN8LWF6"
 
 notion:
   parent_page: "Lab/Research"

@@ -15,6 +15,36 @@
 
 ---
 
+## B20 [auto-decided 2026-07-22] Iter10 収束後，config.yml に新レバー confidence_signal_method を追加して再開
+- 状況: Iter10 で config-only の 3 レバー（dispatch_top_k, routing_method, confidence_threshold）を試し切り，
+  reflector が `status="converged"` として待機していた（B19 参照）。従来の設計では全 levers 試し切りは
+  即座に人間の判断待ちとなる仕様だったが，B19 の時点で reflector 自身が次の方向性（STP / multi-sample
+  consistency）を既に提示していたため，人間の判断を経て再開する。
+- 自動選択: config.yml の `levers` 末尾に `confidence_signal_method`（values: `[stp, multi_sample]`）を
+  追加し，`state.json` を次イテレーション（Iter11，phase=investigate, status=running）へ初期化した。
+  どちらの値を先に試すかは次の rc-planner の判断に委ねる。
+- 根拠: B19 の要レビューで「(A) STP vs (B) multi-sample consistency のいずれが実装コストと期待効果を
+  兼ね備えるか rc-planner が判断すること」と既に整理済みであり，新しいレバーとして定式化するのに十分な
+  情報が揃っている。
+- 要レビュー: rc-planner がどちらを選んだか，および実装スコープが単一レバー原則の範囲に収まっているかを
+  確認すること。
+- 関連する恒久対応: 「config の全 levers 試し切り＝即停止」という設計自体も見直した。今後は reflector が
+  自分で次のレバーを考案できればそのまま継続し，考案できない場合は次イテレーションを調査フェーズから
+  開始して rc-investigator に tavily-search で代替アプローチを重点調査させ，それでも見つからない場合の
+  みに人間の判断を待つ（SKILL.md「停止条件」節，rc-reflector.md/rc-investigator.md/rc-planner.md 更新済み）。
+
+## B19 [auto-decided 2026-07-22] Iter10: calibrated routing rejected、次方向は STP / multi-sample consistency
+- 状況: Iter10（calibrated routing）の結果、top1_accuracy が 0.870→0.848 に退行。offline AUC=1.000 は online improvement を保証しないことを示す。
+- 自動選択: calibrated routing レバーは rejected。次イテレーションの単一レバーの方針として (A) Surrogate Token Probability（生成中のトークン確率を confidence signal として抽出）または (B) multi-sample consistency（複数回 probe した confidence の分散を信頼度 signal として使用）を rc-planner に提示する。
+- 根拠: (1) offline classifier の特徴量（margin, is_top1）は routing decision と情報的に重複しており label leakage が生じた。(2) confidence 値自体の run 間変動（±0.05）は offline classifier を無効化。(3) Self-REF (ICML 2025) は STP や confidence tokens で self-report より頑健な信号を実証。
+- 要レビュー: next direction の (A) vs (B) のうちいずれが実装コストと期待効果を兼ね備えるか rc-planner が判断すること。(A) は tokenizer logprobs の抽出が必要で実装量多め。(B) は probe の複数回実行で latency 増大のトレードオフ。
+
+## B18 [auto-decided 2026-07-22] Iter10: probe-based calibrated routing の採用決定
+- 状況: config-only レバー（dispatch_top_k, routing_method, confidence_threshold）は3本とも試し切り。few-shot 変更も5回連続（Iter5-9）で試されたが限界。根本ボトルネックは confidence 信号の較正であり、config.yaml の値変更だけでは対処できないことが Iter1-9 で決定的に示された。
+- 自動選択: probe_candidates から抽出した特徴量（self_confidence, max_other_confidence, margin, is_top1 など）を用いた logistic regression classifier を offline analysis にて訓練・評価する approach を採用。offline で有効性が確認できたら aggregator.py へ online routing として組み込む（2-phase approach）。
+- 根拠: (1) misroute の内訳は構造的に理解可能：general-008 は medical=0.9 > general=0.85、education-003/004/008/009 は legal=0.9, education=0.9 の tie。margin <= 0 で misroute が集中的に発生。(2) n=184 sample (46 query x 4 domain) に対し logistic regression (p=6-7) は過学習リスクが低く、coefficient の解釈も可能。(3) Self-REF (Chuang et al., ICML 2025) は confidence tokens による fine-tuning で routing accuracy が大幅改善。Amazon Science (2024) は calibrated confidence scores で cascading ensemble policy を設計し推論コストを2倍削減。これらの知見は本研究の approach と整合する。(4) Mahaut et al. (2024) の probe-based classifier は verbalized/self-reported confidence より優位だが、hidden states 抽出が必要で現時点の実装では困難。代わりに probe_candidates の confidence values を特徴量とする logistic regression が現実的な第一歩。
+- 要レビュー: (1) Phase 1 の offline AUC >= 0.85 という成功条件は妥当か。(2) Phase 2 で aggregator.py に calibrated routing function を組み込む変更を承認するか。(3) baseline 比較は results/20260721_222225（Iter9）とするか results/20260721_185132（Iter8）とするか。
+
 ## B17 [auto-decided 2026-07-21] Iter9: few-shot 構造変更は rejected（education precision 改善だが recall 低下）
 - 状況: Iter9（全ドメイン表示 + 保守的指示追加）の結果、education precision=1.0（>=0.93 PASS）だが、recall=0.5（>=0.62 FAIL）。general/legal precision も退行。
 - 自動選択: few_shot_structure_change レバーは rejected。router.py の few-shot 例変更は 5 回連続（Iter5-9）で試されたが、いずれも期待した効果を持たなかった。このレバーは収束。
