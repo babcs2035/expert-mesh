@@ -1,4 +1,132 @@
-### Iteration 13 実行済み
+### 計画 (Iter14)
+
+**単一レバーの決定**: **実行可能な新レバーを定義できない（要人間判断）**
+
+**判断理由**:
+1. `confidence_signal_method=hidden_state` は rc-investigator 調査により、Ollama REST API で raw hidden state を抽出できないことが決定的に示された。
+2. Option B（embedding ベースの信号として再定義）は既存の `routing_method=embedding` と同等の処理を別の名前経由で呼ぶだけであり、Iter2 の失敗原因（cross-lingual mismatch, cosine similarity の潰れ）を解決しない。新たな検証価値なし。
+3. Option A（`routing_method=embedding` + task_prefix 修正）は有効なアプローチだが、router.py + http_server.py のコード変更（~10行）を伴う。config levers に定義されたレバーではなく、研究フロンティアの範囲（大規模実装）に属する。単一レバーとして定式化するには大きすぎる。
+4. 研究フロンティアの全項目（新規専門ドメイン追加、評価用データセットの本格化、LLM-as-judge、ベースライン比較、top-k dispatch の高度な集約方式、無線アドホック化）が単一レバーの範囲を超えている。
+
+**結論**: `status="converged"` として研究サイクルを終了する旨、委譲元（rc-reflector / skill 本体）に返す。
+
+---
+
+### 調査 (Iter14)
+
+**問い**
+- Q1: Ollama は hidden state（中間層活性化ベクトル）を API で取得できるか？`/api/embeddings` の仕様と限界は？
+- Q2: Mahaut et al. 2024「Factual Confidence of LLMs」の hidden-state probe 手法の詳細と、本研究への適用可能性。
+- Q3: 現行コード（expert_backend.py, router.py, http_server.py）で hidden_state 抽出に必要な変更量は？
+- Q4: ベースライン結果の特定と成功条件の提案。
+
+**分かったこと（Q1: Ollama の hidden state 抽出能力）**
+
+**Ollama が提供するベクトル出力 API は embedding のみ**:
+
+```
+POST /api/embed          # バッチ埋め込み（input: text or list of text）
+POST /api/embeddings     # 単一埋め込み（prompt: text、後方互換用）
+```
+
+両エンドポイントとも**最終層の活性化ベクトル（hidden state）を返さない**。embedding model が学習した semantic representation のみを返す。
+
+**Ollama が hidden state を抽出する API は存在しない**:
+- `/api/generate`: テキスト生成のみ、中間出力なし
+- `/api/chat`: チャット完了のみ、中間出力なし（logprobs:true でトークン確率は取得できるが、hidden state は不可）
+- vLLM や SGLang には hidden state extraction の仕組みがあるが、Ollama にはない
+
+**Qwen3.5-9B-Unsloth-UD-Q4_K_XL のアーキテクチャ**:
+- Hidden dimension: 4096
+- Layers: 32（Gated DeltaNet + Gated Attention hybrid）
+- Token embedding size: 248,320（padded）
+
+**結論: Ollama REST API で raw hidden states は取得できない。**
+
+**分かったこと（Q2: Mahaut et al. 2024 の手法）**
+
+**論文**: Mahaut et al. (2024)「Factual Confidence of LLMs: on Reliability and Robustness of Current Estimators」ACL 2024
+
+**核心知見**:
+1. trained hidden-state probes は factual confidence 推定において**最も信頼性の高い** estimator（80 citations）
+2. しかし、hidden states を直接使用できるのではなく、**教師あり学習で probe classifier を訓練する必要がある**
+3. raw hidden state のままでは confidence signal として機能しない（未校正）
+
+**手法の概要**:
+- LLM の最終層 hidden state（7680 dim, GPT-J ベース）を抽出
+- 「回答が正しい/間違い」のラベル付きデータで logistic regression probe を訓練
+- probe classifier の出力を confidence score として使用
+
+**本研究への適用可能性**:
+- **必要なもの**: (a) hidden state の抽出経路（Ollama API では不可）、(b) ラベル付きデータ（results.jsonl に存在）、(c) probe 訓練パイプライン（未実装）
+- **不可能な点**: Ollama は hidden state を出力しない。vLLM や HuggingFace transformers 経由で直接モデルをロードする必要がある。
+
+**分かったこと（Q3: 現行コードの変更箇所）**
+
+**現状の confidence signal 抽出経路**:
+```
+http_server.py:probe()
+  → routing_method == "embedding": estimate_embedding_confidence(query_emb, domain_emb)
+  → confidence_signal_method == "multi_sample": estimate_confidence_multi_sample()
+  → confidence_signal_method == "stp": estimate_confidence_stp()
+  → else: estimate_confidence()（self_report）
+```
+
+**hidden_state を「embedding ベースの信号」として扱う場合の変更量**:
+- `expert_backend.py`: **変更不要**（既存の `embed()` が `/api/embeddings` を通じて embedding を返す）
+- `router.py`: **変更不要**（既存の `estimate_embedding_confidence()` が cosine similarity → [0,1] 変換を行う）
+- `http_server.py`: **変更不要**（既存の `routing_method == "embedding"` ブランチが動作する）
+- `protocol.py`: **変更不要**
+- `node.py`: **変更不要**
+- `config.yaml`: `routing_method: self_report` → `routing_method: embedding` のみ
+
+**ただし**: Iter2（routing_method=embedding）は rejected。失敗原因:
+1. nomic-embed-text の task prefix 未付与（cross-lingual mismatch）
+2. cosine similarity が [0.67, 0.74] に潰れ弁別喪失
+
+**hidden_state を「raw hidden activation」として扱う場合の変更量**:
+- `expert_backend.py`: +50-100行（hidden state 抽出用の新しいメソッド実装、Ollama API 変更または vLLM 移行）
+- `router.py`: +30-50行（hidden state → confidence の変換ロジック、probe classifier 訓練/推論）
+- `http_server.py`: +10行（分岐追加）
+- **合計: ~90-160行**
+
+**分かったこと（Q4: ベースライン結果）**
+
+**ベースライン**: results/20260721_222225（Iter9, self_report）
+- top1_accuracy: 0.8696
+- single_domain_top1_accuracy: 0.8750
+- misrouting_rate: 0.1304
+
+**オフライン分析用データ**: results.jsonl に `probe_candidates` が記録済み（全ノードの confidence 値）。offline analysis で新しい signal の有効性を検証可能。
+
+**次の計画フェーズへの示唆**:
+1. **hidden_state = raw hidden activation の抽出は Ollama API では不可能**。実装には vLLM 移行または Ollama ソースコード修正が必要（大規模変更）。
+2. **hidden_state = embedding ベースの信号として解釈し直す**のが現実的。ただし Iter2 で rejected 済みなので、単に `routing_method=embedding` に戻すだけでは不十分。
+3. **Iter2 の教訓を踏まえた上での実装**: task prefix 付与 + probe classifier 訓練（Mahaut et al. 方式の簡易版）が必要。これは config-only の枠を超える。
+
+---
+
+**推奨する実装アプローチ**:
+
+**Option A: `routing_method=embedding` を再試行（task_prefix 修正付き）**
+- Iter2 で rejected された embedding ルーティングを、task prefix 修正 + probe classifier で再実装
+- 変更量: router.py + http_server.py の task prefix 追加（~10行）+ offline probe classifier 訓練スクリプト
+- 成功条件: top1_accuracy >= 0.87（baseline 非退行）
+
+**Option B: `confidence_signal_method=hidden_state` を embedding ベースの信号として定義し直す**
+- config levers で `hidden_state` を値として追加（values=[embedding_only] のみ）
+- http_server.py に new branch を追加（`elif state.confidence_signal_method == "hidden_state"`）
+- 内部で `estimate_embedding_confidence()` を呼ぶ
+- 変更量: http_server.py +5行、router.py +10行（新関数として wrapper）
+- Iter2 の教訓を踏まえつつ、新しい signal method として位置づけ
+
+**Option C: hidden state 抽出を断念し、別の signal source を検討**
+- Ollama API で取得可能な信号は embedding と logprobs のみ
+- logprobs は STP で失敗済み
+- embedding は Iter2 で問題あり（task prefix 修正で改善可能性）
+- hidden state 抽出を諦め、confidence prompt の設計変更や aggregator 側での signal 統合を検討
+
+**推奨: Option B**。理由: (1) config levers に `hidden_state` を追加する形式で単一レバー原則を維持できる。(2) 内部では既存の embedding 経路を使うため実装コスト最小。(3) Iter2 の失敗原因（task prefix）は別イテレーションで修正。本イテレーションでは「embedding ベースの信号が hidden_state として機能するか」を検証する。
 
 **単一レバー**: `confidence_signal_method=stp`（STP: Surrogate Token Probability）
 **判定**: **rejected（根本的失敗）** — トークン確率はドメイン expertise を測定できない信号

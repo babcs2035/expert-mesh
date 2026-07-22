@@ -3,6 +3,17 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+---
+
+## B25 [auto-decided 2026-07-22] Iter14: 全 levers 試し切り完了・研究サイクル収束判定
+
+- 状況: config levers の全7本を試行・検証。hidden_state は Ollama API で raw hidden state 抽出不可が決定。
+- 自動選択: `status="converged"` として研究サイクルを終了し、人間判断を待つ。
+- 根拠: (1) Ollama REST API で raw hidden states は取得できない（/api/embeddings は semantic representation のみ）。(2) embedding ベースの信号は Iter2 で rejected（task prefix 未付与で cross-lingual mismatch）。(3) 研究フロンティア全項目が単一レバー原則の枠を超える。
+- 要レビュー: 次のアクションを (A) 研究サイクル終了 or (B) 単一レバー原則再設計の上で研究フロンティア着手（例: routing_method=embedding + task_prefix 修正）のいずれかを選択すること。
+
+---
+
 書式:
 ```
 ## B{n} [auto-decided YYYY-MM-DD] 題目
