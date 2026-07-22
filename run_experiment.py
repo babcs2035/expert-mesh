@@ -88,9 +88,18 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
             "node_id": r.node_id,
             "domain": config["nodes"][r.node_id]["domain"],
             "confidence": r.confidence,
+            "confidence_logprobs_mean": r.confidence_logprobs_mean,
         }
         for r in result.probe_responses
     ]
+
+    # Extract STP logprobs signal from the selected node's probe response.
+    stp_logprobs: float | None = None
+    if result.probe_responses and selected_node_id is not None:
+        for pr in result.probe_responses:
+            if pr.node_id == selected_node_id:
+                stp_logprobs = pr.confidence_logprobs_mean
+                break
 
     return {
         "id": row["id"],
@@ -101,6 +110,7 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         "used_fallback": result.fallback_answer is not None,
         "dispatch_failed": result.dispatch_response is None and result.fallback_answer is None,
         "confidence": confidence,
+        "confidence_logprobs_mean": stp_logprobs,
         "answer_text": answer_text,
         "duration_ms": duration_ms,
         "dispatched_domains": dispatched_domains,

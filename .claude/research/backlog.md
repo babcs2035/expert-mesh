@@ -15,6 +15,27 @@
 
 ---
 
+## B24 [auto-decided 2026-07-22] STP レバー最終判定（rejected）および config levers 全試し切り・新レバー hidden_state 追加
+
+- 状況: Iter13（STP再実験）の結果、top1_accuracy=0.0652（baseline 0.8696 から -0.8044）。misrouting_rate=0.9348。STP confidence spread=0.0147（全ノード・全ドメインでほぼ同一）。
+- 自動選択: STP レバーを rejected と確定。config levers の全6レバーを試しまれた。新レバー `confidence_signal_method=hidden_state` を config.yml の levers 末尾へ追記して継続する。
+- 根拠: (1) Sigmoid 正規化が信号を破壊（spread 0.1328→0.0147）。(2) Raw logprobs は「生成 fluency」を測定しておりドメイン expertise を測定していない。(3) self_report（bimodal, spread 0.95）でさえ STP（uniform, spread 0.015）より良い信号だった。(4) research_frontier に hidden states / embeddings-based approach が明記済み（Mahaut et al. 2024）。(5) モデル生成に依存しない信号源の検討が必須。
+- 要レビュー: (1) hidden_state の実装詳細（last_layer activations vs embedding vectors のいずれを使用するか）。(2) config.yml levers への追記が単一レバー原則の枠を超える変更を伴うことを承認するか。(3) hidden_state 抽出には expert_backend.py の変更が必要（hidden state の取得経路）。
+- 関連する恒久知見: verbalized confidence（self_report）と token-level confidence（STP）の両方が失敗した時点で、モデル生成に依存しない新しい信号源の検討が必須。hidden states は「入力の内部表現とドメイン知識の一致度」を測定し、この2つのアプローチとは異なる特性が期待される。
+
+---
+
+## B23 [auto-decided 2026-07-22] STP sigmoid shift 調整による信号弁別力回復
+
+- 状況: STP コードは正常に動作したが、sigmoid(shift=2.0) の飽和領域で mean_logprob が動作し、signal の弁別力が失われた。top1_accuracy=0.043。raw logprob の spread は 0.1615 あるが、sigmoid-normalized confidence の spread は 0.0193 に圧縮。
+- 自動選択: router.py の sigmoid shift を 2.0 -> 0.0（raw logprob 直接使用）へ変更。次イテレーションで実施。ただしコード変更を伴うため単一レバー原則の枠を超える。rc-planner で承認を得て継続するか、調査フェーズから代替アプローチを検索するか判断させる。
+- 根拠: (1) STP コードは既にコミット済み（de37559）。(2) 修正コストは router.py の ~5行のみ。(3) raw logprob は [-inf, +inf] の広い範囲を持ち弁別力が高い。(4) config levers は全試し切り済み。次はコード変更を伴うアプローチに切り替える必要がある。
+- 要レビュー: (1) shift=0.0 が最適な値か、あるいは最適化された shift 値（例: raw logprob の分布から計算）すべきか。(2) コード変更を伴うレバーとして単一レバー原則の枠を超えることを承認するか。(3) STP 修正以外にも代替アプローチ（confidence prompt の出力フォーマット強制 JSON、aggregator での raw logprob 直接使用）があるため、それらとの比較検討も必要。
+
+---
+
+
+
 ## B22 [auto-decided 2026-07-22] Iter12: infrastructure_failure - デプロイフローの修正と STP 再実験
 
 - 状況: Iter12（STP）の結果は無効。`mise run deploy` が Docker イメージを再ビルドせず、Python コード変更がコンテナ内に反映されなかった。全 probe が self_report 経路を通り、結果は baseline と同等の run 間ノイズ。

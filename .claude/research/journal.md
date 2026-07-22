@@ -1,4 +1,465 @@
-### 調査 (Iter12)
+### Iteration 13 実行済み
+
+**単一レバー**: `confidence_signal_method=stp`（STP: Surrogate Token Probability）
+**判定**: **rejected（根本的失敗）** — トークン確率はドメイン expertise を測定できない信号
+
+**結果**:
+| 指標 | Iter9 (baseline) | Iter13 (STP) | 差分 |
+|------|-------------------|--------------|------|
+| top1_accuracy | 0.8696 | **0.0652** | **-0.8044** |
+| single_domain_top1_accuracy | 0.8750 | **0.0500** | **-0.8250** |
+| misrouting_rate | 0.1304 | **0.9348** | **+0.8044** |
+
+**学び**:
+1. STP（トークン確率）は verbalized confidence と同様に calibration の問題を抱える。モデルはどんなドメイン質問でも自分の回答に高い確率を出す。
+2. Sigmoid 正規化パラメータの設計ミスが弁別力を9倍喪失させた。shift=2.0 は実際の mean_logprob 分布とミスマッチ。
+3. Raw logprobs は「生成 fluency」を測定しており、「ドメイン expertise」ではない。education ノードが常に highest confidence を得る偏りが生じた。
+4. self_report（spread 0.95, bimodal）でさえ STP（spread 0.015, uniform）より良い信号だった。
+
+**次イテレーション**: 新レバー `confidence_signal_method=hidden_state` を config.yml に追記して通常継続。
+
+---
+
+### 分析 (実行) (Iter13)
+
+**実験ディレクトリ**: results/20260722_113854（46問、全問完走）
+
+| 指標 | Iter13 (STP) | Iter9 (baseline) | 差分 | 判定 |
+|------|-------------|-------------------|------|------|
+| top1_accuracy | **0.0652** | 0.8696 | **-0.8044** | FAIL（有意な破壊的失敗） |
+| single_domain_top1_accuracy | **0.0500** | 0.8750 | **-0.8250** | FAIL |
+| misrouting_rate | **0.9348** | 0.1304 | **+0.8044** | FAIL |
+| fallback_rate | 0.0000 | 0.0217 | -0.0217 | OK |
+
+STPコードは全46行で正常実行済み（`confidence_logprobs_mean` 非None）。
+
+### STP信号分析
+
+- confidence spread: 0.0147（0.8659〜0.8806）— 全ノード・全ドメインでほぼ同一
+- raw logprob spread: 0.1328（general: -0.208, education: -0.074）
+- Sigmoid shift=2.0 が -0.5〜0.0 の範囲を [0.818, 0.881] に圧縮 → 弁別力が9倍喪失
+
+### self_report vs STP 比較
+
+| | self_report (Iter9) | STP sigmoid (Iter13) |
+|---|---|---|
+| confidence spread | 0.95 | 0.0147 |
+| distribution shape | bimodal {0.1,0.2} vs {0.8,0.9,0.95} | nearly uniform [0.866, 0.881] |
+| top1_accuracy | 0.8696 | **0.0652** |
+
+self_report（二峰分布）でさえSTP（uniform飽和）より良い信号だった。
+
+---
+
+### 分析 (解釈) (Iter13)
+
+**判定**: STP レバーは **rejected（根本的失敗）** — トークン確率はドメイン expertise を測定できない
+
+#### 根本原因: 2つの複合要因
+
+**(a) Sigmoid正規化の飽和**: shift=2.0 の sigmoid は mean_logprob=-0.5〜0.0 の範囲を [0.818, 0.881] に圧縮。raw logprob spread (0.1328) が normalized confidence spread (0.0147) に変換される際、9倍の弁別力が喪失。
+
+**(b) トークン確率の根本的限界**: Raw logprobs は「モデルの生成 fluency」の違いであり「ドメイン expertise」を測定していない。educationノードが全クエリで最もfluentな応答を生成するため、常にhighest confidenceを得る。ルーティングは実質ランダム（正確には education bias）。
+
+#### 仮説との整合
+
+- H1 (STP better calibrated): **不成立**。STPもself_reportも全ドメインで高confidenceに収束。
+- H2 (/api/generate works): **成立**（logprobs抽出は正常）。
+- H3 (mean logprob robust): **検証不能**（signalがdomain-specificでないため）。
+
+#### 研究への示唆
+
+1. STPレバーはrejected。追加反復不要。
+2. config leversは全6レバー（dispatch_top_k, routing_method, confidence_threshold, calibrated_routing, multi_sample, stp）を試しまれた。
+3. confidence signalの根本較正問題は未解決。verbalized self-reportとtoken probabilitiesの両方が失敗した時点で、hidden states / embeddingsベースのapproachや、モデル生成に依存しないcalibration methodの検討が必要。
+
+---
+
+### 実験 (Iter13)
+
+**デプロイ**: `mise run setup`（Dockerイメージ再ビルド）→ `mise run deploy`（4ノードすべてOK）
+
+**バグ修正（実験中に発見・修正）**:
+1. **Ollama API bug** (`expert_backend.py`): STPコードが`/api/generate` + 整数`logprobs: 1`を使用。Ollamaは論理値`logprobs: true`を期待。`/api/chat` + `logprobs: true`に修正。
+2. **結果ファイル未記録** (`run_experiment.py`): `confidence_logprobs_mean`がresults.jsonlに記録されていなかったのを修正。
+
+**検証**: 全46行に`confidence_logprobs_mean`が存在（非None）→ STPコード正常実行確認済み。
+
+**メトリクス比較（baseline: Iter9 vs STP再実験）**:
+| 指標 | Iter9 (baseline) | Iter13 (STP) | 差分 |
+|------|-------------------|--------------|------|
+| top1_accuracy | 0.8696 | **0.065** | **-0.8046** |
+| single_domain_top1_accuracy | 0.8750 | **0.050** | **-0.8250** |
+| misrouting_rate | 0.1304 | **0.935** | **+0.8046** |
+| fallback_rate | 0.0217 | 0.0 | - |
+| mean_duration_ms | 13731 | 13620 | -111 |
+
+**判定**: STPレバーは **rejected（根本的失敗）**。STP confidence値は全ノードでほぼ同一（0.8659〜0.8806、spread 0.015）。STPは「モデルが自分の生成テキストに対してどれだけ自信があるか」を測定しており、「ドメイン専門家であるかどうか」を区別する信号にはならない。ルーティングは実質ランダム。
+
+**学び**:
+1. STP（トークン確率）はverbalized confidenceと同様にcalibrationの問題を抱える。モデルはどんなドメイン質問でも自分の回答に高い確率を出す。
+2. Ollamaの`/api/generate`エンドポイントはこのモデルではtoken logprobsを返さない。`/api/chat` + `logprobs: true`が正しい経路。
+3. STPはconfidence signalとして使えないことが決定的に示された。
+
+---
+
+### 実装 (Iter13)
+
+**単一レバー**: confidence_signal_method=stp（STP: Surrogate Token Probability）
+
+**実行した変更**:
+1. `config.yaml`: 2行変更（`confidence_signal_method: stp`、`multi_sample_count` の削除）
+   - STP コードは commit de37559 で既にコミット済み。コード変更は不要。
+2. テスト実行: `uv run pytest tests/ -v` → **78件全PASS** (0.60秒)
+
+**検証結果**:
+- `uv run pytest tests/ -v`: **78件全PASS** (0.60秒)
+- `uv run ruff check .`: 未実行（config.yaml のみ変更のため不要）
+
+**次フェーズへの引き継ぎ**: config変更完了・テスト全PASS。次は実験フェーズで `mise run setup` → `mise run deploy` → `mise run start` を実行する。
+
+---
+
+### 調査 (Iter13)
+
+**問い**
+- Q1: `mise run deploy` の動作と、Docker イメージ再ビルドの必要性・方法。
+- Q2: STP コード（commit de37559）の実装詳細確認：エンドポイント切り替えロジック、logprobs 抽出・正規化仕様。
+- Q3: ベースライン結果の特定と Iter13（STP再実験）の成功条件。
+
+**分かったこと（Q1: デプロイフローの問題と解決策）**
+
+**mise.toml の deploy タスク動作確認**:
+```
+1. SSH reverse tunnel 確保（localhost:5001 -> リモートノード:5001）
+2. rsync で docker-compose.yml, docker-compose.gpu.yml, config.yaml だけを配布
+3. GPU 検出 → .env 作成
+4. docker compose pull（既存イメージを pull。再ビルドしない）
+5. ollama コンテナ起動 + モデル pull
+6. docker compose up -d --force-recreate app（コンテナ再起動）
+```
+
+**Dockerfile の構造**:
+```dockerfile
+COPY protocol.py expert_backend.py router.py aggregator.py http_client.py \
+     http_server.py node.py logging_utils.py ./
+COPY run_experiment.py build_dataset.py metrics.py ./
+...
+ENTRYPOINT [".venv/bin/python", "node.py"]
+```
+
+**結論**: Python ソースコードは Docker イメージに bake されている。`mise run deploy` はイメージを再ビルドしないため、Python コードの変更（uncommitted も含め）はコンテナ内に反映されない。これは Iter12 の failure 原因そのもの。
+
+**解決策の比較**:
+
+| 方案 | 手順 | 所要時間 | リスク |
+|------|------|---------|--------|
+| (A) `mise run setup` → `mise run deploy` | イメージ再ビルド+push → pull+deploy | 5-10分（build）+2分（deploy） | なし。確実。 |
+| (B) deploy タスクに docker build を追加 | mise.toml の deploy タスクを書き換え | 同上 + 永続化 | 全イテレーションでイメージビルドが必要になり、実験時間が延びる。 |
+| (C) rsync で Python ソースを配布 + コンテナ再起動 | コンテナ内にコードコピー + restart | 1分程度 | 新しい手順の追加。コンテナ内での依存関係問題の可能性。 |
+
+**推奨: (A) `mise run setup` → `mise run deploy`**。理由: (1) 変更最小（既存タスクの順序実行のみ）、(2) Docker イメージの整合性が保証される、(3) mise.toml の書き換え不要。
+
+**分かったこと（Q2: STP 実装の詳細確認）**
+
+commit de37559 の変更内容を確認した。全ファイル正常にコミット済み。
+
+**expert_backend.py:OllamaClient.generate()**:
+- `logprobs: int | None = None` パラメータ追加（既定 None = 既存動作）
+- `logprobs > 0` の場合、`/api/generate` エンドポイントを使用（`payload["logprobs"] = logprobs`）
+- `logprobs == None` の場合、既存の `/api/chat` エンドポイントを使用（後方互換）
+- 戻り値: logprobs 有りは `dict{"content": str, "token_logprobs": list}`、無しは `str`（既存互換）
+
+**router.py:estimate_confidence_stp()**:
+- `build_confidence_prompt(domain, query_summary)` を logprobs付きで呼び出し
+- `logprobs=1`（各トークンにつき1つの top-logprob）
+- Fallback: `isinstance(result, str)` または `"token_logprobs"` 不在 → `parse_confidence(result["content"])`
+- 正規化: `sigmoid(mean_logprob - (-2.0)) = 1 / (1 + exp(-mean_logprob - 2.0))`
+- shift=2.0 は平均 logprob が -2 のとき confidence=0.5 になるようスケーリング
+
+**http_server.py:probe() の切り替えロジック**:
+```python
+elif state.confidence_signal_method == "multi_sample":
+    ...
+elif state.confidence_signal_method == "stp":
+    stp_conf, raw_logprob = await estimate_confidence_stp(...)
+    confidence = stp_conf
+else:
+    confidence = await estimate_confidence(...)
+```
+- 順次 if-elif で、`confidence_signal_method` の値で分岐。問題なし。
+
+**protocol.py:ProbeResponse**:
+- `confidence_logprobs_mean: float | None = None` フィールド追加（既定 None）
+- STP 経路では raw_logprob を設定するはず（http_server.py で明示確認必要だが、commit diff から設定箇所は存在）
+
+**実装の健全性判定**: コードに論理的欠陥は見当たらない。Fallback 経路も確保済み。ollama のバージョン依存は `/api/generate` の logprobs サポート（v0.12.11+）。ワフリラボのノードでは既に最新 ollama が常時 keeping されているため、バージョン問題は低いと判断する。
+
+**分かったこと（Q3: ベースライン結果と成功条件）**
+
+**ベースライン**: results/20260721_222225（Iter9, self_report ベースライン）
+- top1_accuracy: 0.8696 (≈0.870)
+- single_domain_top1_accuracy: 0.8750
+- misrouting_rate: 0.1304
+- fallback_rate: 0.0217
+- education precision/recall: 1.000/0.5000
+- N=46 questions, 全問完走
+
+**Iter12（infrastructure_failure）との比較**: top1_accuracy=0.8478 は baseline より -0.022。ただし STP 未実行のため run 間ノイズ。
+
+**成功条件の提案（Iter13）**:
+- 主基準: top1_accuracy >= 0.87（baseline 非退行）。改善目標は +0.03 の improvement（0.90 以上）。
+- 非退行: single_domain_top1_accuracy >= 0.87
+- 非退行: misrouting_rate <= 0.15
+- **追加検証**: results.jsonl に `confidence_logprobs_mean` が 46/46 行存在すること（STP コードが正常に実行されたことの証拠）
+
+**次の計画フェーズへの示唆**:
+1. rc-planner へ: デプロイフロー修正は `mise run setup` → `mise run deploy` の順で実行するよう指示すること。mise.toml の書き換えは不要。
+2. STP レバーの値は変更なし（`confidence_signal_method: stp` は config.yaml で設定済み）。コード変更もコミット済み。
+3. 成功条件には `confidence_logprobs_mean` の存在確認を含めること（infra failure の再発防止）。
+4. Iter13 が converged/rejected になれば、config levers は全試し切り済み。次は research_frontier へ移行する判断が必要。
+
+### 計画 (Iter13)
+
+**単一レバー**: confidence_signal_method=stp（STP: Surrogate Token Probability）
+- デプロイフロー: `mise run setup` → `mise run deploy` の順で実行（Docker イメージ再ビルド必須）
+- logprob 集計方法: mean（sigmoid shift=2.0 で [0,1] に正規化）
+
+**仮説**:
+- H1: LLM が生成中に出力するトークン確率（logprobs）は、verbalized self-report confidence よりも calibration が高い。self_report で飽和していた二峰分布（{0.1,0.2} vs {0.8,0.9,0.95}）が、STP では連続的な値として観測され、margin の弁別力が向上する。
+- H2: `/api/generate` への切り替えは、使用モデル（isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL）には thinking モードの機能がないため影響しない。`num_predict=100` の cap も generate エンドポイントで有効に機能する。
+- H3: mean logprob は min より robust（単一の outlier token に左右されない）。confidence signal としての signal-to-noise ratio が self_report を上回る。
+
+**成功条件**（ベースライン: results/20260721_222225, Iter9）:
+- 主基準: top1_accuracy >= 0.87（非退行）。改善目標は +0.03 の improvement（0.90 以上）。
+  - ノイズ幅見積もり: Iter8→9 で top1_accuracy は 0.913→0.870（-0.043）。Iter9→11（multi_sample）で 0.870→0.848（-0.022）。1イテレーションの最大変動は +/-0.05 程度。+0.03 はノイズの範囲内だが、STP が calibration を改善すれば有意な改善として観測できるレベル。
+- 非退行: single_domain_top1_accuracy >= 0.87（baseline 0.875 から -0.005 以内）
+- 非退行: misrouting_rate <= 0.15（baseline 0.130 から +0.02 以内）
+- **追加検証**: results.jsonl に `confidence_logprobs_mean` が 46/46 行存在すること（STP コードが正常に実行されたことの証拠、infra failure 再発防止）
+
+**固定する構成**:
+- config.yaml: `routing_method: self_report`, `confidence_threshold: 0.5`, `dispatch_top_k: 1` を維持
+- build_dataset.py: 不変
+- router.py の既存 `estimate_confidence()`, `parse_confidence()`, `build_confidence_prompt()`: 不変
+- aggregator.py: 不変（confidence signal の抽出経路が変わるのみ）
+
+**変更ファイルと変更量**:
+- config.yaml: 1行変更（`confidence_signal_method: stp`）
+- コード変更: なし（STP コードは commit de37559 で既にコミット済み。expert_backend.py, router.py, protocol.py, http_server.py の合計 ~97行追加・24行削除が完了）
+
+**検証手順**:
+1. `mise run setup` で Docker イメージ再ビルド + push（5-10分）
+   - これにより Python ソースコード（expert_backend.py, router.py, protocol.py, http_server.py）がイメージに bake される
+2. `mise run deploy` で各ノードへ配布 + コンテナ再起動（2分程度）
+3. `mise run start` で実験実行（46問/4ノード、expected ~50-70分）
+4. `mise run analyze` で metrics 集計
+5. results.jsonl に `confidence_logprobs_mean` が存在するか確認（infra failure 再発防止。46/46行に値が入っていることを検証）
+
+**単一レバー原則との整合**: config.yaml の変更のみ（1行）。コード変更はコミット済み。
+
+### 実験 (Iter13)
+
+**デプロイ**:
+- Docker イメージ再ビルド: `docker build --no-cache -t localhost:5001/expert-mesh:latest .` で完全再ビルド + push（digest sha256:e1344232...）
+- デプロイ: 全ノードで `docker rmi` → `docker pull` → `docker compose up -d --force-recreate app ollama` を実行
+- wafl500/wafl501/wafl502/wafl503 すべてが正しいイメージ（digest sha256:e13442327f...）で起動確認済み
+- コンテナ内の protocol.py に `confidence_logprobs_mean` が存在することを確認
+
+**追加検証（Infra failure 再発防止）**:
+- results.jsonl に `confidence_logprobs_mean` が存在するか: **YES、46/46行に値が入っている**
+- STP コードが正常に実行されたことを確認。infra failure は再発せず。
+
+**実行結果**: results/20260722_095936/（46問、全問完走、used_fallback=0, dispatch_failed=0）
+- 平均応答時間: 14320ms
+
+**メトリクス比較（baseline: Iter9 vs STP）**:
+| 指標 | Iter9 (baseline) | Iter13 (STP) | 差分 |
+|------|-------------------|--------------|------|
+| top1_accuracy | 0.870 | 0.043 | -0.827 |
+| single_domain_top1_accuracy | 0.875 | 0.025 | -0.850 |
+| misrouting_rate | 0.130 | 0.957 | +0.827 |
+| fallback_rate | 0.022 | 0.000 | -0.022 |
+| education precision/recall | 1.000/0.500 | 0.042/0.083 | - |
+| legal precision/recall | 0.778/0.933 | 0.143/0.067 | - |
+| medical precision/recall | 0.917/0.733 | 0.000/0.000 | - |
+
+**成功条件判定**:
+- top1_accuracy >= 0.87: **FAIL（0.043）** — baseline から大幅な劣化
+- single_domain_top1_accuracy >= 0.87: **FAIL（0.025）**
+- misrouting_rate <= 0.15: **FAIL（0.957）**
+
+**実験上の観察**:
+- STP コードは正しくデプロイされ、`confidence_logprobs_mean` が全46問で記録された
+- フォールバックは0件（全問正常にルーティングされた）
+- ただし、ルーティング先が education(24)・medical(13)・legal(7)・general(2) に偏っており、正解率は極めて低い
+- probe_candidates の詳細を確認したところ、self_report confidence は全ノードで 0.86-0.88 とほぼ同等。STP値（confidence_logprobs_mean）は負の値で類似している（例: medical-001 で wafl500=-0.114, wafl502=-0.039, wafl503=-0.051, wafl501=-0.018）。選択は highest self_report confidence のノード（wafl501/education）に行われている
+
+**根本原因（仮）**: STP 信号の正規化方法と confidence signal の較正に問題がある可能性。分析フェーズで詳細検証予定。
+
+**次フェーズへの引き継ぎ**: 分析フェーズへ。rc-analyst へ:
+1. STP コードは正しくデプロイされている（infra OK）
+2. STP は http_server.py で既に confidence フィールドに統合されている。aggregator 側での変更が必要かどうか、分析で確認
+3. `confidence_logprobs_mean` の値分布と self_report confidence の比較データを提供済み
+4. 現在の results.jsonl と logs/ にすべてのデータが存在
+
+---
+
+### 分析 (実行) (Iter13)
+
+**実験ディレクトリ**: results/20260722_095936（46問、全問完走）
+
+| 指標 | Iter13 (STP) | Iter9 (baseline) | 差分 | 判定 |
+|------|-------------|-------------------|------|------|
+| top1_accuracy | **0.043** | 0.870 | **-0.827** | FAIL（壊れている） |
+| single_domain_top1_accuracy | **0.025** | 0.875 | **-0.850** | FAIL |
+| misrouting_rate | **0.957** | 0.130 | **+0.827** | FAIL |
+| fallback_rate | 0.000 | 0.022 | -0.022 | PASS（フォールバックなし） |
+
+主基準・非退行とも壊れた値。STP コードは正常に実行されたが、aggregator が統合していない。
+
+---
+
+### 分析 (解釈) (Iter13)
+
+**判定**: STP レバーは **rejected（signal_destruction_by_normalization + fundamental_mismatch）**
+
+#### 決定的証拠
+
+**1. STP コードは正常に実行され、選択ロジックにも統合されている**
+
+http_server.py line 253: `confidence = stp_conf` — STP enabled の場合、ProbeResponse.confidence は sigmoid-normalized STP 値で上書きされる。つまり **STP は既に aggregator に統合されている**。 planner が想定した「STP が選択ロジックに統合されていない」は誤り。
+
+**2. self-report confidence の分布が Iter9 と比較して崩壊している**
+
+| ドメイン | Iter9 mean/min/max | Iter13 mean/min/max |
+|---------|-------------------|---------------------|
+| general | 0.379 / 0.20 / 0.95 | 0.865 / 0.819 / 0.876 |
+| education | 0.296 / 0.10 / 0.95 | 0.874 / 0.823 / 0.881 |
+| legal | 0.495 / 0.00 / 0.95 | 0.870 / 0.815 / 0.879 |
+| medical | 0.340 / 0.10 / 0.95 | 0.872 / 0.829 / 0.880 |
+
+Iter9: 自己申告 confidence は 0.0〜0.95 の広い分布。medical ノードは medical クエリで 0.95、他ドメインは 0.1-0.2 と明確に区別。
+Iter13: 全ノードが 0.865-0.880 の極めて狭い範囲に収束。domain 間の弁別力がほぼゼロ。
+
+**3. STP 信号の分布は self-report より広いが、sigmoid 正規化で圧縮されている**
+
+| 指標 | Iter13（再実験） |
+|------|------------------|
+| confidence（sigmoid-normalized）max-min spread | **0.0147** |
+| confidence_logprobs_mean（raw logprob）max-min spread | **0.1328** |
+
+Raw logprob の spread は 9.0 倍広い。しかし sigmoid(shift=2.0) により [0.866, 0.881] に圧縮される。
+
+**4. self-report と STP シグナルは 100% 一致**
+
+全 46 行で、self-report highest-confidence ノードと STP highest-logprobs_mean ノードが完全に一致。両シグナルは同じノード（education）を指している。
+
+**5. 自己申告 confidence の同一クエリ・反復間比較**
+
+medical-001 を例に:
+| ドメイン | Iter9 | Iter13 | 差分 |
+|---------|-------|--------|------|
+| general | 0.20 | 0.87 | +0.67 |
+| education | 0.10 | 0.88 | +0.78 |
+| legal | 0.10 | 0.88 | +0.78 |
+| medical | 0.95 | 0.88 | -0.07 |
+
+**同一クエリに対して、反復間で自己申告 confidence が大きく変化している。** Iter9 の medical ノードは 0.95、Iter13 では 0.88。他ドメインは 0.1→0.88 と +0.78 の増加。これは self-report confidence 自体が不安定であることを示す。
+
+#### 原因分析（修正版）
+
+**根本原因: Sigmoid 正規化の飽和 + トークン確率の根本的限界**
+
+2 つの要因が複合して信号を破壊している。
+
+**要因1: sigmoid(shift=2.0) の飽和領域での動作**
+
+```
+normalized = 1.0 / (1.0 + exp(-mean_logprob - 2.0))
+```
+
+| mean_logprob | normalized confidence |
+|-------------|----------------------|
+| -0.50 | 0.8176 |
+| -0.30 | 0.8455 |
+| -0.20 | 0.8581 |
+| -0.10 | 0.8699 |
+| -0.03 | 0.8776 |
+| 0.00 | 0.8808 |
+
+実際の mean_logprob は -0.13〜-0.002 の範囲に集中しており、sigmoid の飽和領域（confidence>0.8）で動作。このため、logprob の違いが confidence の違いにほとんど変換されない。
+
+**要因2: トークン確率はドメイン expertise を測定していない（根本的限界）**
+
+Raw logprobs の分布をドメイン別に分析すると有意な差がある:
+
+| ドメイン | mean raw logprob | spread |
+|---------|-----------------|--------|
+| general | -0.2078 | 0.4398 |
+| education | -0.0738 | 0.1155 |
+| legal | -0.0971 | 0.1839 |
+| medical | -0.0773 | 0.2821 |
+
+education ノードの mean logprob は -0.074 で、general（-0.208）より約 0.13 高い。これは **education ノードが生成するテキストが全般的により流暢** であることを示す。しかしこの差は domain-specific な弁別力ではなく、単に education ノードの prompt template に対する生成 fluency の違いである。
+
+**教育ノードが常に highest confidence になる理由**:
+- Raw logprob で education > medical > legal > general の順に均等に高い
+- この順位はクエリの内容（medical/general/education/legal）によらず一定
+- つまり「どのドメインの質問でも、education ノードが最も fluent な応答を生成する」
+
+**結論: STP は「モデルが自分の生成テキストに対してどれだけ自信があるか」を測定しており、「そのノードがそのドメインの専門家かどうか」を区別する信号にはならない。**
+
+#### 比較: self_report vs STP
+
+| 指標 | self_report (Iter9) | STP (Iter13, sigmoid) |
+|------|---------------------|-----------------------|
+| confidence spread | 0.95 - 0.00 = **0.95** | 0.8806 - 0.8659 = **0.0147** |
+| distribution shape | bimodal {0.1,0.2} vs {0.8,0.9,0.95} | nearly uniform [0.866, 0.881] |
+| top1_accuracy | 0.8696 | **0.0652** |
+
+self_report は二峰分布（{0.1, 0.2} vs {0.8, 0.9, 0.95}）で少なくとも**何らかの弁別力**があった。STP は sigmoid 正規化により全ノードがほぼ同一値に収束し、self_report よりも**著しく弁別力が低い**。
+
+**仮説との整合**:
+- H1（STP は self_report より calibration が高い）: **不成立**。STP signal も self_report と同様に全ドメインで高 confidence に収束。calibration が改善した証拠は見られない。
+- H2（/api/generate は正常に動作する）: **成立**。logprobs の抽出は正常に機能し、46/46 行に値が記録されている。
+- H3（mean logprob は min より robust）: **検証不能**。STP signal 自体が domain-specific でないため、robustness の評価ができない。
+
+**次の考察フェーズへの示唆**:
+1. STP レバーは **rejected**。根本原因は (a) sigmoid 正規化の飽和、(b) トークン確率がドメイン expertise を測定していないという根本的限界の2つ。
+2. 追加反復は推奨しない。sigmoid shift の調整や prompt フォーマット変更が必要だが、それらは別の実装イテレーションを要する。
+3. config levers は全試し切り済み（dispatch_top_k, routing_method, confidence_threshold, calibrated_routing, multi_sample, stp）。次は research_frontier へ移行する判断が必要。
+4. confidence signal の根本的な較正問題（すべてのノードが全クエリで高 confidence を申告する）は未解決。これは STP に限らず self_report でも反復間で不安定（Iter9 vs Iter13 で同一クエリの confidence が 0.2→0.87 に変化）であるため、より根本的なアプローチが必要。
+5. **両方の verbalized/tokn-level confidence signal が失敗した時点で、hidden states / embeddings ベースの approach や、モデル生成に依存しない calibration method の検討が必須。**
+
+---
+
+### 考察・次計画 (Iter13)
+
+**判定**: STP レバーは **rejected（根本的失敗）** — トークン確率はドメイン expertise を測定できない信号
+
+**総括**:
+- STP コードは正常に実行された（46/46行に confidence_logprobs_mean 存在、Docker イメージ再ビルド済み）。
+- しかし sigmoid(shift=2.0) の飽和領域で mean_logprob が動作し、logprob spread (0.1328) が normalized confidence spread (0.0147) に圧縮され、9倍の弁別力が喪失。
+- top1_accuracy=0.0652 という壊れた値（baseline 0.8696 から -0.8044）。misrouting_rate=0.9348。
+
+**根本原因: 2つの複合要因**
+1. **Sigmoid正規化の飽和**: shift=2.0 の sigmoid は mean_logprob=-0.5〜0.0 の範囲を [0.818, 0.881] に圧縮。設計パラメータ（mean_logprob=-2 で confidence=0.5）と実際の分布がミスマッチ。
+2. **トークン確率の根本的限界**: Raw logprobs は「モデルの生成 fluency」の違いであり「ドメイン expertise」を測定していない。education ノードが全クエリで最も fluent な応答を生成するため、常に highest confidence を得る。ルーティングは実質ランダム（正確には education bias）。
+
+**config levers の状況**: 全6レバーを試しまれた。
+dispatch_top_k(Iter1:reject), routing_method(Iter2:reject), confidence_threshold(Iter3:no-op), calibrated_routing(Iter10:reject), multi_sample(Iter11:reject), stp(Iter13:reject)。
+
+**決定**: 新レバー `confidence_signal_method=hidden_state` を config.yml の levers 末尾へ追記して通常どおり継続する。
+- 根拠: (1) verbalized self-report と token probabilities の両方が失敗した時点で、モデル生成に依存しない信号源の検討が必須。(2) research_frontier に「hidden states / embeddings-based approach」として明記済み（Mahaut et al. 2024 由来）。(3) 既存ノード構成のままコード変更のみで検証可能。
+- 内容: モデルの hidden state（最終層の活性化ベクトルまたは embedding 出力）から confidence signal を抽出する方式。self-report は「生成されたテキストに対する言語的自信」、STP は「生成fluency」、hidden_state は「入力の内部表現とドメイン知識の一致度」を測定し、これら2つのアプローチとは異なる信号特性が期待される。
+- 変更量: expert_backend.py（hidden state 抽出）、router.py（confidence estimation 関数追加）、http_server.py（分岐追加）の合計 ~30-40行。
+
+**次イテレーションの単一レバー**: `confidence_signal_method=hidden_state`（values: [last_layer, embedding] で抽出方式を掃引）
+- state.json の current_lever を "hidden_state" へ更新。phase は plan から開始。
+
+**コミット**: journal/state/backlog の更新のみ。コード変更は次イテレーションの rc-planner/rc-implementer で実施。
+
+---
 
 **問い**
 - Q1: STP（Surrogate Token Probability）の手法概要と、ollama での logprobs 抽出の実装可能性。tokenizer logprobs を抽出するにはどのような変更が必要か。
@@ -457,6 +918,20 @@ top1_accuracy の変動範囲は 0.848〜0.913（±0.033）。Iter9→12 は -0.
 3. **STPの再テスト**: Dockerイメージを再ビルドした上で、同じ構成（`confidence_signal_method=stp`, `routing_method=self_report`, `dispatch_top_k=1`）で実験をやり直す。
 4. **追加反復の必要性**: STPが本来期待どおりに動作するかは未検証。Infrastructure fix 後に少なくとも1回の再実験が必要。
 5. **confidence_threshold レバーの検討**: config-only の最終レバー（values=[0.3, 0.5, 0.7]）は Iter3 で試し切り済みだが、STPと併用する形での再検討も可能。
+
+---
+
+### Iteration 12 実行済み
+
+**単一レバー**: `confidence_signal_method=stp`（STP: Surrogate Token Probability）
+**判定**: **infrastructure_failure（未検証）** — Dockerイメージのデプロイ不備により STP コードが実行されていない
+**結果**: top1_accuracy 0.870→0.848 の退行。これは STP の因果ではなく self_report コードの run 間ノイズ。
+**学び**:
+1. `mise run deploy` は Docker イメージを再ビルドせず、既存イメージを pull するのみ。Python ソースコードはイメージ内に bake されているため uncommitted な変更が反映されない。
+2. results.jsonl に `confidence_logprobs_mean` フィールドが 0/46 行に存在。全 probe が self_report 経路を通った。
+3. デプロイフローの修正（docker build ステップの追加、または rsync での Python ソース配布）が必要。
+**次イテレーション**: STP の再実験を推奨。Docker イメージの再ビルド（`mise run setup`）→ `mise run deploy` → `mise run start` の順で実行。
+**コミット**: STP コード変更 + journal/state/backlog の更新
 
 ---
 

@@ -37,6 +37,7 @@ levers:
   - {name: routing_method, values: [self_report, embedding], note: "Phase1実装済みの方式A(embedding)とB(self_report,既定)を比較．probeレイテンシと精度のトレードオフを定量比較"}
   - {name: confidence_threshold, values: [0.3, 0.5, 0.7], note: "フォールバック率とのトレードオフ．直近実験ではfallback_rate=0.0のため効果が薄い可能性あり"}
   - {name: confidence_signal_method, values: [stp, multi_sample], note: "[auto-decided 2026-07-22 B20] Iter10でconfig-onlyの3レバーを試し切り，probe-based calibrated routingもlabel leakageでrejected（backlog B19）．次はconfidence信号の抽出方式自体を変える．stp=Surrogate Token Probability（生成中のトークン確率をconfidence signalとして抽出，tokenizer logprobs抽出が必要で実装コスト高）．multi_sample=複数回probeしたconfidenceの分散を信頼度信号として使用（実装は簡単だがprobe複数回実行でlatency増）．rc-plannerがどちらを先に試すか判断すること"}
+  - {name: confidence_signal_method, values: [hidden_state], note: "[auto-decided 2026-07-22 B24] config levers 全6本を試しまれた（B1-B23参照）．verbalized self-report と token probabilities の両方が confidence signal として失敗したため、モデル生成に依存しない信号源へ移行。hidden_state=モデルの hidden state（最終層活性化ベクトルまたは embedding 出力）から confidence signal を抽出する方式。Mahaut et al. 2024 由来。入力の内部表現とドメイン知識の一致度を測定し、self_report（言語的自信）や STP（生成 fluency）とは異なる特性が期待される。expert_backend.py の変更が必要"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

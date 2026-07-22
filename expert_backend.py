@@ -33,9 +33,10 @@ class OllamaClient:
     ) -> str | dict:
         """Generate text with optional token-level logprobs.
 
-        When logprobs is set (> 0), uses /api/generate endpoint which supports
-        token probability extraction (ollama v0.12.11+). Otherwise falls back
-        to /api/chat for thinking-model compatibility.
+        When logprobs is set (> 0), uses /api/chat endpoint with logprobs:true
+        for token probability extraction (this endpoint returns logprobs for the
+        models used in this project, whereas /api/generate does not). Otherwise
+        uses /api/chat for thinking-model compatibility.
 
         Returns a string (content only) when logprobs is not requested, or a
         dict with 'content' (str) and optionally 'token_logprobs'
@@ -50,15 +51,18 @@ class OllamaClient:
             options["temperature"] = temperature
 
         if logprobs and logprobs > 0:
-            # Use /api/generate for logprobs support (ollama v0.12.11+)
-            payload: dict = {
+            # Use /api/chat for logprobs support — this endpoint returns
+            # token-level logprobs for the models used in this project,
+            # whereas /api/generate does not (even with logprobs:true).
+            payload = {
                 "model": model,
-                "prompt": prompt,
+                "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
-                "options": options,
+                "think": False,
+                "logprobs": True,
             }
-            if logprobs > 0:
-                payload["logprobs"] = logprobs
+            if options:
+                payload["options"] = options
         else:
             # Use /api/chat for thinking-model compatibility
             payload = {
@@ -72,16 +76,23 @@ class OllamaClient:
 
         for attempt in range(DEFAULT_RETRIES):
             try:
-                endpoint = "/api/generate" if (logprobs and logprobs > 0) else "/api/chat"
+                endpoint = "/api/chat"
                 async with httpx.AsyncClient(timeout=timeout_s) as client:
                     response = await client.post(f"{self._host}{endpoint}", json=payload)
                     response.raise_for_status()
                     data = response.json()
                     if logprobs and logprobs > 0:
-                        result: dict = {"content": data.get("response", "")}
-                        if "token_logprobs" in data:
-                            result["token_logprobs"] = data["token_logprobs"]
-                        return result
+                        # /api/chat returns content under message.content
+                        # and logprobs under the 'logprobs' key (list of {token, logprob, bytes})
+                        content = data.get("message", {}).get("content", "")
+                        raw_logprobs = data.get("logprobs")  # list[dict] with token/logprob/bytes
+                        token_logprobs: list[dict] | None = None
+                        if raw_logprobs:
+                            token_logprobs = [
+                                {"token": entry["token"], "logprob": entry["logprob"]}
+                                for entry in raw_logprobs
+                            ]
+                        return {"content": content, "token_logprobs": token_logprobs}
                     return data["message"]["content"]
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError, httpx.RemoteProtocolError):
                 if attempt < DEFAULT_RETRIES - 1:

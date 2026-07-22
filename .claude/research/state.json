@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter13",
-  "iteration_name": "STP(Surrogate Token Probability)再実験 - Dockerイメージ再ビルド後",
-  "phase": "investigate",
+  "iteration": "Iter14",
+  "iteration_name": null,
+  "phase": "plan",
   "status": "running",
-  "current_lever": null,
+  "current_lever": "hidden_state",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": "2026-07-22T06:00:00+0900",
+  "updated_at": "2026-07-22T13:00:00+09:00",
   "last_slack_ts": null,
   "iteration_thread_ts": null,
   "notion_toggle_created": false,
-  "last_commit": null
+  "last_commit": "916d8579141894025ea0cdb255d5b3a24ad330e4"
 }
