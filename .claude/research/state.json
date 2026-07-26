@@ -1,15 +1,16 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter14",
-  "iteration_name": null,
-  "phase": "plan",
-  "status": "converged",
-  "current_lever": "hidden_state",
+  "iteration": "Iter16",
+  "iteration_name": "Verbalized Top-K による二峰飽和と同点タイの解消検証",
+  "phase": "investigate",
+  "status": "running",
+  "current_lever": "confidence_elicitation",
+  "lever_value": "top_k_with_probs",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": "2026-07-22T14:30:00+09:00",
-  "last_slack_ts": null,
-  "iteration_thread_ts": null,
+  "updated_at": 1785175200,
+  "last_slack_ts": "1785045999.084329",
+  "iteration_thread_ts": "1785045482.280329",
   "notion_toggle_created": false,
-  "last_commit": "b0bd2dc"
+  "last_commit": "d56516c"
 }

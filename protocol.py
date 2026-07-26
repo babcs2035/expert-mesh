@@ -38,6 +38,10 @@ class ProbeResponse(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     estimated_latency_ms: int
     confidence_logprobs_mean: float | None = None  # STP mean logprob signal (null when not used)
+    confidence_semantic_entropy: float | None = (
+        None  # Discrete Semantic Entropy (E4; null when not used)
+    )
+    confidence_p_true: float | None = None  # P(True) self-evaluation (E5; null when not used)
 
 
 class DispatchRequest(BaseModel):

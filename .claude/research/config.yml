@@ -31,8 +31,140 @@ experiment:
 journal_retention: 3
 
 # 単一レバー原則で振る候補（順序＝優先度）．1 イテレーションで動かすのは 1 つだけ．
-# 全て config.yaml の値変更のみで検証可能（コード変更不要）．2026-07-20 ユーザー承認済みの優先順位．
+#
+# 2026-07-26 全面改訂（詳細と出典は plans/p0001_research_direction_2026-07.md）．
+# Iter14 の converged 判定は撤回した．理由は，評価集合が 46 問しかなく，Iter3・Iter5〜11 の
+# 「no-op / 僅差で棄却」という判定群が，実際には 1〜2 問の入れ替わり（p=0.87, n=46 で SE ±5.0pt，
+# Wilson 95% CI 幅 約20pt）に基づいており，統計的に成立していなかったためである．
+# したがって E1（評価集合の拡張）を最優先とし，これを終えるまで他のレバーの結果は判定不能とみなす．
+#
+# 【2026-07-26/27 重要】下記 E1〜E7・expert_model_size・domain_count・expert_specialization は，
+# ユーザーが対話セッションで単一レバー原則を明示的に上書きし，**全て一括で実装済み**（journal.md
+# 「実装 (Iter15)」節参照）．すなわちこの levers リストは「次に選ぶ候補」ではなく「コードとしては
+# 全て実装済みだが，どの構成をこのまま検証対象にするかがまだ決まっていない」状態を指す．
+# 次期 rc-planner は以下を前提に判断すること:
+# - 現在 config.yaml が指す構成（confidence_signal_method=self_report, routing_method=self_report,
+#   domain_count=10, light_model=qwen3.5:4b, expert_model=schroneko/llama-3.1-swallow-8b-instruct-v0.1
+#   ほぼ全ノード共通）で，全1520問のJMMLUデータセットに対する実験が2026-07-27に実行された
+#   （results/20260727_010532/，journal.md「実験 (Iter15)」節参照）．これがE1（eval_set_size）
+#   検証の実データであり，**再実装は不要**．
+# - E2（stp_sign_check）は既にオフライン検証済み（scripts/verify_stp_sign_flip.py，2026-07-22の
+#   Iter13結果に対して実行し，「符号反転で0.87相当に戻る」仮説は不支持と確定）．再実行不要．
+# - E3〜E7・expert_specialization(S1)は，routerコード・config.yamlのキーとしては実装済みだが，
+#   「どの1つを次イテレーションでconfig.yamlに設定して実機検証するか」は未決定．次イテレーションは
+#   config.yamlのconfidence_signal_method/confidence_elicitation/routing_method/embedding_postprocess
+#   のいずれか1キーだけを変更する形で単一レバー原則に復帰できる（コード変更は不要なため）．
 levers:
+  # --- E1: 最優先．これ以前に他のレバーを振っても判定できない ---
+  - {name: eval_set_size, values: [200, 400],
+     note: "[2026-07-26 p0001 F1] data/dataset.jsonl は現状 46 問（単一ドメイン 40 = 4×10，複合 6）．
+            p=0.87,n=46 の二項 SE は ±5.0pt，Wilson 95% CI は [74.3%, 93.9%]（幅 約20pt）．
+            ドメイン別指標に至っては 1 ドメイン 10 問で SE ±9.5pt．Iter10/Iter11 の『0.870→0.848』は
+            40/46→39/46 の 1 問差にすぎない．4 ドメイン層化で 200 問以上へ拡張し，併せて
+            Random / BestSingle（常に general）/ Oracle（正解ドメイン）の 3 ベースラインと
+            Wilson CI・McNemar 対比較を metrics.py に導入すること"}
+
+  # --- E2: 実験不要のオフライン検証．極小コストで Iter13 の結論を覆しうる ---
+  - {name: stp_sign_check, values: [inverted],
+     note: "[2026-07-26 p0001 F3] Iter13 の STP は top1=0.065（3/46）で，4 ドメインの偶然一致 0.25
+            （11.5/46）を約 2.9 SD 下回る．偶然より systematically に悪いのは符号反転・スケーリング
+            反転のバグを強く示唆する．保存済み results.jsonl の confidence を符号反転して top1 を
+            再計算するだけで検証できる．反転で 0.87 前後に戻るなら『トークン確率は専門性を測らない』
+            という Iter13 の結論自体が誤りとなる"}
+
+  # --- E3: プロンプトのみの変更．二峰飽和に直接効く ---
+  - {name: confidence_elicitation, values: [top_k_with_probs, linguistic],
+     note: "[2026-07-26 p0001] Tian et al., EMNLP 2023 (arXiv:2305.14975) は『候補を K 個挙げ各々に
+            確率を付けよ』形式で gpt-3.5 の ECE を 0.131→0.047（top-2）へ低減したと報告．確率の合計
+            制約が verbalized confidence の 0/1 飽和を機械的に壊す．現状の二峰分布問題への最安の対処．
+            同点率とノード間 confidence 分散も併せて計測すること"}
+
+  # --- E4: Iter11 の再試行．ただし文献の前提条件を満たす形で ---
+  - {name: confidence_signal_method, values: [self_consistency_semantic],
+     note: "[2026-07-26 p0001 F2] Iter11 は temperature=0.1・N=3 で実施し『効果なし』としたが，
+            Farquhar et al. Nature 2024 は temperature 0.1 を『点推定としての最良回答』の生成にのみ
+            使い，不確実性推定は T=1・nucleus P=0.9 で行うと明記している．Xiong et al. ICLR2024 も
+            T=0.7 を採用．つまり Iter11 は不確実性を消す設定で不確実性を測っており，手法の棄却根拠に
+            ならない．T=0.7〜1.0・N=5 とし，集約は平均ではなく意味クラスタの出現頻度エントロピー
+            （Discrete Semantic Entropy）にする．**着手前に必ずユニーク回答数を計測し多様性が出ることを
+            確認する**こと（省略すると Iter11 を再演する）"}
+
+  # --- E5: logprobs ベース．STP とは測定対象が異なることを明文化してから実施 ---
+  - {name: confidence_signal_method, values: [p_true],
+     note: "[2026-07-26 p0001] 回答生成後に 'Is the proposed answer true? (A) True (B) False' を投げ，
+            top_logprobs から P('A') を取る（Kadavath+ 2022 arXiv:2207.05221）．STP は生成系列全体の
+            平均トークン確率で長さバイアスがあり流暢さを測るのに対し，P(True) は単一位置の二値分類分布
+            であり測定対象が異なる．この区別を journal に明記してから実施すること．
+            **前提: Ollama v0.12.11 以降が必要（logprobs / top_logprobs 対応）．実機のバージョンを
+            先に確認すること**．反証: Tian et al. Table 1 は gpt-3.5 で 'Is True' が verbalized より
+            較正が悪いと報告．Kadavath の好結果は 52B base + 20-shot 設定である"}
+
+  # --- E6: 教師ありルーター．中央ルーター無しの構造は維持できる ---
+  - {name: routing_method, values: [supervised_classifier],
+     note: "[2026-07-26 p0001 F4] Iter2 の embedding 失敗（cosine が [0.667,0.737] に潰れる）は
+            埋め込みの anisotropy という既知の幾何的現象であり『信号が無い』証明ではない．
+            Varangot-Reille+ JAIR2025 は similarity-based routing の失敗を unsupervised であることに
+            帰し，RouterDC (NeurIPS2024) は CosineClassifier に全タスクで勝利している．
+            SetFit / multilingual-e5 + logistic head を各ノードが持ち，自分のクラス確率のみ返せば
+            中央ルーター無しの構造は保てる．**必須条件: 訓練質問と評価質問を質問単位で完全分離し，
+            訓練データを probe 実行結果から作らない（Iter10 の label leakage の再演を防ぐ）**．
+            反証: MoDEM のルーター精度は 5 クラス 81.00% で現状の 0.87 より低く，Other クラスは 52.94%．
+            Iter4 の education 追加時 precision 低下と同じ構造で general ノードが共通のボトルネック"}
+
+  # --- E7: 安価な切り分け専用．これ単体で成果を期待しない ---
+  - {name: embedding_postprocess, values: [whitening],
+     note: "[2026-07-26 p0001 F4] mean-centering + whitening 後に cosine を取る（Su+ 2021
+            arXiv:2103.15316）．Iter2 の失敗が『幾何』由来か『信号不在』由来かを切り分ける最小実験．
+            反証: whitening は教師なしのままなので survey の指摘（unsupervised だから失敗する）は
+            解消されない．安価な切り分け以上の位置付けをしないこと"}
+
+  # --- E8〜E10: 実験規模の拡大．E1 を終えてから 1 イテレーションに 1 つずつ ---
+  - {name: expert_model_size, values: [qwen3.5-4b],
+     note: "[2026-07-26 p0001 2b] 現行 Qwen3.5-9B UD-Q4_K_XL は実測ログ
+            (results/20260721_222225: size_vram_bytes=5666399845, using_gpu=true) のとおり
+            **5.67GB を VRAM に確保して GPU で動いていた**（CPU オフロードではない）．
+            ただし空き VRAM 6GB では KV cache の余裕がほとんど無い．Qwen3.5-4B/Qwen3-4B は
+            Q4_K_M で約 2.4-2.5GB と余裕があり，生成も速い．
+            **E1（評価拡張）と wall-clock を通じて連動する**: 現行は 46 問で約 46 分
+            （dispatch 実測 238-259 秒），単純比例で 400 問は約 7 時間になりイテレーションが回らない．
+            4B 化はモデル変更単独の影響を測るため **4 ドメインのまま**実施すること．
+            異種モデルメッシュ自体は文献上むしろ標準（RouterEval は『異種 LLM と自然に両立する』と明記，
+            vLLM Semantic Router の Mixture-of-Models・RouteBalance も異種プール前提）"}
+  - {name: domain_count, values: [10],
+     note: "[2026-07-26 p0001 2b] ドメインを 4→10 に拡張（wafl500〜509 の 10 台を使用）．
+            良くなる側: RouterEval (arXiv:2503.10657) は候補数 m の増加でルータ性能の伸びが速く
+            **2≤m≤10 の範囲が最も急**と報告．偶然一致率も 0.25→0.10 に下がり効果量が上がる．
+            悪くなる側: MoDEM (arXiv:2410.07490) は 5 クラスで総合 81.00%，うち **Other(=general 相当)
+            が 52.94%** と突出して低く原因を domain ambiguity と分析．**これは Iter4 で education 追加時に
+            precision が 0.967→0.900 に落ちた現象と構造が同じ**で，general ノードが共通のボトルネック．
+            Label Space Reduction (arXiv:2502.08436) もラベル数増加自体が LLM 分類精度を落とすと示す．
+            **必須: 分野数が変わると偶然一致率が変わるため，生の accuracy を 4 分野と 10 分野で直接
+            比較してはならない．κ 等の chance-corrected 指標を主指標に据えること．これを怠ると
+            Iter13 と同種の解釈事故（偶然一致を下回る値を手法の失敗と誤読）を繰り返す．**
+            前提: VRAM 制約上 10 ノード化とモデル 4B 化は分離できないため，先に expert_model_size を
+            単独で実施してから着手すること"}
+  - {name: expert_specialization, values: [domain_lora, offtheshelf_specialized],
+     note: "[2026-07-26 p0001 F5] **最重要**．現在 4 ノードすべてが light/expert とも
+            isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL で同一であり，差分は router.py:56 と
+            http_server.py:66 のプロンプト 1 文（『あなたは「{domain}」分野の専門家です』）だけである．
+            設計書 docs/encounter_expert_mesh_design.md §2.2 の
+            『Step 0（オフザシェルフの分野特化モデルをノードごとに割当）』が未実施．
+            **ノード間に能力差が無いため，誤ルーティングしても回答品質はほぼ変わらず，
+            top1_accuracy は下流に帰結を持たない代理指標になっている．**評価軸②（回答品質）と
+            ③（End-to-End）が未実装なのもこれが理由と考えられる．
+            文献はドメイン特化の効果を明確に支持する: MoDEM の性能向上は router ではなく専門家モデル
+            （Palmyra-health-70B 等）に由来し，日本語でも Llama3-Swallow-70B の IgakuQA 44.6 に対し
+            医療継続事前学習済みの Llama3-Preferred-MedSwallow-70B は 62.6．
+            **本命は domain_lora（単一ベース + ドメイン LoRA アダプタ）**: 6GB 制約下で最も現実的で，
+            S-LoRA (MLSys2024) が多数アダプタの同時配信を示し，日本語医療 LoRA の先行例に JMedLoRA がある．
+            さらに同じ 10 台の GPU プール上で LoRA 学習を行う仕組みは WAFL-PEFT 側に既にあるため，
+            両プロジェクトを接続する発展が自然．
+            offtheshelf_specialized の注意: 日本語の**法律特化オープン生成モデルは今回の調査では
+            発見できなかった**（見つかったのは検索特化の arXiv:2412.13205 のみ）．
+            **このレバーと同時に評価軸②③（回答品質・End-to-End）を実装すること．
+            それらが無いとルーティングの価値を測れない**"}
+
+  # --- 以下は Iter1〜14 で試行済み（履歴．再実施の際は上記 E1 完了後に限る） ---
   - {name: dispatch_top_k, values: [1, 2, 3], note: "直近完走実験(results/20260709_214113)でmedical recallが0.79（legal 0.93, general 1.0）と低いことが判明．top_k>1の並行dispatchで改善するか検証．aggregator.select_best_dispatch_responseは対応済み・新規実装不要"}
   - {name: routing_method, values: [self_report, embedding], note: "Phase1実装済みの方式A(embedding)とB(self_report,既定)を比較．probeレイテンシと精度のトレードオフを定量比較"}
   - {name: confidence_threshold, values: [0.3, 0.5, 0.7], note: "フォールバック率とのトレードオフ．直近実験ではfallback_rate=0.0のため効果が薄い可能性あり"}
@@ -58,11 +190,20 @@ research_frontier:
 
 baselines: []   # ベースライン比較は research_frontier の項目であり levers 探索後に着手
 
-success_criteria: "Iter1（dispatch_top_k=1→2，複合ドメイン行4件・Σexpected_domains=8）:
-  主基準はcompound_covered_domain_count>=6（ベースライン≈4から+2以上，等価にcompound_domain_set_recall>=0.75）．
-  コスト保護はcompound_mean_dispatched_count<=2.0かつ単一ドメイン30問のdispatch数が1のまま．
-  非退行はtop1_accuracy>=0.97かつmisrouting_rate<=0.03（selected_domainロジック自体は不変のためprobeノイズ以外では動かない想定）．
-  N=4のため1行の揺らぎ（set_recall±0.125）を超える変化を要件とする．"
+# 2026-07-26 改訂（p0001 F1）．旧基準は Iter1 専用の記述が残っていたうえ，n=46 では
+# top1_accuracy の 1 問差（±2.2pt）すら分離できないため，判定基準として機能していなかった．
+# 【2026-07-27 追記】E1（200問以上への拡張）は実質完了した（1520問のJMMLUデータセット，
+# results/20260727_010532/で実験実行済み．journal.md「実験 (Iter15)」節参照）．よって下記の
+# 「E1完了後」の基準は，次のrc-analystが分析を行う時点で**そのまま適用可能な現行基準**である．
+success_criteria: "【E1 完了までの暫定】評価集合が 46 問の間は accuracy 系の増減を採否根拠にしない．
+  E1（200 問以上への拡張）完了後に以下を適用する:
+  (1) 主基準は top1_accuracy の McNemar 対比較（同一問題集合，α=0.05）で有意差があること．
+      効果量は Wilson 95% CI を必ず併記し，CI が重なる変化は『判定不能』として棄却も採用もしない．
+  (2) 非退行は per-domain precision/recall の CI 下限が現行ベースラインの CI 下限を下回らないこと．
+  (3) 参照点として Random / BestSingle（常に general へ送る）/ Oracle（正解ドメインへ送る）を
+      毎回同時に報告し，提案手法が BestSingle を上回っているかを明示する
+      （LLMRouterBench は，複数の最近手法が単純ベースラインを安定して上回れないと報告している）．
+  (4) confidence 信号系のレバーでは accuracy に加えて ECE・AUROC・同点率・ノード間 confidence 分散を報告する．"
 
 slack:
   channel: "#research-cycle"

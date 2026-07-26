@@ -24,15 +24,17 @@ else
   docker run -d --name "$REGISTRY_NAME" -p "127.0.0.1:${REGISTRY_PORT}:5000" --restart=always registry:2
 fi
 
+# Generate the evaluation dataset before the image build: data/ is
+# gitignored, so on a clean checkout it does not exist yet, and the
+# Dockerfile's `COPY data/ ./data/` needs it to exist beforehand.
+echo "[setup] building evaluation dataset"
+uv run python build_dataset.py --output data/dataset.jsonl
+
 echo "[setup] building expert-mesh image"
 docker build -t "localhost:${REGISTRY_PORT}/expert-mesh:latest" .
 
 echo "[setup] pushing expert-mesh image to local registry"
 docker push "localhost:${REGISTRY_PORT}/expert-mesh:latest"
-
-# Generate the evaluation dataset (tier-2 community-consultation questions).
-echo "[setup] building evaluation dataset"
-uv run python build_dataset.py --output data/dataset.jsonl
 
 # Create results/ directory for experiment output.
 mkdir -p results
@@ -64,6 +66,14 @@ for host in $(uv run python tools/list_peers.py); do
 
   ssh "$host" "mkdir -p $REMOTE_DIR"
   rsync -az --inplace docker-compose.yml docker-compose.gpu.yml config.yaml "$host:$REMOTE_DIR/"
+
+  # E6 supervised_classifier artifact (scripts/train_domain_classifier.py's
+  # output); only rsynced when present locally, since not every deployment
+  # uses routing_method=supervised_classifier.
+  if [ -d models ]; then
+    ssh "$host" "mkdir -p $REMOTE_DIR/models"
+    rsync -az --inplace models/ "$host:$REMOTE_DIR/models/"
+  fi
 
   # GPU detection: docker-compose.gpu.yml's device reservation makes
   # `docker compose up` fail outright on hosts without an nvidia runtime,
@@ -119,6 +129,16 @@ exit 1
 
 [tasks.start]
 description = "Run a benchmark experiment: probe -> dispatch -> record results"
+# NOTE: mise appends extra `mise run start -- ...` CLI args as literal trailing
+# text on the *last line* of this script rather than exposing them as `$ARGV`
+# or positional params throughout the script (verified empirically against
+# this mise version) — the `usage` field below is the mechanism mise actually
+# supports for named flags, exposed as `$usage_<name>` env vars.
+usage = '''
+flag "--node-id <node_id>" help="Requester node id from config.yaml (defaults to the first peer in config.yaml)"
+flag "--dataset <path>" help="Dataset JSONL path" default="data/dataset.jsonl"
+flag "--output <path>" help="Output filename, relative to results/<timestamp>/" default="results.jsonl"
+'''
 run = """
 set -e
 
@@ -129,19 +149,9 @@ DATETIME=$(date +"%Y%m%d_%H%M%S")
 RESULTS_DIR="results/${DATETIME}"
 mkdir -p "$RESULTS_DIR"
 
-# Parse arguments from $ARGV (mise passes args as a single string)
-NODE_ID="$FIRST_HOST"
-DATASET="data/dataset.jsonl"
-OUTPUT="results.jsonl"
-set -- $ARGV
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --node-id) NODE_ID="$2"; shift 2 ;;
-    --dataset) DATASET="$2"; shift 2 ;;
-    --output) OUTPUT="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
+NODE_ID="${usage_node_id:-$FIRST_HOST}"
+DATASET="$usage_dataset"
+OUTPUT="$usage_output"
 
 CONTAINER_OUTPUT="/app/results/$DATETIME/$OUTPUT"
 RUN_LOG="/app/results/$DATETIME/run_experiment.log"
@@ -174,6 +184,14 @@ echo "[start] launching experiment (detached): node=$NODE_ID dataset=$DATASET ou
 ssh "$FIRST_HOST" "cd $REMOTE_DIR && docker compose exec -d -T app sh -c '.venv/bin/python run_experiment.py --node-id $NODE_ID --dataset $DATASET --output $CONTAINER_OUTPUT > $RUN_LOG 2>&1'"
 
 echo "[start] waiting for experiment to finish (progress below; transient SSH disconnects during this wait are harmless)"
+# Known cosmetic quirk (observed 2026-07-27, see journal.md Iter15): when
+# `wc -l` samples the log while its last line hasn't been newline-terminated
+# yet, the next poll's `tail -n +$next_line` can re-print that same line
+# once it completes. This only affects the display below, never
+# run_experiment.log/results.jsonl themselves (verified by reading the raw
+# log directly on the host) — not fixed, since it's display-only and the
+# fix (byte- or checksum-based tracking instead of line-count-based) isn't
+# worth the added complexity for a progress echo.
 POLL_INTERVAL_S=15
 MAX_POLL_RETRIES=1000
 shown_lines=0
@@ -208,13 +226,19 @@ echo "[start] experiment done. Results saved to $RESULTS_DIR/"
 
 [tasks.analyze]
 description = "Collect structured logs into results/<datetime>/logs/<node_id>/"
+# See the note on [tasks.start]: mise does not expose extra CLI args as `$1`
+# throughout a multi-line `run` script, so the datetime argument must go
+# through the `usage` field instead.
+usage = '''
+arg "[datetime]" help="Timestamp directory under results/ (defaults to the latest)"
+'''
 run = """
 set -e
 
 REMOTE_DIR=$(uv run python tools/remote_dir.py)
 
-if [ $# -ge 1 ]; then
-  DATETIME="$1"
+if [ -n "$usage_datetime" ]; then
+  DATETIME="$usage_datetime"
 else
   if [ -d results ] && [ "$(ls -d results/*/ 2>/dev/null | wc -l)" -gt 0 ]; then
     DATETIME=$(ls -1d results/*/ | sed 's|results/||;s|/||' | sort | tail -1)

@@ -11,7 +11,14 @@ import yaml
 from aggregator import select_best_dispatch_response, select_dispatch_targets
 from expert_backend import OllamaClient
 from http_client import PeerClient
-from http_server import ROUTING_METHOD_SELF_REPORT, NodeState, create_app
+from http_server import (
+    CONFIDENCE_ELICITATION_NUMERIC_SCALAR,
+    CONFIDENCE_SIGNAL_SELF_REPORT,
+    ROUTING_METHOD_SELF_REPORT,
+    NodeState,
+    create_app,
+    validate_node_config_values,
+)
 from protocol import DispatchRequest, DispatchResponse, ProbeRequest, ProbeResponse
 
 # Truncate the query summary sent to the lightweight probe model.
@@ -47,8 +54,19 @@ def _build_peers(config: dict, self_node_id: str) -> list[dict]:
 
 
 def build_node_state(config: dict, node_id: str) -> NodeState:
-    """Construct a NodeState for the specified node from the config."""
+    """Construct a NodeState for the specified node from the config.
+
+    Raises ValueError if routing_method/confidence_signal_method/
+    confidence_elicitation is set to an unrecognized string, so a config
+    typo fails at startup instead of silently falling back to self_report.
+    """
     node_config = config["nodes"][node_id]
+    routing_method = config.get("routing_method", ROUTING_METHOD_SELF_REPORT)
+    confidence_signal_method = config.get("confidence_signal_method", CONFIDENCE_SIGNAL_SELF_REPORT)
+    confidence_elicitation = config.get(
+        "confidence_elicitation", CONFIDENCE_ELICITATION_NUMERIC_SCALAR
+    )
+    validate_node_config_values(routing_method, confidence_signal_method, confidence_elicitation)
     return NodeState(
         node_id=node_id,
         domain=node_config["domain"],
@@ -60,9 +78,15 @@ def build_node_state(config: dict, node_id: str) -> NodeState:
         ollama_client=OllamaClient(),
         peers=_build_peers(config, node_id),
         embedding_model=config.get("embedding_model"),
-        routing_method=config.get("routing_method", ROUTING_METHOD_SELF_REPORT),
-        confidence_signal_method=config.get("confidence_signal_method", "self_report"),
+        routing_method=routing_method,
+        confidence_signal_method=confidence_signal_method,
         multi_sample_count=config.get("multi_sample_count", 1),
+        confidence_elicitation=confidence_elicitation,
+        embedding_postprocess=config.get("embedding_postprocess", "none"),
+        embedding_whitening_path=config.get("embedding_whitening_path"),
+        semantic_sample_count=config.get("semantic_sample_count", 5),
+        semantic_sample_temperature=config.get("semantic_sample_temperature", 0.7),
+        classifier_model_path=config.get("classifier_model_path"),
     )
 
 

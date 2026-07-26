@@ -4,10 +4,20 @@ import json
 from unittest.mock import AsyncMock
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
+from sklearn.linear_model import LogisticRegression
 
 from expert_backend import OllamaClient
-from http_server import ROUTING_METHOD_EMBEDDING, NodeState, create_app
+from http_server import (
+    CONFIDENCE_ELICITATION_TOP_K_WITH_PROBS,
+    CONFIDENCE_SIGNAL_P_TRUE,
+    CONFIDENCE_SIGNAL_SEMANTIC_ENTROPY,
+    ROUTING_METHOD_EMBEDDING,
+    ROUTING_METHOD_SUPERVISED_CLASSIFIER,
+    NodeState,
+    create_app,
+)
 
 
 def _build_client(
@@ -192,6 +202,116 @@ def test_probe_uses_embedding_similarity_when_routing_method_is_embedding() -> N
     assert ollama_client.generate.await_count == 0
 
 
+def test_probe_uses_top_k_elicitation_when_configured() -> None:
+    """confidence_elicitation=top_k_with_probs routes /probe through estimate_confidence_top_k."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = (
+        '{"candidates": [{"label": "該当する", "probability": 0.8}, '
+        '{"label": "該当しない", "probability": 0.2}]}'
+    )
+    client = _build_client(
+        ollama_client, confidence_elicitation=CONFIDENCE_ELICITATION_TOP_K_WITH_PROBS
+    )
+
+    response = client.post(
+        "/probe",
+        json={
+            "request_id": "uuid-1",
+            "query_summary": "headache and fever",
+            "query_embedding": [0.1],
+            "from": "node-a",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["confidence"] == pytest.approx(0.8)
+    prompt_arg = ollama_client.generate.call_args.args[1]
+    assert "該当する" in prompt_arg
+
+
+def test_probe_uses_semantic_entropy_signal_when_configured() -> None:
+    """confidence_signal_method=self_consistency_semantic populates confidence_semantic_entropy."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    verdict_response = '{"fits": true, "reason": "医療分野の症状である"}'
+    entailment_response = '{"same_claim": true}'
+    ollama_client.generate.side_effect = [verdict_response] * 5 + [entailment_response] * 4
+    client = _build_client(
+        ollama_client,
+        confidence_signal_method=CONFIDENCE_SIGNAL_SEMANTIC_ENTROPY,
+        semantic_sample_count=5,
+    )
+
+    response = client.post(
+        "/probe",
+        json={
+            "request_id": "uuid-1",
+            "query_summary": "headache and fever",
+            "query_embedding": [0.1],
+            "from": "node-a",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["confidence"] == pytest.approx(1.0)
+    assert body["confidence_semantic_entropy"] == pytest.approx(0.0)
+
+
+def test_probe_uses_p_true_signal_when_configured() -> None:
+    """confidence_signal_method=p_true populates confidence_p_true via the two-stage flow."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.side_effect = [
+        "この質問は医療分野に該当します．",
+        {
+            "content": "A",
+            "token_logprobs": [
+                {"token": "A", "logprob": -0.1, "top_logprobs": {"A": -0.1, "B": -2.0}}
+            ],
+        },
+    ]
+    client = _build_client(ollama_client, confidence_signal_method=CONFIDENCE_SIGNAL_P_TRUE)
+
+    response = client.post(
+        "/probe",
+        json={
+            "request_id": "uuid-1",
+            "query_summary": "headache and fever",
+            "query_embedding": [0.1],
+            "from": "node-a",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["confidence_p_true"] == pytest.approx(body["confidence"])
+    assert body["confidence_semantic_entropy"] is None
+
+
+def test_probe_uses_supervised_classifier_without_any_llm_call() -> None:
+    """routing_method=supervised_classifier scores via the injected classifier, no LLM call."""
+    toy_classifier = LogisticRegression(max_iter=1000)
+    toy_classifier.fit(
+        [[1.0, 0.0], [1.0, 0.1], [0.0, 1.0], [0.0, 1.1]],
+        ["medical", "medical", "legal", "legal"],
+    )
+    ollama_client = AsyncMock(spec=OllamaClient)
+    client = _build_client(
+        ollama_client,
+        routing_method=ROUTING_METHOD_SUPERVISED_CLASSIFIER,
+        domain_classifier=toy_classifier,
+    )
+
+    response = client.post(
+        "/probe",
+        json={
+            "request_id": "uuid-1",
+            "query_summary": "headache and fever",
+            "query_embedding": [1.0, 0.0],
+            "from": "node-a",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["confidence"] > 0.5
+    assert ollama_client.generate.await_count == 0
+
+
 def test_advertise_heartbeat_reaches_configured_peer(monkeypatch) -> None:
     """On startup, the node sends /advertise to every configured peer."""
     import http_server
@@ -316,3 +436,20 @@ def test_lifespan_continues_when_gpu_status_check_fails(capsys) -> None:
 
     records = _parse_log_events(capsys.readouterr().out, "gpu_status_check_failed")
     assert len(records) == 1
+
+
+def test_node_state_rejects_embedding_postprocess_without_whitening_path() -> None:
+    """embedding_postprocess=whiten with no embedding_whitening_path fails at construction, not silently."""
+    with pytest.raises(ValueError, match="embedding_whitening_path"):
+        _build_client(AsyncMock(spec=OllamaClient), embedding_postprocess="whiten")
+
+
+def test_lifespan_rejects_supervised_classifier_without_model_path() -> None:
+    """routing_method=supervised_classifier with no classifier_model_path fails at lifespan startup."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = "ok"
+    ollama_client.get_running_models.return_value = []
+    client = _build_client(ollama_client, routing_method=ROUTING_METHOD_SUPERVISED_CLASSIFIER)
+
+    with pytest.raises(ValueError, match="classifier_model_path"), client:
+        pass

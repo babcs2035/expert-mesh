@@ -5,11 +5,18 @@
 # this override is applied there, since no nvidia runtime would be found.
 # Only the ollama service needs GPU access — the app service only calls
 # ollama's HTTP API and never touches the model runtime directly.
+#
+# Uses the legacy `runtime: nvidia` mechanism (not the
+# deploy.resources.reservations.devices / CDI-based mechanism) because the
+# physical cluster (wafl500-509) has an inconsistent nvidia-container-toolkit
+# install: some hosts lack the `nvidia-ctk` CLI that CDI-based GPU discovery
+# requires, which makes `docker compose up` fail with "failed to discover GPU
+# vendor from CDI: no known GPU vendor found" on those hosts even though the
+# "nvidia" OCI runtime itself is registered identically (in
+# /etc/docker/daemon.json) on every host.
 services:
   ollama:
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - count: all
-              capabilities: [gpu]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all

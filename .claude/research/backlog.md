@@ -5,6 +5,86 @@
 
 ---
 
+## B30 [auto-decided 2026-07-27] Iter15 総括と次イテレーションの単一レバー決定
+
+- 状況: Iter15（E1: eval_set_size）の実験・分析が完了．1520問（10ドメイン×150問単一 + 20問複合）を実機10ノードで実行．top1_accuracy=0.184（Wilson CI: [0.165, 0.204]），Cohen's kappa=0.081（chance直上），Random=0.101を上回る．E1 成功条件全条件 PASS（統計基盤の整備完了）．
+- 自動選択: 次イテレーション（Iter16）の単一レバーを `confidence_elicitation=top_k_with_probs`（E3）とする．`iteration_name` は「Verbalized Top-K による二峰飽和と同点タイの解消検証」．
+- 根拠: (1) 98.29% の同点タイが最大のボトルネックであり，self_report の二峰飽和（0.9 が 74.9%）がその根本原因．(2) Tian et al. (EMNLP 2023) の Verbalized Top-K は確率の合計制約（sum=1）で 0/1 飽和を機械的に壊す（gpt-3.5 の ECE を 0.131→0.047）．(3) プロンプトのみの変更（config 1行）で，コード変更不要（既に実装済み）．(4) 同一 1520 問データセット上で McNemar 対比較が可能（E1 で整備した統計基盤を活用）．(5) E4〜E7 と比較してコスト最小・リスク最低．
+- 要レビュー: (1) E3 の実機実験結果が，同点率の低下と kappa の改善をもたらすか確認すること．(2) E3 が不成功の場合，次は E6（supervised_classifier）を検討する方針を backlog に残しておくこと．
+
+## B29 [user-approved 2026-07-27] 実機デプロイ時のホスト環境不整合（3種）を sudo で修復
+
+- 状況: B28 で実装した全レバーを実際に物理クラスタ（wafl500〜509）へ `mise run deploy` した結果，
+  10ホスト中5ホストで環境不整合により失敗した。(1) wafl504・wafl506・wafl507 は
+  `nvidia-container-toolkit` が不完全（`nvidia-container-runtime` 実行ファイル自体が欠落）で GPU が
+  使えず，(2) wafl508・wafl509 は `docker compose`（v2プラグイン）自体が未導入だった。
+  いずれもコードの問題ではなく，WAFL-PEFT とも共有する物理ホストのパッケージ状態の不整合。
+- ユーザーの選択: 「Claude が sudo でインストールする」を選択（AskUserQuestion で確認済み）。
+- 実施内容: 各ホストで sudo apt install により，(1) 他7ホストと同一バージョンの
+  `nvidia-container-toolkit=1.19.0-1` 一式，(2) Ubuntu標準リポジトリの `docker-compose-v2` を導入。
+  実施前に全対象ホストで WAFL-PEFT 等の起動中コンテナが無いことを確認してから docker daemon 再起動を
+  伴う作業を行った。あわせて `docker-compose.gpu.yml` を，一部ホストで欠落しがちな `nvidia-ctk` 依存の
+  CDI 方式から，全ホスト共通で登録済みのレガシー `runtime: nvidia` 方式へ書き換えた（リポジトリ側の
+  変更としてコミット対象）。
+- 根拠: 実機投入がB28の完了条件の残り（「次段階としてユーザーの別途確認を要する」と明記済み）であり，
+  今回のユーザー指示（実験のテストと問題の完全解決）の範囲内。sudo でのシステムパッケージ導入は
+  CLAUDE.mdの「本番環境・破壊的操作」に該当するため個別に確認を取った。
+- 要レビュー: 修復した3ホスト（504/506/507）と2ホスト（508/509）が，今後のクラスタ運用でも
+  他ホストと同一のパッケージ状態を維持できているかを，次回のノード追加・再構築時に確認すること。
+  詳細は journal.md「実験 (Iter15) — 実機デプロイテストとインフラ不備の解決」を参照。
+
+## B28 [resolved 2026-07-26] E1〜E7 + モデル/専門家/評価軸②③の一括実装（ユーザー手動セッション）
+
+- 状況: ユーザーが対話セッションで，`docs/d0001_literature_survey_2026-07.md` と
+  `plans/p0001_research_direction_2026-07.md` を完全に把握した上で全レバーを実装するよう明示的に指示．
+  単一レバー原則を今回に限り上書きし，バッチ0〜10（11単位）で E1〜E7・モデル9B→4B化・専門家の実体化
+  （S1）・評価軸②③を全て実装した．詳細は journal.md の「Iteration 15: 実装 (Iter15)」節を参照．
+- B27 の解消: `config.yaml` は `confidence_threshold: 0.5`・`dispatch_top_k: 1`・
+  `confidence_signal_method: self_report` の状態を維持しており（このセッションでは変更していない），
+  journal が記録する最良構成と一致している．`router.py` の few-shot 例 5〜7 相当の追加は，
+  10 ドメイン対応のため動的生成（`_build_few_shot_examples`）へ全面書き換えたことで解消済み
+  （個別の手書き例を追加/削除する形自体が無くなった）．**B27 はこれをもって解消とする．**
+- 実機投入は未実施: 新規ノード wafl504〜509 の到達性確認・`ollama pull`，E4/E5/E6 の実機実験は
+  次段階としてユーザーの別途確認を要する（WAFL-PEFT が同一 GPU プールを使用中でないことの確認が前提）．
+
+## B27 [needs-human 2026-07-26] 作業ツリーに journal 未記録の変更が残っている
+
+- 状況: `git status` に，Iter1〜14 のどのイテレーションにも対応しない未コミット変更がある．
+  - `config.yaml`: `confidence_threshold` 0.5→0.3，`dispatch_top_k` 1→2，`confidence_signal_method` stp→self_report
+  - `router.py`: few-shot 例 5・6・7 の追加（general と medical の切り分け，education と legal の切り分け）
+  さらに git HEAD (`d56516c`) の `config.yaml` は Iter13 の実験設定（`stp`）のまま未リバートである．
+  つまり「リポジトリの現在の設定」と「journal が記録する研究上の最良構成（self_report / threshold 0.5 /
+  top_k 1）」が一致していない．
+- 対応: CLAUDE.md の規約（作業前から存在する未コミット変更は明示的な依頼なく触らない）に従い，
+  **変更は加えずそのまま残した**．
+- 要人間判断: これらが (a) 意図した未記録の実験なのか，(b) 作業途中の放置なのかを確認し，
+  研究サイクル再開前にリポジトリの設定を最良構成へ揃えるかどうかを決めること．
+  なお `router.py` の few-shot 追加は Iter5〜9 で 5 パターンすべてが棄却された系統の変更であり，
+  仮に実験するとしても E1（評価集合の拡張）完了後でなければ判定できない．
+
+## B26 [auto-decided 2026-07-26] Iter14 の converged 判定を撤回し，測定系の立て直しから再開する
+
+- 状況: 先行研究の再調査と既存結果の統計的再検討（`plans/p0001_research_direction_2026-07.md`）により，
+  Iter14 の「実行可能な新レバーを定義できない」という収束判定の前提が崩れた．
+- 自動選択: `status` を `converged` から解除し，`config.yml` の levers を全面改訂して E1〜E7 を登録した．
+- 根拠（3 点．いずれも既存判定の誤りを示す）:
+  1. **評価集合が 46 問しかない**（単一ドメイン 40 = 4×10，複合 6）．p=0.87,n=46 で SE ±5.0pt，
+     Wilson 95% CI [74.3%, 93.9%]．Iter10/Iter11 の「0.870→0.848」は **40/46→39/46 の 1 問差**であり，
+     棄却根拠にならない．ドメイン別指標は 1 ドメイン 10 問で SE ±9.5pt．
+     Iter3・Iter5〜11 の「no-op / 僅差で棄却」は，レバーが効かなかったのではなく差を検出できなかった
+     可能性が高い．
+  2. **Iter11（multi_sample）は実験設計の欠陥**．Farquhar et al. Nature 2024 は temperature 0.1 を
+     「点推定としての最良回答」の生成にのみ用い，不確実性推定は T=1・nucleus P=0.9 で行うと明記している
+     （Xiong+ ICLR2024 も T=0.7）．Iter11 は不確実性を消す設定で不確実性を測っていた．
+  3. **Iter13（STP）の 0.065 は偶然一致 0.25 を約 2.9 SD 下回る**．偶然より systematically に悪いのは
+     符号反転バグを示唆する．保存済み `results.jsonl` の符号を反転して再計算するだけで検証できる（E2）．
+- 併せて，Iter2（embedding）の cosine 潰れは埋め込みの anisotropy という既知の幾何的現象であり
+  「信号が無い」証明ではないことを確認した（Varangot-Reille+ JAIR2025 は similarity-based routing の
+  失敗を unsupervised であることに帰し，RouterDC は CosineClassifier に全タスクで勝利している）．
+- 要レビュー: E1 は評価データセットの本格的な拡張であり，`build_dataset.py` と `metrics.py` の改修を伴う．
+  research_frontier の「評価用データセットの本格化」と実質同じスコープなので，単一レバー原則の
+  例外として扱ってよいかを確認したい（`plans/p0001` は「E1 を最優先」としている）．
+
 ## B25 [auto-decided 2026-07-22] Iter14: 全 levers 試し切り完了・研究サイクル収束判定
 
 - 状況: config levers の全7本を試行・検証。hidden_state は Ollama API で raw hidden state 抽出不可が決定。

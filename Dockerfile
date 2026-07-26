@@ -11,7 +11,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY protocol.py expert_backend.py router.py aggregator.py http_client.py http_server.py node.py logging_utils.py ./
+COPY protocol.py expert_backend.py router.py aggregator.py http_client.py http_server.py node.py logging_utils.py classifier.py ./
 # tools/healthcheck.py etc. are needed to run connectivity checks and queries
 # from within a node's container when the operator terminal cannot directly
 # reach the node LAN (192.168.15.0/24).

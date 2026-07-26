@@ -36,6 +36,9 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./results:/app/results
+      # E6 supervised_classifier artifact (scripts/train_domain_classifier.py's
+      # output), mounted read-only so retraining doesn't require an image rebuild.
+      - ./models:/app/models:ro
     restart: unless-stopped
 
 volumes:

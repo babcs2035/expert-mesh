@@ -30,6 +30,7 @@ class OllamaClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         logprobs: int | None = None,
+        top_logprobs: int | None = None,
     ) -> str | dict:
         """Generate text with optional token-level logprobs.
 
@@ -38,9 +39,16 @@ class OllamaClient:
         models used in this project, whereas /api/generate does not). Otherwise
         uses /api/chat for thinking-model compatibility.
 
+        top_logprobs additionally requests N alternative-token candidates per
+        position (Ollama v0.12.11+; see docs.ollama.com/api/chat), needed by
+        router.py's extract_p_true to read P("A") even when "A" wasn't the
+        actually-generated top-1 token. Ignored when logprobs is not set.
+
         Returns a string (content only) when logprobs is not requested, or a
-        dict with 'content' (str) and optionally 'token_logprobs'
-        (list[dict] with 'token', 'logprob' keys) when logprobs is set.
+        dict with 'content' (str) and optionally 'token_logprobs' (list[dict]
+        with 'token', 'logprob', and — only when top_logprobs was requested —
+        'top_logprobs': dict[str, float] mapping alternative tokens to their
+        logprob) when logprobs is set.
 
         Retries up to DEFAULT_RETRIES times on transient connection errors.
         """
@@ -61,6 +69,8 @@ class OllamaClient:
                 "think": False,
                 "logprobs": True,
             }
+            if top_logprobs is not None:
+                payload["top_logprobs"] = top_logprobs
             if options:
                 payload["options"] = options
         else:
@@ -92,9 +102,22 @@ class OllamaClient:
                                 {"token": entry["token"], "logprob": entry["logprob"]}
                                 for entry in raw_logprobs
                             ]
+                            if top_logprobs is not None:
+                                for position, raw_entry in zip(
+                                    token_logprobs, raw_logprobs, strict=True
+                                ):
+                                    position["top_logprobs"] = {
+                                        alt["token"]: alt["logprob"]
+                                        for alt in raw_entry.get("top_logprobs", [])
+                                    }
                         return {"content": content, "token_logprobs": token_logprobs}
                     return data["message"]["content"]
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError, httpx.RemoteProtocolError):
+            except (
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+            ):
                 if attempt < DEFAULT_RETRIES - 1:
                     await asyncio.sleep(RETRY_DELAY_S)
                 else:
@@ -114,7 +137,9 @@ class OllamaClient:
             response.raise_for_status()
             return response.json().get("models", [])
 
-    async def embed(self, model: str, text: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> list[float]:
+    async def embed(
+        self, model: str, text: str, timeout_s: float = DEFAULT_TIMEOUT_S
+    ) -> list[float]:
         """Return the embedding vector for a text string.
 
         Retries up to DEFAULT_RETRIES times on transient connection errors.
@@ -128,7 +153,12 @@ class OllamaClient:
                     )
                     response.raise_for_status()
                     return response.json()["embedding"]
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError, httpx.RemoteProtocolError):
+            except (
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+            ):
                 if attempt < DEFAULT_RETRIES - 1:
                     await asyncio.sleep(RETRY_DELAY_S)
                 else:

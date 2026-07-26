@@ -3,9 +3,16 @@
 # paths are documented ONLY in this file — never hardcode them in code.
 embedding_model: nomic-embed-text
 confidence_threshold: 0.5
-# light_model uses qwen3.5:9b (verified: qwen3.5:2b incorrectly assigns
-# high confidence to out-of-domain questions). probe_timeout_s is based
-# on measured confidence scoring time with 9b (20-40s) plus margin.
+# light_model switched from 9B to qwen3.5:4b-q4_K_M (~2.4-2.5GB) for the
+# 10-node mesh: 9B (5.67GB measured resident, docs/d0001 §1.5) left too
+# little VRAM headroom once 6 more nodes were added, and light_model is
+# called on every /probe regardless of which node ends up dispatched to,
+# so its cost dominates routing latency. expert_model (only invoked for
+# the node actually dispatched to) stays a separate, potentially larger
+# model — see the S1 domain-specialization note near the nodes section.
+# probe_timeout_s/dispatch_timeout_s below are still calibrated to the old
+# 9B model's measured latency; they should be re-measured against 4b
+# before being treated as accurate for the new light_model.
 probe_timeout_s: 60.0
 # dispatch_timeout_s is based on qwen3.5:9b expert model generation time
 # for DISPATCH_MAX_TOKENS=512. The original estimate (170s + margin = 200s)
@@ -20,34 +27,123 @@ remote_dir: "~/workspace/ktakahashi/expert-mesh"
 # ("self_report": the light_model self-scores confidence). Design doc 2.4
 # prioritizes B first; A is kept opt-in for the comparison experiment.
 calibrated_routing: false
-confidence_signal_method: stp
+confidence_signal_method: self_report
 routing_method: self_report
+# confidence_elicitation (E3) only applies to the self_report signal
+# method: "numeric_scalar" asks for a single 0-1 confidence value;
+# "top_k_with_probs" asks for 2 labeled candidates with probabilities
+# summing to 1 (Tian et al. 2023), which reduces 0/1 saturation.
+confidence_elicitation: numeric_scalar
+# self_consistency_semantic (E4) samples semantic_sample_count verdicts at
+# semantic_sample_temperature and discounts the fits-fraction by the
+# entropy of their clustered reasons. Each probe call under this method
+# makes semantic_sample_count + up-to-(semantic_sample_count-1) LLM calls
+# (verdict sampling + entailment clustering), so probe_timeout_s may need
+# raising when this method is active.
+semantic_sample_count: 5
+semantic_sample_temperature: 0.7
+# p_true (E5, Kadavath et al. 2022) requires ollama v0.12.11+ for
+# top_logprobs support; if a node's ollama is older, estimate_confidence_p_true
+# falls back to numeric_scalar self_report automatically (confirm the real
+# ollama version on each node before treating a p_true run as valid).
 # dispatch_top_k > 1 sends /dispatch to multiple confidence-qualifying nodes
 # in parallel (design doc 2.5); the highest-confidence answer is kept.
 dispatch_top_k: 1
+# embedding_postprocess (E7) applies mean-centering or whitening (Su+2021)
+# to query_embedding/domain_embedding before cosine scoring, addressing the
+# anisotropy that collapsed Iter2's cosine similarities into a narrow band.
+# Only used when routing_method: embedding. embedding_whitening_path points
+# at the artifact produced by scripts/fit_embedding_whitening.py.
+embedding_postprocess: none
+embedding_whitening_path: config/embedding_whitening.json
+# routing_method: supervised_classifier (E6) loads the same trained
+# classifier (scripts/train_domain_classifier.py's output) on every node;
+# each node reads off only its own domain's predicted probability, so no
+# central router is introduced. classifier_model_path is only read when
+# routing_method is set to this value.
+classifier_model_path: models/domain_classifier.joblib
+# judge_model (evaluation axis 2, scripts/evaluate_response_quality.py's
+# --judge-model default) reuses the general node's expert_model as
+# LLM-as-judge for hand-authored consultation rows (no ground-truth
+# answer to compare against), rather than deploying a dedicated judge
+# model. Not read by node.py/http_server.py; only by that offline script.
+judge_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
 
+# 10-domain mesh (p0001 Iter15): wafl500-509 on 192.168.15.100-109. Domain
+# names match build_dataset.py's _DOMAIN_TASK_MAP so the JMMLU-backed
+# dataset's expected_domains line up with actual node domains.
+#
+# expert_model (S1, "professional の実体化"): checked the Ollama registry
+# for a domain-specialized Japanese generation model per mesh domain (the
+# design doc's Step 0). None was found for legal (matches
+# docs/d0001_literature_survey_2026-07.md's finding — only a Japanese
+# legal *retrieval* model exists, not a generation model) nor for any of
+# the other 9 domains (a Japanese medical-specialized model such as
+# ELAINE-medLLM was searched for and not found on the registry either).
+# All 10 nodes therefore share schroneko/llama-3.1-swallow-8b-instruct-v0.1
+# (Q4_K_M, ~4.9GB, verified present on the registry) as expert_model — a
+# strong general-purpose Japanese-tuned model, not a per-domain specialist.
+# This is an honest negative result for S1, not a placeholder: if a
+# verified specialized model for a specific domain is found later, only
+# that domain's expert_model line needs to change.
 nodes:
   wafl500:
     host: 192.168.15.100
     port: 8080
     domain: general
-    light_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
-    expert_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
-  wafl502:
-    host: 192.168.15.102
-    port: 8080
-    domain: legal
-    light_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
-    expert_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
-  wafl503:
-    host: 192.168.15.103
-    port: 8080
-    domain: medical
-    light_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
-    expert_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
   wafl501:
     host: 192.168.15.101
     port: 8080
     domain: education
-    light_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
-    expert_model: isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+  wafl502:
+    host: 192.168.15.102
+    port: 8080
+    domain: legal
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+  wafl503:
+    host: 192.168.15.103
+    port: 8080
+    domain: medical
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+  wafl504:
+    host: 192.168.15.104
+    port: 8080
+    domain: business_economics
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+  wafl505:
+    host: 192.168.15.105
+    port: 8080
+    domain: computer_science
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+  wafl506:
+    host: 192.168.15.106
+    port: 8080
+    domain: natural_science
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+  wafl507:
+    host: 192.168.15.107
+    port: 8080
+    domain: mathematics
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+  wafl508:
+    host: 192.168.15.108
+    port: 8080
+    domain: history_culture
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+  wafl509:
+    host: 192.168.15.109
+    port: 8080
+    domain: social_science
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m

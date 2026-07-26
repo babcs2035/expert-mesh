@@ -186,7 +186,7 @@ expert-mesh/
 ├── aggregator.py                     # probe 結果の集約・confidence 上位ノードの選定・top-k dispatch結果の集約
 ├── http_client.py                     # 他ノードへの並行 HTTP POST クライアント（advertise/probe/dispatch）
 ├── http_server.py                      # FastAPI による /advertise, /probe, /dispatch サーバ・advertiseハートビート
-├── logging_utils.py                     # リクエスト単位の構造化ログ出力（通信時間とローカル推論時間の分離記録）
+├── logging_utils.py                     # リクエスト単位の構造化ログ出力（ローカル推論時間を記録．通信時間との分離は evaluation.py 側で近似計算）
 ├── node.py                              # CLI エントリポイント（serve / ask サブコマンド）
 ├── tools/
 │   ├── list_peers.py                     # config.yaml から node_id 一覧を出力
@@ -194,12 +194,22 @@ expert-mesh/
 │   ├── remote_dir.py                       # config.yaml からリモート配置先ディレクトリを出力
 │   ├── healthcheck.py                       # 全ノードへの /advertise 疎通確認
 │   └── show_logs.py                          # 収集済みログから構造化ログ行を抽出・集計表示
-├── data/                                        # 評価用データセット
-│   └── dataset.jsonl                             # 階層2（地域の困りごと相談・複合ドメイン含む）データセット
-├── build_dataset.py                             # 評価用データセット生成
+├── data/                                        # 評価用データセット（.gitignore対象，build_dataset.pyが生成）
+│   └── dataset.jsonl                             # JMMLU由来の10ドメイン単一ドメイン設問＋手作りの複合ドメイン設問
+├── build_dataset.py                             # JMMLUベースの評価用データセット生成（10ドメイン固定）
 ├── run_experiment.py                            # データセットの各質問を実際にノードへ投げて結果を記録
-├── metrics.py                                   # Top-1正解率・適合率・再現率・誤ルーティング率の算出
+├── metrics.py                                   # 評価軸①：Top-1正解率・Wilson CI・McNemar検定・Cohen's kappa・3ベースライン
+├── evaluation.py                                # 評価軸②（回答品質）・③（End-to-End・レイテンシ内訳）
+├── classifier.py                                # E6: supervised_classifier のノード側スコアリング（LLM呼び出し無し）
+├── scripts/
+│   ├── verify_stp_sign_flip.py                   # E2: STP符号反転のオフライン検証
+│   ├── fit_embedding_whitening.py                 # E7: embedding whitening/mean-centeringの学習（要 --extra research）
+│   ├── measure_sample_diversity.py                # E4実験前の必須診断：サンプリング多様性の実測
+│   ├── train_domain_classifier.py                 # E6: supervised_classifier のオフライン学習
+│   ├── evaluate_response_quality.py               # 評価軸②③の事後計算（results.jsonl + dataset.jsonlから）
+│   └── analyze_probe_features.py                  # Iter10由来のprobe特徴量オフライン分析（ドメイン数非依存）
 └── tests/                                        # 単体テスト（LLM 呼び出し部分はモック）
+    └── fixtures/jmmlu_sample.zip                   # build_dataset.pyのテスト用合成JMMLU互換zip（実データではない）
 ```
 
 ## セットアップと実行
@@ -306,7 +316,7 @@ mise run start -- --node-id wafl502
 mise run start -- --dataset my_dataset.jsonl
 ```
 
-`run_experiment.py` はデータセットの各行を順に処理し，各行の結果を JSON 行として出力する．`analyze` タスクで収集した各ノードの構造化ログ（`logging_utils.py` 出力）と組み合わせることで，通信時間とローカル推論時間の内訳をリクエストごとに分離して解析できる．
+`run_experiment.py` はデータセットの各行を順に処理し，各行の結果を JSON 行として出力する．各行には `duration_ms`（probe 全体+dispatch を含むクライアント側の総所要時間）と `dispatch_gen_time_ms`（実際に dispatch された専門家ノード自身のローカル推論時間，dispatch が成功した行のみ）が含まれ，`evaluation.compute_latency_breakdown` でその差分（probe のラウンドトリップ等，dispatch 生成時間以外の残差）を集計できる．ただし probe 個々の通信時間までは分離できておらず，「通信時間」そのものの純粋な計測ではない点に注意（詳細は下記 §「構造化ログ」）．
 
 ### 実験ログの回収（`mise run analyze`）
 
@@ -462,7 +472,9 @@ ollama はモデルへの初回リクエスト時に，ディスクからメモ�
 
 ### 9. 構造化ログによるレイテンシ内訳の記録
 
-`logging_utils.py` は，各リクエスト単位のイベント（`probe_done`, `dispatch_done`, `probe_timeout`, `dispatch_timeout`）を `[LEVEL] {json}` 形式で stdout に出力する．JSON レコードには `unix_time_s`, `node_id`, `event`, `latency_ms`, `gen_time_ms` 等のフィールドを含み，`tools/show_logs.py` で後からパース・集計できる．これにより，通信時間（`latency_ms` から `gen_time_ms` を引いた値）とローカル推論時間の内訳を，リクエストごとに分離して計測できる．実機検証では，このログから dispatch の大部分の時間を占めるのがネットワーク通信ではなくモデルのトークン生成であることを定量的に確認した．
+`logging_utils.py` は，各リクエスト単位のイベント（`probe_done`, `dispatch_done`, `probe_timeout`, `dispatch_timeout`）を `[LEVEL] {json}` 形式で stdout に出力する．JSON レコードには `unix_time_s`, `node_id`, `event`, `received_at_unix_time_s`, `local_inference_ms` 等のフィールドを含み，`tools/show_logs.py` で後からパース・集計できる．`local_inference_ms` はそのノード自身のローカル推論時間（confidence 計算または回答生成）であり，クライアント側（`run_experiment.py`）はリクエスト送信時刻を記録していないため，このログ単体から通信時間を分離計算することはできない．
+
+通信時間とローカル推論時間の内訳は，`run_experiment.py` が出力する `duration_ms`（クライアント側の総所要時間）と `dispatch_gen_time_ms`（dispatch された専門家ノードの生成時間）を `evaluation.compute_latency_breakdown` で突き合わせることで，dispatch 生成時間とそれ以外（probe のラウンドトリップ等）の残差として近似計算できる．ただし probe 個々の通信時間までは分離できておらず，実機検証では dispatch の大部分の時間を占めるのがネットワーク通信ではなくモデルのトークン生成であることが定性的に確認されている（`dispatch_timeout_s` のコメント参照）．
 
 ### 10. 長時間 SSH セッションでの `docker compose exec` は接続断で丸ごと失われる
 
@@ -479,7 +491,9 @@ ollama はモデルへの初回リクエスト時に，ディスクからメモ�
 設計書 4 章の評価計画のうち，Top-1 正解率・適合率・再現率・誤ルーティング率（評価軸①）を計測する最小限の基盤を実装している．
 
 ```bash
-# 1. 階層2（地域の困りごと相談・複合ドメイン含む）データセットを生成する（現時点ではサンプル仮データ）
+# 1. JMMLU（10ドメイン固定，医療・法律・教育・一般に加え経営経済/情報科学/
+#    自然科学/数学/歴史文化/社会科学の6分野を追加）ベースの評価データセットを
+#    生成し，手作りの複合ドメイン相談例と合わせて出力する
 uv run python build_dataset.py --output data/dataset.jsonl
 
 # 2. 実際にノードへ質問を投げ，選定結果・応答時間を記録する（実機の mesh が必要）
@@ -490,7 +504,7 @@ uv run python run_experiment.py --node-id wafl500 \
 uv run python metrics.py --results results.jsonl
 ```
 
-`build_dataset.py` が生成する質問は，実際のドメインQAベンチマークではなく，動作確認用のサンプル仮データである．評価軸②（回答品質）・③（End-to-End正答率）は，LLM-as-judge や人手評価を要するため未実装であり，Phase 2 以降の課題として残る．
+`build_dataset.py` は JMMLU（https://huggingface.co/datasets/nlp-waseda/JMMLU, CC BY-NC-ND 4.0）の56タスクを10メッシュドメインへ写像し，ドメインあたり最大150問（legalは実際のタスクプールが227問しかないためこれが上限）をサンプリングする．legal・educationの写像品質については `build_dataset.py` のモジュール docstring に既知の限界を明記している．複合ドメイン設問（医療×法律等）はJMMLUの四択形式では表現できないため手作りのまま維持している．評価軸②（回答品質）・③（End-to-End正答率）は，LLM-as-judge や人手評価を要するため未実装であり，Phase 2 以降の課題として残る．
 
 `tools/show_logs.py` は，`mise run analyze` が収集した `results/<datetime>/logs/<node_id>/expert-mesh.log` から `logging_utils.py` が出力する構造化ログ行（`[LEVEL] {json}`）を抽出し，イベント種別ごとの件数・ローカル推論時間の平均/最大を集計する事後解析ツールである．
 
@@ -512,7 +526,7 @@ uv run ruff check .       # 静的解析
 - **ルーティング精度**：`qwen3.5:9b` への切り替えとプロンプト改善により，医療・法律・一般・複合ドメイン・無関係な質問を含む複数パターンで正しいノードが選定されることを実機で確認した．ただし，これは限られたテストケースでの確認であり，`data/` による体系的な精度評価は，実データセットの整備を待って本格的に行う必要がある．
 - **回答生成の言語**：複合ドメインの質問に対して，選定自体は正しいにもかかわらず，回答が日本語ではない言語（中国語）で生成される事例が確認されている．これは `qwen3.5` の多言語対応モデルとしての特性に起因すると考えられ，ルーティングの正確性とは独立した課題である．
 - **top-k dispatch の選定方式**：`dispatch_top_k` を1より大きくした場合の複数候補からの選定は，LLM-as-judge や多数決ではなく，各ノードが `/probe` で自己申告した confidence を再利用した単純な最大値選択（`aggregator.select_best_dispatch_response`）に留まる．追加の LLM 呼び出しなしで実装できる最小構成を優先した判断であり，より高度な集約方式は本フェーズのスコープ外である．
-- **評価用データセット**：`build_dataset.py` が生成するのは動作確認用の仮データであり，設計書 4.3 節が定義する実際のドメインQAベンチマーク（階層1）や，本格的な社会実装シナリオデータセット（階層2）ではない．
+- **評価用データセット**：`build_dataset.py` はJMMLU由来の10ドメイン単一ドメイン設問（設計書 4.3 節の階層1に相当）と，手作りの複合ドメイン相談設問（階層2）を組み合わせる．legal・educationはJMMLUに直接対応するタスクが無いための代理指標であり，写像の限界は `build_dataset.py` のdocstringに明記している．
 - **回答品質・End-to-End評価**：`metrics.py` はルーティング精度（評価軸①）のみを計算する．LLM-as-judge 等による回答品質（評価軸②）と，それを統合した End-to-End 評価（評価軸③）は未実装である．
-- **ベースライン比較**：単一汎用小型モデル・中央集権ルーター・オラクルルーティングとの比較実験（設計書 4.2 節）は未実装である．
+- **ベースライン比較**：`metrics.py` は Random／BestSingle／Oracle の3ベースラインと，Wilson信頼区間・McNemar検定・Cohen's kappa（chance-corrected指標）を実装済み．中央集権ルーターとの比較実験（設計書 4.2 節）は未実装である．
 - **無線アドホック化・ネットワーク不安定性への対応**：設計書が Phase 3 として明示的に切り出している課題であり，本フェーズのスコープには含まれない．

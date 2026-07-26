@@ -59,16 +59,19 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         answer_text = result.dispatch_response.answer_text
         selected_node_id = result.dispatch_response.node_id
         confidence = result.dispatch_response.confidence
+        dispatch_gen_time_ms = result.dispatch_response.gen_time_ms
     elif result.fallback_answer is not None:
         selected_domain = config["nodes"][node_id]["domain"]
         answer_text = result.fallback_answer
         selected_node_id = node_id
         confidence = None
+        dispatch_gen_time_ms = None
     else:
         selected_domain = None
         answer_text = None
         selected_node_id = None
         confidence = None
+        dispatch_gen_time_ms = None
 
     # Recompute the dispatch target set from the probe_responses already
     # fetched above (no extra /probe or /dispatch calls) using the same
@@ -103,6 +106,7 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
 
     return {
         "id": row["id"],
+        "request_id": result.request_id,
         "query": row["query"],
         "expected_domains": row["expected_domains"],
         "selected_node_id": selected_node_id,
@@ -113,6 +117,13 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         "confidence_logprobs_mean": stp_logprobs,
         "answer_text": answer_text,
         "duration_ms": duration_ms,
+        # dispatch_gen_time_ms is the expert node's own local generation time
+        # (DispatchResponse.gen_time_ms); duration_ms - dispatch_gen_time_ms
+        # approximates network + probe-round overhead (design doc 4.4's
+        # "latency breakdown"). None when there was no successful dispatch
+        # (fallback or dispatch_failed), since there is no expert generation
+        # time to report in that case.
+        "dispatch_gen_time_ms": dispatch_gen_time_ms,
         "dispatched_domains": dispatched_domains,
         "probe_candidates": probe_candidates,
     }

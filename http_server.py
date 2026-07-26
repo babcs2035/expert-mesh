@@ -1,6 +1,7 @@
 """FastAPI server exposing the inter-node protocol endpoints."""
 
 import asyncio
+import dataclasses
 import time
 from contextlib import asynccontextmanager
 
@@ -8,7 +9,9 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sklearn.linear_model import LogisticRegression
 
+from classifier import estimate_confidence_classifier, load_domain_classifier
 from expert_backend import OllamaClient
 from http_client import PeerClient
 from logging_utils import LOG_LEVEL_ERROR, LOG_LEVEL_INFO, log_event
@@ -22,10 +25,18 @@ from protocol import (
     ProbeResponse,
 )
 from router import (
+    EMBEDDING_POSTPROCESS_NONE,
+    SEMANTIC_SAMPLE_COUNT,
+    SEMANTIC_SAMPLE_TEMPERATURE,
+    apply_embedding_postprocess,
     estimate_confidence,
     estimate_confidence_multi_sample,
+    estimate_confidence_p_true,
+    estimate_confidence_semantic_entropy,
     estimate_confidence_stp,
+    estimate_confidence_top_k,
     estimate_embedding_confidence,
+    load_embedding_postprocess_params,
 )
 
 # Maximum tokens for full answer generation. Without an explicit cap,
@@ -59,6 +70,53 @@ PLACEHOLDER_LOAD = 0.0
 # ever compares them once per /probe call.
 ROUTING_METHOD_SELF_REPORT = "self_report"
 ROUTING_METHOD_EMBEDDING = "embedding"
+ROUTING_METHOD_SUPERVISED_CLASSIFIER = "supervised_classifier"
+VALID_ROUTING_METHODS = frozenset(
+    {ROUTING_METHOD_SELF_REPORT, ROUTING_METHOD_EMBEDDING, ROUTING_METHOD_SUPERVISED_CLASSIFIER}
+)
+
+# confidence_signal_method identifiers. Plain strings for the same reason
+# as ROUTING_METHOD_* above.
+CONFIDENCE_SIGNAL_SELF_REPORT = "self_report"
+CONFIDENCE_SIGNAL_MULTI_SAMPLE = "multi_sample"
+CONFIDENCE_SIGNAL_STP = "stp"
+CONFIDENCE_SIGNAL_SEMANTIC_ENTROPY = "self_consistency_semantic"
+CONFIDENCE_SIGNAL_P_TRUE = "p_true"
+VALID_CONFIDENCE_SIGNAL_METHODS = frozenset(
+    {
+        CONFIDENCE_SIGNAL_SELF_REPORT,
+        CONFIDENCE_SIGNAL_MULTI_SAMPLE,
+        CONFIDENCE_SIGNAL_STP,
+        CONFIDENCE_SIGNAL_SEMANTIC_ENTROPY,
+        CONFIDENCE_SIGNAL_P_TRUE,
+    }
+)
+
+# confidence_elicitation identifiers: how the self_report prompt asks the
+# model to express its score (a single 0-1 scalar, or top-K candidates with
+# per-candidate probabilities per Tian et al. 2023).
+CONFIDENCE_ELICITATION_NUMERIC_SCALAR = "numeric_scalar"
+CONFIDENCE_ELICITATION_TOP_K_WITH_PROBS = "top_k_with_probs"
+VALID_CONFIDENCE_ELICITATIONS = frozenset(
+    {CONFIDENCE_ELICITATION_NUMERIC_SCALAR, CONFIDENCE_ELICITATION_TOP_K_WITH_PROBS}
+)
+
+
+def validate_node_config_values(
+    routing_method: str, confidence_signal_method: str, confidence_elicitation: str
+) -> None:
+    """Raise ValueError if any configured method/elicitation string is unrecognized.
+
+    Silently falling back to self_report on a config typo would hide a
+    misconfiguration until routing behaves unexpectedly at runtime; failing
+    at startup surfaces it immediately instead.
+    """
+    if routing_method not in VALID_ROUTING_METHODS:
+        raise ValueError(f"unknown routing_method: {routing_method!r}")
+    if confidence_signal_method not in VALID_CONFIDENCE_SIGNAL_METHODS:
+        raise ValueError(f"unknown confidence_signal_method: {confidence_signal_method!r}")
+    if confidence_elicitation not in VALID_CONFIDENCE_ELICITATIONS:
+        raise ValueError(f"unknown confidence_elicitation: {confidence_elicitation!r}")
 
 
 def build_dispatch_prompt(domain: str, full_query: str) -> str:
@@ -126,8 +184,15 @@ class NodeState:
         peers: list[dict] | None = None,
         embedding_model: str | None = None,
         routing_method: str = ROUTING_METHOD_SELF_REPORT,
-        confidence_signal_method: str = "self_report",
+        confidence_signal_method: str = CONFIDENCE_SIGNAL_SELF_REPORT,
         multi_sample_count: int = 1,
+        confidence_elicitation: str = CONFIDENCE_ELICITATION_NUMERIC_SCALAR,
+        embedding_postprocess: str = EMBEDDING_POSTPROCESS_NONE,
+        embedding_whitening_path: str | None = None,
+        semantic_sample_count: int = SEMANTIC_SAMPLE_COUNT,
+        semantic_sample_temperature: float = SEMANTIC_SAMPLE_TEMPERATURE,
+        classifier_model_path: str | None = None,
+        domain_classifier: LogisticRegression | None = None,
     ) -> None:
         self.node_id = node_id
         self.domain = domain
@@ -145,9 +210,46 @@ class NodeState:
         self.routing_method = routing_method
         self.confidence_signal_method = confidence_signal_method
         self.multi_sample_count = multi_sample_count
+        self.confidence_elicitation = confidence_elicitation
         self.domain_embedding: list[float] = []
         self.known_peers: dict[str, AdvertiseRequest] = {}
         self._probe_confidence_cache: dict[str, float] = {}
+
+        self.embedding_postprocess = embedding_postprocess
+        self.embedding_mean_vector: list[float] | None = None
+        self.embedding_whitening_matrix: list[list[float]] | None = None
+        if embedding_postprocess != EMBEDDING_POSTPROCESS_NONE:
+            if embedding_whitening_path is None:
+                # Fail at construction time rather than silently degrading to
+                # "no postprocessing" (apply_embedding_postprocess's
+                # mean_vector-is-None fallback exists for that function's own
+                # defensive contract, not to paper over a config mistake
+                # here): an experiment run under embedding_postprocess=whiten
+                # that silently behaved as embedding_postprocess=none would
+                # produce results indistinguishable from a valid run of the
+                # wrong configuration — exactly the kind of silent
+                # misconfiguration this research project has repeatedly been
+                # burned by (see docs/d0001_literature_survey_2026-07.md).
+                raise ValueError(
+                    f"embedding_postprocess={embedding_postprocess!r} requires "
+                    "embedding_whitening_path to be set"
+                )
+            self.embedding_mean_vector, self.embedding_whitening_matrix = (
+                load_embedding_postprocess_params(embedding_whitening_path)
+            )
+
+        self.semantic_sample_count = semantic_sample_count
+        self.semantic_sample_temperature = semantic_sample_temperature
+
+        self.classifier_model_path = classifier_model_path
+        # Normally loaded lazily in create_app's lifespan from
+        # classifier_model_path (not here), since it's only ever needed
+        # when routing_method=supervised_classifier and tests for every
+        # other routing_method construct a NodeState without a classifier
+        # artifact on disk at all. Tests that do exercise the classifier
+        # path can instead inject an already-fitted model directly here,
+        # bypassing the filesystem and lifespan.
+        self.domain_classifier: LogisticRegression | None = domain_classifier
 
     def cache_probe_confidence(self, request_id: str, confidence: float) -> None:
         """Store the confidence score from probe for later reuse in dispatch."""
@@ -178,6 +280,114 @@ async def _advertise_loop(state: NodeState, peer_client: PeerClient) -> None:
         await asyncio.sleep(ADVERTISE_INTERVAL_S)
 
 
+@dataclasses.dataclass
+class ProbeConfidenceResult:
+    """Confidence plus any signal-method-specific diagnostic value for /probe.
+
+    Only one of logprobs_mean/semantic_entropy/p_true is ever populated per
+    call, matching whichever confidence_signal_method produced it; the rest
+    stay None. Kept as separate fields (not reused across methods) because
+    each measures a different thing: STP the fluency of the whole response,
+    self_consistency_semantic the diversity of independently-sampled
+    verdicts, p_true a single self-judgment token.
+    """
+
+    confidence: float
+    logprobs_mean: float | None = None
+    semantic_entropy: float | None = None
+    p_true: float | None = None
+
+
+async def _estimate_probe_confidence(state: NodeState, body: ProbeRequest) -> ProbeConfidenceResult:
+    """Compute the /probe confidence (plus any diagnostic value) for the configured method.
+
+    Dispatches on state.routing_method / state.confidence_signal_method.
+    Split out of the /probe handler so the handler itself only deals with
+    request validation, error handling, logging, and response construction.
+    """
+    # Derived from the configured peer list (which always includes self;
+    # see node.py's _build_peers) so the confidence prompt's few-shot
+    # examples cover every domain actually in the mesh, however many there
+    # are, instead of a hardcoded 4-domain set.
+    all_domains = sorted({p["domain"] for p in state.peers}) if state.peers else None
+    if state.routing_method == ROUTING_METHOD_EMBEDDING:
+        query_embedding, domain_embedding = apply_embedding_postprocess(
+            body.query_embedding,
+            state.domain_embedding,
+            state.embedding_postprocess,
+            state.embedding_mean_vector,
+            state.embedding_whitening_matrix,
+        )
+        confidence = estimate_embedding_confidence(query_embedding, domain_embedding)
+        return ProbeConfidenceResult(confidence=confidence)
+    if state.routing_method == ROUTING_METHOD_SUPERVISED_CLASSIFIER:
+        # No LLM call: the classifier consumes the query_embedding the
+        # requester already computed (node.py's run_ask_flow).
+        confidence = estimate_confidence_classifier(
+            state.domain_classifier, state.domain, body.query_embedding
+        )
+        return ProbeConfidenceResult(confidence=confidence)
+    if state.confidence_signal_method == CONFIDENCE_SIGNAL_MULTI_SAMPLE:
+        mean_c, _var_c = await estimate_confidence_multi_sample(
+            state.ollama_client,
+            state.light_model,
+            state.domain,
+            body.query_summary,
+            timeout_s=state.probe_timeout_s,
+            n_samples=state.multi_sample_count,
+            all_domains=all_domains,
+        )
+        return ProbeConfidenceResult(confidence=mean_c)
+    if state.confidence_signal_method == CONFIDENCE_SIGNAL_STP:
+        stp_conf, raw_logprob = await estimate_confidence_stp(
+            state.ollama_client,
+            state.light_model,
+            state.domain,
+            body.query_summary,
+            timeout_s=state.probe_timeout_s,
+            all_domains=all_domains,
+        )
+        return ProbeConfidenceResult(confidence=stp_conf, logprobs_mean=raw_logprob)
+    if state.confidence_signal_method == CONFIDENCE_SIGNAL_SEMANTIC_ENTROPY:
+        semantic_conf, entropy = await estimate_confidence_semantic_entropy(
+            state.ollama_client,
+            state.light_model,
+            state.domain,
+            body.query_summary,
+            timeout_s=state.probe_timeout_s,
+            n_samples=state.semantic_sample_count,
+            temperature=state.semantic_sample_temperature,
+        )
+        return ProbeConfidenceResult(confidence=semantic_conf, semantic_entropy=entropy)
+    if state.confidence_signal_method == CONFIDENCE_SIGNAL_P_TRUE:
+        p_true_conf, raw_p_true = await estimate_confidence_p_true(
+            state.ollama_client,
+            state.light_model,
+            state.domain,
+            body.query_summary,
+            timeout_s=state.probe_timeout_s,
+        )
+        return ProbeConfidenceResult(confidence=p_true_conf, p_true=raw_p_true)
+    if state.confidence_elicitation == CONFIDENCE_ELICITATION_TOP_K_WITH_PROBS:
+        confidence = await estimate_confidence_top_k(
+            state.ollama_client,
+            state.light_model,
+            state.domain,
+            body.query_summary,
+            timeout_s=state.probe_timeout_s,
+        )
+        return ProbeConfidenceResult(confidence=confidence)
+    confidence = await estimate_confidence(
+        state.ollama_client,
+        state.light_model,
+        state.domain,
+        body.query_summary,
+        timeout_s=state.probe_timeout_s,
+        all_domains=all_domains,
+    )
+    return ProbeConfidenceResult(confidence=confidence)
+
+
 def create_app(state: NodeState) -> FastAPI:
     """Create and wire up the FastAPI application with the given node state."""
 
@@ -193,6 +403,12 @@ def create_app(state: NodeState) -> FastAPI:
             state.domain_embedding = await state.ollama_client.embed(
                 state.embedding_model, state.domain
             )
+        if state.routing_method == ROUTING_METHOD_SUPERVISED_CLASSIFIER:
+            if state.classifier_model_path is None:
+                raise ValueError(
+                    "routing_method=supervised_classifier requires classifier_model_path to be set"
+                )
+            state.domain_classifier = load_domain_classifier(state.classifier_model_path)
 
         advertise_task = None
         if state.peers:
@@ -211,7 +427,9 @@ def create_app(state: NodeState) -> FastAPI:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         """Return a standardized 400 error for malformed requests."""
-        return JSONResponse(status_code=400, content=ErrorResponse(error="invalid request").model_dump())
+        return JSONResponse(
+            status_code=400, content=ErrorResponse(error="invalid request").model_dump()
+        )
 
     @app.post("/advertise", response_model=AdvertiseResponse)
     async def advertise(body: AdvertiseRequest) -> AdvertiseResponse:
@@ -226,46 +444,12 @@ def create_app(state: NodeState) -> FastAPI:
         received_at = time.time()
         start = time.monotonic()
         try:
-            if state.routing_method == ROUTING_METHOD_EMBEDDING:
-                confidence = estimate_embedding_confidence(
-                    body.query_embedding, state.domain_embedding
-                )
-                logprobs_mean: float | None = None
-            elif state.confidence_signal_method == "multi_sample":
-                mean_c, _var_c = await estimate_confidence_multi_sample(
-                    state.ollama_client,
-                    state.light_model,
-                    state.domain,
-                    body.query_summary,
-                    timeout_s=state.probe_timeout_s,
-                    n_samples=state.multi_sample_count,
-                )
-                confidence = mean_c  # Use mean as the routing signal
-                logprobs_mean = None
-            elif state.confidence_signal_method == "stp":
-                stp_conf, raw_logprob = await estimate_confidence_stp(
-                    state.ollama_client,
-                    state.light_model,
-                    state.domain,
-                    body.query_summary,
-                    timeout_s=state.probe_timeout_s,
-                )
-                confidence = stp_conf  # Use STP as the routing signal
-                logprobs_mean = raw_logprob
-            else:
-                confidence = await estimate_confidence(
-                    state.ollama_client,
-                    state.light_model,
-                    state.domain,
-                    body.query_summary,
-                    timeout_s=state.probe_timeout_s,
-                )
-                logprobs_mean = None
+            result = await _estimate_probe_confidence(state, body)
         except httpx.TimeoutException:
-            log_event(
-                state.node_id, LOG_LEVEL_ERROR, "probe_timeout", request_id=body.request_id
+            log_event(state.node_id, LOG_LEVEL_ERROR, "probe_timeout", request_id=body.request_id)
+            return JSONResponse(
+                status_code=504, content=ErrorResponse(error="timeout").model_dump()
             )
-            return JSONResponse(status_code=504, content=ErrorResponse(error="timeout").model_dump())
         except httpx.HTTPError as exc:
             log_event(
                 state.node_id,
@@ -278,7 +462,7 @@ def create_app(state: NodeState) -> FastAPI:
                 status_code=503, content=ErrorResponse(error="model not ready").model_dump()
             )
         estimated_latency_ms = int((time.monotonic() - start) * 1000)
-        state.cache_probe_confidence(body.request_id, confidence)
+        state.cache_probe_confidence(body.request_id, result.confidence)
         log_event(
             state.node_id,
             LOG_LEVEL_INFO,
@@ -286,16 +470,18 @@ def create_app(state: NodeState) -> FastAPI:
             request_id=body.request_id,
             from_node=body.from_,
             routing_method=state.routing_method,
-            confidence=confidence,
+            confidence=result.confidence,
             received_at_unix_time_s=received_at,
             local_inference_ms=estimated_latency_ms,
         )
         return ProbeResponse(
             request_id=body.request_id,
             node_id=state.node_id,
-            confidence=confidence,
+            confidence=result.confidence,
             estimated_latency_ms=estimated_latency_ms,
-            confidence_logprobs_mean=logprobs_mean,
+            confidence_logprobs_mean=result.logprobs_mean,
+            confidence_semantic_entropy=result.semantic_entropy,
+            confidence_p_true=result.p_true,
         )
 
     @app.post("/dispatch", response_model=None)
@@ -314,7 +500,9 @@ def create_app(state: NodeState) -> FastAPI:
             log_event(
                 state.node_id, LOG_LEVEL_ERROR, "dispatch_timeout", request_id=body.request_id
             )
-            return JSONResponse(status_code=504, content=ErrorResponse(error="timeout").model_dump())
+            return JSONResponse(
+                status_code=504, content=ErrorResponse(error="timeout").model_dump()
+            )
         except httpx.HTTPError as exc:
             log_event(
                 state.node_id,

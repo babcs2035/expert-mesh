@@ -9,7 +9,14 @@ dependencies = [
     "httpx>=0.27",
     "pydantic>=2.9",
     "pyyaml>=6.0",
+    "scikit-learn>=1.5",
 ]
+
+[project.optional-dependencies]
+# Only needed to fit a new embedding_postprocess=whiten artifact
+# (scripts/fit_embedding_whitening.py); the serving path (router.py) applies
+# the precomputed transform with plain Python, so nodes never need this.
+research = ["numpy>=1.26"]
 
 [dependency-groups]
 dev = [

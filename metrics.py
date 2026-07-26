@@ -13,9 +13,13 @@ Usage:
 
 import argparse
 import json
+import math
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import TextIO
+
+# z-score for a two-sided 95% confidence interval (Wilson score interval).
+_Z_95 = 1.959963984540054
 
 
 def _read_results(path: str) -> list[dict]:
@@ -49,6 +53,20 @@ def compute_misrouting_rate(results: list[dict]) -> float:
     return 1.0 - compute_top1_accuracy(results)
 
 
+def _observed_domains(results: list[dict]) -> list[str]:
+    """Union of every expected_domains entry and every non-null selected_domain, sorted.
+
+    Used as the default domain set for metrics (precision/recall,
+    baselines, Cohen's kappa) that need "every domain seen in this
+    experiment" without requiring config.yaml to be passed alongside the
+    results file.
+    """
+    domains = {domain for r in results for domain in r["expected_domains"]} | {
+        r["selected_domain"] for r in results if r["selected_domain"] is not None
+    }
+    return sorted(domains)
+
+
 def compute_precision_recall_per_domain(results: list[dict]) -> dict[str, dict[str, float]]:
     """Per-domain precision and recall, treating routing as a multi-label classifier.
 
@@ -59,15 +77,10 @@ def compute_precision_recall_per_domain(results: list[dict]) -> dict[str, dict[s
     select_dispatch_targets treats "any qualifying expert" as acceptable
     (design doc 2.5).
     """
-    all_domains = {domain for r in results for domain in r["expected_domains"]} | {
-        r["selected_domain"] for r in results if r["selected_domain"] is not None
-    }
     per_domain: dict[str, dict[str, float]] = {}
-    for domain in sorted(all_domains):
+    for domain in _observed_domains(results):
         true_positive = sum(
-            1
-            for r in results
-            if r["selected_domain"] == domain and domain in r["expected_domains"]
+            1 for r in results if r["selected_domain"] == domain and domain in r["expected_domains"]
         )
         selected_as_domain = sum(1 for r in results if r["selected_domain"] == domain)
         should_be_domain = sum(1 for r in results if domain in r["expected_domains"])
@@ -181,15 +194,177 @@ def compute_compound_coverage_metrics(results: list[dict]) -> dict:
     }
 
 
+def compute_wilson_confidence_interval(
+    successes: int, total: int, z: float = _Z_95
+) -> tuple[float, float]:
+    """Return the (lower, upper) Wilson score interval for a binomial proportion.
+
+    Preferred over the naive normal-approximation interval (p +/- z*SE)
+    because the latter can extend past [0, 1] and is a poor approximation
+    at small n (this project's per-domain n is as low as ~10-40 rows).
+    """
+    if total == 0:
+        return 0.0, 0.0
+    p = successes / total
+    z2 = z * z
+    denominator = 1.0 + z2 / total
+    center = (p + z2 / (2 * total)) / denominator
+    half_width = (z * math.sqrt(p * (1 - p) / total + z2 / (4 * total * total))) / denominator
+    return max(center - half_width, 0.0), min(center + half_width, 1.0)
+
+
+def compute_top1_accuracy_wilson_ci(results: list[dict], z: float = _Z_95) -> tuple[float, float]:
+    """Wilson confidence interval for the top1_accuracy proportion."""
+    successes = sum(1 for r in results if r["selected_domain"] in r["expected_domains"])
+    return compute_wilson_confidence_interval(successes, len(results), z)
+
+
+def _standard_normal_cdf(z: float) -> float:
+    """Standard normal CDF via math.erf (avoids adding scipy for one function)."""
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def compute_mcnemar_test(results_a: list[dict], results_b: list[dict]) -> dict[str, float]:
+    """Continuity-corrected McNemar test comparing two paired top1-correctness sets.
+
+    Rows are paired by `id` (the same evaluation question run under two
+    different configurations), so this answers "is configuration B's
+    accuracy change from A distinguishable from noise on these exact
+    questions" rather than comparing two independent samples. Raises
+    ValueError if the two result sets don't cover the same question ids,
+    since a McNemar test over mismatched pairs would silently compare the
+    wrong rows against each other.
+    """
+    ids_a = {r["id"] for r in results_a}
+    ids_b = {r["id"] for r in results_b}
+    if ids_a != ids_b:
+        raise ValueError("results_a and results_b must cover the same set of ids")
+
+    correct_a = {r["id"]: r["selected_domain"] in r["expected_domains"] for r in results_a}
+    correct_b = {r["id"]: r["selected_domain"] in r["expected_domains"] for r in results_b}
+
+    discordant_a_only = sum(1 for row_id in ids_a if correct_a[row_id] and not correct_b[row_id])
+    discordant_b_only = sum(1 for row_id in ids_a if correct_b[row_id] and not correct_a[row_id])
+    discordant_pairs = discordant_a_only + discordant_b_only
+    if discordant_pairs == 0:
+        chi2_statistic = 0.0
+    else:
+        chi2_statistic = (abs(discordant_a_only - discordant_b_only) - 1) ** 2 / discordant_pairs
+    # chi-square(1) is the distribution of a squared standard normal, so its
+    # upper-tail probability is the two-sided normal tail: 2*(1-Phi(sqrt(x))).
+    p_value = 2.0 * (1.0 - _standard_normal_cdf(math.sqrt(max(chi2_statistic, 0.0))))
+    return {
+        "discordant_a_only": discordant_a_only,
+        "discordant_b_only": discordant_b_only,
+        "discordant_pairs": discordant_pairs,
+        "chi2_statistic": chi2_statistic,
+        "p_value": p_value,
+    }
+
+
+def compute_random_baseline_accuracy(results: list[dict], domains: list[str]) -> float:
+    """Closed-form expected accuracy of selecting a domain uniformly at random.
+
+    A compound row with k acceptable domains out of len(domains) candidates
+    has hit probability k/len(domains); no RNG/simulation is needed since
+    this is the exact expectation, not an estimate.
+    """
+    if not results or not domains:
+        return 0.0
+    return sum(len(r["expected_domains"]) / len(domains) for r in results) / len(results)
+
+
+def compute_best_single_domain_baseline(
+    results: list[dict], domains: list[str]
+) -> dict[str, float]:
+    """Accuracy if every row were routed to a single fixed domain, for each candidate domain.
+
+    Includes the literature-specified "always route to general" baseline
+    as one entry among all configured domains, rather than hardcoding
+    "general" as a special case that would break if a mesh has no such
+    domain (e.g. a specialized-only deployment).
+    """
+    if not results:
+        return {domain: 0.0 for domain in domains}
+    return {
+        domain: sum(1 for r in results if domain in r["expected_domains"]) / len(results)
+        for domain in domains
+    }
+
+
+def compute_oracle_accuracy(results: list[dict], available_domains: list[str]) -> float:
+    """Fraction of rows answerable at all by some domain the mesh actually has configured.
+
+    This is the upper bound imposed by mesh coverage, not by routing
+    quality: it stays below 1.0 only when a row's expected_domains don't
+    intersect available_domains at all (e.g. a dataset row tagged with a
+    domain no node in config.yaml currently serves).
+    """
+    if not results:
+        return 0.0
+    available = set(available_domains)
+    return sum(1 for r in results if available.intersection(r["expected_domains"])) / len(results)
+
+
+def compute_cohens_kappa(results: list[dict], domains: list[str]) -> float:
+    """Chance-corrected agreement between selected_domain and expected_domains.
+
+    Computed over single-domain rows only (compound rows have no single
+    "actual" class to test agreement against, so including them would
+    require an arbitrary tie-breaking rule). Needed because raw accuracy is
+    not comparable across mesh configurations with a different domain
+    count: a 10-domain mesh's chance accuracy (~0.10) is much lower than a
+    4-domain mesh's (~0.25), so the same raw accuracy reflects very
+    different amounts of real signal.
+
+    Raises ValueError when there are single-domain rows to score but
+    domains is empty: chance_agreement would silently sum to 0 over an
+    empty domain list, making the return value degenerate to plain
+    observed accuracy — exactly the "raw accuracy across different domain
+    counts" comparison this function exists to prevent (the caller almost
+    certainly passed an incomplete domain list by mistake, not an
+    intentional zero chance level). An empty results/single_domain_results
+    is a different, legitimate case (no data at all) and still returns 0.0,
+    matching every other metric's empty-input convention.
+    """
+    single_domain_results = [r for r in results if len(r["expected_domains"]) == 1]
+    total = len(single_domain_results)
+    if total == 0:
+        return 0.0
+    if not domains:
+        raise ValueError("domains must be non-empty for a chance-corrected kappa computation")
+    observed_agreement = (
+        sum(1 for r in single_domain_results if r["selected_domain"] == r["expected_domains"][0])
+        / total
+    )
+    actual_counts = Counter(r["expected_domains"][0] for r in single_domain_results)
+    predicted_counts = Counter(
+        r["selected_domain"] for r in single_domain_results if r["selected_domain"] is not None
+    )
+    chance_agreement = sum(
+        (actual_counts.get(domain, 0) / total) * (predicted_counts.get(domain, 0) / total)
+        for domain in domains
+    )
+    if chance_agreement >= 1.0:
+        return 1.0 if observed_agreement >= 1.0 else 0.0
+    return (observed_agreement - chance_agreement) / (1.0 - chance_agreement)
+
+
 def compute_all_metrics(results: list[dict]) -> dict:
     """Bundle every axis-1 metric plus supporting counts into one summary dict."""
     by_compound = defaultdict(list)
     for r in results:
         by_compound[len(r["expected_domains"]) > 1].append(r)
+    domains = _observed_domains(results)
 
     return {
         "total_questions": len(results),
         "top1_accuracy": compute_top1_accuracy(results),
+        "top1_accuracy_wilson_ci": compute_top1_accuracy_wilson_ci(results),
+        "cohens_kappa": compute_cohens_kappa(results, domains),
+        "random_baseline_accuracy": compute_random_baseline_accuracy(results, domains),
+        "best_single_domain_baseline": compute_best_single_domain_baseline(results, domains),
+        "oracle_accuracy": compute_oracle_accuracy(results, domains),
         "misrouting_rate": compute_misrouting_rate(results),
         "fallback_rate": compute_fallback_rate(results),
         "dispatch_failure_rate": compute_dispatch_failure_rate(results),
@@ -206,7 +381,28 @@ def compute_all_metrics(results: list[dict]) -> dict:
 def print_summary(metrics: dict, output: TextIO) -> None:
     """Print a human-readable summary of the computed metrics."""
     print(f"総質問数: {metrics['total_questions']}", file=output)
-    print(f"Top-1正解率: {metrics['top1_accuracy']:.3f}", file=output)
+    ci_lower, ci_upper = metrics["top1_accuracy_wilson_ci"]
+    print(
+        f"Top-1正解率: {metrics['top1_accuracy']:.3f}"
+        f"（Wilson 95% CI: [{ci_lower:.3f}, {ci_upper:.3f}]）",
+        file=output,
+    )
+    print(
+        f"Cohen's kappa（偶然一致補正後，単一ドメイン行のみ）: {metrics['cohens_kappa']:.3f}",
+        file=output,
+    )
+    print(f"Randomベースライン正解率: {metrics['random_baseline_accuracy']:.3f}", file=output)
+    best_single = metrics["best_single_domain_baseline"]
+    if best_single:
+        best_domain, best_accuracy = max(best_single.items(), key=lambda item: item[1])
+        print(
+            f"BestSingleベースライン（最良の単一ドメイン固定）: {best_domain}={best_accuracy:.3f}",
+            file=output,
+        )
+    print(
+        f"Oracle正解率（メッシュが構成上到達可能なドメインの上限）: {metrics['oracle_accuracy']:.3f}",
+        file=output,
+    )
     print(f"誤ルーティング率: {metrics['misrouting_rate']:.3f}", file=output)
     print(f"フォールバック率: {metrics['fallback_rate']:.3f}", file=output)
     print(f"dispatch失敗率（システム的失敗）: {metrics['dispatch_failure_rate']:.3f}", file=output)
