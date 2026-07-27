@@ -71,7 +71,7 @@ for host in $(uv run python tools/list_peers.py); do
   # output); only rsynced when present locally, since not every deployment
   # uses routing_method=supervised_classifier.
   if [ -d models ]; then
-    ssh "$host" "mkdir -p $REMOTE_DIR/models"
+    ssh "$host" "sudo rm -rf $REMOTE_DIR/models && mkdir -p $REMOTE_DIR/models"
     rsync -az --inplace models/ "$host:$REMOTE_DIR/models/"
   fi
 

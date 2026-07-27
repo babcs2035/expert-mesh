@@ -5,6 +5,13 @@
 
 ---
 
+## B32 [auto-decided 2026-07-27] Iter17 総括と次イテレーションの単一レバー決定
+
+- 状況: Iter17（E6: routing_method=supervised_classifier）の実験・分析が完了．1520問（10ドメイン）を実機10ノードで実行．top1_accuracy=0.5651（Iter16 0.2059 vs +0.3592），Cohen's kappa=0.5215（Iter16 0.1067 vs +0.4148），ECE=0.2118（Iter16 0.7388 vs -71.3%），同点タイ率 0.00%（Iter16 82.83% vs -82.83pt）．McNemar 対比較で決定的有意差（p < 0.000001）．Wilson CI 重ならなし．成功条件: 主基準2件・副基準3件 全5件達成．education recall のみ非退行違反（JMMLU データセットの構造的問題に起因）．
+- 自動選択: E6 は「採用」と判定．次イテレーション（Iter18）の単一レバーを `expert_specialization`（E10）とする．`iteration_name` は null のまま（rc-planner が決定）．
+- 根拠: (1) supervised_classifier によりルーティング精度が Random の 5.6 倍，Iter16 の 2.7 倍に改善し，ノード間の能力差が回答品質に反映される環境が整った．(2) 現在全ノードが同一モデルで差分はプロンプト 1 文だけであるため，誤ルーティングしても回答品質はほぼ変わらず，top1_accuracy は下流に帰結を持たない代理指標だった．(3) E10（expert_specialization）の実施により，初めて「正しいドメインにルーティングされた質問が，実際に良い回答を得るか」を評価軸②（回答品質，LLM-as-judge）と③（End-to-End）で検証できる．(4) 本命は `domain_lora`（単一ベース + ドメイン LoRA アダプタ）で，6GB VRAM 制約下で最も現実的．(5) E10 と同時に評価軸②③を実装することが必須（それらが無いとルーティングの価値を測れない）．
+- 要レビュー: (1) E10（expert_specialization）の実装はコード変更を伴う（LoRA アダプタの準備・ロード，評価軸②③の実装）ため，単一レバー原則の枠を超える可能性があることを確認すること．(2) 日本語の法律特化オープン生成モデルが見つからないため，`offtheshelf_specialized` ではなく `domain_lora` を優先する方針を確認すること．(3) 評価軸②③（回答品質・End-to-End）の実装スコープと成功条件を rc-planner が具体化すること．
+
 ## B31 [auto-decided 2026-07-27] Iter16 総括と次イテレーションの単一レバー決定
 
 - 状況: Iter16（E3: confidence_elicitation=top_k_with_probs）の実験・分析が完了．1520問（10ドメイン）を実機10ノードで実行．top1_accuracy=0.206（Iter15 0.184 vs +0.022），Cohen's kappa=0.107（Iter15 0.081 vs +0.025），同点タイ率 82.83%（Iter15 98.29% vs -15.46pt）．McNemar 対比較で有意差なし（p=0.0783）．ECE は悪化（0.715→0.739）．

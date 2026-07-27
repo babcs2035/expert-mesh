@@ -23,7 +23,7 @@ experiment:
   results_glob: "results/*/results.jsonl"
   # metrics.py は --results 必須のため，最新の実行結果を動的に解決してから渡す．
   metrics_cmd: "uv run python metrics.py --results $(ls -1dt results/*/ | head -1)results.jsonl --json"
-  timeout_min: 90                  # 直近の完走実験（20260709_205442→20260709_214113）は34問で約46分．CPU推論のばらつきを見て倍程度の余裕を確保
+  timeout_min: 150                 # Iter17: supervised_classifier で 1520 問，推計 90-120 分．余裕を見て 150 分へ引き上げ
   poll_interval_sec: 120
 
 # journal.md に残す直近イテレーション数．超過分は自動で journal_archive.md へ移す

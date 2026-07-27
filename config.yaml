@@ -28,7 +28,7 @@ remote_dir: "~/workspace/ktakahashi/expert-mesh"
 # prioritizes B first; A is kept opt-in for the comparison experiment.
 calibrated_routing: false
 confidence_signal_method: self_report
-routing_method: self_report
+routing_method: supervised_classifier
 # confidence_elicitation (E3) only applies to the self_report signal
 # method: "numeric_scalar" asks for a single 0-1 confidence value;
 # "top_k_with_probs" asks for 2 labeled candidates with probabilities
