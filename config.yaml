@@ -33,7 +33,7 @@ routing_method: self_report
 # method: "numeric_scalar" asks for a single 0-1 confidence value;
 # "top_k_with_probs" asks for 2 labeled candidates with probabilities
 # summing to 1 (Tian et al. 2023), which reduces 0/1 saturation.
-confidence_elicitation: numeric_scalar
+confidence_elicitation: top_k_with_probs
 # self_consistency_semantic (E4) samples semantic_sample_count verdicts at
 # semantic_sample_temperature and discounts the fits-fraction by the
 # entropy of their clustered reasons. Each probe call under this method

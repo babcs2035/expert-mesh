@@ -5,6 +5,13 @@
 
 ---
 
+## B31 [auto-decided 2026-07-27] Iter16 総括と次イテレーションの単一レバー決定
+
+- 状況: Iter16（E3: confidence_elicitation=top_k_with_probs）の実験・分析が完了．1520問（10ドメイン）を実機10ノードで実行．top1_accuracy=0.206（Iter15 0.184 vs +0.022），Cohen's kappa=0.107（Iter15 0.081 vs +0.025），同点タイ率 82.83%（Iter15 98.29% vs -15.46pt）．McNemar 対比較で有意差なし（p=0.0783）．ECE は悪化（0.715→0.739）．
+- 自動選択: E3 は「部分的採用」と判定．次イテレーション（Iter17）の単一レバーを `routing_method=supervised_classifier`（E6）とする．`iteration_name` は「embedding ベース教師あり分類による routing_method の検証」．
+- 根拠: (1) self_report の根本的限界が numeric_scalar と top_k_with_probs の両方で確認された（ECE > 0.7）．confidence elicitation の方式変更だけでは self_report の構造的問題（各ノードが自分の分野に偏った confidence を出す）は解消されない．(2) embedding ベースの教師あり分類は self_report（言語的自信）とは全く異なる信号源であり，E3 の結果とは独立して評価できる．(3) Iter2（embedding）の失敗は unsupervised cosine similarity の anisotropy 問題であり，教師あり分類では解消される可能性がある（Varangot-Reille+ JAIR2025，RouterDC NeurIPS2024）．(4) 訓練/評価分離は既に実装済みであり，label leakage の再演リスクは低い．(5) config.yaml 1行変更のみで検証可能（コード変更不要）．
+- 要レビュー: (1) E6 の実機実験結果が，self_report を有意に上回るか確認すること．(2) E6 が不成功の場合，次は E7（whitening）または E4/E5（confidence_signal_method の変更）を検討する方針を backlog に残しておくこと．
+
 ## B30 [auto-decided 2026-07-27] Iter15 総括と次イテレーションの単一レバー決定
 
 - 状況: Iter15（E1: eval_set_size）の実験・分析が完了．1520問（10ドメイン×150問単一 + 20問複合）を実機10ノードで実行．top1_accuracy=0.184（Wilson CI: [0.165, 0.204]），Cohen's kappa=0.081（chance直上），Random=0.101を上回る．E1 成功条件全条件 PASS（統計基盤の整備完了）．

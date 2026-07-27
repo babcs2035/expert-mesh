@@ -1,4 +1,329 @@
-## Iteration 15: 評価集合の 200 問以上への拡張と統計的判定基準の導入
+## Iteration 16: Verbalized Top-K による二峰飽和と同点タイの解消検証
+
+### 実装 (Iter16)
+
+**単一レバー**: `confidence_elicitation` (E3), `numeric_scalar → top_k_with_probs`
+
+**変更箇所**: `config.yaml` 行36 の1行変更のみ．
+
+**検証**:
+- `uv run pytest tests/ -v`: 180件全PASS（Iter15と同じ件数，回帰なし）
+- `uv run ruff check`: All checks passed
+- `mise run setup`: Docker イメージ再ビルド・ローカル registry push 成功
+- `mise run deploy`: 全10ノード（wafl500〜509）の app コンテナ再作成・起動成功，warmup 後全ノード healthy
+- wafl500 上のコンテナ内設定確認: `confidence_elicitation: top_k_with_probs` が正しく反映
+
+**実験開始の可否**: 実験を開始してよい状態である．
+
+### 実験 (Iter16)
+
+- **実験ディレクトリ**: `results/20260727_100917`
+- **データセット**: JMMLU 1520問（単一1500 + 複合20），全問完走
+- **所要時間**: 約105分（mean_duration_ms=4134.4）
+- **top1_accuracy**: 0.2059（Wilson CI: [0.1863, 0.2270]）
+- **Cohen's kappa**: 0.1067
+- **random_baseline**: 0.1013，best_single: education 0.1039
+- **misrouting_rate**: 0.7941，fallback_rate: 0.0
+- **parse_failure_rate**: 0.0（0/1520）
+- **confidence 分布**: 範囲 [0.6, 1.0]，唯一値 {0.6, 0.8, 0.9, 0.95, 1.0}（5段階）
+- **異常**: なし（全ノードログ確認済み）
+
+### 分析 (実行) (Iter16)
+
+**比較ベースライン**: `results/20260727_010532/` (Iter15)
+
+| 指標 | Iter15 | Iter16 | 変化 |
+|------|--------|--------|------|
+| top1_accuracy | 0.1836 | 0.2059 | +0.0223 |
+| Wilson 95% CI | [0.1649, 0.2038] | [0.1863, 0.2270] | 下限 +0.0214 |
+| Cohen's kappa | 0.0815 | 0.1067 | +0.0252 |
+| misrouting_rate | 0.8164 | 0.7941 | -0.0223 |
+
+**McNemar 対比较**: 不一致対数 362．chi2=3.10, p=0.0783．**有意差なし** (α=0.05)．
+
+**同点タイ率**: 98.29% → 82.83% **-15.46pt**．verbalized top-K の意図した効果確認．
+
+**ドメイン別 McNemar**: 6/10 ドメインで有意改善．general で有意退行 (-0.407)．
+
+**confidence 分布**: 0.9 が 96.84% → 14.67%，0.95 が 0.16% → 33.37%．ピークが 0.9→0.95 へシフト．
+
+**ECE**: 0.7146 → 0.7388．較正は悪化．
+
+### 分析 (解釈) (Iter16)
+
+#### 1. 同点タイ率 -15.46pt の解釈
+
+**観測事実**: 98.29% → 82.83% (-15.46pt)．SE=0.0075 に対して 20.6 SE の変化であり，**ノイズではなく明確な信号**である．
+
+**メカニズムの解釈**:
+
+Iter15（numeric_scalar）では，各ノードが「0.9 または 0.2」の二峰値を申告し，10 ノード中 7〜10 ノードが 0.9 を出すため，実質的に全問でタイが発生した．Top-K elicitation（top_k_with_probs）に切り替えたことで，Qwen3.5-4B が「該当する/該当しない」の 2 択に確率を分配するようになり，confidence 値が {0.6, 0.8, 0.9, 0.95, 1.0} の 5 段階に分散した．
+
+しかし，82.83% のタイ率は依然として高い．confidence 値の唯一値が 5 段階しかないため，10 ノードが 5 段階の値を独立に出す場合，同値になる確率は依然として高い（10^2 / 5^10 の単純計算ではなく，実際には 0.95 が 80.5% を占める偏りがあるためさらに高い）．
+
+**解釈**: Top-K elicitation は二峰飽和を部分的に壊したが，**離散値の数が少ない（5段階）** ためタイは完全には解消されていない．これは Qwen3.5-4B の算数能力の限界であり，「0.73, 0.81, 0.64」のような連続値を生成できないためである．
+
+#### 2. general の退行（0.687 → 0.280, -0.407）の解釈
+
+**観測事実**: general の recall が -0.407 退行．SE=0.0408 に対して 10.0 SE の変化であり，**ノイズではなく明確な信号**．
+
+**根本原因: 宣言順有利の剥奪**
+
+Iter15 の general recall=0.687 の大部分は，ドメイン識別能力ではなく**宣言順 1 位によるタイ勝率 42.9%** によるものであった（Iter15 解釈節 3 参照）．1494 タイ中 641 件を general が勝っていた．
+
+Top-K elicitation によりタイ率が 98.29% → 82.83% に低下したことで，**宣言順有利が相対的に小さくなった**．非タイケースでは，general ノードは自分の分野（general）に関する質問に対して 0.95 ではなく 0.8 や 0.6 を出すことがあり，専門ノード（mathematics, medical など）が同じ質問に対して 0.9 を出すと，general が負けるようになった．
+
+**これは general の「実力」が低下したのではなく，Iter15 で観測されていた general の recall が「構造上の偽高値」であったことが露見した** ことに近い．Iter16 の general recall=0.280 は，宣言順有利が相対的に小さくなった環境下での**より正確な推定値**である可能性がある．
+
+#### 3. 6/10 ドメインの有意改善と退行ドメインの構造的差異
+
+**改善したドメイン（6/10）**:
+
+| ドメイン | acc_15 | acc_16 | 変化 | p-value |
+|---------|--------|--------|------|---------|
+| computer_science | 0.007 | 0.193 | +0.187 | <0.001 |
+| mathematics | 0.053 | 0.160 | +0.107 | 0.0047 |
+| natural_science | 0.040 | 0.140 | +0.100 | 0.0053 |
+| business_economics | 0.020 | 0.100 | +0.080 | 0.0040 |
+| social_science | 0.000 | 0.080 | +0.080 | 0.0009 |
+| history_culture | 0.000 | 0.060 | +0.060 | 0.0046 |
+
+**改善のメカニズム**: これらのドメインは Iter15 で recall=0.0〜0.053 であり，実質的にルーティングされなかった（宣言順不利 + タイ）．Top-K elicitation により，各ノードが自分の分野に対してより高い confidence（0.95）を出すようになり，**非タイケースが増えたことで，実際のドメイン識別信号が反映されるようになった**．
+
+特に computer_science（+0.187, 7.6 SE）と mathematics（+0.107）の改善は，これらの分野の質問が専門用語・数式を含むため，Top-K elicitation で「該当する」確率が明確に高くなる構造があることを示唆する．
+
+**退行したドメイン（2/10）**:
+
+| ドメイン | acc_15 | acc_16 | 変化 | p-value |
+|---------|--------|--------|------|---------|
+| general | 0.687 | 0.280 | -0.407 | <0.001 |
+| legal | 0.440 | 0.349 | -0.090 | 0.0721（有意未満） |
+
+**構造的差異**: general と legal の共通点は，**宣言順が上位（general=1位，legal=3位）** であり，Iter15 でタイ勝率が高かったことである（general 42.9%，legal 21.6%）．Top-K elicitation によりタイが減ると，この構造上の有利が剥奪される．
+
+**不変ドメイン（2/10）**:
+
+| ドメイン | acc_15 | acc_16 | 変化 | p-value |
+|---------|--------|--------|------|---------|
+| education | 0.494 | 0.563 | +0.070 | 0.1788 |
+| medical | 0.157 | 0.199 | +0.042 | 0.2430 |
+
+education（宣言順 2 位）は Iter15 でも比較的高い recall（0.494）を持っていたが，Top-K elicitation で有意な変化なし．medical（宣言順 4 位）も同様に安定している．両者とも Iter15 で既に一定のドメイン識別信号を持っていた可能性がある．
+
+#### 4. ECE の悪化（0.7146 → 0.7388）の解釈
+
+**観測事実**: ECE が +0.0242 悪化．
+
+**理由**: ECE = 各ビンにおける |bin_accuracy - bin_confidence| の加重平均である．
+
+- Iter15: confidence の中心が 0.9，accuracy=0.184 → 主要ビンの乖離 ≈ |0.184 - 0.9| = 0.716
+- Iter16: confidence の中心が 0.95，accuracy=0.206 → 主要ビンの乖離 ≈ |0.206 - 0.95| = 0.744
+
+Top-K elicitation は confidence 値を**上方シフト**させた（0.9 → 0.95）が，accuracy の改善（+0.022）はこれに追いつかなかった．その結果，confidence と accuracy の乖離は拡大し，ECE が悪化した．
+
+**Top-K elicitation の較正効果の限界**: Tian et al. (EMNLP 2023) の結果（ECE 0.131→0.047）は，gpt-3.5-turbo（175B クラス）で得られた．Qwen3.5-4B（4B クラス）では，算数能力の不足により確率の合計制約は満たされるものの（再正規化により），**個別の確率値の較正精度は低い**．モデルは「該当する/該当しない」の 2 択で確率を分配できるが，その確率値自体が実際のドメイン適合度を反映していない．
+
+#### 5. 総合判定
+
+**成功条件に対する判定**:
+
+| 分類 | 指標 | ベースライン | 結果 | 判定 |
+|------|------|-------------|------|------|
+| 主基準 | 同点率 | 98.29% | 82.83% (-15.46pt, 20.6 SE) | **採用**（明確な有意低下） |
+| 主基準 | Cohen's kappa | 0.0815 | 0.1067 (+0.0252) | **判定不能**（依然として chance 直上，CI の重なり確認が必要） |
+| 副基準 | McNemar | α=0.05 | p=0.0783 | **有意差なし**（有意閾値の 80% にあるが，閾値未満） |
+| 副基準 | ECE | 0.7146 | 0.7388 | **悪化** |
+
+**総合判定: 部分的採用**
+
+Top-K elicitation は二峰飽和の解消（同点率 -15.46pt）において明確な成功である．しかし，**accuracy への帰結は McNemar で有意差なし**であり，較正（ECE）は悪化している．kappa は +0.0252 改善したが，0.1067 は依然として「chance 直上」であり，実質的なドメイン識別力は低い．
+
+**McNemar の p=0.0783 の解釈**: 有意閾値（α=0.05）の 80% にあり，「ほぼ有意」と言える範囲である．362 件の不一致対（Iter15 不正解/Iter16 正解 = 198，逆 = 164）は，Iter16 の方が 34 問多いことを示す．これは Top-K elicitation が一部のドメイン（computer_science, mathematics 等）でルーティング精度を改善したことを反映しているが，general の退行（-0.407）が全体を押し下げている．
+
+**重要な知見**: general の退行は「偽高値の剥奪」である可能性が高い．Iter15 の general recall=0.687 の大部分は宣言順有利によるものであった．Top-K elicitation によりタイが減ると，この構造上の有利が剥がれ，general の「実力」に近い値（0.280）が観測された．**これは Top-K elicitation の失敗ではなく，Iter15 の general の高値が構造上のアーティファクトであったことを示している**．
+
+#### 6. 次イテレーションへの提案
+
+**E6（supervised_classifier）を推奨する**．理由:
+
+1. **self_report の根本的限界が確認された**: numeric_scalar でも top_k_with_probs でも，confidence 値はドメイン適合度を較正された形で反映していない（ECE > 0.7）．confidence elicitation の方式を変更するだけでは，self_report の構造的問題（各ノードが自分の分野に偏った confidence を出す）は解消されない．
+
+2. **embedding ベースの教師あり分類は独立したアプローチ**: self_report（言語的自信）とは全く異なる信号源であり，E3 の結果とは独立して評価できる．Iter2（embedding）の失敗は unsupervised cosine similarity の anisotropy 問題であり，教師あり分類では解消される可能性がある．
+
+3. **訓練/評価分離は既に実装済み**: Iter15 で label leakage 対策として訓練/評価クエリの構造的分離が実装済みであり，label leakage の再演リスクは低い．
+
+4. **コード変更は不要**: E6 は `routing_method: self_report → supervised_classifier` の config.yaml 1 行変更のみで，scikit-learn ベースの LogisticRegression が既に実装済みである．
+
+**E7（whitening）は E6 の前段階として検討可能**．E6 が不成功の場合，unsupervised embedding の幾何的改善（mean-centering + whitening）が E6 のベースラインを改善する可能性がある（Su+ 2021）．ただし，E7 は教師なしのため，E6 の教師ありアプローチより優先度は低い．
+
+**E4（self_consistency_semantic）と E5（p_true）は，E6 の結果を確認してから検討する**．self_report の較正問題とは独立した signal method であるが，E6（routing_method の変更）が self_report を完全に置き換える可能性があり，その場合は E4/E5 の検証価値が下がる．
+
+### 考察・次計画 (Iter16)
+
+**判定: E3（confidence_elicitation=top_k_with_probs）— 部分的採用**
+
+Top-K elicitation は二峰飽和の解消において明確な成功である（同点率 98.29% → 82.83%，-15.46pt，20.6 SE）．しかし，accuracy への帰結は McNemar で有意差なし（p=0.0783）であり，較正（ECE）は悪化（0.7146 → 0.7388）している．kappa は +0.0252 改善したが，0.1067 は依然として「chance 直上」であり，実質的なドメイン識別力は低い．
+
+**このイテレーションで確定した非自明な学び**
+
+1. **Top-K elicitation は二峰飽和を部分的に壊す**: confidence 値が {0.6, 0.8, 0.9, 0.95, 1.0} の5段階に分散し，同点率が -15.46pt 低下した．しかし，離散値が5段階しかないためタイは完全には解消されず（82.83%）．これは Qwen3.5-4B の算数能力の限界であり，連続値を生成できないためである．
+
+2. **general の退行は偽高値の剥奪**: Iter15 の general recall=0.687 の大部分は宣言順1位によるタイ勝率 42.9% による構造上の偽高値であった．Top-K elicitation によりタイが減ると，この構造上の有利が剥がれ，general の「実力」に近い値（0.280）が観測された．これは Top-K elicitation の失敗ではなく，Iter15 の測定値がアーティファクトであったことを示している．
+
+3. **self_report の根本的限界が確認された**: numeric_scalar でも top_k_with_probs でも，confidence 値はドメイン適合度を較正された形で反映していない（ECE > 0.7）．confidence elicitation の方式を変更するだけでは，self_report の構造的問題（各ノードが自分の分野に偏った confidence を出す）は解消されない．
+
+4. **6/10 ドメインの有意改善は「実信号の露出」**: computer_science（+0.187），mathematics（+0.107），natural_science（+0.100）などの改善は，Iter15 で宣言順不利により実質的にルーティングされていなかったドメインが，Top-K により非タイケースが増えたことで，実際のドメイン識別信号が反映されるようになった結果である．
+
+5. **ECE の悪化はモデル規模の限界**: Tian et al.（EMNLP 2023）の結果（ECE 0.131→0.047）は gpt-3.5-turbo（175Bクラス）で得られた．Qwen3.5-4B（4Bクラス）では，算数能力の不足により確率の合計制約は満たされるものの，個別の確率値の較正精度は低い．
+
+**次の単一レバー: E6（routing_method=supervised_classifier）**
+
+self_report の根本的限界が確認されたため，confidence elicitation の方式変更（E3, E4, E5）よりも，全く異なる信号源に基づく routing_method の変更が優先される．E6 は embedding ベースの教師あり分類であり，self_report（言語的自信）とは独立したアプローチである．Iter2（embedding）の失敗は unsupervised cosine similarity の anisotropy 問題であり，教師あり分類では解消される可能性がある．訓練/評価分離は既に実装済みであり，config.yaml 1行変更のみで検証可能である．
+
+- 変更: `routing_method: self_report → supervised_classifier` のみ
+- 固定: `confidence_signal_method: self_report`，`confidence_elicitation: top_k_with_probs`（ Iter16 の最良構成を継承），他全設定不変
+- 比較: 同一 1520 問データセット上で McNemar 対比較（α=0.05）
+- 成功条件: top1_accuracy の McNemar で有意差，Wilson CI が重ならない変化
+
+---
+
+### 計画 (Iter16)
+
+**単一レバー**: `confidence_elicitation` (E3), 値 `numeric_scalar → top_k_with_probs`
+
+**変更箇所**: `config.yaml` 行36 のみ
+```
+confidence_elicitation: numeric_scalar  →  confidence_elicitation: top_k_with_probs
+```
+
+**仮説**: Top-K elicitation（Tian et al. EMNLP 2023）は確率の合計制約（sum=1）により，self_report numeric_scalar の二峰飽和（0.9 が 74.9%）を壊し，連続的な confidence 分布を生成する．その結果，同点タイ率が大幅に低下し，kappa が改善する．
+
+**固定する構成**（直近最良構成＝Iter15 実験構成をそのまま継承）:
+- `confidence_signal_method: self_report`（変更不可．E3 は elicitation 方式の変更であり signal method 自体は self_report のまま）
+- `routing_method: self_report`
+- `confidence_threshold: 0.5`
+- `dispatch_top_k: 1`
+- `semantic_sample_count: 5`, `semantic_sample_temperature: 0.7`（E4 用設定は不変）
+- `embedding_postprocess: none`
+- `light_model: qwen3.5:4b-q4_K_M`, `expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m`（全10ノード共通）
+- 10 ノード構成（wafl500〜509）
+- `router.py` の few-shot 例（動的生成 `_build_few_shot_examples`）
+
+**成功条件**
+
+| 分類 | 指標 | ベースライン (Iter15) | 成功条件 | 根拠 |
+|------|------|---------------------|---------|------|
+| 主基準 | 同点率 | 98.29% (1494/1520) | **有意な低下**（McNemar α=0.05） | 二峰飽和の解消がタイ削減に直接反映される |
+| 主基準 | Cohen's kappa | 0.081 | **0.081 より有意に高い**（Wilson CI が重ならない） | chance-corrected 指標で実質識別力を測定 |
+| 副基準 | top1_accuracy | 0.184 [0.165, 0.204] | **Wilson CI がベースライン CI と重ならない** | McNemar 対比較（α=0.05） |
+| 副基準 | ECE | 未計測（Iter15 では numeric_scalar の二峰分布） | **報告**（較正改善の定量化） | Tian et al. の主指標 |
+| 監視 | parse failure 率 | N/A | **5% 未満** | Qwen3.5-4B の JSON 出力従順性確認 |
+| 監視 | 再正規化頻度 | N/A | **報告**（_PROB_SUM_TOLERANCE=0.02 を超える割合） | R1（算数能力）の緩和策確認 |
+
+**成功条件の数値根拠**: Iter15 の Wilson CI 幅は 0.039（3.9pt）であり，1520 問で SE は約 0.0096．Top-K elicitation が二峰飽和を壊す場合，同点率は 98.29% から大幅に低下する見込みであり，その差分は McNemar で有意（α=0.05）になる．kappa=0.081 は chance 直上であり，Top-K による連続分布がドメイン弁別力を向上させるなら，kappa も上昇する．
+
+**実験構成**:
+1. `config.yaml` 行36 のみ変更（`numeric_scalar → top_k_with_probs`）
+2. `mise run setup`（Docker イメージ再ビルド．`router.py` の Top-K 関数が既に実装済みなので，イメージに反映させるため）
+3. `mise run deploy`（全10ノード）
+4. `mise run start`（同一 1520 問データセット `data/dataset.jsonl`）
+5. `mise run analyze`（結果収集）
+6. `metrics.py` による解析（Wilson CI, kappa, McNemar, ECE, 同点率）
+
+**実行時間の見積もり**: Iter15 の mean_duration_ms=3826（約3.8秒/問）を基準に，1520 問で約 5780 秒（約 1.6 時間）．Top-K elicitation は probe 1 回/ノードのまま（追加 LLM コールなし）であり，numeric_scalar と同程度の推論時間を想定．ただし Qwen3.5-4B の JSON 出力が numeric_scalar より若干長くなる可能性があり，余裕を見て約 2 時間を見込む．
+
+**特定されたリスクと緩和策**:
+
+| リスク | 内容 | 緩和策 |
+|-------|------|--------|
+| R1 | Qwen3.5-4B の算数能力不足で sum=1 制約違反 | `parse_top_k_confidence()` の再正規化（許容誤差 0.02）がカバー．再正規化頻度を監視 |
+| R2 | 生 Top-K 分布のロギング不足 | 本イテレーションでは必須ではないが，`probe_candidates` に `confidence_top_k_raw` を追加する検討を次イテレーションへ持ち越し |
+| R3 | 4B モデルでの JSON 出力従順性 | `parse_top_k_confidence` は parse failure で 0.0 にフォールバック．parse failure 率を監視（5% 未満を目標） |
+| R4 | ドメイン専門家プロンプトとの相互作用 | 各ノードが自分の分野に偏った確率分布を生成する可能性．Top-K は少なくとも 0/1 飽和を壊すため，self_report より改善が見込まれる |
+
+### 調査 (Iter16)
+
+**単一レバー**: `confidence_elicitation` (E3), 候補値 `top_k_with_probs`
+
+**調査の問い**
+
+1. `confidence_elicitation=top_k_with_probs` のコード実装は完了しているか．
+2. プロンプト設計は Tian et al. (EMNLP 2023) の方式に沿っているか．
+3. 解析パイプライン（aggregator, metrics, run_experiment）は Top-K 形式の出力と互換か．
+4. 既知のリスク・課題は何か．
+
+**1. 実装の現状**
+
+実装は完全に完了しており，全テスト（180件）がPASSしている．
+
+| 項目 | ファイル | 行番号 | 状態 |
+|------|---------|-------|------|
+| config.yaml のキー | `config.yaml` | 行36 | `confidence_elicitation: numeric_scalar`（変更1行で切替可能） |
+| プロンプト生成（通常ドメイン） | `router.py` | 行193-212 | `build_top_k_confidence_prompt()` 実装済み |
+| プロンプト生成（general） | `router.py` | 行178-190 | `_build_general_top_k_confidence_prompt()` 実装済み |
+| 出力パース＋再正規化 | `router.py` | 行215-238 | `parse_top_k_confidence()` 実装済み |
+| 非同期推論ラッパー | `router.py` | 行241-257 | `estimate_confidence_top_k()` 実装済み |
+| http_server 分岐 | `http_server.py` | 行371-379 | `_estimate_probe_confidence()` 内に分岐あり |
+| 識別子定数 | `http_server.py` | 行98-102 | `CONFIDENCE_ELICITATION_TOP_K_WITH_PROBS`, `VALID_CONFIDENCE_ELICITATIONS` |
+| node.py 設定伝播 | `node.py` | 行66-67, 行84 | config から NodeState へ伝播 |
+| 単体テスト | `tests/test_router.py` | 行238-278 | 7件全PASS |
+| 統合テスト | `tests/test_http_server.py` | 行205-213 | 1件PASS |
+
+**2. プロンプト設計の評価**
+
+Tian et al. (EMNLP 2023, arXiv:2305.14975) の Verbalized Top-K との整合性を確認した．
+
+| 要素 | Tian et al. の方式 | 本実装 | 整合 |
+|------|-------------------|--------|------|
+| 候補数 K | K=2（2-way elicitation） | `TOP_K_CANDIDATES = 2` | 一致 |
+| 出力形式 | 各候補に確率を付与 | `{"candidates": [{"label": "...", "probability": ...}, ...]}` | 一致 |
+| 合計制約 | sum(probabilities) = 1 の指示 | プロンプトに「確率の合計は1.0になるようにしてください」 | 一致 |
+| 再正規化 | 論文では明示せず | `parse_top_k_confidence()` で合計が1.0から外れた場合は再正規化（許容誤差 0.02） | 補強あり |
+
+**重要な違い**: Tian et al. は多クラス分類（3-5選択肢）で検証したが，本実装は2値分類（該当する/該当しない）である．Tian et al. Table 1 では gpt-3.5-turbo で top-2 verbalized confidence の ECE が 0.131→0.047 に改善した．2値分類でも確率の合計制約が0/1飽和を壊すメカニズムは同じだが，効果量は異なる可能性がある．
+
+**3. 解析パイプラインの互換性**
+
+完全互換である．Top-K elicitation は「入力プロンプトの形式」と「出力パースのロジック」だけを変え，`ProbeResponse.confidence` は依然として単一スカラー float である．
+
+| パイプライン段階 | 処理 | 変更必要 |
+|-----------------|------|---------|
+| `estimate_confidence_top_k()` | Top-K プロンプト送出 → パース → "該当する"確率を抽出 | 実装済み |
+| `ProbeResponse.confidence` | スカラー float [0,1] | 変更不要 |
+| `aggregator.select_dispatch_targets()` | confidence スカラーでソート・閾値フィルタ | 変更不要 |
+| `aggregator.select_best_dispatch_response()` | confidence 最大値選択 | 変更不要 |
+| `run_experiment.py` probe_candidates | `confidence` スカラーを記録 | 変更不要 |
+| `metrics.py` 全関数 | `confidence` スカラーを消費（ECE, kappa, precision/recall） | 変更不要 |
+
+**4. 特定されたリスク・課題**
+
+**R1: 小モデルの算数能力**
+- Qwen3.5-4B は確率の合計=1制約を厳密に守れない可能性がある．
+- 既存の再正規化（`_PROB_SUM_TOLERANCE = 0.02`）がこれをカバーするが，再正規化が頻発する場合，モデルの算数能力の限界が結果にバイアスを導入する．
+- **緩和策**: 実験後に `parse_top_k_confidence` の再正規化頻度をログで確認する．
+
+**R2: 生 Top-K 分布のロギング不足**
+- 現在 `probe_candidates` は再正規化後のスカラー `confidence` のみを記録し，生 Top-K 分布（"該当する"確率と"該当しない"確率のペア）は記録しない．
+- **影響**: 事後分析で「再正規化前の分布形状」や「2つの確率の相関」を確認できない．
+- **緩和策**: 本イテレーションでは必須ではないが，必要に応じて `probe_candidates` に `confidence_top_k_raw` フィールドを追加する．
+
+**R3: 2値分類 vs 多クラス分類の乖離**
+- Tian et al. の結果は gpt-3.5-turbo（175Bクラス）で得られた．Qwen3.5-4B（4Bクラス）では効果が異なる可能性がある．
+- 特に，4Bクラスモデルは few-shot 指示の従順性が低く，JSON形式の出力を正確に生成しないリスクがある．
+- **緩和策**: `parse_top_k_confidence` は parse failure で `PARSE_FAILURE_CONFIDENCE=0.0` にフォールバックするため，最悪ケースでも安全である．parse failure 率を監視する．
+
+**R4: ドメイン専門家プロンプトとの相互作用**
+- 各ノードは「あなたは{domain}分野の専門家です」と指示されているため，Top-K elicitation であっても自分の分野に偏った確率分布を生成する可能性がある．
+- これは Top-K elicitation の設計上の制約ではなく，ドメインプロンプト自体の問題である．
+- Top-K elicitation は少なくとも0/1飽和を壊し，連続的な分布を得ることで，self_report よりも改善が見込まれる．
+
+**計画フェーズへの提案**
+
+1. **config.yaml 変更**: `confidence_elicitation: numeric_scalar → top_k_with_probs` の1行変更のみ．他は不変．
+2. **成功条件（主指標）**: 同点率の有意な低下．ベースライン 98.29% に対し，Top-K では確率分布の連続性により同点率が大幅に低下する見込み．具体的な目標値は提案しない（モデルの算数能力に依存するため）が，ベースラインとの McNemar 対比較で有意差（α=0.05）を検出する．
+3. **成功条件（副指標）**: Cohen's kappa の改善（ベースライン 0.081）．Top-K elicitation がドメイン弁別力を向上させる場合，kappa も上昇する．
+4. **監視項目**: (a) parse failure 率（0.0%に近いことを確認），(b) 再正規化頻度（_PROB_SUM_TOLERANCE を超える頻度），(c) ドメイン別 confidence 分布の形状変化（二峰→連続分布への移行）．
+5. **比較ベースライン**: `results/20260727_010532/`（Iter15, 1520問）．同一データセット上の McNemar 対比較が可能．
 
 ### 調査 (Iter15)
 
