@@ -20,3 +20,10 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+    # E10 domain_lora: mount LoRA adapter weights so Ollama can apply them
+    # via the ADAPTER directive in Modelfiles. The models/lora_adapters/
+    # directory is created by scripts/train_domain_lora.py and contains
+    # per-domain safetensors files. Mounted read-only since adapters are
+    # not modified at inference time. Path matches docker-compose.yml mount.
+    volumes:
+      - ./models/lora_adapters:/app/models/lora_adapters:ro

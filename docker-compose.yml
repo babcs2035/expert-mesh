@@ -5,6 +5,11 @@ services:
     image: ollama/ollama:latest
     volumes:
       - ollama_data:/root/.ollama
+      # E10: LoRA adapter weights for domain-specific expert models.
+      # Mounted so Ollama can access adapter files via ADAPTER directive
+      # in Modelfiles (scripts/create_lora_model.py). Path matches the
+      # adapter output directory from scripts/train_domain_lora.py.
+      - ./models/lora_adapters:/app/models/lora_adapters:ro
     # Communicates with app over docker compose's internal network
     # (http://app:11434), so no need to expose to LAN. Binds to 127.0.0.1
     # only to avoid exposing an unauthenticated API externally, while still

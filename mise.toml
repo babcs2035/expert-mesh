@@ -94,8 +94,13 @@ for host in $(uv run python tools/list_peers.py); do
   ssh "$host" "cd $REMOTE_DIR && docker compose up -d ollama"
 
   for model in $(uv run python tools/node_models.py "$host"); do
-    echo "[deploy] $host: ollama pull $model"
-    ssh "$host" "cd $REMOTE_DIR && docker compose exec -T ollama ollama pull $model"
+    # Skip pull for models that already exist locally (e.g., custom LoRA models)
+    if ssh "$host" "cd $REMOTE_DIR && docker compose exec -T ollama ollama list" 2>/dev/null | grep -q "^${model}"; then
+      echo "[deploy] $host: $model already exists, skipping pull"
+    else
+      echo "[deploy] $host: ollama pull $model"
+      ssh "$host" "cd $REMOTE_DIR && docker compose exec -T ollama ollama pull $model"
+    fi
   done
 done
 
@@ -225,7 +230,7 @@ echo "[start] experiment done. Results saved to $RESULTS_DIR/"
 """
 
 [tasks.analyze]
-description = "Collect structured logs into results/<datetime>/logs/<node_id>/"
+description = "Collect logs and compute axis 2/3 metrics (answer quality, end-to-end)"
 # See the note on [tasks.start]: mise does not expose extra CLI args as `$1`
 # throughout a multi-line `run` script, so the datetime argument must go
 # through the `usage` field instead.
@@ -260,6 +265,20 @@ for host in $(uv run python tools/list_peers.py); do
   line_count=$(wc -l < "$LOG_DIR/$host/expert-mesh.log")
   echo "  -> $LOG_DIR/$host/expert-mesh.log (${line_count} lines)"
 done
+
+# E10: compute axis 2 (answer quality) and axis 3 (end-to-end) metrics.
+# evaluate_response_quality.py reads results.jsonl + dataset.jsonl and
+# computes answer_quality_accuracy, end_to_end_accuracy, and latency_breakdown.
+# JMMLU rows are graded by ground-truth comparison; hand-authored consultation
+# rows require a live Ollama node for LLM-as-judge (uses config.yaml's judge_model).
+# If --ollama-host is not provided, only JMMLU rows are graded (hand-authored
+# rows are treated as ungraded, not failing).
+echo "[analyze] computing axis 2/3 metrics (answer quality, end-to-end)"
+uv run python -m scripts.evaluate_response_quality \\
+    --results "$RESULTS_DIR/results.jsonl" \\
+    --dataset data/dataset.jsonl \\
+    2>&1 | tee "$RESULTS_DIR/axis23_metrics.json" || \\
+    echo "[analyze] WARNING: evaluate_response_quality failed (results.jsonl may be incomplete)" >&2
 
 echo "[analyze] done. Results in $RESULTS_DIR/"
 echo "  Run 'uv run python tools/show_logs.py --node-id <node_id> --summary' for per-node metrics"

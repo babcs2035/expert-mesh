@@ -5,6 +5,14 @@
 
 ---
 
+## B33 [auto-decided 2026-07-29] Iter18 総括と次イテレーションの単一レバー決定
+
+- 状況: Iter18（E10: expert_specialization=domain_lora）の実験・分析が完了．Phase A（LoRA なしベースライン: answer_quality_accuracy=0.2787）と Phase C（domain_lora: answer_quality_accuracy=0.5013）の比較．
+- 自動選択: E10 は「採用」と判定．次イテレーション（Iter19）の単一レバーを `expert_model_size`（E8）とする．`iteration_name` は「Qwen3.5 モデルサイズ 9B→4B 変更による推論速度・VRAM 効率・回答品質への影響測定」．
+- 根拠: (1) E10（domain_lora）は answer_quality_accuracy +22.3pt, end_to_end_accuracy +14.5pt の大幅改善で採用確定．これにより本研究の目的（メッシュ型専門ノード群によるドメイン別最適ルーティング）が初めて実証された．(2) 残りの levers は E7（embedding_postprocess=whitening）と E8（expert_model_size=qwen3.5-4b）のみ．(3) E7 は「whitening が unsupervised embedding の幾何的問題を解消するか」の切り分け用で、supervised_classifier 採用後は次要的なレバー．(4) E8 は現行 9B モデル（5.67GB VRAM）の代わりに 4B モデル（~2.4GB）を使用し、推論速度・VRAM 効率・回答品質への影響を測定．(5) research_frontier の「ベースライン比較」や「top-k dispatch 高度化」は levers を試し切ってから着手する順序に従う．
+- 要レビュー: (1) E8 の expert_model_size 変更は light_model と expert_model の両方に影響するか、expert_model のみか確認すること．(2) 4B モデルの回答品質が 9B モデルより大きく劣化する場合、E8 の結論は「サイズ低下は回答品質に直結する」になる．このトレードオフをどう位置付けるか．(3) E7（whitening）はスキップしてよいか、または E8 実施後に検討するか．
+- 恒久知見: expert_specialization（LoRA）によりノード間に能力差が生まれて初めて、「正しいドメインにルーティングすること」が回答品質に直結する．同一モデルのメッシュでは、誤ルーティングしても回答品質はほぼ変わらない．これは本研究のメッシュ型専門ノード群の価値を初めて実証した．
+
 ## B32 [auto-decided 2026-07-27] Iter17 総括と次イテレーションの単一レバー決定
 
 - 状況: Iter17（E6: routing_method=supervised_classifier）の実験・分析が完了．1520問（10ドメイン）を実機10ノードで実行．top1_accuracy=0.5651（Iter16 0.2059 vs +0.3592），Cohen's kappa=0.5215（Iter16 0.1067 vs +0.4148），ECE=0.2118（Iter16 0.7388 vs -71.3%），同点タイ率 0.00%（Iter16 82.83% vs -82.83pt）．McNemar 対比較で決定的有意差（p < 0.000001）．Wilson CI 重ならなし．成功条件: 主基準2件・副基準3件 全5件達成．education recall のみ非退行違反（JMMLU データセットの構造的問題に起因）．

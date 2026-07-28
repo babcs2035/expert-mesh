@@ -73,77 +73,71 @@ judge_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
 # names match build_dataset.py's _DOMAIN_TASK_MAP so the JMMLU-backed
 # dataset's expected_domains line up with actual node domains.
 #
-# expert_model (S1, "professional の実体化"): checked the Ollama registry
-# for a domain-specialized Japanese generation model per mesh domain (the
-# design doc's Step 0). None was found for legal (matches
-# docs/d0001_literature_survey_2026-07.md's finding — only a Japanese
-# legal *retrieval* model exists, not a generation model) nor for any of
-# the other 9 domains (a Japanese medical-specialized model such as
-# ELAINE-medLLM was searched for and not found on the registry either).
-# All 10 nodes therefore share schroneko/llama-3.1-swallow-8b-instruct-v0.1
-# (Q4_K_M, ~4.9GB, verified present on the registry) as expert_model — a
-# strong general-purpose Japanese-tuned model, not a per-domain specialist.
-# This is an honest negative result for S1, not a placeholder: if a
-# verified specialized model for a specific domain is found later, only
-# that domain's expert_model line needs to change.
+# expert_model (S1, E10 expert_specialization=domain_lora): each node uses
+# a domain-specific LoRA-integrated model (expert-mesh-{domain}-lora) built
+# from schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m + a domain LoRA
+# adapter trained via scripts/train_domain_lora.py and registered via
+# scripts/create_lora_model.py. This addresses the Iter15 finding that all
+# nodes shared the same general-purpose model, making routing accuracy an
+# proxy metric with no downstream effect on answer quality.
 nodes:
   wafl500:
     host: 192.168.15.100
     port: 8080
     domain: general
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-general-lora
   wafl501:
     host: 192.168.15.101
     port: 8080
     domain: education
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-education-lora
   wafl502:
     host: 192.168.15.102
     port: 8080
     domain: legal
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-legal-lora
   wafl503:
     host: 192.168.15.103
     port: 8080
     domain: medical
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-medical-lora
   wafl504:
     host: 192.168.15.104
     port: 8080
     domain: business_economics
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-business_economics-lora
   wafl505:
     host: 192.168.15.105
     port: 8080
     domain: computer_science
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-computer_science-lora
   wafl506:
     host: 192.168.15.106
     port: 8080
     domain: natural_science
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-natural_science-lora
   wafl507:
     host: 192.168.15.107
     port: 8080
     domain: mathematics
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-mathematics-lora
   wafl508:
     host: 192.168.15.108
     port: 8080
     domain: history_culture
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-history_culture-lora
   wafl509:
     host: 192.168.15.109
     port: 8080
     domain: social_science
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+    expert_model: expert-mesh-social_science-lora
