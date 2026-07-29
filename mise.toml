@@ -120,17 +120,33 @@ first_host=$(uv run python tools/list_peers.py | head -1)
 
 MAX_RETRIES=30
 RETRY_INTERVAL_S=10
+healthy=false
 for i in $(seq 1 "$MAX_RETRIES"); do
   if ssh "$first_host" "cd $REMOTE_DIR && docker compose exec -T app .venv/bin/python tools/healthcheck.py"; then
     echo "[deploy] all nodes healthy"
-    exit 0
+    healthy=true
+    break
   fi
   echo "[deploy] not ready yet (attempt $i/$MAX_RETRIES), retrying in ${RETRY_INTERVAL_S}s..."
   sleep "$RETRY_INTERVAL_S"
 done
 
-echo "[deploy] ERROR: nodes did not become healthy within timeout" >&2
-exit 1
+if [ "$healthy" != true ]; then
+  echo "[deploy] ERROR: nodes did not become healthy within timeout" >&2
+  exit 1
+fi
+
+# Smoke check (docs/d0003 F2): catches the two known deploy-drift failure
+# modes before an experiment runs instead of after ~2 hours of wasted
+# runtime — Iter12 (image not rebuilt, code change never shipped) and
+# Iter22 (bug-fix commit never deployed, config.yaml drift). git-status and
+# hashes run from this host; probe runs inside the first node's container
+# since Ollama there is only reachable from inside that host (127.0.0.1
+# binding in docker-compose.yml).
+echo "[deploy] running smoke check"
+uv run python tools/smoke_check.py --check git-status
+uv run python tools/smoke_check.py --check hashes --remote-dir "$REMOTE_DIR"
+ssh "$first_host" "cd $REMOTE_DIR && docker compose exec -T app .venv/bin/python tools/smoke_check.py --check probe"
 """
 
 [tasks.start]
