@@ -13,7 +13,7 @@ confidence_threshold: 0.5
 # probe_timeout_s/dispatch_timeout_s below are still calibrated to the old
 # 9B model's measured latency; they should be re-measured against 4b
 # before being treated as accurate for the new light_model.
-probe_timeout_s: 60.0
+probe_timeout_s: 120.0
 # dispatch_timeout_s is based on qwen3.5:9b expert model generation time
 # for DISPATCH_MAX_TOKENS=512. The original estimate (170s + margin = 200s)
 # proved insufficient: real-machine measurement on wafl503 (medical, 3
@@ -27,7 +27,7 @@ remote_dir: "~/workspace/ktakahashi/expert-mesh"
 # ("self_report": the light_model self-scores confidence). Design doc 2.4
 # prioritizes B first; A is kept opt-in for the comparison experiment.
 calibrated_routing: false
-confidence_signal_method: self_report
+confidence_signal_method: self_consistency_semantic
 routing_method: supervised_classifier
 # confidence_elicitation (E3) only applies to the self_report signal
 # method: "numeric_scalar" asks for a single 0-1 confidence value;
