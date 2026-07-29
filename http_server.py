@@ -310,23 +310,6 @@ async def _estimate_probe_confidence(state: NodeState, body: ProbeRequest) -> Pr
     # examples cover every domain actually in the mesh, however many there
     # are, instead of a hardcoded 4-domain set.
     all_domains = sorted({p["domain"] for p in state.peers}) if state.peers else None
-    if state.routing_method == ROUTING_METHOD_EMBEDDING:
-        query_embedding, domain_embedding = apply_embedding_postprocess(
-            body.query_embedding,
-            state.domain_embedding,
-            state.embedding_postprocess,
-            state.embedding_mean_vector,
-            state.embedding_whitening_matrix,
-        )
-        confidence = estimate_embedding_confidence(query_embedding, domain_embedding)
-        return ProbeConfidenceResult(confidence=confidence)
-    if state.routing_method == ROUTING_METHOD_SUPERVISED_CLASSIFIER:
-        # No LLM call: the classifier consumes the query_embedding the
-        # requester already computed (node.py's run_ask_flow).
-        confidence = estimate_confidence_classifier(
-            state.domain_classifier, state.domain, body.query_embedding
-        )
-        return ProbeConfidenceResult(confidence=confidence)
     if state.confidence_signal_method == CONFIDENCE_SIGNAL_MULTI_SAMPLE:
         mean_c, _var_c = await estimate_confidence_multi_sample(
             state.ollama_client,
@@ -368,6 +351,23 @@ async def _estimate_probe_confidence(state: NodeState, body: ProbeRequest) -> Pr
             timeout_s=state.probe_timeout_s,
         )
         return ProbeConfidenceResult(confidence=p_true_conf, p_true=raw_p_true)
+    if state.routing_method == ROUTING_METHOD_EMBEDDING:
+        query_embedding, domain_embedding = apply_embedding_postprocess(
+            body.query_embedding,
+            state.domain_embedding,
+            state.embedding_postprocess,
+            state.embedding_mean_vector,
+            state.embedding_whitening_matrix,
+        )
+        confidence = estimate_embedding_confidence(query_embedding, domain_embedding)
+        return ProbeConfidenceResult(confidence=confidence)
+    if state.routing_method == ROUTING_METHOD_SUPERVISED_CLASSIFIER:
+        # No LLM call: the classifier consumes the query_embedding the
+        # requester already computed (node.py's run_ask_flow).
+        confidence = estimate_confidence_classifier(
+            state.domain_classifier, state.domain, body.query_embedding
+        )
+        return ProbeConfidenceResult(confidence=confidence)
     if state.confidence_elicitation == CONFIDENCE_ELICITATION_TOP_K_WITH_PROBS:
         confidence = await estimate_confidence_top_k(
             state.ollama_client,
