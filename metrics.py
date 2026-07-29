@@ -350,6 +350,165 @@ def compute_cohens_kappa(results: list[dict], domains: list[str]) -> float:
     return (observed_agreement - chance_agreement) / (1.0 - chance_agreement)
 
 
+def compute_ece(results: list[dict], n_bins: int = 10) -> dict:
+    """Expected Calibration Error over rows with a non-null `confidence`.
+
+    Rows with confidence=None (fallback or dispatch_failed, see
+    run_experiment.py's `_run_one`) are excluded rather than treated as
+    confidence=0, since a missing confidence is a different phenomenon
+    (no dispatch happened at all) from a low but present one. `n_rows` is
+    returned alongside `ece` because that exclusion changes what population
+    the number describes (docs/d0003 F3): comparing ECE across runs with a
+    very different fallback_rate without also comparing n_rows can be
+    misleading.
+
+    Uses equal-width bins in [0, 1] (design doc's calibration axis), with
+    the final bin's upper edge inclusive so a confidence of exactly 1.0
+    doesn't fall outside every bin.
+    """
+    rows = [r for r in results if r["confidence"] is not None]
+    if not rows:
+        return {"ece": 0.0, "n_rows": 0}
+    bin_edges = [i / n_bins for i in range(n_bins + 1)]
+    total = len(rows)
+    ece = 0.0
+    for i in range(n_bins):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        if i == n_bins - 1:
+            bin_rows = [r for r in rows if lo <= r["confidence"] <= hi]
+        else:
+            bin_rows = [r for r in rows if lo <= r["confidence"] < hi]
+        if not bin_rows:
+            continue
+        bin_confidence = sum(r["confidence"] for r in bin_rows) / len(bin_rows)
+        bin_accuracy = sum(
+            1 for r in bin_rows if r["selected_domain"] in r["expected_domains"]
+        ) / len(bin_rows)
+        ece += (len(bin_rows) / total) * abs(bin_confidence - bin_accuracy)
+    return {"ece": ece, "n_rows": total}
+
+
+def compute_brier_score(results: list[dict]) -> dict:
+    """Mean squared error between `confidence` and routing correctness (0/1).
+
+    Unlike ECE (which only measures calibration within bins), Brier score
+    also penalizes poor discrimination, so the two are reported together
+    rather than as substitutes for each other. Same non-null-confidence
+    population and `n_rows` caveat as compute_ece.
+    """
+    rows = [r for r in results if r["confidence"] is not None]
+    if not rows:
+        return {"brier_score": 0.0, "n_rows": 0}
+    total_squared_error = sum(
+        (r["confidence"] - (1.0 if r["selected_domain"] in r["expected_domains"] else 0.0)) ** 2
+        for r in rows
+    )
+    return {"brier_score": total_squared_error / len(rows), "n_rows": len(rows)}
+
+
+def _rank_with_average_ties(values: list[float]) -> list[float]:
+    """Return 1-indexed ranks for `values`, averaging ranks within tied groups.
+
+    Needed for a scipy-free Mann-Whitney U (AUROC) computation, matching
+    this module's existing math.erf-based approach for the normal CDF.
+    """
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        average_rank = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = average_rank
+        i = j + 1
+    return ranks
+
+
+def compute_auroc(results: list[dict]) -> dict:
+    """AUROC of `confidence` as a discriminator between correct and incorrect routing.
+
+    Computed via the Mann-Whitney U statistic (rank-sum), which is
+    equivalent to the AUROC and needs no scipy/numpy dependency, matching
+    this module's existing style (compute_mcnemar_test's math.erf-based
+    p-value). Calibration (ECE) and discrimination (AUROC) answer different
+    questions — a classifier can be well-calibrated on average while still
+    ranking correct and incorrect predictions no better than chance, and
+    vice versa — so both are reported (docs/d0003 F3).
+
+    Returns auroc=None when every non-null-confidence row is correct or
+    every one is incorrect: AUROC (probability a random correct row
+    outranks a random incorrect one) is undefined with only one class
+    present, not 0.0 or 1.0.
+    """
+    rows = [r for r in results if r["confidence"] is not None]
+    if not rows:
+        return {"auroc": None, "n_rows": 0}
+    labels = [1 if r["selected_domain"] in r["expected_domains"] else 0 for r in rows]
+    scores = [r["confidence"] for r in rows]
+    n_positive = sum(labels)
+    n_negative = len(labels) - n_positive
+    if n_positive == 0 or n_negative == 0:
+        return {"auroc": None, "n_rows": len(rows)}
+    ranks = _rank_with_average_ties(scores)
+    positive_rank_sum = sum(ranks[i] for i in range(len(labels)) if labels[i] == 1)
+    u_statistic = positive_rank_sum - n_positive * (n_positive + 1) / 2.0
+    return {"auroc": u_statistic / (n_positive * n_negative), "n_rows": len(rows)}
+
+
+def compute_tie_rate(results: list[dict]) -> dict:
+    """Fraction of probe rounds where the top-2 candidate confidences are exactly equal.
+
+    Motivated by the self_report signal's bimodal saturation (journal.md
+    Iter15/16): when most nodes report 0.9-0.95 or 0.1-0.2, ties at the top
+    are common and the aggregator's tie-break (declaration order) silently
+    decides routing instead of the confidence signal itself. Requires
+    run_experiment.py's `probe_candidates` field; rows predating that field
+    are skipped for backward compatibility (same convention as
+    compute_compound_coverage_metrics).
+    """
+    rows = [r for r in results if r.get("probe_candidates")]
+    if not rows:
+        return {"tie_rate": 0.0, "n_rows": 0}
+    tie_count = 0
+    for r in rows:
+        confidences = sorted((c["confidence"] for c in r["probe_candidates"]), reverse=True)
+        if len(confidences) >= 2 and confidences[0] == confidences[1]:
+            tie_count += 1
+    return {"tie_rate": tie_count / len(rows), "n_rows": len(rows)}
+
+
+def compute_confidence_dispersion(results: list[dict]) -> dict:
+    """Mean per-probe standard deviation and sum of candidate confidences across nodes.
+
+    The sum matters because self_report confidences from independent nodes
+    don't sum to 1 (each node scores itself in isolation), while
+    top_k_with_probs's candidates are constructed to sum to 1 by design
+    (Tian et al. 2023) — reporting the mean sum lets a caller see this
+    structural difference directly rather than inferring it from the
+    elicitation method name. Same backward-compatibility skip as
+    compute_tie_rate.
+    """
+    rows = [r for r in results if r.get("probe_candidates")]
+    if not rows:
+        return {"mean_confidence_std": 0.0, "mean_confidence_sum": 0.0, "n_rows": 0}
+    stds = []
+    sums = []
+    for r in rows:
+        confidences = [c["confidence"] for c in r["probe_candidates"]]
+        n = len(confidences)
+        mean_confidence = sum(confidences) / n
+        variance = sum((c - mean_confidence) ** 2 for c in confidences) / n
+        stds.append(math.sqrt(variance))
+        sums.append(sum(confidences))
+    return {
+        "mean_confidence_std": sum(stds) / len(stds),
+        "mean_confidence_sum": sum(sums) / len(sums),
+        "n_rows": len(rows),
+    }
+
+
 def compute_all_metrics(results: list[dict]) -> dict:
     """Bundle every axis-1 metric plus supporting counts into one summary dict."""
     by_compound = defaultdict(list)
@@ -375,6 +534,11 @@ def compute_all_metrics(results: list[dict]) -> dict:
         "compound_domain_question_count": len(by_compound[True]),
         "compound_domain_top1_accuracy": compute_top1_accuracy(by_compound[True]),
         "compound_coverage": compute_compound_coverage_metrics(results),
+        "ece": compute_ece(results),
+        "brier_score": compute_brier_score(results),
+        "auroc": compute_auroc(results),
+        "tie_rate": compute_tie_rate(results),
+        "confidence_dispersion": compute_confidence_dispersion(results),
     }
 
 
@@ -423,6 +587,25 @@ def print_summary(metrics: dict, output: TextIO) -> None:
             f"  {domain}: precision={scores['precision']:.3f}, recall={scores['recall']:.3f}",
             file=output,
         )
+    ece = metrics["ece"]
+    print(f"ECE（{ece['n_rows']}行，confidence非nullのみ対象）: {ece['ece']:.4f}", file=output)
+    brier = metrics["brier_score"]
+    print(f"Brier score（{brier['n_rows']}行）: {brier['brier_score']:.4f}", file=output)
+    auroc = metrics["auroc"]
+    auroc_str = f"{auroc['auroc']:.4f}" if auroc["auroc"] is not None else "undefined（単一クラスのみ）"
+    print(f"AUROC（{auroc['n_rows']}行）: {auroc_str}", file=output)
+    tie_rate = metrics["tie_rate"]
+    print(
+        f"同点タイ率（probe上位2件が完全一致，{tie_rate['n_rows']}行）: {tie_rate['tie_rate']:.4f}",
+        file=output,
+    )
+    dispersion = metrics["confidence_dispersion"]
+    print(
+        f"ノード間confidence分散（{dispersion['n_rows']}行）: "
+        f"mean_std={dispersion['mean_confidence_std']:.4f}, "
+        f"mean_sum={dispersion['mean_confidence_sum']:.4f}",
+        file=output,
+    )
     compound_coverage = metrics.get("compound_coverage", {})
     if compound_coverage.get("compound_coverage_available"):
         print("複合ドメイン行の dispatch 被覆率（dispatch_top_k の効果測定用）:", file=output)

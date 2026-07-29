@@ -6,10 +6,14 @@ import pytest
 
 from metrics import (
     compute_all_metrics,
+    compute_auroc,
     compute_best_single_domain_baseline,
+    compute_brier_score,
     compute_cohens_kappa,
     compute_compound_coverage_metrics,
+    compute_confidence_dispersion,
     compute_dispatch_failure_rate,
+    compute_ece,
     compute_fallback_rate,
     compute_mcnemar_test,
     compute_mean_duration_ms,
@@ -17,6 +21,7 @@ from metrics import (
     compute_oracle_accuracy,
     compute_precision_recall_per_domain,
     compute_random_baseline_accuracy,
+    compute_tie_rate,
     compute_top1_accuracy,
     compute_top1_accuracy_wilson_ci,
     compute_wilson_confidence_interval,
@@ -34,6 +39,8 @@ def _result(
     duration_ms: int = 100,
     dispatched_domains: list[str] | None = None,
     row_id: str | None = None,
+    confidence: float | None = None,
+    probe_candidates: list[dict] | None = None,
 ) -> dict:
     """Build a minimal result row matching run_experiment.py's output shape.
 
@@ -45,7 +52,12 @@ def _result(
     a fresh id per call (via a module-level counter, not id(object()) —
     CPython can reuse a just-freed temporary object's address, making
     id(object()) collide across calls) so tests that don't care about
-    pairing (McNemar) still produce unique ids.
+    pairing (McNemar) still produce unique ids. `confidence` defaults to
+    None (matches a fallback/dispatch_failed row) and `probe_candidates`
+    defaults to None (pre-Iter1 schema, same backward-compatibility
+    convention as `dispatched_domains`) so existing callers that don't care
+    about the confidence-calibration metrics (compute_ece etc.) are
+    unaffected.
     """
     return {
         "id": row_id if row_id is not None else f"row-{next(_row_id_counter)}",
@@ -55,6 +67,8 @@ def _result(
         "dispatch_failed": dispatch_failed,
         "duration_ms": duration_ms,
         "dispatched_domains": dispatched_domains,
+        "confidence": confidence,
+        "probe_candidates": probe_candidates,
     }
 
 
@@ -373,3 +387,144 @@ def test_compute_all_metrics_includes_new_statistical_fields() -> None:
     assert "random_baseline_accuracy" in metrics
     assert "best_single_domain_baseline" in metrics
     assert "oracle_accuracy" in metrics
+
+
+def test_compute_ece_perfectly_calibrated_is_zero() -> None:
+    """Confidence exactly equal to the bin's observed accuracy yields ECE 0.0."""
+    results = [
+        _result("medical", ["medical"], confidence=0.9),
+        _result("medical", ["medical"], confidence=0.9),
+        _result("medical", ["medical"], confidence=0.9),
+        _result("medical", ["medical"], confidence=0.9),
+        _result("medical", ["medical"], confidence=0.9),
+        _result("medical", ["medical"], confidence=0.9),
+        _result("medical", ["medical"], confidence=0.9),
+        _result("medical", ["medical"], confidence=0.9),
+        _result("medical", ["medical"], confidence=0.9),
+        _result("legal", ["medical"], confidence=0.9),  # 9/10 correct at confidence 0.9
+    ]
+    ece = compute_ece(results)
+    assert ece["ece"] == pytest.approx(0.0, abs=1e-9)
+    assert ece["n_rows"] == 10
+
+
+def test_compute_ece_miscalibrated_matches_hand_computed_gap() -> None:
+    """All rows in one bin, all wrong: ECE collapses to |mean_confidence - 0|."""
+    results = [
+        _result("legal", ["medical"], confidence=0.9),
+        _result("legal", ["medical"], confidence=0.9),
+    ]
+    ece = compute_ece(results)
+    assert ece["ece"] == pytest.approx(0.9, abs=1e-9)
+
+
+def test_compute_ece_excludes_null_confidence_rows() -> None:
+    """Fallback/dispatch-failed rows (confidence=None) are excluded, not treated as 0."""
+    results = [
+        _result("medical", ["medical"], confidence=1.0),
+        _result(None, ["medical"], used_fallback=True, confidence=None),
+    ]
+    ece = compute_ece(results)
+    assert ece["n_rows"] == 1
+    assert ece["ece"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_compute_ece_empty_results_is_zero() -> None:
+    """No rows at all returns 0.0/0 rather than dividing by zero."""
+    assert compute_ece([]) == {"ece": 0.0, "n_rows": 0}
+
+
+def test_compute_brier_score_perfect_predictions_is_zero() -> None:
+    """Confidence 1.0 on a correct row and 0.0 on an incorrect one both score 0 squared error."""
+    results = [
+        _result("medical", ["medical"], confidence=1.0),
+        _result("legal", ["medical"], confidence=0.0),
+    ]
+    assert compute_brier_score(results)["brier_score"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_compute_brier_score_worst_case_is_one() -> None:
+    """Full confidence on a wrong answer is the maximum possible squared error."""
+    results = [_result("legal", ["medical"], confidence=1.0)]
+    assert compute_brier_score(results)["brier_score"] == pytest.approx(1.0, abs=1e-9)
+
+
+def test_compute_auroc_perfect_discrimination_is_one() -> None:
+    """Correct rows all outrank incorrect rows in confidence -> AUROC 1.0."""
+    results = [
+        _result("medical", ["medical"], confidence=0.9),
+        _result("legal", ["legal"], confidence=0.8),
+        _result("legal", ["medical"], confidence=0.2),
+        _result("medical", ["legal"], confidence=0.1),
+    ]
+    assert compute_auroc(results)["auroc"] == pytest.approx(1.0, abs=1e-9)
+
+
+def test_compute_auroc_undefined_with_single_class() -> None:
+    """AUROC needs both a correct and an incorrect row to be defined; all-correct returns None."""
+    results = [
+        _result("medical", ["medical"], confidence=0.9),
+        _result("legal", ["legal"], confidence=0.5),
+    ]
+    result = compute_auroc(results)
+    assert result["auroc"] is None
+    assert result["n_rows"] == 2
+
+
+def test_compute_tie_rate_detects_exact_top_two_tie() -> None:
+    """Two candidates reporting the identical top confidence counts as a tie."""
+    results = [
+        _result(
+            "medical",
+            ["medical"],
+            probe_candidates=[{"confidence": 0.5}, {"confidence": 0.5}, {"confidence": 0.1}],
+        )
+    ]
+    tie = compute_tie_rate(results)
+    assert tie["tie_rate"] == pytest.approx(1.0, abs=1e-9)
+    assert tie["n_rows"] == 1
+
+
+def test_compute_tie_rate_no_tie_when_top_two_differ() -> None:
+    """Distinct top-two confidences are not a tie."""
+    results = [
+        _result(
+            "medical",
+            ["medical"],
+            probe_candidates=[{"confidence": 0.9}, {"confidence": 0.5}],
+        )
+    ]
+    assert compute_tie_rate(results)["tie_rate"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_compute_tie_rate_skips_rows_without_probe_candidates() -> None:
+    """Rows predating the probe_candidates field (None) are excluded, matching
+    compute_compound_coverage_metrics's backward-compatibility convention."""
+    results = [_result("medical", ["medical"], probe_candidates=None)]
+    assert compute_tie_rate(results) == {"tie_rate": 0.0, "n_rows": 0}
+
+
+def test_compute_confidence_dispersion_matches_hand_computed_std_and_sum() -> None:
+    """A single probe round with confidences [0.2, 0.8] has population std 0.3 and sum 1.0."""
+    results = [
+        _result(
+            "medical",
+            ["medical"],
+            probe_candidates=[{"confidence": 0.2}, {"confidence": 0.8}],
+        )
+    ]
+    dispersion = compute_confidence_dispersion(results)
+    assert dispersion["mean_confidence_std"] == pytest.approx(0.3, abs=1e-9)
+    assert dispersion["mean_confidence_sum"] == pytest.approx(1.0, abs=1e-9)
+    assert dispersion["n_rows"] == 1
+
+
+def test_compute_all_metrics_includes_calibration_fields() -> None:
+    """compute_all_metrics exposes ECE, Brier score, AUROC, tie rate, and dispersion."""
+    results = [_result("medical", ["medical"], confidence=0.9, probe_candidates=[{"confidence": 0.9}])]
+    metrics = compute_all_metrics(results)
+    assert "ece" in metrics
+    assert "brier_score" in metrics
+    assert "auroc" in metrics
+    assert "tie_rate" in metrics
+    assert "confidence_dispersion" in metrics
