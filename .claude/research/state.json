@@ -1,17 +1,17 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter22",
-  "phase": "reflect",
+  "iteration": "Iter24",
+  "phase": "investigate",
   "status": "running",
-  "current_lever": "confidence_signal_method=self_consistency_semantic",
+  "current_lever": null,
   "experiment_dir": null,
-  "experiment_deadline": 1785314712,
-  "updated_at": 1785400000,
-  "last_slack_ts": null,
-  "iteration_thread_ts": null,
-  "notion_toggle_created": true,
-  "last_commit": null,
-  "iteration_name": "self_consistency_semantic 再実行（http_server.py bug修正後）",
+  "experiment_deadline": null,
+  "updated_at": 1785350913,
+  "last_slack_ts": "1785349847.704499",
+  "iteration_thread_ts": "1785342491.301279",
+  "notion_toggle_created": false,
+  "last_commit": "PLACEHOLDER_COMMIT_HASH",
+  "iteration_name": "中央集権ルータ比較による分散型 supervised_classifier の相対性能評価",
   "e10_results": {
     "lever": "expert_specialization=domain_lora",
     "answer_quality_accuracy": 0.5013,
@@ -38,5 +38,29 @@
     "mean_duration_ms": 6498,
     "vram_gb": 3.4,
     "judgment": "rejected"
+  },
+  "e22_results": {
+    "lever": "confidence_signal_method=self_consistency_semantic",
+    "top1_accuracy": 0.5651315789473684,
+    "cohens_kappa": 0.5214814814814815,
+    "answer_quality_accuracy": 0.218,
+    "end_to_end_accuracy": 0.1256578947368421,
+    "fallback_rate": 0.13157894736842105,
+    "judgment": "invalid",
+    "note": "Bug not fixed: routing_method=supervised_classifier early return in _estimate_probe_confidence() prevents self_consistency_semantic code path from executing. Results identical to E20 (diff < 0.0001)."
+  },
+  "e23_results": {
+    "lever": "F1-F3-F5_commit_and_X1_baseline_reacquisition",
+    "top1_accuracy": 0.5651315789473684,
+    "cohens_kappa": 0.5214814814814815,
+    "ece": 0.19265409042498843,
+    "tie_rate": "0.00%",
+    "answer_quality_accuracy": 0.508667,
+    "end_to_end_accuracy": 0.318421,
+    "brier_score": 0.240286,
+    "auroc": 0.723004,
+    "fallback_rate": 0.131579,
+    "judgment": "adopted",
+    "note": "X1: 測定系修復後の基準線再取得。主基準4項目が期待値と完全に一致。"
   }
 }

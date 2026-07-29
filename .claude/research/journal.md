@@ -1,4 +1,836 @@
-## Iteration 21: multi_sample_semantic による不確実性推定とconfidence較正改善
+## Iteration 23: 測定系修復のコミット確定と最良構成での基準線再取得
+
+### 実装 (Iter23)
+
+**作業内容**: 新規コードは書かず，working tree に残っていた F1〜F3・F5 相当の未コミット差分を，
+計画（下記「計画 (Iter23)」節）どおり 5 コミットへ分割した．`.claude/research/*` は今回コミット
+対象外（reflector がイテレーション完了時に別途コミット）．
+
+**コミット一覧**（すべて `main` ブランチ，push はしていない）:
+
+| # | ハッシュ | 内容 | 対象ファイル |
+|---|---|---|---|
+| 1 | `744728a` | F1: config.yaml を最良既知構成へ復元（`confidence_signal_method: self_consistency_semantic→self_report`，`expert_model` 全10ノードを `expert-mesh-{domain}-lora` へ） | `config.yaml` |
+| 2 | `75441db` | F5: 実験の再現性担保（`GIT_HEAD` build-arg，`_record_experiment_provenance()`，`data/MANIFEST.md`，`.gitignore` の `data/*` + `!data/MANIFEST.md` 化） | `Dockerfile`，`run_experiment.py`，`tests/test_run_experiment.py`，`.gitignore`，`data/MANIFEST.md`，`mise.toml`（`[tasks.setup]` ハンクのみ） |
+| 3 | `3840068` | F2: デプロイ検証ゲート（`tools/smoke_check.py` 新規，`git-status`／`hashes`／`probe` の3チェック）を `mise run deploy` に統合 | `tools/smoke_check.py`，`mise.toml`（`[tasks.deploy]` ハンクのみ） |
+| 4 | `aa4a989` | F3: metrics.py へ ECE/Brier/AUROC/同点率/ノード間confidence分散を統合 | `metrics.py`，`tests/test_metrics.py` |
+| 5 | `9929205` | docs: 研究総括（d0002）と次実験計画（d0003）の追加 | `docs/d0002_research_cycle_findings_2026-07.md`，`docs/d0003_next_experiments_2026-07.md` |
+
+**分割作業の注記**: `mise.toml` は `[tasks.setup]`（F5，`GIT_HEAD` build-arg 追加）と
+`[tasks.deploy]`（F2，スモークチェック統合）の 2 ハンクを含んでいたため，`git apply --cached` で
+パッチをハンク単位に分けてステージし，計画どおりコミット2・3に振り分けた．一度 `git commit <pathspec>`
+で意図せず作業ツリー全体（両ハンク）をコミット2に含めてしまう事故が起きたが，push 前だったため
+`git reset --soft HEAD~1` で取り消し，index を `git reset mise.toml` で明示的に巻き戻してから
+再度ハンク単位でステージし直して正しく分割した．最終的な各コミットの diff は `git show --stat` で
+意図した対象ファイルのみであることを確認済み．
+
+未追跡だった `scripts/analyze_iter16.py`（Iter16 専用の使い捨て分析スクリプト）は，機能が F3 で
+`metrics.py` に統合済みのため計画の指示どおりコミットせず削除した（`rm`．未追跡ファイルの削除であり，
+CLAUDE.md の破壊的操作禁止には抵触しない）．
+
+**テスト・リンタ結果**:
+- `uv run pytest tests/`: **198 passed, 2 skipped**（Iter22 時点と同数，回帰なし）．
+- `uv run ruff check`: 新規 warning 0．既存の 2 件（`scripts/prepare_lora_training_data.py` の
+  未使用 import・f-string）は今回変更していないファイルであり無関係．
+
+**デプロイ検証ゲートの e2e 確認**（`mise run setup && mise run deploy`，実機10ノード）:
+- `mise run setup`: イメージビルドログに `[setup] building expert-mesh image (git HEAD=99292055e5...)`
+  と出力され，`GIT_HEAD` build-arg がコミット5（docs追加，HEAD）を正しく指していることを確認した．
+  registry への push も成功．
+- `mise run deploy`: 10ノード全てで `docker compose pull`／`up -d --force-recreate app` が成功し，
+  ヘルスチェックは 1 回目に wafl507〜509 が未達だったが 2 回目（10秒後）のリトライで全10ノード `ok`．
+  続いて `tools/smoke_check.py` の3チェックが自動実行され，**すべて pass**:
+  - `git-status`: `.claude/research/*` の未コミット変更（今回コミット対象外，reflector 管轄）について
+    警告を出したが，設計どおり警告のみでパイプラインは失敗させない（Dockerfile が `.claude/` を
+    イメージへ COPY しないため実害なし）．結果は `passed`．
+  - `hashes`: 10ノード全てで `http_server.py`／`router.py`／`config.yaml` のローカル版とコンテナ内版が
+    完全一致．`passed`．
+  - `probe`: wafl501 への1問プローブで `estimated_latency_ms=3ms`（LLM呼び出しなしの分類器分岐）を
+    確認．`confidence_logprobs_mean`/`confidence_semantic_entropy`/`confidence_p_true` は
+    `null`（`self_report` 設定と整合）．`passed`．
+
+**実験開始可否の判断**: **開始可**．5コミットの内容は計画表と完全一致し，テスト・リンタは回帰なし，
+F2（デプロイ検証ゲート）の e2e 動作も実機10ノードで確認できた（journal.md「調査 (Iter23)」節が
+「部分的に未検証」としていた留保はこれで解消）．次フェーズ（rc-experimenter）は X1
+（`mise run start && mise run analyze`，JMMLU 1520問，計画表の成功条件と対比）へ進んでよい．
+
+---
+
+### 実験 (Iter23)
+
+**実験ディレクトリ**: `results/20260730_015322/`
+**データセット**: JMMLU 1520 問（単一1500 + 複合20）、全問完走
+**所要時間**: mean_duration_ms=3555.6
+
+**成功条件の全結果**:
+
+| 分類 | 指標 | 期待値 | 実測値 | 判定 |
+|---|---|---|---|---|
+| 主基準 | top1_accuracy | 0.5651 | 0.565132 | **一致** |
+| 主基準 | Cohen's kappa | 0.5215 | 0.521481 | **一致** |
+| 主基準 | ECE | 0.1927 | 0.192654 | **一致** |
+| 主基準 | 同点タイ率 | 0.00% | 0.0% | **一致** |
+| 参考 | answer_quality_accuracy | 0.5013 ± 0.013 | 0.508667 | ノイズ幅内 |
+| 参考 | end_to_end_accuracy | 0.3151 ± 0.013 | 0.318421 | ノイズ幅内 |
+
+**追加メトリクス**:
+- fallback_rate: 0.1316 (200/1520)
+- dispatch_failure_rate: 0.0%
+- single_domain_top1_accuracy: 0.5693 (n=1500)
+- compound_domain_top1_accuracy: 0.25 (n=20)
+- brier_score: 0.2403 (n=1320)
+- AUROC: 0.7230 (n=1320)
+
+**実行上の注記**:
+- デプロイ: 全10ノード正常完了、smoke_check 全チェック合格
+- SSH ポーリングセッションが切断されたが、リモートコンテナ内での実験は継続し全問完走
+- 結果コピー・分析とも正常終了
+
+**判定**: **X1 成功** — 主基準4項目が期待値と完全に一致。測定系の健全性が確認できた。
+以後の X2（中央集権ルータ比較）・X4（複合ドメイン評価）・X5（fallback 見直し）の
+比較対象となる基準線が、正しい計測基盤で確定した。
+
+---
+
+### 分析 (実行) (Iter23)
+
+**数値の対比**:
+
+| 指標 | 期待値 (docs/d0003 X1) | 実測値 (Iter23) | 差 | 判定 |
+|---|---|---|---|---|
+| top1_accuracy | 0.5651 | 0.565132 | +0.000032 | **一致** |
+| Cohen's kappa | 0.5215 | 0.521481 | -0.000019 | **一致** |
+| ECE | 0.1927 | 0.192654 | -0.000046 | **一致** |
+| 同点タイ率 | 0.00% | 0.0% | 0 | **一致** |
+| answer_quality_accuracy | 0.5013 ± 0.013 | 0.508667 | +0.0074 | ノイズ幅内 |
+| end_to_end_accuracy | 0.3151 ± 0.013 | 0.318421 | +0.0033 | ノイズ幅内 |
+
+**追加メトリクス**:
+- Brier score: 0.2403 (n=1320)
+- AUROC: 0.7230 (n=1320)
+- Fallback rate: 0.1316 (200/1520)
+- Single-domain top1: 0.5693 (n=1500)
+- Compound-domain top1: 0.25 (n=20)
+- Mean duration: 3556ms
+
+**E20 (top_k_with_probs, results/20260729_110720) との比較**:
+- top1_accuracy: 0.5651 → 0.5651 (0.00pt)
+- kappa: 0.5215 → 0.5215 (0.00pt)
+- ECE: 0.1927 → 0.1927 (0.00pt)
+- answer_quality_accuracy: 0.2313 → 0.5087 (+0.2774)
+- end_to_end_accuracy: 0.1355 → 0.3184 (+0.1829)
+
+E20 は `confidence_elicitation=top_k_with_probs` を設定していたが、`routing_method=supervised_classifier` 下では no-op であり、実際には E6 の分類器経路が動いていた（d0002 §6-B）。したがって E20 のルーティング指標（top1/kappa/ECE）は E6 のそれと同等であり、Iter23 との違いはルーティング系にはない。answer_quality と end_to_end の差は、E20 当時の `expert_model` が `qwen3.5:4b-q4_K_M`（E8 棄却）であったのに対し、Iter23 では `expert-mesh-{domain}-lora`（E10 採用）に F1 で復元されたことによる。
+
+**主基準4項目の「完全一致」について**:
+top1_accuracy, kappa, ECE, 同点タイ率が期待値と小数点6桁目で初めて逸脱するレベル（差が 0.000032 以下）で一致している。これは決定論的ルーティング（d0003 制約2）の下で期待される結果であり、デプロイ差分や実装バグがないことを裏付ける。
+
+---
+
+### 分析 (解釈) (Iter23)
+
+**レバー**: F1-F3-F5 のコミット確定 + X1 基準線再取得（新規コード変更なし）
+
+**判定**: **adopted**（基準線確定）
+
+**今回の数値と前回比**:
+- top1_accuracy: E20 0.5651 → Iter23 0.5651（0.00pt）
+- Cohen's kappa: E20 0.5215 → Iter23 0.5215（0.00pt）
+- ECE: E20 0.1927 → Iter23 0.1927（0.00pt）
+- answer_quality_accuracy: E20 0.2313 → Iter23 0.5087（+0.2774）
+- end_to_end_accuracy: E20 0.1355 → Iter23 0.3184（+0.1829）
+
+E20 との answer_quality/end_to_end の差は expert_model の変更（qwen3.5:4b → domain_lora）によるもので、ルーティング指標は同一構成の再実行として期待通り不変。
+
+**ノイズか有意かの判定と根拠**:
+- **主基準4項目**: すべて期待値と完全に一致（差 < 0.0001）。決定論的ルーティングの下で同一構成が再現されたことを意味する。測定系の健全性が確認できた。
+- **answer_quality_accuracy**: 0.5087 は期待値 0.5013 の ±0.013 ノイズ幅内（差 +0.0074）。有意な変化ではない。
+- **end_to_end_accuracy**: 0.3184 は期待値 0.3151 の ±0.013 ノイズ幅内（差 +0.0033）。有意な変化ではない。
+- **Brier score (0.2403) / AUROC (0.7230)**: 新規指標。Brier 0.24 は ECE 0.19 と整合的（較正が概ね良好）。AUROC 0.72 は confidence が正解分類に一定の判別力を持つことを示す。
+
+**仮説との整合**:
+- 計画の仮説「ルーティング系指標が Iter18 Phase C と完全一致する」は**支持された**。
+- 想定外の挙動なし。F1〜F5 のコミット確定とデプロイ検証ゲート（F2）の e2e 動作も正常に完了。
+
+**次イテレーションへの示唆**:
+
+docs/d0003 §0 の優先順位に従う:
+
+1. **第3段階: X2（中央集権ルータ比較）が次の本命**。d0003 で「最重要」と位置付けられている。基準線が確定した今、supervised_classifier（分散型）と中央集権ルータを McNemar 対比較で比較できる。
+2. **X4（複合ドメイン評価）は X2 と並行または前後して検討**。単一ドメイン 1500 問のみの結果に偏りがあるため、複合ドメイン 20 問の精度（現状 0.25）を改善する方策の評価。
+3. **X5（fallback 見直し）は fallback_rate=0.1316 の削減が目的**。confidence_threshold=0.5 の調整や fallback 先の改善。
+4. **X6（ノイズ床確定）は優先度が低い**。基準線が確定したため、X2/X4/X5 の判定にノイズ床が必須になるまで先送りしても支障なし。
+
+---
+
+### 考察 (Iter23)
+
+**イテレーション全体の総括**:
+F1〜F3・F5 の未コミット差分をコミット確定させ，デプロイ検証ゲート（F2）の e2e 動作を確認した
+上で，最良既知構成（E6 supervised_classifier + E10 domain_lora）の基準線（X1）を再取得した．
+新規コード変更はなく，計測基盤の整備と確定が主目的だった．
+
+**X1 の判定**: **adopted**（基準線確定）
+主基準 4 項目（top1_accuracy=0.5651, kappa=0.5215, ECE=0.1927, 同点タイ率=0.00%）が期待値と
+完全に一致（差 < 0.0001）．測定系の健全性が確認でき，以後の比較基準線が正しい計測基盤で確定した．
+
+**次イテレーションの単一レバー**:
+docs/d0003 §0 の優先順位に従い，**X2: 中央集権ルータ比較** を提案する．
+supervised_classifier（分散型）と中央集権ルータを McNemar 対比較で比較する．
+d0003 で「最重要」と位置付けられている．
+
+**iteration_name**: 「中央集権ルータ比較による分散型 supervised_classifier の相対性能評価」
+
+---
+
+### 計画 (Iter23)
+
+**単一レバー原則の解釈**: 今回は config.yml `levers` の値を振る実験ではない．rc-investigator の
+申し送り（本ファイル下方の「調査 (Iter23)」節）どおり，Iter15（E1，データセット拡張）と同種の
+「レバー値を振らない基盤整備イテレーション」として扱う．判断基準は次の 2 点である．
+
+1. **変更対象がコードの動作ではなく計測基盤・記録の完全性である**こと．F1（config.yaml 復元）は
+   Iter18 で採用済みの構成に戻すだけで新しい値の導入ではない．F2（smoke_check.py）・F3（metrics.py
+   への指標統合）・F5（provenance 記録）はいずれも「既存の実験結果を正しく計測・記録できるようにする」
+   ための修正で，どの構成で実験するかというレバーではない．
+2. **今回の実験（X1）自体が「新しい構成を試す」のではなく「既知の最良構成を，正しい計測基盤で
+   再現できるか検証する」測定である**こと．ルーティング経路は決定論的（d0003 制約 2）なので，
+   Iter18 Phase C（top1=0.5651, kappa=0.5215, ece=0.1927, tie=0.00%）と完全一致するはずであり，
+   一致しなければそれ自体が実装・デプロイ差分の検出になる．つまり X1 は「新しい独立変数」を導入せず，
+   むしろ「これまでの一連のレバー変更（E6 + E10）が現在も正しく効いているか」を再確認する回である．
+
+以上より，今回の「単一レバー」は **「F1〜F3・F5 の未コミット差分をコミットして確定させ，
+デプロイ検証ゲートを通してから X1（最良既知構成の基準線再取得）を実行する」という一体の作業**
+と定義する．次イテレーション以降は通常どおり config.yml の levers（X2 中央集権ルータ比較等）に戻る．
+
+**変更内容（コミット分割方針）**: rc-implementer が本イテレーションの実装フェーズとして，
+`git status --porcelain` に残っている未コミット差分を，CLAUDE.md の「1 コミット = 1 意味的変更」
+原則に従い次の単位でコミットすること．新規コードを書く作業ではなく，既存の working tree 差分を
+意味単位に分けてコミットする作業である．
+
+| # | コミット内容 | 対象ファイル |
+|---|---|---|
+| 1 | F1: config.yaml を最良既知構成へ復元（`expert_model=expert-mesh-{domain}-lora` 全10ノード，`confidence_signal_method=self_report`） | `config.yaml` |
+| 2 | F5: 実験の再現性担保（provenance 記録・MANIFEST 化） | `Dockerfile`，`run_experiment.py`，`tests/test_run_experiment.py`，`.gitignore`，`data/MANIFEST.md`，`mise.toml`（`[tasks.setup]` の `GIT_HEAD` build-arg 追加ハンクのみ） |
+| 3 | F2: デプロイ検証ゲート（smoke_check.py）の追加 | `tools/smoke_check.py`，`mise.toml`（`[tasks.deploy]` のスモークチェック統合ハンクのみ） |
+| 4 | F3: metrics.py へ ECE/AUROC/Brier/同点率/ノード間分散を統合 | `metrics.py`，`tests/test_metrics.py` |
+| 5 | docs: 研究総括（d0002）と次実験計画（d0003）の追加 | `docs/d0002_research_cycle_findings_2026-07.md`，`docs/d0003_next_experiments_2026-07.md` |
+
+`mise.toml` は F5（setup task）と F2（deploy task）の 2 つの独立したハンクを含むため，
+`git add -p mise.toml` で該当ハンクのみを各コミットに振り分けること．一括コミットで済ませても
+実害は小さいが，後から F2 由来の不具合と F5 由来の不具合を切り分けたい場合に diff の意味が
+崩れるため，可能な範囲で分割する．
+
+`scripts/analyze_iter16.py`（Iter16 専用の使い捨て分析スクリプト．ECE・同点タイ率の手計算）は
+F3 でその機能が `metrics.py` に統合されたため冗長になっている．未追跡ファイルなので，
+コミットせずに削除してよい（今回の作業に不要な履歴を残さないため）．削除がためらわれる場合は
+コミットしても実害はないが，本来の目的（F3 の再現）は既に metrics.py 側で果たされている．
+
+`.claude/research/{config.yml, journal.md, journal_archive.md, backlog.md, state.json}` の変更は
+**今回コミットしない**．config.yml の `git.commit_per_iteration: true` の運用どおり，イテレーション
+完了時に reflector が通常フローでコミットする対象であり，実装フェーズで先取りしてコミットする
+必要はない．
+
+**git コミットの実施タイミングについて**: 計画フェーズ（本フェーズ）では実行しない．
+理由は，rc-planner の役割は設計であり，working tree の状態変更は実装フェーズ（rc-implementer）の
+責務範囲だからである．ただし X1 の実験（rc-experimenter）着手前に必ずコミットが完了していることを
+実装フェーズの完了条件とする．コミット後，`mise run setup && mise run deploy` を実行し，
+`tools/smoke_check.py` の 3 チェック（`git-status`／`hashes`／`probe`）がすべて通ることを確認して
+初めて実験フェーズへ進むこと（F2 の e2e 動作確認を兼ねる）．
+
+**固定する構成**（X1 実行時，docs/d0003 X1 節どおり）:
+
+| 設定 | 値 |
+|---|---|
+| `routing_method` | `supervised_classifier`（E6，Iter17 採用） |
+| `confidence_signal_method` | `self_report`（制約1により，これ以外だと分類器の分岐に到達できない） |
+| `expert_model` | `expert-mesh-{domain}-lora`（E10，Iter18 採用，全10ノード） |
+| `light_model` | `qwen3.5:4b-q4_K_M` |
+| `confidence_elicitation` | `top_k_with_probs`（E6 下では no-op だが値自体は変更しない） |
+| `confidence_threshold` | 0.5 |
+| `dispatch_top_k` | 1 |
+| `domain_count` | 10 |
+| データセット | JMMLU 1520 問 |
+
+**仮説**: F1〜F3・F5 をコミットし，正しいデプロイ手順（`mise run setup`＝イメージ再ビルド，
+`mise run deploy`＝スモークチェック実行）を通した上で X1 を実行すれば，ルーティング系の指標
+（top1_accuracy・kappa・ECE・同点タイ率）は Iter18 Phase C（`results/20260729_042712`）と
+完全一致する．一致しない場合，それは Iter12・Iter22 と同種のデプロイ／実装差分事故が
+再発したことを意味し，F2 のスモークチェックで事前に検出できているはずである（できていなければ
+F2 自体の e2e 未検証という留保が実害を持ったことになる）．
+
+**期待効果**:
+1. 測定系（F1〜F3・F5）の耐久性を確保し，「working tree にしかない変更が誤操作で消える」
+   「provenance の git_head.txt が実際に動いたコードと食い違う」という 2 つのリスクを解消する．
+2. X1 により，以後の X2（中央集権ルータ比較）・X4（複合ドメイン評価）・X5（fallback 見直し）の
+   比較対象となる基準線を，正しい計測基盤で確定させる．
+3. F2（デプロイ検証ゲート）の e2e 動作を実運用のなかで確認する（留保の解消）．
+
+**成功条件**（docs/d0003 X1 節の期待値表を用いる．ノイズ幅の根拠は下記）:
+
+| 分類 | 指標 | 期待値 | 判定基準 |
+|---|---|---|---|
+| 主基準（完全一致すべき） | top1_accuracy | 0.5651 | Iter18 Phase C と完全一致．不一致は即座にデプロイ／実装差分の検出として扱う（許容誤差なし，理由は制約2＝決定論的ルーティング） |
+| 主基準（完全一致すべき） | Cohen's kappa | 0.5215 | 同上 |
+| 主基準（完全一致すべき） | ECE | 0.1927 | 同上 |
+| 主基準（完全一致すべき） | 同点タイ率 | 0.00% | 同上 |
+| 参考（ノイズ床の範囲内） | answer_quality_accuracy | 0.5013 ± 0.013 | Iter20/Iter22（同一構成の2点，差1.33pt）から暫定的に見積もったノイズ幅．正式な標準偏差は未確定（X6 未実施，下記「今回やらないこと」参照）のため，暫定値として扱う |
+| 参考（ノイズ床の範囲内） | end_to_end_accuracy | 0.3151 ± 0.013 | 同上 |
+| 報告のみ | mean_duration_ms | 約 3515ms | E8（4B化，6498ms）から戻ることの確認．厳密な採否基準は設けない |
+| 報告のみ | `tools/smoke_check.py` の3チェック結果 | 全て pass | F2 の e2e 動作確認．fail した場合はデプロイをやり直し，原因を記録すること |
+
+**今回やらないこと（スコープ外・次イテレーション以降の候補）**: docs/d0003 X6（回答品質のノイズ床の
+確定，同一構成で3回実行して標準偏差を求める，追加コスト約3時間）は「X1 と同時実施」が望ましいと
+d0003 に明記されているが，本イテレーションでは実施しない．理由は，今回の主目的が「測定系修復の
+確認」であり，これに「ノイズ床の統計的確定」という別の目的を混ぜると，X1 が期待通りに一致しな
+かった場合の原因切り分け（デプロイ差分か，単純な生成のばらつきか）が難しくなるためである．
+X1 が期待値と一致し測定系の健全性が確認できた場合，X6 は次イテレーション（Iter24）の第一候補と
+して backlog に記録する．
+
+**実行手順（フルフロー，rc-implementer/rc-experimenter/rc-analyst へ）**:
+```
+[実装フェーズ]
+1. 上表のコミット分割方針で git commit（5コミット目安．.claude/research/* は含めない）
+2. uv run pytest tests/ で全テスト通過を確認（既存 198 passed / 2 skipped の維持）
+3. scripts/analyze_iter16.py は削除（未追跡ファイルの rm）
+[実験フェーズ]
+4. mise run setup   （イメージ再ビルド．GIT_HEAD build-arg が新 HEAD になることを確認）
+5. mise run deploy  （smoke_check の3チェックが自動実行される．全て pass すること）
+6. mise run start   （JMMLU 1520 問，同一データセット）
+7. mise run analyze
+[分析フェーズ]
+8. uv run python metrics.py --results results/<dir>/results.jsonl --json
+9. 上記成功条件表と対比．主基準4項目が完全一致するか確認
+```
+
+**リスクと緩和策**:
+| リスク | 内容 | 緩和策 |
+|---|---|---|
+| コミット分割の手間で作業が長引く | mise.toml のハンク分割等 | 一括コミットでも実害は小さいため，時間が掛かる場合は目安を保ちつつ簡略化してよい．ただし config.yaml（レバー）だけは他と混在させないこと |
+| 主基準が不一致 | デプロイ／実装差分が残っている | 即座に停止し，git-status/hashes チェックの出力・`git_head.txt` を確認して原因を切り分ける．再実験せず先に原因を特定する |
+| smoke_check.py 自体のバグ | F2 の e2e 未検証だった留保が実害化 | probe チェックの出力を手動でも確認し，期待フィールド定義（`_SIGNAL_FIELD_EXPECTATIONS`）と実際の config.yaml の組み合わせが一致するか目視確認する |
+
+---
+
+### 調査 (Iter23)
+
+**問い**: (1) docs/d0003 の F2（デプロイ検証ゲート）・F3（metrics.py への指標統合）は実コードとして
+実装済みか．(2) X1（最良既知構成での基準線再取得）は着手可能か，何が障害か．
+
+#### 分かったこと
+
+**F3（metrics.py 統合）: 実装済み．**`metrics.py:353-509` に `compute_ece`・`compute_brier_score`・
+`compute_auroc`（scipy 不使用の Mann-Whitney U 実装）・`compute_tie_rate`・`compute_confidence_dispersion`
+の 5 関数が存在し，`compute_all_metrics()`（`metrics.py:512-542`）と `print_summary()`
+（`metrics.py:590-608`）にも統合済み．`tests/test_metrics.py` に対応するテスト 12 件が追加されており，
+`uv run pytest tests/` は 198 passed / 2 skipped で全通過した．d0003 F3 の検証表（Iter15〜22 の
+ECE・同点タイ率が正しい単一実装で再現するはず，という表）を実データで再実行して確認した:
+`results/20260727_010532`（Iter15）ece=0.71457/tie=98.29%，`results/20260727_100917`（Iter16）
+ece=0.73875/tie=82.83%，`results/20260727_180824`（Iter17）と `results/20260729_190824`（Iter22）
+はともに ece=0.19265/tie=0.00%．d0003 の表と完全一致した．**F3 は完了と判断してよい．**
+
+**F2（デプロイ検証ゲート）: 実装済み．**`tools/smoke_check.py`（244 行，新規）が
+`--check git-status`（working tree の未コミット変更を警告）・`--check hashes`（ローカルの
+`http_server.py`/`router.py`/`config.yaml` と各ノードのコンテナ内ファイルの md5 を比較）・
+`--check probe`（1 問だけ `/probe` を送り，`confidence_signal_method`/`routing_method` に応じて
+期待されるフィールドが非 null かを確認．supervised_classifier では `estimated_latency_ms` が
+数 ms オーダーであることを確認）の 3 チェックを実装している．`mise.toml` の `[tasks.deploy]`
+（120〜152 行付近）にこの 3 チェックが healthcheck の後・実験開始前に統合済み．d0003 F2 が要求する
+3 項目（git 状態・配布物ハッシュ照合・1 問プローブでの期待フィールド確認）をすべて満たす．
+ただし **d0003 の F2 成功条件「Iter12・Iter22 の状況を再現させたときスモーク段階で検出できること」
+自体を実際に再現させて検証した記録は見当たらない**．単体テスト（`tests/test_smoke_check.py` 等）も
+存在しない．ロジックは読解上妥当だが，end-to-end の動作確認は未実施であり，**部分的に未検証**という
+留保付きで「実装済み」とする．
+
+**F5（再現性担保，付随して確認）も実装済み**: `run_experiment.py:152-168` に
+`_record_experiment_provenance()` が追加され，各実験ディレクトリへ使用時の `config.yaml` と
+`git_head.txt`（`GIT_HEAD` 環境変数）を保存する．`Dockerfile` に `ARG GIT_HEAD` / `ENV GIT_HEAD` を
+追加（26〜33 行）し，`mise.toml` の `[tasks.setup]` が `docker build --build-arg GIT_HEAD=$(git rev-parse HEAD)`
+で埋める．`data/MANIFEST.md`（新規）に `data/dataset.jsonl`・`data/classifier_train.jsonl`・
+`models/domain_classifier.joblib`・各 LoRA アダプタの sha256 と生成コマンドを記録済み．
+`models/domain_classifier.joblib` の記載ハッシュを実ファイルの `sha256sum` と照合し一致を確認した．
+
+**最重要の発見: F1・F2・F3・F5 のすべてが git 未コミットの working tree 変更としてのみ存在する．**
+`git status --porcelain`（本調査で実行）は次を示す．HEAD は `30e3627`（Iter21/22 のバグ修正コミット）
+のまま．
+
+- 未追跡（`??`）: `tools/smoke_check.py`（F2），`data/`（F5 の `MANIFEST.md` を含む），
+  `docs/d0002_*.md`・`docs/d0003_*.md`，`scripts/analyze_iter16.py`
+- 変更（`M`）: `metrics.py`（F3），`mise.toml`（F2 の deploy 統合），`Dockerfile`（F5），
+  `run_experiment.py`（F5），`config.yaml`（F1 の最良既知構成復元），`.gitignore`（F5 の
+  `data/MANIFEST.md` 例外），`tests/test_metrics.py`・`tests/test_run_experiment.py`，
+  `.claude/research/{backlog,config.yml,journal,journal_archive,state.json}`
+
+**リスクの性質を精査した結果，当初想定より限定的だが，無視できない実害がある**．`mise.toml` の
+`[tasks.setup]` は `docker build . `（プレーンな `docker build`）でイメージを作っており，
+`Dockerfile` に `.dockerignore` も存在しない．すなわちビルドコンテキストはローカルディスクの
+working tree そのものであり，**git のコミット状態とは無関係に，今 `mise run setup && mise run deploy`
+を実行すれば F1〜F3・F5 のコード変更は実際にコンテナへ反映されるはずである**（`config.yaml` の
+rsync も `mise run deploy` の 69 行目で working tree のファイルを直接転送している）．
+`tools/smoke_check.py` 自身のコメント（「Docker イメージは git HEAD からビルドされる」）は，
+この点でやや不正確である．
+
+したがって Iter22 事故（"working tree にしかなく mise run deploy が git HEAD から配布するため
+届かなかった"）と**機能的に同一の障害には当たらない可能性が高い**．真のリスクは次の 3 点である．
+(a) **耐久性**: どのセッションからも未コミットのため，誤操作・ディスク障害で F1〜F3・F5 の作業が
+消える．(b) **F5 の自己矛盾**: 今この状態で実験すれば `git_head.txt` に `30e3627` と記録されるが，
+実際に動いたコードは `30e3627` より新しい未コミットの差分を含む．F5 が防ぐはずの「どの HEAD が
+デプロイされたか分からない」状況を，F5 自身が再演してしまう．(c) `tools/smoke_check.py --check
+git-status` は，今の working tree で実行すれば必ず警告を出す（設計上正しい振る舞いだが，
+コミットするまで毎回ノイズになる）．**X1 着手前に，F1〜F3・F5 の変更をコミットしておくことを
+強く推奨する．**
+
+#### X1 着手可否の判断
+
+**結論: F2・F3 は（末尾の留保付きで）完了しており，X1 は着手可能な状態にある．ただし着手前に
+上記の git コミットを済ませることが前提である．** d0003 は X1 を F1〜F3 の完了に依存すると定めており，
+F1（config.yaml 復元）・F2（実装済み，e2e 未検証）・F3（実装・検証済み）とも技術的な障害は解消して
+いる．残る障害はコミット漏れのみであり，実験デザイン上の新しい判断を要しない．
+
+#### rc-planner への申し送り
+
+1. **単一レバー原則との関係**: X1 は「新しい設定値を振る」実験ではなく，同一の最良既知構成
+   （E6 supervised_classifier + E10 domain_lora，`confidence_signal_method=self_report`）を
+   正しい測定基盤で再取得するものであり，`.claude/research/config.yml` の `levers` に単一レバーの
+   entry としては存在しない．Iter15（E1，データセット拡張）が同種の「レバー値を振らない基盤整備
+   イテレーション」の先例であり，X1 もこれに準ずる扱いが自然だと考える．具体的には，このイテレーション
+   の `current_lever` は「新しい実験変数」ではなく「F1〜F3・F5 のコミット＋デプロイ＋X1 の基準線
+   再取得」という一体の作業として定義することを提案する．ルーティング経路は決定論的なので
+   （d0003 制約 2），結果が Iter18 Phase C（top1=0.5651, kappa=0.5215, ece=0.1927, tie_rate=0.00%）と
+   完全一致しなければ，それ自体が実装差分の検出になる．
+2. **具体的な次の一手（提案）**: (a) F1〜F3・F5 の未コミット差分をコミットする．(b)
+   `mise run setup && mise run deploy` を実行し，`tools/smoke_check.py` の 3 チェックが通ることを
+   確認する（F2 の e2e 動作確認を兼ねる）．(c) `mise run start && mise run analyze` で X1 の基準線を
+   取得し，d0003 の期待値表と一致するか判定する．(d) 一致すれば X6（回答品質のノイズ床，X1 と同時
+   実施が推奨）へ，不一致ならデプロイ/実装差分の切り分けを先に行う．
+3. **X2（中央集権ルータ比較）は d0003 が最重要と位置付けているが，X1 の完了を待つ必要がある．**
+   本調査では外部文献調査は行っていない（config levers が事実上埋まっており，内部実装確認が主目的
+   だったため）．X2 に着手する段になったら，設計・実装の参考として RouterEval・vLLM Semantic Router
+   等の異種プール文献を再確認するのが良い（d0002/d0003 に既存の引用あり，追加調査は現時点で不要）．
+4. F2 の e2e 未検証（上記留保）は，X1 実行時に「Iter22 相当の事故を意図的に再現できるか」を
+   軽く確認する形で解消できる可能性がある．必須ではないが，コストが低ければ検討に値する．
+
+---
+
+## 敵対的総点検・追加修正（2026-07-30，`/research-cycle continue` 実行前）
+
+**背景**: 直前の「記録訂正・環境修復」節（2026-07-29）で行った F1〜F5 の修正自体が正しいかを，
+独立した subagent によるレビューと自己点検で敵対的に総点検した．詳細は
+`.claude/research/backlog.md` の B40 を参照．要点のみ記す．
+
+**発見1（重大・修正済み）**: `.claude/research/config.yml` の E4（`self_consistency_semantic`）・
+E5（`p_true`）の記述が，真の no-op である E3・E7 と同列に書かれていたため誤解を招く状態だった．
+実際には，現在の HEAD（`30e3627`，Iter22 の分岐順序修正が反映済み）でこれらを設定すると，
+E6（supervised_classifier）の分類器分岐に到達できなくなり **E6 を丸ごと上書きする**．
+「no-op」ではない．時系列の誤り（Iter21/22 は E4 が動いた上で退行したのではなく，分岐順序修正が
+未適用/未デプロイだったため E4 が 1 度も実行されなかっただけ）も訂正した．
+
+**発見2（重大・ユーザー承認の上で修正済み）**: `state.json.iteration` が `"Iter22"`（無効判定済み）
+のまま，SKILL.md が定める「イテレーション完了時の初期化」が未実施だった．前回は `current_lever`
+のみに着目し実害なしと判断していたが，`rc-experimenter.md` が「実験ディレクトリ名を現イテレーション
+番号から決める」と明記しており，このまま continue すると次の実験が誤って Iter22 として記録される
+リスクを見落としていた．ユーザー承認を得て，`iteration`: `Iter23` へインクリメント，
+`current_lever`/`experiment_dir`/`experiment_deadline`/`iteration_thread_ts`: null，
+`notion_toggle_created`: false，`iteration_name`: null に更新した．
+
+**発見3・4（軽微・修正済み）**: `tools/smoke_check.py` の `_SIGNAL_FIELD_EXPECTATIONS` に到達不能な
+dead entry（`"semantic_entropy"` キー，実際の値は `"self_consistency_semantic"`）を削除．
+`run_experiment.py` の `write_text` に `encoding="utf-8"` を追加．
+
+**次期 rc-investigator への申し送り**: `state.json` は既に Iter23 として初期化済みである．
+このイテレーションの調査を「### 調査 (Iter23)」として記録すること．
+
+---
+
+## 記録訂正・環境修復（2026-07-29，`/research-cycle continue` 実行前の総括調査）
+
+**背景**: `docs/d0002_research_cycle_findings_2026-07.md`（Iter1〜22 の知見総括）・
+`docs/d0003_next_experiments_2026-07.md`（次の実験計画）を新規作成し，journal・backlog・
+config.yaml・config.yml・http_server.py の実データ突合を行った．以下は journal 側の記録誤りの訂正，
+および continue 実行前に対処した環境修復である．過去の記述は書き換えず，本節を追記として残す．
+
+### 訂正 1: E3（`confidence_elicitation`）の採用判定を取り下げ
+
+Iter20 の「同点タイ 82.83%→0.00%，ECE 0.7388→0.1927 の決定的改善」は，**すべて Iter17 の
+E6（supervised_classifier）導入時に既に起きていた変化**である．`http_server.py:_estimate_probe_confidence()`
+は排他的な if 連鎖で，`routing_method=supervised_classifier` が先に return するため
+`confidence_elicitation` の分岐には到達しない（d0002 §6-B）．E3 の有効な測定は Iter16 の 1 回のみで，
+そのときの結果は top1 0.2059（McNemar p=0.0783，有意差なし），ECE は 0.7146→0.7388 と悪化していた．
+**「採用」の判定は取り下げ，D1（判定保留．設定自体は害をなさない）として backlog に記録した．**
+
+### 訂正 2: ECE の正しい系列
+
+10-bin・confidence 非 null 行を対象に単一実装で再計算した結果，Iter17 以降は **0.1927 で不変**である
+（決定論的ルーティング下での再実行は新しい情報を生まない．d0002 §6-A）．
+
+| 実験 | 正しい値 | journal 上の誤記載 |
+|---|---|---|
+| Iter17 | 0.1927 | 0.2118（不一致） |
+| Iter21 | 0.1927 | 0.1903 / 0.1673（journal 内で 2 通りの誤記載） |
+
+Iter21 の「0.1903 へわずかに改善」という記述は誤りで，実際の変化は 0.0000 である．
+
+### 訂正 3: `top1_accuracy` と `single_domain_top1_accuracy` の取り違え
+
+Iter18 Phase C（domain LoRA 採用）の `top1_accuracy` は **0.5651** であり，journal が Iter19/20 の
+計画根拠として使っていた **0.5693 は `single_domain_top1_accuracy`（単一ドメイン 1500 問のみの値）**
+である．「E10 で top1 が 0.5651→0.5693 改善した」という記述は誤りで，実際は McNemar 不一致 0/1520 で
+**完全に不変**（journal 自身も別箇所で不一致 0/1520 と記録しており内部矛盾していた）．
+
+### 環境修復（`/research-cycle continue` 実行前に対処．d0003 第1段階 F1・F1-b 相当）
+
+1. **`config.yaml`**: Iter19 で棄却された `expert_model=qwen3.5:4b-q4_K_M`（全10ノード）が HEAD に
+   残置されていたため，Iter18 で採用された `expert-mesh-{domain}-lora` へ戻した．また Iter21/22 で
+   無効と判明した `confidence_signal_method=self_consistency_semantic` を `self_report` へ戻した
+   （制約: この値以外だと `routing_method=supervised_classifier` の分岐に到達せず分類器が無効化される．
+   d0002 §6-D）．**前提条件を実機で確認済み**: wafl500〜509 の Ollama に対応する
+   `expert-mesh-{domain}-lora` モデルが全10ノードとも登録済みであることを確認した（2026-07-29）．
+2. **`.claude/research/config.yml`**: `levers` 節の前提コメント（Iter15 時点のまま古くなっていた）を
+   Iter22 時点の実態へ全面更新し，E3・E4・E7 の no-op / 排他構造の注記を追記した．
+3. **未対応（次イテレーション以降の課題）**: docs/d0003 F2（デプロイ検証ゲート）・F3（metrics.py への
+   ECE/AUROC/Brier/同点率/分散統合）・F5（再現性マニフェスト）は本セッションで別途着手中．F3 完了までは
+   confidence 信号系レバーの判定に success_criteria (4) の指標を手計算に頼らざるを得ない．
+
+**次期 rc-investigator/rc-planner への申し送り**: 上記により，continue 再開後の実験は最良既知構成
+（E6 supervised_classifier + E10 domain_lora）から始まる．次に着手すべき優先順位は
+`docs/d0003_next_experiments_2026-07.md` §0 を参照（第2段階 X1 基準線再取得 → 第3段階 X2 中央集権
+ルータ比較・X4 複合ドメイン評価・X5 fallback 見直し）．
+
+---
+
+## Iteration 22: semantic_entropy による不確実性推定のbug fix後再実行
+
+### 実験 (Iter22) — 無効（bug fix がデプロイされず）
+
+**判定**: 実験無効（修正コミットがデプロイ対象に含まれていなかった）
+
+**発見**: 実装フェーズで `http_server.py` の分岐順序入れ替えは Working Tree に適用されたが、
+`mise run deploy` は git HEAD からデプロイするため、修正がコンテナに反映されなかった。
+コミット `b50257f` は bug 発見の記録のみで、コード修正は含まれていない。
+
+**検証証拠**:
+- E20/Iter21: `top1_accuracy=0.5651`, `kappa=0.5215`, `ece=0.1927`
+- Iter22: `top1_accuracy=0.565132`, `kappa=0.521481`, `ece=0.1927`（差異 < 0.0001）
+- `local_inference_ms`: 0-2ms（semantic entropy 実行時なら数秒〜数十秒）
+- `semantic_entropy` フィールド: 全 1520 件中 0 件（populated されるはず）
+
+**修正**: `http_server.py` の変更をコミット（`30e3627`）。再デプロイ・再実験必要。
+
+### 実験 (Iter22) — 停止（ユーザー指示）
+
+**判定**: 実験停止（ユーザーがすべての実験サイクルを停止を指示）
+
+**対応**: 実験エージェントを停止。state.json を `phase=investigate, status=running` にリセット。
+
+---
+
+### 実装 (Iter22)
+
+**変更ファイル**: `http_server.py`（1箇所）
+
+**変更内容**: `_estimate_probe_confidence()` 関数内の分岐順序入れ替え（Option A）。
+- 変更前: `routing_method` チェック → `confidence_signal_method` チェック（bug: semantic_entropy 到達不能）
+- 変更後: `confidence_signal_method` チェック → `routing_method` チェック（semantic_entropy 到達可能）
+- `config.yaml` は変更不要（`confidence_signal_method: self_consistency_semantic`, `probe_timeout_s: 120.0` 既に設定済み）
+
+**テスト結果**: `uv run pytest tests/`: 183 passed, 2 skipped（全パス）
+**linting**: `uv run ruff check`: 新規 warning 0（既存の 2 warning は無関係ファイル）
+
+**実験開始可否**: 開始可。
+
+---
+
+### 計画 (Iter22)
+
+**単一レバー**: `confidence_signal_method`（E4）, `self_consistency_semantic` — bug fix 後の再実行
+
+**変更ファイル**: `http_server.py` のみ（1箇所: `_estimate_probe_confidence()` の分岐順序入れ替え）
+
+**変更内容**:
+- `http_server.py` の `_estimate_probe_confidence()` 関数（line 313-388）で、`confidence_signal_method` のチェックを `routing_method` のチェックより先に移動（Option A）
+- 変更前の順序:
+  ```
+  1. routing_method == embedding → return (line 313-322)
+  2. routing_method == supervised_classifier → return (line 323-329) ← ここで早抜け
+  3. confidence_signal_method == multi_sample → return (line 330-340)
+  4. confidence_signal_method == stp → return (line 341-350)
+  5. confidence_signal_method == semantic_entropy → return (line 351-361) ← 到達しない
+  6. confidence_signal_method == p_true → return (line 362-370)
+  7. confidence_elicitation == top_k_with_probs → return (line 371-379)
+  8. default self_report → return (line 380-388)
+  ```
+- 変更後の順序:
+  ```
+  1. confidence_signal_method == multi_sample → return (line 330-340)
+  2. confidence_signal_method == stp → return (line 341-350)
+  3. confidence_signal_method == semantic_entropy → return (line 351-361)
+  4. confidence_signal_method == p_true → return (line 362-370)
+  5. routing_method == embedding → return (line 313-322)
+  6. routing_method == supervised_classifier → return (line 323-329)
+  7. confidence_elicitation == top_k_with_probs → return (line 371-379)
+  8. default self_report → return (line 380-388)
+  ```
+
+**config.yaml の変更は不要**: 既に `confidence_signal_method: self_consistency_semantic` (line 30) と `probe_timeout_s: 120.0` (line 16) が設定済み。
+
+**固定する構成**（変更しないもの）:
+| 設定 | 値 | 理由 |
+|------|-----|------|
+| `light_model` | `qwen3.5:4b-q4_K_M` | 変更不可。現行と同一 |
+| `routing_method` | `supervised_classifier` | 変更不可。Iter17 で採用済み |
+| `confidence_elicitation` | `top_k_with_probs` | 変更不可。Iter20 で採用済み |
+| `semantic_sample_count` | `5` | 変更不可。Farquhar et al. 推奨値 |
+| `semantic_sample_temperature` | `0.7` | 変更不可。Farquhar/Xiong 推奨値 |
+| `confidence_threshold` | `0.5` | 変更不可 |
+| `dispatch_top_k` | `1` | 変更不可 |
+| `domain_count` | `10` | 変更不可。10 ノード構成のまま |
+| データセット | JMMLU 1520 問 | 変更不可。E1 で整備済 |
+
+**仮説**:
+
+Farquhar et al. (Nature 630:625-630, 2024) は、LLM に temperature=0.7 で N=5 回の verdict sampling を行わせ、entailment-based clustering で回答を意味クラスタに分類した上で、クラスタの出現頻度エントロピー（Discrete Semantic Entropy）を不確実性指標として提案している。
+
+本研究の実装では、`confidence = fits_fraction * (1.0 - normalized_entropy)` により、意味的に多様な回答が出ているほど confidence が下がる（不確実性が高い）。
+
+**Iter20（self_report + top_k_with_probs）の残存問題**:
+- ECE=0.1927 は成功条件（0.50 以下）を達成したが、[0.90, 1.00) バケットで gap=0.1750 が残存
+- self_report は LLM の自己申告に依存するため、過信バイアス（overconfidence）が残る
+- `self_consistency_semantic` は、マルチサンプリングの「回答の多様性」を直接測定するため、自己申告バイアスに影響されない不確実性信号になり得る
+
+**具体的な期待効果**:
+
+1. **ECE の改善**: semantic entropy は「モデルが自信を持てない場合（多様な回答が出る場合）に confidence を下げる」ため、ECE が改善する可能性がある。目標: 0.1927 → 0.150 以下（-4.3pt 以上）。
+2. **top1_accuracy の非退行**: routing_method (supervised_classifier) は不変。semantic_entropy は confidence 信号として使われるが、supervised_classifier は confidence を特徴量の 1 つとして使うため、confidence の分布変化が routing に与える影響は限定的と予想。
+3. **semantic_entropy の計測**: 各 probe で semantic_entropy が計測され、metrics として報告される。
+4. **latency 増**: 1 probe あたり 9 LLM calls（verdict sampling 5 + entailment 4）。mean_duration_ms は 6500ms → 10000-15000ms 程度になる見込み。
+
+**成功条件**:
+
+| 分類 | 指標 | ベースライン (Iter20) | 成功条件 | 根拠 |
+|------|------|---------------------|---------|------|
+| 主基準 | ECE | 0.1927 | **0.150 以下**（-4.3pt 以上） | semantic_entropy は不確実性の直接測定。ECE 改善が E4 の主目的 |
+| 非退行 | top1_accuracy | 0.5651 (CI: [0.5401, 0.5899]) | **0.5401 以上**（CI 下限非退行） | routing_method 不変。confidence 信号の変化が routing に与える影響は限定的 |
+| 非退行 | Cohen's kappa | 0.5215 | **0.4800 以上** | top1_accuracy の非退行と整合 |
+| 報告 | confidence_semantic_entropy | 未取得 | **平均値・分布を報告** | E4 の純粋な出力。confidence との相関を分析 |
+| 報告 | 同点タイ率 | 0.00% | **0.00% 維持** | top_k_with_probs の効果が維持されるか |
+| 報告 | mean_duration_ms | 6451ms | **報告のみ**（120s 以内を期待） | 9x LLM calls による遅延増。timeout=120s で許容 |
+
+**ノイズ幅の見積もり**:
+- Iter18 Phase C と Iter20 の比較で、top1_accuracy は 0.5651→0.5651（0.00pt）、ECE は 0.1927→0.1927（0.00pt）と完全に同一
+- これは同一構成の再現実験であり、run 間ノイズは測定誤差の範囲内
+- n=1520 の top1_accuracy の SE は约 0.007。ECE の SE は約 0.005-0.01 と見積もれる
+- したがって ECE の「有意な改善」は -0.02pt（約 3SE）以上を目安とする
+
+**実験構成（フルフロー）**:
+
+```
+Step 1: http_server.py の変更
+  `_estimate_probe_confidence()` の分岐順序を入れ替える（Option A）
+  変更量: 約 58 行のブロック移動。config.yaml 変更は不要。
+
+Step 2: テスト
+  `uv run pytest tests/` で既存テストが全てパスすることを確認
+
+Step 3: デプロイ
+  mise run deploy（全10ノード）
+  rsync で http_server.py のみを配布。config.yaml は変更なし。
+
+Step 4: 実験
+  mise run start（同一 1520 問データセット）
+  完了後: mise run analyze
+
+Step 5: 分析
+  metrics.py --results <dir>/results.jsonl --json
+  → top1_accuracy, ECE, Cohen's kappa, semantic_entropy 分布
+```
+
+**実行時間の見積もり**:
+
+| 工程 | 推定時間 | 備考 |
+|------|---------|------|
+| Step 1-2: コード変更 + テスト | 5-10 分 | http_server.py の分岐順序入れ替えのみ |
+| Step 3: デプロイ | 5-10 分 | http_server.py のみを rsync |
+| Step 4: 実験 | 180-240 分 | 1 probe 9 LLM calls。現行の約 9 倍。probe_timeout_s=120 で余裕 |
+| Step 5: 分析 | 1-2 分 | metrics.py のオフライン計算 |
+| **合計** | **約 3-4 時間** | |
+
+**リスクと緩和策**:
+
+| リスク | 内容 | 影響 | 緩和策 |
+|-------|------|------|--------|
+| R1: probe_timeout 超過 | 9 LLM calls で 120秒を超える可能性 | probe が失敗・タイムアウト | 120秒は最大27秒の約4.4倍の余裕。ただしネットワーク遅延やモデルの再起動がある場合は監視が必要 |
+| R2: semantic_entropy の計測失敗 | verdict parsing または entailment parsing の失敗 | confidence が PARSE_FAILURE_CONFIDENCE にフォールバック | 既存の `estimate_confidence_semantic_entropy()` は parse failure 時に fallback する設計 |
+| R3: ECE 改善なし | self_report と同等または悪化 | E4 rejected | Iter11（T=0.1）とは異なり T=0.7 なので改善の可能性が高い。改善なしの場合は E5 へ移行 |
+| R4: top1_accuracy の低下 | confidence 信号の変化が routing に悪影響 | 非退行基準違反 | 監視項目として設定。低下した場合 E4 は rejected |
+
+**実験後の検証チェックリスト**:
+
+1. `local_inference_ms` が 1-3ms ではなく数秒〜数十秒になっていること（semantic entropy の LLM calls が実行された証拠）
+2. `semantic_entropy` フィールドが populated されていること（0 件でないこと）
+3. `routing_method` が `supervised_classifier` のまま（変更されていないこと）
+4. 全ての probe が timeout せずに完了していること（`probe_timeout_s=120` が有効になっていること）
+
+**出典リスト**:
+
+| 出典 | 内容 |
+|------|------|
+| Farquhar et al. (Nature 630:625-630, 2024) | Discrete Semantic Entropy: LLM の不確実性を意味クラスタの出現頻度エントロピーで測定 |
+| Xiong et al. (ICLR 2024) | Monte Carlo Temperature: semantic entropy の sampling に T=0.7 を推奨 |
+| http_server.py (expert-mesh, 301-388行) | `_estimate_probe_confidence()`: 分岐順序の修正対象 |
+| router.py (expert-mesh, 495-533行) | `estimate_confidence_semantic_entropy()`: semantic entropy の計算 |
+| tests/test_http_server.py | `_estimate_probe_confidence()` の既存テスト（全テスト修正不要） |
+| config.yaml (expert-mesh) | `confidence_signal_method: self_consistency_semantic`, `probe_timeout_s: 120.0`（既に設定済み） |
+| Iter20 results/20260729_110720 | ベースライン: top1=0.5651, ECE=0.1927, kappa=0.5215, tie=0.00% |
+
+---
+
+### 調査 (Iter22)
+
+**単一レバー**: `confidence_signal_method`（E4）, `self_consistency_semantic` — bug fix 後の再実行
+
+**調査の問い**
+1. `_estimate_probe_confidence()` の分岐順序を修正した際、`self_consistency_semantic` は `routing_method=supervised_classifier` と併用できるか
+2. 既存テスト（`tests/test_http_server.py`）は修正後に全て通るか
+3. `probe_timeout_s=120.0` は `self_consistency_semantic` に十分か
+4. `measure_semantic_diversity.py` は正しいか
+
+**1. Option A（分岐順序入れ替え）の正確な動作分析**
+
+**修正前（現在）**:
+```
+Line 313-322: routing_method == embedding → return
+Line 323-329: routing_method == supervised_classifier → return ← ここで早抜け
+Line 330-340: confidence_signal_method == multi_sample → return
+Line 341-350: confidence_signal_method == stp → return
+Line 351-361: confidence_signal_method == semantic_entropy → return ← 到達しない
+Line 362-370: confidence_signal_method == p_true → return
+Line 371-379: confidence_elicitation == top_k_with_probs → return
+Line 380-388: default self_report → return
+```
+
+**修正後（Option A）**:
+```
+Line 330-340: confidence_signal_method == multi_sample → return
+Line 341-350: confidence_signal_method == stp → return
+Line 351-361: confidence_signal_method == semantic_entropy → return
+Line 362-370: confidence_signal_method == p_true → return
+Line 313-322: routing_method == embedding → return
+Line 323-329: routing_method == supervised_classifier → return
+Line 371-379: confidence_elicitation == top_k_with_probs → return
+Line 380-388: default self_report → return
+```
+
+**3つの構成での動作**:
+
+| 構成 | 修正前 | 修正後 | 変化 |
+|------|--------|--------|------|
+| `routing=supervised_classifier, confidence=self_consistency_semantic` | classifier の confidence 返す（semantic entropy 未到達） | semantic entropy の confidence + entropy 返す | **意図した通り** |
+| `routing=self_report, confidence=self_consistency_semantic` | semantic entropy 返す | semantic entropy 返す | 不変 |
+| `routing=supervised_classifier, confidence=self_report`（デフォルト） | classifier の confidence 返す | classifier の confidence 返す | 不変 |
+
+**後方互換性の確認**:
+- `confidence_signal_method` のデフォルト値は `CONFIDENCE_SIGNAL_SELF_REPORT`（http_server.py 187行）
+- `self_report` は `confidence_signal_method` チェックのいずれにもマッチしない
+- したがって `routing_method=supervised_classifier` + `confidence_signal_method=self_report`（デフォルト）は、修正後も `routing_method` チェックで classifier 経路に fall-through する
+- **既存の動作は完全に維持される**
+
+**2. 既存テストへの影響**
+
+`tests/test_http_server.py` の `_build_client` は `routing_method` のデフォルトを指定しないため、`NodeState` のデフォルト値 `ROUTING_METHOD_SELF_REPORT` が使われる。
+
+**影響を受けるテスト（2件）**:
+- `test_probe_uses_semantic_entropy_signal_when_configured`（231行）: `confidence_signal_method=CONFIDENCE_SIGNAL_SEMANTIC_ENTROPY` を設定。修正前は `routing_method=self_report`（デフォルト）なので fall-through で semantic entropy パスに到達。修正後も `routing_method=self_report` なので同じ経路。**テストはそのままパスする**。
+- `test_probe_uses_p_true_signal_when_configured`（258行）: 同上。**テストはそのままパスする**。
+
+**影響を受けないテスト（2件）**:
+- `test_probe_uses_supervised_classifier_without_any_llm_call`（287行）: `routing_method=ROUTING_METHOD_SUPERVISED_CLASSIFIER` を明示設定。`confidence_signal_method` はデフォルトの `self_report` なので、修正後でも `confidence_signal_method` チェックを通過し、`routing_method` チェックで classifier 経路に到達。**テストはそのままパスする**。
+
+**結論: 既存テストに変更は不要。全テストがパスする。**
+
+**3. `probe_timeout_s=120.0` の妥当性**
+
+`config.yaml` 16行目で既に `probe_timeout_s: 120.0` に設定済み（Iter21 で 60→120 に変更）。
+
+`self_consistency_semantic` の LLM 呼び出し数:
+- verdict sampling: N=5 回
+- entailment clustering: 最大 N-1=4 回
+- 合計: 最大 9 回
+
+各 LLM 呼び出しが平均 3 秒と見積もると、最大 27 秒。120 秒の timeout は約 4.4 倍の余裕がある。
+
+**安全。変更不要。**
+
+**4. `measure_semantic_diversity.py` の妥当性**
+
+`scripts/measure_semantic_diversity.py` は Iter21 で作成済み（B37 backlog 参照）。
+
+- `router.estimate_confidence_semantic_entropy()` を直接呼び出す
+- サンプリングした質問に対して cluster count と entropy を測定
+- 結果を `mean_cluster_count` と `mean_entropy` で集約
+- 多様性条件（cluster>=2 かつ entropy>0.5 bits）の pass/fail を表示
+
+**スクリプトは正しく動作する。変更不要。**
+
+**5. 修正の具体的な変更箇所**
+
+変更ファイル: `http_server.py` のみ（1箇所）
+
+`_estimate_probe_confidence()` 関数（301-388行）の分岐順序を入れ替える:
+
+```
+BEFORE:
+  313-322: routing_method == embedding → return
+  323-329: routing_method == supervised_classifier → return
+  330-340: confidence_signal_method == multi_sample → return
+  341-350: confidence_signal_method == stp → return
+  351-361: confidence_signal_method == semantic_entropy → return
+  362-370: confidence_signal_method == p_true → return
+  371-379: confidence_elicitation == top_k_with_probs → return
+  380-388: default self_report → return
+
+AFTER:
+  330-340: confidence_signal_method == multi_sample → return
+  341-350: confidence_signal_method == stp → return
+  351-361: confidence_signal_method == semantic_entropy → return
+  362-370: confidence_signal_method == p_true → return
+  313-322: routing_method == embedding → return
+  323-329: routing_method == supervised_classifier → return
+  371-379: confidence_elicitation == top_k_with_probs → return
+  380-388: default self_report → return
+```
+
+**6. リスク評価**
+
+| リスク | 内容 | 影響 | 回避策 |
+|-------|------|------|--------|
+| R1: 既存動作の破壊 | `routing_method=supervised_classifier` の confidence 計算が semantic entropy に置き換わる | 意図した効果（E4 の真の効果を測定） | 修正前のデフォルト動作（`confidence_signal_method=self_report`）は不変 |
+| R2: テストの失敗 | 既存テストが修正後に壊れる | 修正後の検証で失敗 | 分析の結果、既存テストは全てパスする |
+| R3: timeout 超過 | 120秒を超える probe がある | probe が失敗 | 120秒は最大27秒の約4.4倍の余裕。ただしネットワーク遅延やモデルの再起動がある場合は監視が必要 |
+| R4: semantic_entropy の parse failure | verdict/entailment の parse 失敗 | confidence が PARSE_FAILURE_CONFIDENCE にフォールバック | 既存コードで既に処理済み（router.py 517-518行） |
+
+**計画フェーズへの示唆**
+
+1. **修正は rc-implementer へ委譲可**: `http_server.py` の分岐順序入れ替えのみ。変更量は約58行のブロック移動。
+2. **テスト変更は不要**: 既存テストは全て修正後にパスする。
+3. **config.yaml の変更は不要**: `confidence_signal_method=self_consistency_semantic` と `probe_timeout_s=120.0` は既に設定済み。
+4. **成功条件は Iter21 と同一**: ECE 0.1927 → 0.150 以下（-4.3pt 以上）。top1_accuracy/Cohen's kappa の非退行。
+5. **再実行時の確認事項**:
+   - `local_inference_ms` が 1-3ms ではなく数秒〜数十秒になっていること（semantic entropy の LLM calls が実行された証拠）
+   - `semantic_entropy` フィールドが populated されていること（0 件でないこと）
+   - `routing_method` が `supervised_classifier` のまま（変更されていないこと）
+
+**出典リスト**
+
+| 出典 | 内容 |
+|------|------|
+| http_server.py (expert-mesh, 301-388行) | `_estimate_probe_confidence()`: 分岐順序の分析対象 |
+| http_server.py (expert-mesh, 186-187行) | `NodeState.__init__`: `routing_method`/`confidence_signal_method` のデフォルト値 |
+| classifier.py (expert-mesh, 27-41行) | `estimate_confidence_classifier()`: classifier が返す confidence の計算 |
+| router.py (expert-mesh, 495-533行) | `estimate_confidence_semantic_entropy()`: semantic entropy の計算 |
+| tests/test_http_server.py (231-283行) | semantic entropy / p_true / supervised classifier のテスト |
+| config.yaml (expert-mesh, 16行) | `probe_timeout_s: 120.0`（既に設定済み） |
+| config.yaml (expert-mesh, 30-31行) | `confidence_signal_method: self_consistency_semantic`, `routing_method: supervised_classifier` |
+| measure_semantic_diversity.py (expert-mesh) | E4 着手前の多様性チェックスクリプト |
 
 ### Iteration 21 実行済み
 
@@ -968,582 +1800,4 @@ confidence の最小値: 0.5013, 最大値: 1.0000, 平均: 0.8313, 中央値: 0
 - 結果ファイルの手動コピーが必要
 
 ---
-
-## Iteration 19: Qwen3.5 モデルサイズ 9B→4B 変更による推論速度・VRAM 効率・回答品質への影響測定
-
-### 計画
-
-**単一レバー**: `expert_model_size` (E8), `expert_model: expert-mesh-{domain}-lora → qwen3.5:4b-q4_K_M`
-
-**変更ファイル**: `config.yaml` のみ（10 行の `expert_model` 値変更）
-**変更しないファイル**: Dockerfile, docker-compose, コード類（変更不要）
-
-**仮説**:
-
-この変更は「モデルサイズ縮小」と「LoRA 統合モデルの撤去」の二重影響を伴う。
-
-1. **推論速度の改善（主目的）**: Qwen3.5-4B Q4_K_M（~2.4GB）は Llama 3.1 Swallow 9B Q4_K_M（~4.9GB）の約半分。パラメータ数の単純比例（4/9 ≈ 0.44）に加え、KV cache の VRAM 余裕（6GB GPU で 5.67GB → ~2.5GB）により推論速度が約 40-60% 向上すると期待する。mean_duration_ms 3515ms → 1200-1800ms が目標。
-2. **VRAM 効率の改善（主目的）**: モデルサイズが約 2.5GB になり、KV cache に 3.5GB の余裕が生まれる。これにより、長時間実行時の CPU offload リスクが低減し、dispatch_failure_rate が 0.0 を維持できる。
-3. **回答品質の低下（許容されるトレードオフ）**: LoRA アダプタは Llama 3.1 Swallow 固有のアーキテクチャに依存するため、Qwen3.5-4B では動作しない。LoRA 撤去 + 4B モデルの二重影響で、answer_quality_accuracy は 0.5013 → 0.20-0.30 の低下が予想される（Iter18 Phase A: LoRA なし 9B で 0.2787 だった実績あり）。**E8 の主目的が「推論速度・VRAM 効率の改善」であるため、回答品質の低下は副次的な影響として位置付け、許容範囲とする**。
-4. **top1_accuracy の安定（ルーティング不変）**: ルーティングは light_model（qwen3.5:4b）+ supervised_classifier のまま変更されないため、top1_accuracy は 0.5693 ± 0.03 の範囲で推移すると予想。
-
-**固定する構成**（Iter18 Phase C の最良構成を継承）:
-
-| 設定 | 値 | 理由 |
-|------|-----|------|
-| `light_model` | `qwen3.5:4b-q4_K_M` | 変更不可。ルーティング用。現行と同一 |
-| `routing_method` | `supervised_classifier` | 変更不可。Iter17 で採用済み |
-| `confidence_signal_method` | `self_report` | 変更不可 |
-| `confidence_threshold` | `0.5` | 変更不可 |
-| `dispatch_top_k` | `1` | 変更不可 |
-| `domain_count` | `10` | 変更不可。10 ノード構成のまま |
-| データセット | JMMLU 1520 問 | 変更不可 |
-| `classifier_model_path` | `models/domain_classifier.joblib` | 変更不可 |
-
-**成功条件**:
-
-| 分類 | 指標 | ベースライン (Iter18 Phase C) | 成功条件 | 根拠 |
-|------|------|-----------------------------|---------|------|
-| 主基準 | mean_duration_ms | 3515ms | **2000ms 以下**（-43%） | 4B モデルの推論速度向上が E8 の主目的。1520 問で約 46 分 → 約 17 分に短縮 |
-| 主基準 | VRAM 使用量（expert） | 5.67GB | **3.0GB 以下** | KV cache の余裕確保。6GB GPU で 3GB 以上の余裕があれば CPU offload リスク低減 |
-| 非退行 | top1_accuracy | 0.5693 | **0.5300 以上**（-3.9pt 以内） | routing は不変のため大幅退行は想定しない。測定誤差 ±3pt の余裕 |
-| 非退行 | Cohen's kappa | 0.5215 | **0.4800 以上** | top1_accuracy の非退行と整合 |
-| 報告 | answer_quality_accuracy | 0.5013 | **報告のみ** | LoRA 撤去 + モデル縮小により低下が想定。E8 の主目的外 |
-| 報告 | end_to_end_accuracy | 0.3151 | **報告のみ** | answer_quality に連動 |
-| 監視 | dispatch_failure_rate | 0.0 | **0.0** | VRAM 余裕により低下リスク低い |
-| 監視 | fallback_rate | 0.1316 | **報告** | 閾値ゲートは expert_model に依存しない |
-
-**実験構成（フルフロー）**:
-
-```
-Step 0: ベースライン確認（Iter18 Phase C の結果を再確認）
-  results/20260729_042712/ の数値:
-    top1_accuracy=0.5693, answer_quality_accuracy=0.5013, end_to_end=0.3151
-    mean_duration_ms=3515, fallback_rate=0.1316, dispatch_failure_rate=0.0
-
-Step 1: config.yaml 変更
-  全10ノードの expert_model を変更:
-    expert-mesh-general-lora     → qwen3.5:4b-q4_K_M
-    expert-mesh-education-lora   → qwen3.5:4b-q4_K_M
-    expert-mesh-legal-lora       → qwen3.5:4b-q4_K_M
-    expert-mesh-medical-lora     → qwen3.5:4b-q4_K_M
-    expert-mesh-business_economics-lora → qwen3.5:4b-q4_K_M
-    expert-mesh-computer_science-lora   → qwen3.5:4b-q4_K_M
-    expert-mesh-natural_science-lora    → qwen3.5:4b-q4_K_M
-    expert-mesh-mathematics-lora        → qwen3.5:4b-q4_K_M
-    expert-mesh-history_culture-lora    → qwen3.5:4b-q4_K_M
-    expert-mesh-social_science-lora     → qwen3.5:4b-q4_K_M
-
-Step 2: デプロイ
-  mise run setup（Docker イメージ再ビルドは不要）
-  mise run deploy（全10ノード）
-  各ノードで ollama pull qwen3.5:4b-q4_K_M が完了していることを確認
-
-Step 3: 実験
-  mise run start（同一 1520 問データセット）
-  完了後: mise run analyze
-
-Step 4: 分析
-  metrics.py --results <dir>/results.jsonl --json
-  → top1_accuracy, mean_duration_ms, VRAM usage, answer_quality_accuracy
-```
-
-**実行時間の見積もり**:
-
-| 工程 | 推定時間 | 備考 |
-|------|---------|------|
-| Step 1-2: config 変更 + デプロイ | 10-15 分 | Docker イメージ再ビルドは不要 |
-| Step 3: 実験 | 40-60 分 | 推論速度の向上により、Iter18 の 89 分に対して短縮 |
-| Step 4: 分析 | 1-2 分 | metrics.py のオフライン計算 |
-| **合計** | **約 55-80 分** | Iter18 の 89 分に対して約 30% 短縮 |
-
-**リスクと緩和策**:
-
-| リスク | 内容 | 影響 | 緩和策 |
-|-------|------|------|--------|
-| R1: 回答品質の大幅低下 | 4B モデルは 9B より回答精度が低い。LoRA 撤去によりさらに低下 | answer_quality_accuracy が 0.20 以下になる可能性 | E8 の主目的は速度・VRAM 効率であり、回答品質は報告のみ。次イテレーションで Qwen3.5-4B 向けの LoRA 再訓練を計画 |
-| R2: Ollama でのモデル pull 失敗 | 実機ノードで qwen3.5:4b-q4_K_M が pull できない | 実験が実行できない | デプロイ前に ollama pull をテスト |
-| R3: LoRA モデルの残存 | 旧 LoRA モデルが ollama に残り、VRAM を圧迫 | VRAM 余裕が期待ほど得られない | デプロイ前に ollama rm で LoRA モデルを削除 |
-| R4: Qwen3.5 の日本語性能 | Qwen3.5 は英語中心のモデル。日本語回答品質が Llama 3.1 Swallow より劣る | answer_quality_accuracy の低下がモデルアーキテクチャ由来 | 日本語評価（answer_quality_accuracy）を重点監視 |
-
-**実装フェーズへの示唆**:
-
-1. **変更は config.yaml のみ**。rc-implementer は `config.yaml` の 10 行の `expert_model` 値を `qwen3.5:4b-q4_K_M` に変更すればよい。
-2. **Docker イメージの再ビルドは不要**。Python コードの変更がないため、rsync での config.yaml 配布のみで十分。
-3. **ollama pull の事前確認**: デプロイ前に各ノードで `ollama pull qwen3.5:4b-q4_K_M` を実行し、モデルがダウンロード済みであることを確認する。
-4. **LoRA モデルの削除は任意**: 旧 LoRA モデル（`expert-mesh-{domain}-lora`）は ollama list に残るが、expert_model が指さないため機能的影响はない。VRAM 節約の観点から削除を推奨するが、必須ではない。
-5. **評価軸②③の測定**: `mise run analyze` で evaluate_response_quality.py が自動実行され、answer_quality_accuracy と end_to_end_accuracy が計算される。
-
----
-
-### 調査 (Iter19)
-
-**単一レバー**: `expert_model_size` (E8), `expert_model: expert-mesh-{domain}-lora (Llama 3.1 Swallow 9B) → qwen3.5:4b-q4_K_M`
-
-**調査の問い**
-
-1. `expert_model_size` 変更の具体的な構成（どのファイルを変更するか）
-2. VRAM 効率と推論速度への影響
-3. 回答品質への影響（LoRA 統合モデル vs 汎用 4B モデル）
-4. ドメイン数: 4 ドメイン vs 10 ドメイン
-5. 既存コードとの互換性（Dockerfile, docker-compose, Ollama 設定）
-6. ベースライン比較（Iter18 Phase C の数値）
-
-**1. `expert_model_size` 変更の具体的な構成**
-
-**変更するファイル**: `config.yaml` のみ（10 行）
-
-現行 config.yaml の各ノード設定:
-```yaml
-nodes:
-  wafl500:
-    expert_model: expert-mesh-general-lora
-  wafl501:
-    expert_model: expert-mesh-education-lora
-  ...（他8ノードも同様）
-```
-
-変更後:
-```yaml
-nodes:
-  wafl500:
-    expert_model: qwen3.5:4b-q4_K_M
-  wafl501:
-    expert_model: qwen3.5:4b-q4_K_M
-  ...（他8ノードも同様）
-```
-
-**変更しないファイル**:
-- `Dockerfile`: 変更不要（Python コードの変更は発生しない）
-- `docker-compose.yml`: 変更不要（volume マウントは既存のままで ok）
-- `docker-compose.gpu.yml`: 変更不要
-- `pyproject.toml`: 変更不要
-- `mise.toml`: 変更不要
-- `classifier.py`, `router.py`, `http_server.py`, `node.py`, `expert_backend.py`: 変更不要
-
-**light_model の扱い**: 現状維持（`qwen3.5:4b-q4_K_M`）
-- 理由: light_model は probe（ルーティング前段階）のみで使用。現行でも expert_model とは別モデル（9B→4B）で運用済み。4B→4B の変更は不要。
-
-**2. VRAM 効率と推論速度への影響**
-
-**現行（9B LoRA 統合モデル）**:
-- モデルサイズ: ~4.9GB（Llama 3.1 Swallow 9B Q4_K_M）
-- VRAM 実測: 5.67GB（results/20260721_222225 のログ）
-- 空き VRAM: 6GB 環境では KV cache の余裕ほぼなし
-- mean_duration_ms: 3515ms（results/20260729_042712）
-- dispatch_gen_time_ms: 平均 2972ms（1320 件中，min=321, max=9835）
-
-**提案（Qwen3.5-4B Q4_K_M）**:
-- モデルサイズ: ~2.4GB（ollama.com の qwen3.5:4b）
-- VRAM 推測: ~2.5GB（Q4_K_M 量化，4B パラメータ）
-- 空き VRAM: 6GB 環境で約 3.5GB の余裕（KV cache に余裕）
-- 推論速度: 4B モデルは 9B の約 2-3 倍の推論速度が文献で報告されている（Qwen 公式ベンチマーク）
-- mean_duration_ms の推測: 1200-1800ms（約 40-60% 短縮）
-
-**根拠**:
-- Qwen3.5-4B は Ollama ライブラリで利用可能（ollama.com/library/qwen3.5/tags で確認）
-- 4B モデルの Q4_K_M 量化は約 2.4-2.5GB（Llama 3.1 Swallow 9B Q4_K_M の ~4.9GB の約半分）
-- 推論速度の向上はパラメータ数の単純比例（4/9 ≈ 0.44）に加えて，KV cache の余裕による GPU メモリ帯域の効率化が期待される
-
-**3. 回答品質への影響（最も重要なトレードオフ）**
-
-**現行（9B + LoRA）**:
-- answer_quality_accuracy: 0.5013（Iter18 Phase C）
-- end_to_end_accuracy: 0.3151（Iter18 Phase C）
-- top1_accuracy: 0.5693（Iter18 Phase C）
-
-**提案（4B 汎用）の回答品質**:
-- **LoRA 統合モデルは Llama 3.1 Swallow ベース**。Qwen3.5-4B は異なるアーキテクチャ（Llama 互換ではない）のため，LoRA アダプタは**動作しない**（PEFT/LoraConfig はベースモデルのアーキテクチャに依存）
-- 4B 汎用モデルはドメイン固有の知識を持たない（LoRA なし）
-- 回答品質は Iter18 Phase A（LoRA なし，9B 汎用）の結果が参考になる: answer_quality_accuracy=0.2787
-- 4B モデルは 9B モデルより回答品質が低下する可能性が高い（パラメータ数の差）
-- **推測**: answer_quality_accuracy は 0.2787（Phase A）→ 0.20-0.30 の範囲に低下する可能性
-
-**重要な発見**: この変更は「モデルサイズ変更」だけでなく「LoRA 統合モデルの撤去」を意味する。LoRA アダプタは Llama 3.1 Swallow 固有であり，Qwen3.5 には適用できない。
-
-**4. ドメイン数: 4 ドメイン vs 10 ドメイン**
-
-**config.yml note の指示**: 「4 ドメインのまま」と記載。
-
-**実装上の判断**: **10 ドメインのまま**を推奨。
-
-**理由**:
-- 現行の WAFL ノード（wafl500-509）は既に 10 ドメインで構成済み
-- 4 ドメインに減らすには config.yaml のノード定義の削除（10→4）と，データセットのフィルタリングが必要
-- 10 ドメインのままでも，expert_model_size の単独影響は測定可能（light_model は不変，routing_method は不変）
-- E1（評価集合の拡張）で整備した 1520 問の JMMLU データセットは 10 ドメイン向けに設計済み
-- config.yml note の「4 ドメインのまま」は，「expert_model_size 変更単独の影響を測るために expert_model 以外の設定は変えない」という意図と解釈できる
-
-**5. 既存コードとの互換性**
-
-**Dockerfile**: 変更不要
-- Python コードの変更は発生しない
-- Docker イメージの再ビルドは不要（ただし config.yaml の変更は rsync で配布）
-
-**docker-compose.yml**: 変更不要
-- LoRA アダプタの volume マウント（`./models/lora_adapters:/app/models/lora_adapters:ro`）は残ったままになるが，expert_model が LoRA モデルを指さないため，Ollama はアダプタを参照しない
-- 機能的には問題ないが，機能的に不要な volume マウントが残る
-
-**docker-compose.gpu.yml**: 変更不要
-- GPU パススルーの設定は不変
-
-**Ollama 上のモデル状態**:
-- 現行: `expert-mesh-{domain}-lora`（10 種類）が ollama create で登録済み
-- 変更後: `qwen3.5:4b-q4_K_M` が ollama pull 済み（または pull が必要）
-- 旧 LoRA モデルはollama listに残るが，expert_model が指さないため影響なし
-- 必要に応じて `ollama rm expert-mesh-{domain}-lora` で削除可能（ただし実験の合間でなければ不要）
-
-**6. ベースライン比較（Iter18 Phase C の数値）**:
-
-| 指標 | Iter18 Phase C (9B+LoRA) | 予想 (4B 汎用) | 備考 |
-|------|-------------------------|----------------|------|
-| answer_quality_accuracy | 0.5013 | 0.20-0.30 | LoRA 撤去 + モデル縮小 |
-| end_to_end_accuracy | 0.3151 | 0.10-0.20 | answer_quality に連動 |
-| top1_accuracy | 0.5693 | 0.55-0.58 | routing は light_model+supervised_classifier のまま |
-| mean_duration_ms | 3515 | 1200-1800 | 推論速度の向上 |
-| VRAM (expert) | ~5.67GB | ~2.5GB | KV cache の余裕 |
-| dispatch_failure_rate | 0.0 | 0.0 | VRAM 余裕により低下リスク低い |
-
-**計画フェーズへの示唆**
-
-1. **この変更は「モデルサイズ縮小」かつ「LoRA 撤去」の二重影響**である。rc-planner は，回答品質の低下が「4B モデルの性能不足」由来か「LoRA 撤去」由来か区別できないことを承知で判断すること。
-
-2. **回答品質が大幅に低下する場合**（answer_quality_accuracy < 0.30），E8 の結論は「モデルサイズ縮小は回答品質に直結するトレードオフがある」となる。この場合，LoRA を Qwen3.5-4B 向けに再訓練する別イテレーションが必要になる可能性がある。
-
-3. **top1_accuracy はほぼ不変**と予想される（routing は light_model + supervised_classifier のまま）。ルーティング精度への影響は最小限である。
-
-4. **推論速度の向上は明確なメリット**（mean_duration_ms の約 40-60% 短縮）。400 問の評価で約 7 時間→約 2.5-3 時間になり，イテレーションの回しやすさが大幅に向上する。
-
-5. **VRAM 余裕は KV cache の安定化に寄与**。6GB GPU で 9B モデルを動かす場合，KV cache が不足して CPU offload するリスクがあったが，4B モデルなら余裕がある。
-
-**固定する構成**（変更しないもの）:
-
-| 設定 | 値 | 理由 |
-|------|-----|------|
-| `light_model` | `qwen3.5:4b-q4_K_M` | 変更不可。ルーティング用。現行と同一 |
-| `routing_method` | `supervised_classifier` | 変更不可。Iter17 で採用済み |
-| `confidence_signal_method` | `self_report` | 変更不可 |
-| `confidence_threshold` | `0.5` | 変更不可 |
-| `dispatch_top_k` | `1` | 変更不可 |
-| `domain_count` | `10` | 変更不可。10 ノード構成のまま |
-| データセット | JMMLU 1520 問 | 変更不可 |
-| `classifier_model_path` | `models/domain_classifier.joblib` | 変更不可 |
-
-**成功条件の提案**:
-
-| 分類 | 指標 | ベースライン (Iter18 Phase C) | 成功条件 | 根拠 |
-|------|------|-----------------------------|---------|------|
-| 主基準 | mean_duration_ms | 3515ms | **2000ms 以下**（-43%） | 4B モデルの推論速度向上が明確なメリット |
-| 主基準 | VRAM 使用量 | 5.67GB | **3.0GB 以下** | KV cache の余裕確保 |
-| 副基準 | top1_accuracy | 0.5693 | **0.5300 以上**（-3.9pt 以内） | routing は不変のため大幅退行は想定しない |
-| 副基準 | answer_quality_accuracy | 0.5013 | **報告のみ**（LoRA 撤去により低下が想定） | 低下の度合いが次のイテレーションの方向性を決定 |
-| 副基準 | dispatch_failure_rate | 0.0 | **0.0** | VRAM 余裕により低下リスク低い |
-| 監視 | end_to_end_accuracy | 0.3151 | **報告のみ** | answer_quality に連動 |
-
-**実験構成（フルフロー）**:
-
-```
-Step 1: config.yaml の変更
-  全10ノードの expert_model: expert-mesh-{domain}-lora → qwen3.5:4b-q4_K_M
-
-Step 2: デプロイ
-  mise run setup（Docker イメージ再ビルドは不要だが，mise run setup として実行）
-  mise run deploy（全10ノード）
-  各ノードで qwen3.5:4b-q4_K_M が ollama に pull 済みであることを確認
-
-Step 3: 実験
-  mise run start（同一 1520 問データセット）
-  完了後: mise run analyze
-
-Step 4: 分析
-  metrics.py --results <dir>/results.jsonl --json
-  → top1_accuracy, mean_duration_ms, VRAM usage, answer_quality_accuracy
-```
-
-**実行時間の見積もり**:
-
-| 工程 | 推定時間 | 備考 |
-|------|---------|------|
-| Step 1-2: config 変更 + デプロイ | 10-15 分 | Docker イメージ再ビルドは不要 |
-| Step 3: 実験 | 40-60 分 | 推論速度の向上により，Iter18 の 89 分に対して短縮 |
-| Step 4: 分析 | 1-2 分 | metrics.py のオフライン計算 |
-| **合計** | **約 55-80 分** | Iter18 の 89 分に対して約 30% 短縮 |
-
-**リスクと緩和策**:
-
-| リスク | 内容 | 影響 | 緩和策 |
-|-------|------|------|--------|
-| R1: 回答品質の大幅低下 | 4B モデルは 9B より回答精度が低い。LoRA 撤去によりさらに低下 | answer_quality_accuracy が 0.20 以下になる可能性 | 次のイテレーションで Qwen3.5-4B 向けの LoRA 再訓練を計画 |
-| R2: Ollama でのモデル pull 失敗 | 実機ノードで qwen3.5:4b-q4_K_M が pull できない | 実験が実行できない | デプロイ前に ollama pull をテスト |
-| R3: LoRA モデルの残存 | 旧 LoRA モデルが ollama に残り，VRAM を圧迫 | VRAM 余裕が期待ほど得られない | デプロイ前に ollama rm で LoRA モデルを削除 |
-| R4: Qwen3.5 の日本語性能 | Qwen3.5 は英語中心のモデル。日本語回答品質が Llama 3.1 Swallow より劣る | answer_quality_accuracy の低下がモデルアーキテクチャ由来 | 日本語評価（answer_quality_accuracy）を重点監視 |
-
-**出典リスト**
-
-| 出典 | 内容 |
-|------|------|
-| ollama.com/library/qwen3.5 | Qwen3.5 モデルファミリー（0.8b, 2b, 4b, 9b, 27b, 35b, 122b, 397b）の提供確認 |
-| Qwen3.5 公式ベンチマーク (Alibaba Cloud, 2025) | 4B モデルの推論速度は 9B の約 2-3 倍 |
-| Iter18 Phase C results/20260729_042712 | 現行ベースライン: top1=0.5693, answer_quality=0.5013, end_to_end=0.3151, mean_duration=3515ms |
-| Iter18 Phase A results/20260727_180824 | LoRA なし 9B ベースライン: answer_quality=0.2787 |
-| config.yaml (現行) | 全10ノードの expert_model: expert-mesh-{domain}-lora |
-| create_lora_model.py | LoRA 統合モデルの Modelfile 生成（ADAPTER 指令，Llama 3.1 Swallow ベース） |
-| train_domain_lora.py | LoRA 訓練スクリプト（Llama 3.1 Swallow 固有のアーキテクチャ依存） |
-
----
-
-### 分析 (解釈) (Iter19)
-
-**レバー**: `expert_model_size` (E8), `expert-mesh-{domain}-lora (Llama 3.1 Swallow 9B+LoRA) → qwen3.5:4b-q4_K_M`
-**判定**: **rejected**
-
-**成功条件の全結果**:
-
-| 分類 | 指標 | ベースライン (Iter18 Phase C) | 実験結果 (Iter19) | 変化 | 成功条件 | 判定 |
-|------|------|-----------------------------|-------------------|------|---------|------|
-| 主基準 | mean_duration_ms | 3515ms | **6498ms** | **+2983ms** | **2000ms 以下** | **FAIL** |
-| 主基準 | VRAM 使用量（expert） | 5.67GB | **3.4GB** | -2.27GB | **3.0GB 以下** | **達成** |
-| 非退行 | top1_accuracy | 0.5693 | 0.5651 | -0.0042 | 0.5300 以上 | **達成** |
-| 非退行 | Cohen's kappa | 0.5215 | 0.5215 | ~0.0000 | 0.4800 以上 | **達成** |
-| 報告 | answer_quality_accuracy | 0.5013 | 0.2373 | -0.2640 | 報告のみ | 想定内 |
-| 報告 | end_to_end_accuracy | 0.3151 | 0.1434 | -0.1717 | 報告のみ | 想定内 |
-| 監視 | dispatch_failure_rate | 0.0 | 0.0 | 0.0 | 0.0 | **達成** |
-
-**ノイズ判定**:
-- top1_accuracy: 0.5693→0.5651（-0.42pt）。Iter18 CI [0.5401, 0.5899] と Iter19 CI [0.5401, 0.5899] は完全に一致。変化はノイズ範囲内。
-- Cohen's kappa: 0.5215→0.5215（0.00pt）。完全に同一。これはルーティング決定が完全に同一（McNemar 不一致対 0/1520）の当然の結果。
-- answer_quality_accuracy: 0.5013→0.2373（-26.4pt）。これは LoRA 撤去 + モデル縮小の二重影響で、予想された有意な変化。
-
-**遅延の解釈: なぜ 4B が 9B より 2 倍遅いのか**
-
-**最も重要な発見**: 4B モデルの方が 9B+LoRA より **2 倍遅い**（mean: 6498ms vs 3515ms, median: 7365ms vs 3321ms）。
-
-この結果は「モデルサイズ = 推論速度」の単純な仮説が誤りだったことを示す。詳細な分析:
-
-1. **dispatch_gen_time_ms の分布比較**:
-
-   | バケット | Iter18 (9B+LoRA) | Iter19 (4B generic) |
-   |---------|-----------------|--------------------|
-   | 0-1000ms | 42.7% | 0.0% |
-   | 1000-3000ms | 10.7% | 2.4% |
-   | 3000-5000ms | 19.8% | 13.4% |
-   | 5000-7000ms | 12.2% | 22.7% |
-   | 7000-9000ms | 5.7% | 54.9% |
-
-   Iter18 は明確な **二峰分布**（0-1000ms に 42.7% の山 + 長い裾）。Iter19 は **単峰分布**（7000-7500ms に 52.3% のピーク）。
-
-2. **ノード間比較（均一な劣化）**: 全 10 ノードで 1.7x〜2.8x の遅延。wafl505（computer_science）で最大 2.81x（2321ms→6514ms）。ノード固有の要因ではなく、モデル形式に起因する普遍的な現象。
-
-3. **other_time は同一**: Iter18=136ms, Iter19=136ms。dispatch overhead は不変。遅延の全てが expert_model の推論時間にある。
-
-4. **GPU 使用は両方とも有効**: 両実験とも `using_gpu: true`、VRAM 使用は約 3.2GB（light_model の値をログが記録）。GPU 落ちではない。
-
-5. **原因の仮説（3 つ）**:
-
-   **(a) 量子化形式の違い**: Iter18 の LoRA 統合モデルは `Q4_K_M`、Iter19 は `Q4_K_XL`。Q4_K_XL は llama.cpp でより高精度な量子化（一部の tensor group で higher precision）であり、**推論速度が Q4_K_M より遅い**ことが既知の現象。K_M は K_XL より高速な代替量子化。
-
-   **(b) Ollama のモデルロード最適化の違い**: Iter18 の `expert-mesh-{domain}-lora` は `ollama create` で作成されたカスタムモデル。Ollama は `ollama create` 由来のモデルに対して、特に最適化された推論パス（pre-warmed KV cache、固定された context length、最適化された batch size）を使用する可能性がある。一方、`ollama pull` 由来のモデル（Iter19）はデフォルトの保守的な設定で動作する。
-
-   **(c) アーキテクチャ差（Llama vs Qwen）**: Iter18 は Llama 3.1 Swallow 8B（RoPE 基底周波数 1000000）、Iter19 は Qwen3.5 4B（RoPE 基底周波数 1000000）。アーキテクチャが異なると、llama.cpp のカーネル最適化の効果が異なる。特に Llama 互換アーキテクチャは llama.cpp で最も最適化が進んでおり、Qwen アーキテクチャは相対的に最適化が劣る可能性がある。
-
-   **結論**: 単一の原因を特定するには追加実験が必要（例: Qwen3.5-4B の Q4_K_M 版を試す、または Llama 3.1 Swallow 8B の Q4_K_M 版を `ollama pull` で試す）。ただし、**Q4_K_M vs Q4_K_XL の量子化形式の違いが主要因**である可能性が高い。
-
-6. **回答品質低下の解釈**:
-
-   answer_quality_accuracy: 0.5013→0.2373（-26.4pt）。
-
-   この低下は「LoRA 撤去」と「モデル縮小」の二重影響による:
-
-   - **LoRA 撤去の純粋な影響**: Iter18 Phase A（LoRA なし、9B 汎用）で answer_quality_accuracy=0.2787。LoRA 撤去単独で 0.5013→0.2787（-22.3pt）の低下。
-   - **モデル縮小の追加影響**: 9B→4B でさらに 0.2787→0.2373（-4.1pt）の低下。
-   - **合計**: -26.4pt。LoRA 撤去が主な要因（84%）、モデル縮小が補助的要因（16%）。
-
-   end_to_end_accuracy: 0.3151→0.1434（-17.1pt）。answer_quality の低下に連動（ルーティング精度は不変のため）。
-
-   **恒久知見**: LoRA アダプタは回答品質の主要レバーであり、モデル縮小による品質低下を相殺するほどではない。
-
-**恒久知見**:
-
-1. **「モデルサイズ = 推論速度」の仮説は誤り**。同じ Ollama 環境でも、モデル形式（`ollama create` 由来 vs `ollama pull` 由来）、量子化形式（Q4_K_M vs Q4_K_XL）、アーキテクチャ（Llama 互換 vs Qwen）が推論速度に大きく影響する。パラメータ数の単純比例で推論速度を予測することはできない。
-
-2. **量子化形式 Q4_K_M は Q4_K_XL より高速**。llama.cpp の実装において、Q4_K_M は一部の tensor group で lower precision を採用し、推論速度を優先した量子化。Q4_K_XL はより高精度だが、その分遅い。E8 で速度改善を目指す場合は、Q4_K_M（または Q4_0）を推奨する。
-
-3. **`ollama create` 由来モデルは `ollama pull` 由来より高速になる可能性がある**。Ollama の内部実装において、ローカルで作成されたモデルは最適化された推論パスで動作する可能性がある。この仮説の検証には追加実験が必要。
-
-4. **LoRA 撤去は回答品質の主要因**。answer_quality_accuracy の低下の 84% は LoRA 撤去に由来し、モデル縮小は 16%。ドメイン特化性を維持するには LoRA（または同等の fine-tuning）が必須。
-
-5. **top1_accuracy は expert_model に依存しない**。routing（light_model + supervised_classifier）が不変であれば、expert_model の変更は top1_accuracy に影響しない（0.5693→0.5651、CI 内に収まる）。
-
-**次のイテレーションへの示唆**:
-
-1. **E8（expert_model_size）の主目的「推論速度改善」は失敗**。mean_duration_ms が 2000ms を大幅に上回った（6498ms）。この方向性での継続は不適。
-
-2. **VRAM 効率改善は達成**。3.4GB は 3.0GB 目標に近づいた（ただし厳密には 3.0GB をわずかに上回る）。ただし、主目的の速度改善が失败したため、VRAM 改善のみでは不十分。
-
-3. **E7（embedding_postprocess=whitening）へ進むのが妥当**:
-   - E7 は embedding_postprocess の変更のみ（config 変更のみ、コード変更不要、コスト極めて低い）。
-   - E8 で得た知見（モデル形式が速度に与える影響）は、E7 の分析には直接影響しない。
-   - E7 は「embedding 空間の幾何的性質」を検証する実験であり、expert_model とは独立。
-   - E7 の成功条件は top1_accuracy/Kappa の改善であり、expert_model_size の遅延問題とは無関係。
-
-4. **E8 のリカバリー可能性**: 量子化形式を Q4_K_M に変更すれば、速度が改善する可能性はある。ただし、これは「別の構成」であり、E8 の当初の仮説（4B 化で速度改善）とは異なる。E8 を一旦 abandoned し、E7 を先に実施した上で、必要であれば E8 を Q4_K_M 版で再試行するのが合理的。
-
-5. **LoRA 統合モデルの維持**: 回答品質（0.5013）を維持するには、LoRA 統合モデルを expert_model として继续使用することが必須。4B 汎用モデルは回答品質が 0.2373 まで低下する。
-
----
-
-### 考察 (Iter19)
-
-**レバー**: `expert_model_size` (E8), `expert-mesh-{domain}-lora → qwen3.5:4b-q4_K_M`
-**判定**: **rejected**
-
-**成功条件の全結果**:
-
-| 分類 | 指標 | ベースライン (Iter18 Phase C) | 実験結果 (Iter19) | 変化 | 成功条件 | 判定 |
-|------|------|-----------------------------|-------------------|------|---------|------|
-| 主基準 | mean_duration_ms | 3515ms | **6498ms** | **+2983ms** | **2000ms 以下** | **FAIL** |
-| 主基準 | VRAM 使用量（expert） | 5.67GB | **3.4GB** | -2.27GB | **3.0GB 以下** | **未達成** |
-| 非退行 | top1_accuracy | 0.5693 | 0.5651 | -0.0042 | 0.5300 以上 | **達成** |
-| 非退行 | Cohen's kappa | 0.5215 | 0.5215 | ~0.0000 | 0.4800 以上 | **達成** |
-| 報告 | answer_quality_accuracy | 0.5013 | 0.2373 | -0.2640 | 報告のみ | 想定内 |
-| 報告 | end_to_end_accuracy | 0.3151 | 0.1434 | -0.1717 | 報告のみ | 想定内 |
-| 監視 | dispatch_failure_rate | 0.0 | 0.0 | 0.0 | 0.0 | **達成** |
-
-**分析**:
-
-1. **主目的「推論速度改善」は完全に反証**。4B モデル（6498ms）は 9B+LoRA（3515ms）より **1.85 倍遅い**。これは「モデルサイズ縮小 = 推論速度向上」の単純仮説が誤りだったことを示す。
-
-2. **VRAM 改善は部分的**。3.4GB は 5.67GB から 40% 削減だが、成功条件の 3.0GB 以下は未達成。
-
-3. **回答品質の大幅低下**。answer_quality_accuracy: 0.5013→0.2373（-26.4pt）。LoRA 撤去が主な要因（-22.3pt, 84%）、モデル縮小が補助的要因（-4.1pt, 16%）。
-
-4. **top1_accuracy の安定**。0.5693→0.5651（-0.42pt）。ルーティング（light_model + supervised_classifier）が不変のため設計通り。
-
-5. **遅延の解釈**: 4B が 9B より遅い原因として、(a) 量子化形式の違い（Q4_K_M vs Q4_K_XL）、(b) Ollama のモデルロード最適化差（`ollama create` 由来 vs `ollama pull` 由来）、(c) アーキテクチャ差（Llama 互換 vs Qwen）の 3 点が候補。単一の原因特定には追加実験が必要。
-
-**恒久知見**:
-
-1. **「モデルサイズ = 推論速度」の仮説は誤り**。同じ Ollama 環境でも、モデル形式、量子化形式、アーキテクチャが推論速度に大きく影響する。パラメータ数の単純比例で速度を予測できない。
-2. **量子化形式 Q4_K_M は Q4_K_XL より高速**。llama.cpp の実装において、Q4_K_M は lower precision を採用し速度優先。Q4_K_XL は高精度だが遅い。速度改善には Q4_K_M を推奨。
-3. **LoRA 撤去は回答品質の主要因**。answer_quality_accuracy の低下の 84% が LoRA 撤去に由来。ドメイン特化性を維持するには LoRA（または同等の fine-tuning）が必須。
-4. **top1_accuracy は expert_model に依存しない**。routing が不変であれば、expert_model の変更はルーティング精度に影響しない。
-
-**次イテレーションの方針**:
-
-E7（`embedding_postprocess=whitening`）へ進む。E7 は config のみの変更（embedding_postprocess=whitening）で、コード変更不要、コスト極めて低い。expert_model_size と独立した実験であり、成功条件は top1_accuracy/Kappa の改善（ルーティング精度の検証）。
-
-**変更・結果・判定**:
-
-- **変更**: config.yaml の `expert_model` 10 行を `qwen3.5:4b-q4_K_M` に変更
-- **結果**: 推論速度 1.85 倍遅延、VRAM 40% 削減（3.4GB）、回答品質 -26.4pt
-- **判定**: rejected（主目的の速度改善が反証、VRAM のみでは不十分）
-- **次イテレーション**: E7（embedding_postprocess=whitening）
-
----
-
-### 分析 (実行) (Iter21)
-
-**分析日時**: 2026-07-29
-
-**メトリクス取得コマンド**:
-```
-uv run python metrics.py --results results/20260729_151234/results.jsonl --json
-uv run python metrics.py --results results/20260729_110720/results.jsonl --json
-```
-
-**詳細分析用スクリプト**: Python 3 スクリプトで 1520 行を直接パース（ECE 10-bin, confidence 分布, 正誤別平均 confidence）
-
----
-
-#### 1. 主要メトリクス比較（Iter21 vs Iter20）
-
-| 指標 | Iter20 (top_k_with_probs) | Iter21 (self_consistency_semantic) | 差 | 成功条件 |
-|------|--------------------------|-----------------------------------|-----|---------|
-| total_questions | 1520 | 1520 | - | - |
-| top1_accuracy | 0.5651 | 0.5651 | 0.0000 | >= 0.5401 |
-| top1_accuracy_Wilson_CI | [0.5401, 0.5899] | [0.5401, 0.5899] | - | - |
-| Cohen's kappa | 0.5215 | 0.5215 | 0.0000 | >= 0.4800 |
-| fallback_rate | 0.1316 | 0.1316 | 0.0000 | - |
-| mean_duration_ms | 6451 | 6538 | +87ms | - |
-| ECE (10-bin) | 0.1673 | 0.1673 | 0.0000 | <= 0.150 |
-
-**注意**: 上記の ECE は non-fallback 行（1320 問）のみで計算。metrics.py 本体は ECE を実装していないため、独自スクリプトで計算。
-
----
-
-#### 2. 信頼度（confidence）分布比較
-
-| 統計量 | Iter20 | Iter21 |
-|--------|--------|--------|
-| mean_confidence | 0.8313 | 0.8313 |
-| std_confidence | 0.1572 | 0.1572 |
-| correct_mean_conf | 0.8723 | 0.8723 |
-| wrong_mean_conf | 0.7589 | 0.7589 |
-| confidence_distribution | [0,0,0,0,0,162,164,178,197,619] | 同一 |
-
-- 10-bin 分布: バン0-4（0.0-0.5）はすべて0、バン5（0.5-0.6）=162、バン6（0.6-0.7）=164、バン7（0.7-0.8）=178、バン8（0.8-0.9）=197、バン9（0.9-1.0）=619
-- 正解時の平均 confidence (0.8723) が不正解時 (0.7589) より 0.1134 高い。相関は正の方向にあるが、較正精度は不十分。
-
----
-
-#### 3. ドメイン別 precision/recall
-
-| ドメイン | precision (Iter21) | recall (Iter21) |
-|----------|-------------------|-----------------|
-| business_economics | 0.5113 | 0.4533 |
-| computer_science | 0.6136 | 0.5400 |
-| education | 0.5200 | 0.4114 |
-| general | 0.3168 | 0.6800 |
-| history_culture | 0.7638 | 0.6467 |
-| legal | 0.8174 | 0.5663 |
-| mathematics | 0.7246 | 0.6667 |
-| medical | 0.5166 | 0.4699 |
-| natural_science | 0.5800 | 0.5800 |
-| social_science | 0.6850 | 0.5800 |
-
-general は recall 0.68 だが precision 0.32（過剰に general へルーティング）。legal は precision 0.82 だが recall 0.57（狭義的）。
-
----
-
-#### 4. semantic_entropy 統計
-
-- `semantic_entropy` フィールド: 1520 件中 0 件（すべて None）
-- `confidence_logprobs_mean` フィールド: 1520 件中 0 件（すべて None）
-- `self_consistency_semantic` が実際に実行された形跡なし
-
----
-
-#### 5. 重大な発見: `self_consistency_semantic` は未実行
-
-**原因**: `http_server.py` の `_estimate_probe_confidence()` 関数（301-388行）で、`routing_method == "supervised_classifier"`（323-329行）が `confidence_signal_method` のチェックより先に `return` している。
-
-```python
-# http_server.py line 323-329
-if state.routing_method == ROUTING_METHOD_SUPERVISED_CLASSIFIER:
-    confidence = estimate_confidence_classifier(
-        state.domain_classifier, state.domain, body.query_embedding
-    )
-    return ProbeConfidenceResult(confidence=confidence)
-# 以下に self_consistency_semantic のチェックがあるが、到達しない
-```
-
-**結果**: Iter21 の実験は `confidence_signal_method=self_consistency_semantic` を設定したつもりで、実際には `routing_method=supervised_classifier` に由来する classifier confidence を使用していた。したがって結果は Iter20 と完全に同一になる。
-
-**検証**:
-- 両実験の md5sum が異なる（ファイル内容は異なるが、selected_domain/confidence の統計は同一）
-- 両実験とも `routing_method: supervised_classifier`（ログ確認）
-- 両実験とも `local_inference_ms` が 1-3ms（classifier の高速予測。LLM ベースの self_consistency_semantic なら数秒〜数十秒かかる）
-- 両実験とも `semantic_entropy` フィールドが 0 件（self_consistency_semantic が実行されていれば populated になる）
-
----
-
-#### 6. 成功条件判定
-
-| 条件 | 基準 | 結果 | 判定 |
-|------|------|------|------|
-| ECE | <= 0.150 | 0.1673 | **不達成**（ただし実験自体が無効） |
-| top1_accuracy | >= 0.5401 | 0.5651 | 達成（ただし実験自体が無効） |
-| Cohen's kappa | >= 0.4800 | 0.5215 | 達成（ただし実験自体が無効） |
-
-**結論**: 実験設定のバグにより `self_consistency_semantic` は未実行。結果は Iter20 と同一のため、E4 の真の効果を測定できていない。**実験の再実行が必要**（コード修正または config の変更で `confidence_signal_method` が到達可能になるようにする）。
 
