@@ -5,7 +5,13 @@ __pycache__/
 .ruff_cache/
 
 .env
-data/
+# A trailing-slash directory pattern (`data/`) cannot be selectively
+# un-ignored per file by git, so this uses `data/*` instead: MANIFEST.md
+# records sha256 hashes + generation commands for the otherwise-untracked
+# data/ artifacts (docs/d0003 F5) and is the one file under data/ meant to
+# be reproducible from git alone.
+data/*
+!data/MANIFEST.md
 results/
 # E6 supervised_classifier artifacts (scripts/train_domain_classifier.py's
 # output) and E7 whitening artifacts (scripts/fit_embedding_whitening.py's

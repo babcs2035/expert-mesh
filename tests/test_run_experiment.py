@@ -181,3 +181,44 @@ def test_main_touches_done_marker_only_after_output_is_written(monkeypatch, tmp_
     assert output_path.exists()
     assert json.loads(output_path.read_text().strip())["selected_domain"] == "general"
     assert Path(f"{output_path}.done").exists()
+
+
+def test_record_experiment_provenance_copies_config_and_records_git_head(
+    monkeypatch, tmp_path
+) -> None:
+    """The results directory gets a config.yaml snapshot and the build's git commit.
+
+    Without this, comparing an old results.jsonl against the repo's current
+    config.yaml cannot tell which commit's code actually produced it — the
+    exact ambiguity that made the Iter22 deploy-drift incident (docs/d0002
+    §6-C/§6-D) take a manual journal.md cross-reference to diagnose.
+    """
+    monkeypatch.setenv("GIT_HEAD", "30e3627020c986dfd24a3b0a4c0cdd26d1136b85")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("routing_method: supervised_classifier\n", encoding="utf-8")
+    output_path = tmp_path / "run" / "results.jsonl"
+
+    run_experiment._record_experiment_provenance(str(output_path), str(config_path))
+
+    output_dir = output_path.parent
+    assert (output_dir / "config.yaml").read_text(encoding="utf-8") == config_path.read_text(
+        encoding="utf-8"
+    )
+    assert (
+        output_dir / "git_head.txt"
+    ).read_text().strip() == "30e3627020c986dfd24a3b0a4c0cdd26d1136b85"
+
+
+def test_record_experiment_provenance_defaults_to_unknown_without_git_head_env(
+    monkeypatch, tmp_path
+) -> None:
+    """GIT_HEAD is only set inside the Docker image (Dockerfile's ARG/ENV); outside
+    it, the marker is explicit rather than silently missing or empty."""
+    monkeypatch.delenv("GIT_HEAD", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("routing_method: self_report\n", encoding="utf-8")
+    output_path = tmp_path / "run" / "results.jsonl"
+
+    run_experiment._record_experiment_provenance(str(output_path), str(config_path))
+
+    assert (output_path.parent / "git_head.txt").read_text().strip() == "unknown"

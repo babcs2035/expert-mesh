@@ -23,6 +23,16 @@ COPY tools/ ./tools/
 COPY run_experiment.py build_dataset.py metrics.py ./
 COPY data/ ./data/
 
+# Baked in at build time (mise.toml's setup task passes --build-arg
+# GIT_HEAD=$(git rev-parse HEAD)) since .git itself is not copied into the
+# image. run_experiment.py reads this to stamp each experiment's results
+# directory with the exact commit the running image was built from —
+# without it, a stale-deploy incident (docs/d0002 §6-C/§6-D, Iter22) can
+# only be reconstructed after the fact by cross-referencing journal.md
+# commit hashes against dates.
+ARG GIT_HEAD=unknown
+ENV GIT_HEAD=${GIT_HEAD}
+
 EXPOSE 8080
 
 # `uv run` rechecks pyproject.toml consistency on every container start and

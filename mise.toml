@@ -30,8 +30,9 @@ fi
 echo "[setup] building evaluation dataset"
 uv run python build_dataset.py --output data/dataset.jsonl
 
-echo "[setup] building expert-mesh image"
-docker build -t "localhost:${REGISTRY_PORT}/expert-mesh:latest" .
+GIT_HEAD=$(git rev-parse HEAD)
+echo "[setup] building expert-mesh image (git HEAD=$GIT_HEAD)"
+docker build --build-arg GIT_HEAD="$GIT_HEAD" -t "localhost:${REGISTRY_PORT}/expert-mesh:latest" .
 
 echo "[setup] pushing expert-mesh image to local registry"
 docker push "localhost:${REGISTRY_PORT}/expert-mesh:latest"

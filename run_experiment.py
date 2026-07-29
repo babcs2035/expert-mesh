@@ -15,6 +15,8 @@ Usage:
 import argparse
 import asyncio
 import json
+import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -147,6 +149,25 @@ async def run_experiment(config: dict, node_id: str, dataset_path: str, output: 
     return len(rows)
 
 
+def _record_experiment_provenance(output_path: str, config_path: str) -> None:
+    """Copy the active config.yaml and the git commit into the results directory.
+
+    Without this, a stale-deploy incident where the running container's
+    code doesn't match what journal.md assumes (Iter22, docs/d0002
+    §6-C/§6-D) can only be reconstructed after the fact by cross-referencing
+    journal.md's commit hashes against dates. GIT_HEAD is baked into the
+    Docker image at build time (Dockerfile's ARG/ENV, set from mise.toml's
+    setup task) since .git itself is not copied into the image, so it
+    reflects the commit the running container was actually built from —
+    not whatever HEAD happens to be at read time.
+    """
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(config_path, output_dir / "config.yaml")
+    git_head = os.environ.get("GIT_HEAD", "unknown")
+    (output_dir / "git_head.txt").write_text(git_head + "\n", encoding="utf-8")
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -162,6 +183,7 @@ def main() -> None:
     if args.output is None:
         count = asyncio.run(run_experiment(config, args.node_id, args.dataset, sys.stdout))
     else:
+        _record_experiment_provenance(args.output, args.config)
         with open(args.output, "w", encoding="utf-8") as f:
             count = asyncio.run(run_experiment(config, args.node_id, args.dataset, f))
         # Written only after the output file is closed (all rows flushed to
