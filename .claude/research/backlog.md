@@ -3,6 +3,46 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B38 [auto-decided 2026-07-29] Iter21: 実験無効（bug 発見）, Iter22 で E4 再実行
+
+- 状況: Iter21（`confidence_signal_method=self_consistency_semantic`）の結果は無効。`http_server.py` の `_estimate_probe_confidence()` で `routing_method=supervised_classifier` の early return（line 323-329）が `confidence_signal_method` チェックより先に実行されており、`self_consistency_semantic` のコードパスが 1 回も到達していない。
+- 検証証拠: (1) Iter20 とメトリクスが完全に同一（top1=0.5651, kappa=0.5215, fallback=0.1316）(2) `local_inference_ms` が 1-3ms（semantic entropy なら数秒〜数十秒）(3) `semantic_entropy` フィールドが 0/1520 件 (4) ログの `routing_method: supervised_classifier` — 全プローブで classifier が使用された。
+- 修正方針: `http_server.py` の `_estimate_probe_confidence()` で `confidence_signal_method` チェックを `routing_method` チェックより先に移動（Option A）。これにより両者が独立して動作する。
+- Iter22 計画: 修正後、同一 1520 問で `confidence_signal_method=self_consistency_semantic` を再実行。期待: latency 増（1 probe あたり 9 LLM calls）、mean_duration_ms 6500ms → 10000-15000ms 程度。
+- 要レビュー: (1) 修正が正しく適用されたか実験ログで確認すること。(2) `probe_timeout_s=120` が有効になるか。
+
+---
+
+## B37 [auto-decided 2026-07-29] Iter21 計画: confidence_signal_method=self_consistency_semantic
+
+- 状況: Iter21 の計画フェーズ完了。単一レバーを `confidence_signal_method=self_consistency_semantic`（E4）で確定。
+- 変更内容: `config.yaml` の 2 行変更（`confidence_signal_method: self_report → self_consistency_semantic`, `probe_timeout_s: 60.0 → 120.0`）
+- コード変更: 0行（`self_consistency_semantic` は既に完全に実装済み）
+- 成功条件: ECE 0.1927 → 0.150 以下（-4.3pt 以上）。top1_accuracy/Cohen's kappa の非退行。
+- ノイズ幅: Iter18 Phase C ↔ Iter20 の比較で top1/ECE ともに 0.00pt の再現性。ECE の有意な改善閾値は約 -0.02pt（3SE）。
+- 実装フェーズへの示唆: (1) config.yaml の 2 行変更のみ (2) `measure_semantic_diversity.py` の作成（config.yml note で要求）(3) semantic_entropy の分析用スクリプト作成の検討
+- 要レビュー: (1) ECE の成功条件（0.150 以下）が妥当か (2) probe_timeout_s の 120s 引き上げが適切か
+
+---
+
+## B36 [auto-decided 2026-07-29] Iter20 総括と次イテレーションの単一レバー決定
+
+- 状況: Iter20（E3: confidence_elicitation=top_k_with_probs）の結果、adopted 判定。同点タイ率 82.83%→0.00%、ECE 0.7388→0.1927 の決定的改善。
+- 自動選択: 次イテレーション（Iter21）の単一レバーを `confidence_signal_method=multi_sample_semantic`（E4）とする。`iteration_name` は「multi_sample_semantic による不確実性推定とconfidence較正改善」。
+- 根拠: (1) E4 は未着手で、config levers で E5 より優先度が高い。(2) E4 は温度 0.7〜1.0、N=5 のマルチサンプリングで不確実性を測定。(3) Iter11 の失敗（T=0.1）とは異なり、文献に基づく適切な設定。(4) E5 は Ollama バージョン確認が必要で E4 より実装コストが高い。
+- 要レビュー: (1) E4 の着手前にユニーク回答数（多様性）を計測すること。(2) E4 の成功条件（ECE 改善目標値）を rc-planner が具体化すること。
+
+---
+
+## B35 [auto-decided 2026-07-29] E7（embedding_postprocess=whitening）のスキップと E3 への方向転換
+
+- 状況: Iter20 の単一レバーを E7（embedding_postprocess=whitening）とする計画だったが、調査フェーズで重大な構造的問題が発見された。
+- 発見: `embedding_postprocess` は `routing_method=supervised_classifier` の下では全く適用されない。`http_server.py` の `_estimate_probe_confidence()` では `routing_method=embedding` の場合のみ `apply_embedding_postprocess()` が呼ばれ、`supervised_classifier` パスでは `query_embedding` が classifier に生で直接渡される。つまり現在の構成で whitening を有効にしても no-op である。
+- Alternatives: (A) `routing_method=embedding` に変更（単一レバー原則違反）、(B) `classifier.py` にコード変更（config-only 原則違反）、(C) E7 をスキップして次のレバーへ移行。
+- 自動選択: (C) を採用。E7 をスキップし、次レバー E3（`confidence_elicitation=top_k_with_probs`）へ移行。`iteration_name` を「top_k_with_probs による confidence 較正改善と同点タイ率への影響測定」に変更。
+- 根拠: (1) E7 は config-only の枠内で検証不可能（no-op 確定）。(2) A/B は単一レバー原則または config-only 原則の両方を違反する。(3) E3 は Iter16 で rejected されたが、当時は n=46 の評価集合。E1 完了後の 1520 問で再検証する意義がある。(4) E3 は config.yaml の 1 行変更のみで検証可能（コスト極めて低い）。
+- 要レビュー: (1) E3 の再試行が統計的に意味があるか（n=1520 で SE ≈ 0.007）。(2) Iter16 で E3 が rejected された理由（同点タイ率の低下効果なし）が、n=1520 で再現されるか。
+
 ---
 
 ## B34 [auto-decided 2026-07-29] Iter19 総括と次イテレーションの単一レバー決定

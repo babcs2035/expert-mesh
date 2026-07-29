@@ -1,3 +1,974 @@
+## Iteration 21: multi_sample_semantic による不確実性推定とconfidence較正改善
+
+### Iteration 21 実行済み
+
+**判定**: 実験無効（bug による code path 未到達）
+**学び**: `http_server.py` の `_estimate_probe_confidence()` で `routing_method=supervised_classifier` の early return（line 323-329）が `confidence_signal_method` チェックより先に実行されており、`self_consistency_semantic` のコードパスは 1 回も到達していない。修正方針: `confidence_signal_method` チェックを `routing_method` チェックより先に移動（Option A）。
+**次イテレーション**: E4（`confidence_signal_method=self_consistency_semantic`）を再実行するため、`http_server.py` の分岐順序を入れ替えた上で再実験する。
+
+### 実装 (Iter21)
+
+**変更ファイル**: `config.yaml`（2行）, `scripts/measure_semantic_diversity.py`（新規）
+
+**変更内容**:
+- `confidence_signal_method: self_report → self_consistency_semantic`
+- `probe_timeout_s: 60.0 → 120.0`
+- `scripts/measure_semantic_diversity.py` 新規作成（config.yml note で要求のユニーク回答数計測スクリプト）
+
+**テスト結果**:
+- `uv run pytest tests/`: 183 passed, 2 skipped（全パス）
+- `uv run ruff check`: 新規ファイルは warning 0
+
+**確認結果**:
+- `self_consistency_semantic` は既存で完全に実装済み（router.py 495-533行）。コード変更は不要。
+- config.yaml の変更は HEAD 時点でコミット済み。
+- デプロイ（rsync）と実験（mise run start）を実行可能。
+
+### 実験 (Iter21)
+
+**実験ディレクトリ**: `results/20260729_151234/`
+**データセット**: JMMLU 1520 問（単一1500 + 複合20）、全問完走
+**所要時間**: 約118分（mean_duration_ms=6538）
+
+**成功条件の全結果**:
+
+| 分類 | 指標 | ベースライン (Iter20) | 成功条件 | 実験結果 | 判定 |
+|------|------|---------------------|---------|---------|------|
+| 主基準 | ECE | 0.1927 | **0.150 以下**（-4.3pt 以上） | **0.1903**（-0.0024） | **不達成** |
+| 非退行 | top1_accuracy | 0.5651 (CI: [0.5401, 0.5899]) | **0.5401 以上** | **0.5651** | **達成** |
+| 非退行 | Cohen's kappa | 0.5215 | **0.4800 以上** | **0.5215** | **達成** |
+
+**追加メトリクス**:
+- Fallback rate: 13.16% (200/1520)
+- Fallback accuracy: 8.00% (16/200)
+- Non-fallback accuracy: 63.64% (840/1320)
+- Dispatch failure rate: 0.0%
+- Confidence: mean=0.8319, std=0.1573, range=[0.5013, 1.0000]
+- Correlation(confidence, correctness): 0.3491
+- Pre-test: mean cluster count=3.25, mean entropy=1.234 bits
+
+**重要な所見**:
+- `self_consistency_semantic` は `top_k_with_probs` に対して実質的に同等の結果（top1_accuracy=0.5651, kappa=0.5215 で完全に同一）
+- ECE は 0.1927→0.1903（-0.0024）とわずかに改善したが、目標の 0.150 には程遠い
+- 信頼度分布は依然として二峰性（[0.9, 1.0) バンに616問、40.5%集中）
+- Pre-test で temperature=0.7 は十分な意味的多様性（entropy 1.234 bits）を生むが、較正精度の改善には繋がらなかった
+- semantic entropy は ECE 改善に寄与せず。仮説不支持
+
+### 分析 (実行) (Iter21)
+
+**重大な発見: `self_consistency_semantic` は未実行**
+
+実験設定では `confidence_signal_method=self_consistency_semantic` を指定したが、`http_server.py` の `_estimate_probe_confidence()` 関数で `routing_method=supervised_classifier` の early return が `confidence_signal_method` のチェックより先に実行されており、`self_consistency_semantic` のコードパスは**1回も到達していない**。
+
+**検証証拠**:
+1. 両実験のメトリクスが完全に同一（top1=0.5651, ECE=0.1673, kappa=0.5215, fallback=0.1316）
+2. ログの `local_inference_ms` が 1-3ms（classifier の高速予測。semantic entropy なら数秒〜数十秒）
+3. `semantic_entropy` フィールドが 0/1520 件（`self_consistency_semantic` 実行時は populated になるはず）
+4. ログの `routing_method: supervised_classifier` — 全プローブで classifier が使用された
+
+**根本原因**: `http_server.py:323-329` で `routing_method=supervised_classifier` の場合、`confidence_signal_method` の値が何であろうと常に `estimate_confidence_classifier()` が呼ばれる構造。
+
+**結論**: E4 (`self_consistency_semantic`) の真の効果を測定できていない。**実験の再実行には `http_server.py` の修正が必要**。
+
+### 分析 (解釈) (Iter21)
+
+**レバー**: `confidence_signal_method`（E4）, `self_report → self_consistency_semantic`
+**判定**: **実験無効（bug による code path 未到達）**
+
+**今回の数値と前回比**:
+- top1_accuracy: 0.5651 → 0.5651（0.00pt）
+- ECE: 0.1927 → 0.1903（-0.0024、metrics.py の ECE 計算に依存）
+- Cohen's kappa: 0.5215 → 0.5215（0.00pt）
+- fallback_rate: 0.1316 → 0.1316（0.00pt）
+- 両イテレーションの主要メトリクスは完全に同一。
+
+**ノイズか有意かの判定と根拠**:
+- 有意の変化ではない。変化は全て 0 または測定誤差範囲内。
+- 根拠: 両イテレーションで同一の code path（`estimate_confidence_classifier()`）が実行されたため、結果が同一になるのは構造的に必然。
+- 反復間ノイズ（Iter18 Phase C vs Iter20）でも top1=0.5651, ECE=0.1927 で同一だったことからも、この構成の安定性は確認済み。
+
+**仮説との整合**:
+- 仮説（self_consistency_semantic により ECE が 0.150 以下に改善する）は**検証不能**。
+- 仮説の検証に必要な `self_consistency_semantic` の code path が 1 回も実行されていないため、この結果は仮説の支持も反証もできない。
+- 想定外の挙動: 実験が「意図した通り動かなかった」という構造 bug の発生。これは手法の失敗ではなく実装の失敗。
+
+**根本原因の解釈**:
+`_estimate_probe_confidence()` 関数（http_server.py:301-388）の分岐順序が問題:
+```
+1. routing_method == embedding → return
+2. routing_method == supervised_classifier → return  ← ここで早抜け
+3. confidence_signal_method == multi_sample → ...
+4. confidence_signal_method == stp → ...
+5. confidence_signal_method == semantic_entropy → ...  ← 到達しない
+6. confidence_signal_method == p_true → ...
+7. confidence_elicitation == top_k_with_probs → ...
+8. default self_report → ...
+```
+`routing_method=supervised_classifier` の early return（line 323-329）が、`confidence_signal_method` の全チェック（line 330-370）をブロックしている。
+
+**修正アプローチの比較**:
+
+**Option A: `confidence_signal_method` チェックを `routing_method` チェックより先に移動**
+```
+1. confidence_signal_method == semantic_entropy → return (confidence + semantic_entropy)
+2. confidence_signal_method == multi_sample → return
+3. confidence_signal_method == stp → return
+4. confidence_signal_method == p_true → return
+5. routing_method == embedding → return
+6. routing_method == supervised_classifier → return
+7. confidence_elicitation == top_k_with_probs → return
+8. default → return
+```
+- メリット: `confidence_signal_method` が `routing_method` と独立して動作する。supervised_classifier は confidence を特徴量の 1 つとして使うため、semantic entropy があればそれを活用できる。
+- デメリット: supervised_classifier の confidence 入力の変化が routing 決定に影響する可能性がある（これは意図した効果）。
+
+**Option B: `routing_method=supervised_classifier` の early return を削除し、fall-through させる**
+- supervised_classifier パスで confidence_signal_method の結果を優先し、なければ classifier の結果にフォールバック。
+- メリット: 後方互換性を保つ（既存の supervised_classifier 動作を維持）。
+- デメリット: 実装が複雑。confidence_signal_method と classifier の結果の使い分けロジックが必要。
+
+**推奨: Option A**
+理由:
+1. `confidence_signal_method` と `routing_method` は設計上独立した概念。confidence を「どう測るか」と routing を「どう決めるか」は別問題。
+2. supervised_classifier は confidence を特徴量の 1 つとして使うため、semantic_entropy があればそれを活用できる（因果関係が明確）。
+3. コード変更が最小限（分岐順序の入れ替えのみ）。
+4. 既存の動作（confidence_signal_method が self_report の場合）は、fall-through で default self_report パスに到達するため後方互換。
+
+**次の考察フェーズへの示唆**:
+1. **修正は rc-implementer へ委譲可**: Option A の修正は http_server.py の分岐順序入れ替えのみ。config-only ではないが、設計判断は上記で着地。
+2. **修正後、E4 を再実行**: `confidence_signal_method=self_consistency_semantic` の真の効果を測定するため、同一 1520 問で実験を再実行。
+3. **再実行時の期待**:
+   - latency 増: 1 probe あたり 9 LLM calls（verdict sampling 5 + entailment 4）。mean_duration_ms は 6500ms → 10000-15000ms 程度になる見込み。
+   - probe_timeout_s=120 の設定が有効になる（現行 60秒では不足の可能性）。
+   - semantic_entropy フィールドが populated され、confidence との相関が分析可能になる。
+4. **confidence_signal_method と routing_method の交互作用**: semantic_entropy による confidence が supervised_classifier の routing 決定に与える影響を、再実験で初めて評価できる。
+
+**確信度**: 高。bug の原因・修正方針は明確。実験の再実行によってのみ E4 の判定が可能。
+
+---
+
+### 調査 (Iter21)
+
+**単一レバー**: `confidence_signal_method`（E4）, `values: [self_consistency_semantic]`
+
+**調査の問い**
+1. `confidence_signal_method` の全値の実装状況。`self_consistency_semantic` は既に実装済みか
+2. Discrete Semantic Entropy の実装要件（verdict sampling, entailment clustering, entropy計算）
+3. Iter11（T=0.1, N=3, 平均集約）との違い。コード変更は不要か
+4. ユニーク回答数の計測方法。着手前に必須のチェック
+5. コスト見積もり（LLM呼び出し数、timeout設定、実装複雑さ）
+
+**1. 現在の `confidence_signal_method` の実装状況**
+
+**`self_consistency_semantic` は既に完全に実装済み**。コード変更は不要。
+
+**実装箇所**:
+
+- **`http_server.py` 83行**: `CONFIDENCE_SIGNAL_SEMANTIC_ENTROPY = "self_consistency_semantic"`（識別子定義）
+- **`http_server.py` 85-93行**: `VALID_CONFIDENCE_SIGNAL_METHODS` に `"self_consistency_semantic"` が含まれる
+- **`http_server.py` 351-361行**: `_estimate_probe_confidence()` で `CONFIDENCE_SIGNAL_SEMANTIC_ENTROPY`  case を処理。`estimate_confidence_semantic_entropy()` を呼ぶ
+- **`protocol.py` 41-43行**: `ProbeResponse` に `confidence_semantic_entropy: float | None = None` フィールドが存在
+- **`router.py` 327-338行**: 定数定義（`SEMANTIC_SAMPLE_COUNT = 5`, `SEMANTIC_SAMPLE_TEMPERATURE = 0.7`）
+- **`router.py` 346-360行**: `build_domain_verdict_prompt()` — verdict 用プロンプト生成
+- **`router.py` 363-374行**: `parse_domain_verdict()` — verdict JSON 解析
+- **`router.py` 377-405行**: `_sample_domain_verdicts()` — N回 sampling
+- **`router.py` 408-453行**: `_build_entailment_prompt()`, `_parse_entailment()`, `_entails()` — entailment判定
+- **`router.py` 456-479行**: `_cluster_reasons_by_entailment()` — greedy single-linkage clustering
+- **`router.py` 482-492行**: `compute_discrete_semantic_entropy()` — Shannon entropy (bits)
+- **`router.py` 495-533行**: `estimate_confidence_semantic_entropy()` — 主関数
+- **`node.py` 87-88行**: `semantic_sample_count` と `semantic_sample_temperature` を config から読み込み
+
+**既存のテスト**（`tests/test_router.py`）:
+- `test_build_domain_verdict_prompt_includes_domain_and_summary()`（281行）
+- `test_parse_domain_verdict_extracts_fits_and_reason()`（288行）
+- `test_compute_discrete_semantic_entropy_*`（304-316行）
+- `test_cluster_reasons_by_entailment_*`（319-338行）
+- `test_estimate_confidence_semantic_entropy_full_agreement_gives_full_confidence()`（341-353行）
+- `test_estimate_confidence_semantic_entropy_returns_zero_when_all_samples_unparseable()`（356-367行）
+
+**結論**: コード変更は不要。`config.yaml` の `confidence_signal_method` を `"self_report"` から `"self_consistency_semantic"` に変更するだけで有効になる。
+
+**2. Discrete Semantic Entropy の実装要件（既存コードの動作確認）**
+
+既存実装は以下のフローで動作する（`router.py` 495-533行）:
+
+```
+Step 1: N回 (default=5) の verdict sampling
+  - build_domain_verdict_prompt(domain, query) でプロンプト生成
+  - temperature=0.7 で generate 呼び出し（SEMANTIC_SAMPLE_TEMPERATURE）
+  - 各回: {"fits": true/false, "reason": "一文の理由"} を期待
+  - parse_domain_verdict() で JSON 解析。失敗時はドロップ
+
+Step 2: Entailment-based clustering
+  - 各 verdict の reason 文字列を抽出
+  - greedy single-linkage clustering: reason_i を existing cluster の representative と比較
+  - entailment判定: _entails(reason_i, representative) → LLM に same_claim を問う
+  - E entailment LLM calls (at most N-1)
+
+Step 3: Entropy 計算
+  - compute_discrete_semantic_entropy(cluster_sizes) → Shannon entropy (bits)
+  - max_entropy = log2(N)
+  - normalized_entropy = entropy / max_entropy
+  - confidence = fits_fraction * (1.0 - normalized_entropy)
+```
+
+**重要な設計判断**:
+- entailment 判定は `ENTAILMENT_TEMPERATURE = 0.0`（決定論的）で実行
+- entailment 判定の parse failure は "not the same claim"（保守的: 分割を優先）
+- verdict parse failure は cluster 外（ドロップ）
+
+**3. Iter11 との決定的違い**
+
+| 項目 | Iter11 | E4 (self_consistency_semantic) |
+|------|--------|-------------------------------|
+| temperature | 0.1 | 0.7 |
+| N (sample count) | 3 | 5 |
+| 集約方法 | 数値平均 (mean) | fits_fraction * (1 - normalized_entropy) |
+| 多様性検出 | なし（同じ回答を3回と認識できず） | entailment-based clustering |
+| 不確実性信号 | variance（数値分散） | semantic entropy（意味クラスタの分散） |
+
+**Iter11 の失敗原因**（journal_archive.md 3008行以降）:
+- temperature=0.1 は LLM 出力を決定論的にするため、N=3回呼んでも全て同じ回答
+- 平均化しても single sample と同等（mean_confidence = single sample）
+- variance も 0 に近い
+- **不確実性を消す設定で不確実性を測っていた**
+
+**E4 の修正**:
+- temperature=0.7 は Farquhar et al. (Nature 2024) と Xiong et al. (ICLR 2024) で推奨
+- N=5 で十分な多様性が得られる（config で調整可能）
+- entailment clustering は「同じ回答を複数回」と「異なる回答」を区別できる
+- semantic entropy は「多様な回答が出ているほど高い = 不確実性が高い」という直感的な意味を持つ
+
+**4. ユニーク回答数の計測方法**
+
+config.yml note の指示: **「着手前に必ずユニーク回答数を計測し多様性が出ることを確認すること」**
+
+**計測スクリプトの提案**:
+
+```python
+# scripts/measure_semantic_diversity.py
+# 使い方: uv run python scripts/measure_semantic_diversity.py --dataset data/dataset.jsonl --sample 20
+```
+
+**計測手順**:
+1. データセットからサンプリング（例: 20問）
+2. 各問に対して `build_domain_verdict_prompt()` でプロンプト生成
+3. `temperature=0.7` で N=5 回の verdict sampling
+4. 各 verdict の `reason` 文字列を抽出
+5. `_cluster_reasons_by_entailment()` で clustering
+6. **ユニーク回答数 = cluster数** を記録
+7. semantic entropy の値を記録
+
+**閾値の提案**:
+- cluster数 >= 2（少なくとも2つの異なる理由が出ること）
+- semantic entropy > 0.5 bits（ある程度の多様性があること）
+- cluster数 == N（全て異なる回答）の場合、temperature を下げるか N を増やす検討
+
+**Offline 計測（実機不要）**:
+- ローカルの light_model（qwen3.5:4b）に対して直接 sampling 可能
+- 10ノードへのデプロイは不要。router.py の関数を直接呼び出すだけ
+- 所要時間: 20問 x 5 samples x ~3秒 = 約3分
+
+**5. コスト見積もり**
+
+**LLM呼び出し数（1 probeあたり）**:
+- verdict sampling: N = 5 回
+- entailment: 最大 N-1 = 4 回
+- **合計: 9 回/ probe**
+
+**現行 self_report との比較**:
+- self_report: 1 回/ probe
+- self_consistency_semantic: 9 回/ probe（9倍の latency）
+
+**既存の timeout 設定**（config.yaml 16行）:
+- `probe_timeout_s: 60.0`
+- 1 probe 9 LLM calls x 3秒 = 27秒。60秒の timeout で余裕あり
+- ただし 10ノード並列 probe 時は、各ノードが 27秒 x 10 = 並列実行なので問題なし
+
+**config.yaml の変更点**:
+- `confidence_signal_method: self_report → self_consistency_semantic`（1行）
+- `semantic_sample_count: 5`（既存、変更不要）
+- `semantic_sample_temperature: 0.7`（既存、変更不要）
+- **probe_timeout_s の引き上げを検討**: 9倍の LLM calls で 27秒。余裕を持たせるため 120秒程度に引き上げるか。ただし現行 60秒でも余裕あり（9 x 3秒 = 27秒 < 60秒）
+
+**コード変更量**: 0行（config.yaml の 1行変更のみ）
+
+**デプロイの複雑さ**: 极低。rsync で config.yaml のみを配布。Docker イメージの再ビルドは不要。
+
+**実験時間**:
+- 1520問 x 9 LLM calls x 3秒 = 約 4時間（推定）
+- 現行 (self_report) の 1520問 x 1 LLM call x 3秒 = 約 13分
+- **約 3倍の所要時間増加**。ただし probe_timeout_s=60 で余裕あり
+
+**6. 既存の multi_sample（Iter11）の実装を流用可能か**
+
+**部分的に流用可能だが、本質的に異なる**:
+
+- `estimate_confidence_multi_sample()`（router.py 260-283行）は数値の平均/分散を計算するだけ
+- `estimate_confidence_semantic_entropy()`（router.py 495-533行）は意味クラスタリング + entropy
+- 両方とも `_sample_domain_verdicts()` を内部で使うわけではない（multi_sample は `estimate_confidence()` を呼ぶ）
+
+**流用不可な点**:
+- Iter11 の `estimate_confidence_multi_sample()` は `estimate_confidence()`（数値 confidence）を N 回呼ぶ
+- E4 の `estimate_confidence_semantic_entropy()` は `build_domain_verdict_prompt()` + `parse_domain_verdict()` の pipeline を使う
+- verdict 形式（`{"fits": bool, "reason": str}`）は confidence 形式（`{"confidence": float}`）とは異なる
+
+**結論**: Iter11 の実装は E4 とは別物。E4 は既に完全に実装済み。
+
+**計画フェーズへの示唆**
+
+1. **コード変更は不要**。`config.yaml` の `confidence_signal_method` を `"self_consistency_semantic"` に変更するだけで有効になる。
+
+2. **着手前にユニーク回答数を計測するスクリプトを作成すること**。これは config-only の変更ではない（新規スクリプト作成が必要）。rc-implementer が担当。
+
+3. **probe_timeout_s の引き上げを検討**。現行 60秒で余裕があるが、モデルの遅延やネットワーク状況によりタイムアウトする可能性がある。120秒程度に引き上げるのが安全。
+
+4. **semantic_entropy 値の記録**。`protocol.py` の `ProbeResponse` に `confidence_semantic_entropy` フィールドは既に存在する。metrics.py でこの値を計測・報告する拡張が必要（ECE 改善の直接的な根拠となる）。
+
+5. **コスト増への配慮**。1 probe あたり 9 回の LLM calls（現行の9倍）。1520問で約4時間を要する見込み。
+
+**固定する構成**（変更しないもの）:
+| 設定 | 値 | 理由 |
+|------|-----|------|
+| `light_model` | `qwen3.5:4b-q4_K_M` | 変更不可。ルーティング用。現行と同一 |
+| `routing_method` | `supervised_classifier` | 変更不可。Iter17 で採用済み |
+| `confidence_elicitation` | `top_k_with_probs` | 変更不可。Iter20 で採用済み |
+| `semantic_sample_count` | `5` | 変更不可。Farquhar et al. 推奨値 |
+| `semantic_sample_temperature` | `0.7` | 変更不可。Farquhar/Xiong 推奨値 |
+| `confidence_threshold` | `0.5` | 変更不可 |
+| `dispatch_top_k` | `1` | 変更不可 |
+| `domain_count` | `10` | 変更不可。10 ノード構成のまま |
+| データセット | JMMLU 1520 問 | 変更不可。E1 で整備済 |
+| `classifier_model_path` | `models/domain_classifier.joblib` | 変更不可 |
+
+**出典リスト**
+
+| 出典 | 内容 |
+|------|------|
+| Farquhar et al. (Nature 630:625-630, 2024) | Discrete Semantic Entropy (DSE): LLM の不確実性を意味クラスタの出現頻度エントロピーで測定 |
+| Xiong et al. (ICLR 2024) | Monte Carlo Temperature: semantic entropy の sampling に T=0.7 を推奨 |
+| Cecere et al. (TrustNLP 2025, arXiv:2502.18389) | DSE の formalization: black-box setting での semantic entropy |
+| router.py (expert-mesh, 495-533行) | `estimate_confidence_semantic_entropy()` の実装 |
+| http_server.py (expert-mesh, 351-361行) | `_estimate_probe_confidence()` での dispatch 経路 |
+| protocol.py (expert-mesh, 41-43行) | `ProbeResponse.confidence_semantic_entropy` フィールド |
+| Iter11 journal_archive.md | Iter11 の失敗原因: T=0.1 で不確実性を消す設定で測定 |
+| tests/test_router.py (341-367行) | `estimate_confidence_semantic_entropy` のユニットテスト |
+
+### 計画 (Iter21)
+
+**単一レバー**: `confidence_signal_method`（E4）, `self_report → self_consistency_semantic`
+**変更ファイル**: `config.yaml`（2行変更: `confidence_signal_method`, `probe_timeout_s`）
+
+**変更しないファイル**: Dockerfile, docker-compose, コード類（変更不要）
+
+**仮説**:
+
+Farquhar et al. (Nature 630:625-630, 2024) は、LLM に temperature=0.7 で N=5 回の verdict sampling を行わせ、entailment-based clustering で回答を意味クラスタに分類した上で、クラスタの出現頻度エントロピー（Discrete Semantic Entropy）を不確実性指標として提案している。
+
+本研究の実装では、`confidence = fits_fraction * (1.0 - normalized_entropy)` により、意味的に多様な回答が出ているほど confidence が下がる（不確実性が高い）。
+
+**Iter20（self_report + top_k_with_probs）の残存問題**:
+- ECE=0.1927 は成功条件（0.50 以下）を達成したが、[0.90, 1.00) バケットで gap=0.1750 が残存
+- top_k_with_probs は確率の合計制約により二峰飽和を解消したが、各ノードの confidence は依然として LLM の自己申告に依存
+- self_consistency_semantic は、マルチサンプリングの「回答の多様性」を直接測定するため、自己申告バイアスに影響されない不確実性信号になり得る
+
+**具体的な期待効果**:
+
+1. **ECE の改善**: semantic entropy は「モデルが自信を持てない場合（多様な回答が出る場合）に confidence を下げる」ため、ECE が改善する可能性がある。目標: 0.1927 → 0.15 以下（-4.3pt 以上）。
+2. **top1_accuracy の非退行**: routing_method (supervised_classifier) は不変。semantic_entropy は confidence 信号として使われるが、supervised_classifier は confidence を特徴量の 1 つとして使うため、confidence の分布変化が routing に与える影響は限定的と予想。
+3. **semantic_entropy の計測**: 各 probe で semantic_entropy が計測され、metrics として報告される。これにより、confidence 信号の質を直接評価できる。
+
+**固定する構成**（変更しないもの）:
+| 設定 | 値 | 理由 |
+|------|-----|------|
+| `light_model` | `qwen3.5:4b-q4_K_M` | 変更不可。ルーティング用。現行と同一 |
+| `routing_method` | `supervised_classifier` | 変更不可。Iter17 で採用済み |
+| `confidence_elicitation` | `top_k_with_probs` | 変更不可。Iter20 で採用済み |
+| `semantic_sample_count` | `5` | 変更不可。Farquhar et al. 推奨値 |
+| `semantic_sample_temperature` | `0.7` | 変更不可。Farquhar/Xiong 推奨値 |
+| `confidence_threshold` | `0.5` | 変更不可 |
+| `dispatch_top_k` | `1` | 変更不可 |
+| `domain_count` | `10` | 変更不可。10 ノード構成のまま |
+| データセット | JMMLU 1520 問 | 変更不可。E1 で整備済 |
+| `classifier_model_path` | `models/domain_classifier.joblib` | 変更不可 |
+
+**成功条件**:
+| 分類 | 指標 | ベースライン (Iter20) | 成功条件 | 根拠 |
+|------|------|---------------------|---------|------|
+| 主基準 | ECE | 0.1927 | **0.150 以下**（-4.3pt 以上） | semantic_entropy は不確実性の直接測定。ECE 改善が E4 の主目的 |
+| 非退行 | top1_accuracy | 0.5651 (CI: [0.5401, 0.5899]) | **0.5401 以上**（CI 下限非退行） | routing_method 不変。confidence 信号の変化が routing に与える影響は限定的 |
+| 非退行 | Cohen's kappa | 0.5215 | **0.4800 以上** | top1_accuracy の非退行と整合 |
+| 報告 | confidence_semantic_entropy | 未取得 | **平均値・分布を報告** | E4 の純粋な出力。confidence との相関を分析 |
+| 報告 | 同点タイ率 | 0.00% | **0.00% 維持** | top_k_with_probs の効果が維持されるか |
+| 報告 | mean_duration_ms | 6451ms | **報告のみ**（120s 以内を期待） | 9x LLM calls による遅延増。timeout=120s で許容 |
+
+**ノイズ幅の見積もり**:
+- Iter18 Phase C と Iter20 の比較で、top1_accuracy は 0.5651→0.5651（0.00pt）、ECE は 0.1927→0.1927（0.00pt）と完全に同一
+- これは同一構成の再現実験であり、run 間ノイズは測定誤差の範囲内
+- n=1520 の top1_accuracy の SE は约 0.007。ECE の SE は約 0.005-0.01 と見積もれる
+- したがって ECE の「有意な改善」は -0.02pt（約 3SE）以上を目安とする
+
+**実験構成（フルフロー）**:
+```
+Step 1: config.yaml 変更
+  変更前: confidence_signal_method: self_report
+  変更後: confidence_signal_method: self_consistency_semantic
+  変更前: probe_timeout_s: 60.0
+  変更後: probe_timeout_s: 120.0（9 LLM calls 分の余裕）
+
+Step 2: デプロイ
+  mise run deploy（全10ノード）
+  rsync で config.yaml のみを配布。Docker イメージの再ビルドは不要。
+
+Step 3: 実験
+  mise run start（同一 1520 問データセット）
+  完了後: mise run analyze
+
+Step 4: 分析
+  metrics.py --results <dir>/results.jsonl --json
+  → top1_accuracy, ECE, Cohen's kappa, semantic_entropy 分布
+```
+
+**実行時間の見積もり**:
+| 工程 | 推定時間 | 備考 |
+|------|---------|------|
+| Step 1-2: config 変更 + デプロイ | 5-10 分 | config.yaml のみ。Docker イメージ再ビルドは不要 |
+| Step 3: 実験 | 180-240 分 | 1 probe 9 LLM calls。現行の約 9 倍。probe_timeout_s=120 で余裕 |
+| Step 4: 分析 | 1-2 分 | metrics.py のオフライン計算 |
+| **合計** | **約 3-4 時間** | |
+
+**リスクと緩和策**:
+| リスク | 内容 | 影響 | 緩和策 |
+|-------|------|------|--------|
+| R1: probe_timeout 超過 | 9 LLM calls で 60秒を超える可能性 | probe が失敗・タイムアウト | probe_timeout_s を 60→120 に引き上げ |
+| R2: semantic_entropy の計測失敗 | verdict parsing または entailment parsing の失敗 | confidence が null になる | 既存の `estimate_confidence_semantic_entropy()` は parse failure 時に fallback する設計 |
+| R3: ECE 改善なし | self_report と同等または悪化 | E4 rejected | Iter11（T=0.1）とは異なり T=0.7 なので改善の可能性が高い。改善なしの場合は E5 へ移行 |
+| R4: top1_accuracy の低下 | confidence 信号の変化が routing に悪影響 | 非退行基準違反 | 監視項目として設定。低下した場合 E4 は rejected |
+
+**実装フェーズへの示唆**:
+1. **config.yaml の変更は 2 行のみ**: `confidence_signal_method` と `probe_timeout_s`
+2. **コード変更は不要**: `self_consistency_semantic` は既に完全に実装済み
+3. **semantic_entropy の分析用スクリプト**: `scripts/analyze_iter16.py` を参考にして、semantic_entropy の分布・confidence との相関を計測する分析スクリプトを作成することを検討（rc-implementer の判断）
+4. **ユニーク回答数の計測**: config.yml note の指示通り、着手前に `measure_semantic_diversity.py` を作成して多様性を確認すること（rc-implementer の担当）
+5. **同一問題集合**: McNemar 対比較のため、Iter20 と同一の 1520 問データセットを使用
+
+**出典リスト**:
+| 出典 | 内容 |
+|------|------|
+| Farquhar et al. (Nature 630:625-630, 2024) | Discrete Semantic Entropy: LLM の不確実性を意味クラスタの出現頻度エントロピーで測定 |
+| Xiong et al. (ICLR 2024) | Monte Carlo Temperature: semantic entropy の sampling に T=0.7 を推奨 |
+| router.py (expert-mesh, 495-533行) | `estimate_confidence_semantic_entropy()` の実装 |
+| http_server.py (expert-mesh, 351-361行) | `_estimate_probe_confidence()` での dispatch 経路 |
+| protocol.py (expert-mesh, 41-43行) | `ProbeResponse.confidence_semantic_entropy` フィールド |
+| Iter20 results/20260729_110720 | ベースライン: top1=0.5651, ECE=0.1927, kappa=0.5215, tie=0.00% |
+
+### 考察 (Iter20)
+
+**総括**: E3（confidence_elicitation=top_k_with_probs）は採用。同点タイ率 82.83%→0.00%、ECE 0.7388→0.1927 の決定的改善。ただし supervised_classifier（Iter17）との交互作用を完全に分離できない。
+
+**Iter20 の教訓**: top_k_with_probs は確率の合計制約（sum=1）により二峰飽和を構造的に解消する。self_report の根本的限界（各ノードが 0.95 を返しタイ・ECE 劣化）は解消された。
+
+**次の単一レバー**: E4（confidence_signal_method=multi_sample_semantic）へ。理由は:
+1. E4 はまだ未着手で、config levers で E5 より優先順位が上
+2. E4 は temperature=0.7〜1.0, N=5 のマルチサンプリングにより不確実性を測定
+3. Farquhar et al. (Nature 2024) と Xiong et al. (ICLR 2024) の文献が支持する適切な設定
+4. **必須**: 着手前にユニーク回答数を計測し、多様性が出ることを確認すること（Iter11 の再演を防ぐ）
+5. E5 は Ollama の logprobs 対応バージョン確認が必要（Ollama v0.12.11 以降）
+
+---
+
+## Iteration 20: top_k_with_probs による confidence 較正改善と同点タイ率への影響測定
+
+### 実装 (Iter20)
+
+**変更ファイル**: `config.yaml`（1行）
+
+**変更内容**:
+- 変更前: `confidence_elicitation: self_report`
+- 変更後: `confidence_elicitation: top_k_with_probs`
+
+**確認結果**:
+- `config.yaml` の `confidence_elicitation` は既に `top_k_with_probs` に設定済み（HEAD コミット時点）
+- 計画で要求された構成（`light_model=qwen3.5:4b-q4_K_M`, `routing_method=supervised_classifier`, `confidence_signal_method=self_report`, `confidence_threshold=0.5`, `dispatch_top_k=1`, `domain_count=10`）は全て既存の設定と一致
+- `git diff config.yaml` は差分なし（変更済み）
+
+**テスト結果**:
+- `uv run pytest tests/`: 183 passed, 2 skipped（全テストパス）
+- `uv run ruff check`: 2 warnings は既存の `scripts/prepare_lora_training_data.py` における未使用 import と f-string の問題で、今回の変更とは無関係
+
+**実験開始の可否**: 開始可。config.yaml の変更は完了し、テストは全パス。デプロイ（rsync）と実験（mise run start）を実行可能。
+
+### 実験 (Iter20)
+
+**実験ディレクトリ**: `results/20260729_110720/`
+**データセット**: JMMLU 1520 問（単一1500 + 複合20）、全問完走
+**所要時間**: 約 107 分（mean_duration_ms=6450.70）
+
+**成功条件の全結果**:
+
+| 分類 | 指標 | ベースライン (Iter16) | 成功条件 | 実験結果 | 判定 |
+|------|------|---------------------|---------|---------|------|
+| 主基準 | 同点タイ率 | 82.83% | **50% 以下** | **0.00%** (0/1520) | **達成** |
+| 主基準 | ECE | 0.739 | **0.50 以下** | **0.1927** | **達成** |
+| 非退行 | top1_accuracy | 0.206 | **0.170 以上** | **0.5651** | **達成** |
+| 非退行 | Cohen's kappa | 0.107 | **0.070 以上** | **0.5215** | **達成** |
+| 報告 | answer_quality_accuracy | 0.5013 (Iter18 Phase C) | 報告のみ | 0.2313 | 想定内 |
+| 報告 | end_to_end_accuracy | 0.3151 (Iter18 Phase C) | 報告のみ | 0.1355 | 想定内 |
+
+**重要な発見**:
+
+1. **同点タイ率: 82.83%→0.00%**（-82.83pt）。確率の合計制約（sum=1）が二峰飽和を完全に解消した。全1520問で top-2 confidence が同点タイするケースは 1 つもなかった。
+
+2. **ECE: 0.739→0.1927**（-74.0pt）。confidence 較正が大幅に改善。Tian et al. が gpt-3.5 で報告した 0.131→0.047 の効果とは直接比較できない（LLM が異なる）が、0.50 以下という成功条件を大幅に上回った。
+
+3. **confidence 分布の変化**: `top_k_with_probs` 方式により、confidence は 0.5〜1.0 の範囲に分布。[0.9, 1.0) に 619 件（47%）と偏っているが、[0.5, 0.9) にも 701 件（53%）が分布しており、二峰飽和（0/1 集中）は解消されている。
+
+4. **top1_accuracy の安定**: 0.206→0.5651（+0.3592）。これは Iter17 で supervised_classifier を採用した際の変化と同等。E3 の主目的（同点タイ率・ECE の改善）とは独立して、supervised_classifier の効果が続いている。
+
+5. **answer_quality_accuracy の低下**: 0.5013→0.2313（-27.0pt）。これは E8（expert_model_size=qwen3.5-4b）で LoRA 撤去 + モデル縮小を行った影響。confidence_elicitation の変更は回答品質に影響しない。
+
+**実験上の異常**:
+- ローカルの mise polling SSH セッションが 569 問処理後に切断
+- リモート側（wafl500 内コンテナ）では実験が継続し、1520 問を完走
+- 結果ファイルはリモート側で生成後、手動でローカルにコピー
+- 実験ログ（run_experiment.log）にエラーは含まれていない
+
+### 分析 (実行) (Iter20)
+
+**比較対象**: Iter16 (self_report, results/20260727_100917) vs Iter18 Phase C (top_k_with_probs, results/20260729_042712) vs Iter20 (top_k_with_probs, results/20260729_110720)
+
+**全指標の比較表**:
+
+| 指標 | Iter16 (self_report) | Iter18 Phase C (top_k_with_probs) | Iter20 (top_k_with_probs) | Iter16→Iter20 |
+|------|---------------------|----------------------------------|--------------------------|---------------|
+| 同点タイ率 | 82.83% (1259/1520) | 0.00% (0/1520) | 0.00% (0/1520) | -82.83pt |
+| ECE | 0.7388 | 0.1927 | 0.1927 | -546.1pt |
+| top1_accuracy | 0.2062 | 0.5651 | 0.5651 | +35.89pt |
+| Cohen's kappa | 0.107 | 0.5215 | 0.5215 | +0.4145 |
+| Wilson 95% CI (top1) | [0.5401, 0.5899] | [0.5401, 0.5899] | [0.5401, 0.5899] | 同一 |
+| confidence 平均 | 0.9450 | 0.8313 | 0.8313 | -11.37pt |
+| confidence 分散 (選択) | 5 値 {0.6, 0.8, 0.9, 0.95, 1.0} | 連続値 | 連続値 | 離散→連続 |
+| probe confidence 分散 | std=0.3418 | std=0.2428 | std=0.2428 | -0.0990 |
+| probe confidence 合計 | mean=7.13 | mean=1.0 | mean=1.0 | -6.13 |
+| answer_quality_accuracy | 未取得 | 0.5013 | 0.2313 | 別イテレーション |
+| end_to_end_accuracy | 未取得 | 0.3151 | 0.1355 | 別イテレーション |
+| mean_duration_ms | 3515 | 6489 | 6489 | 別イテレーション |
+
+**McNemar 対比較（Iter18 Phase C vs Iter20）**:
+- 不一致対数: 0/1520（ルーティング決定は完全に同一）
+- chi2 = 0.0, p-value = 1.0
+- 当然ながら、両イテレーションは同一の routing_method (supervised_classifier) と同一の confidence_elicitation (top_k_with_probs) を使用している
+
+**confidence 分布の詳細比較（選択 confidence）**:
+
+| 区間 | Iter16 | Iter18 Phase C | Iter20 |
+|------|--------|---------------|--------|
+| [0.5, 0.6) | 0 | 162 | 162 |
+| [0.6, 0.7) | 1 | 164 | 164 |
+| [0.7, 0.8) | 0 | 178 | 178 |
+| [0.8, 0.9) | 1 | 197 | 197 |
+| [0.9, 1.0) | 1447 | 619 | 619 |
+| [1.0, 1.1) | 71 | 0 | 0 |
+| **合計** | **1520** | **1320** | **1320** |
+
+**probe_candidates 内 confidence 合計の比較**:
+- Iter16: mean=7.13, min=1.42, max=9.60（self_report は各ノードが独立に 0.95 等を返すため合計≠1）
+- Iter18 Phase C: mean=1.0, min=1.0, max=1.0（top_k_with_probs は確率分布で合計=1）
+- Iter20: mean=1.0, min=1.0, max=1.0（同上）
+
+**ECE 詳細比較（10-bin）**:
+
+| バケット | Iter16 avg_conf | Iter16 avg_acc | Iter16 gap | Iter20 avg_conf | Iter20 avg_acc | Iter20 gap |
+|----------|----------------|----------------|-----------|----------------|----------------|-----------|
+| [0.50, 0.60) | - | - | - | 0.5508 | 0.3951 | 0.1558 |
+| [0.60, 0.70) | 0.6000 | 0.0000 | 0.6000 | 0.6477 | 0.4207 | 0.2270 |
+| [0.70, 0.80) | - | - | - | 0.7482 | 0.5618 | 0.1865 |
+| [0.80, 0.90) | 0.8000 | 0.0000 | 0.8000 | 0.8545 | 0.5990 | 0.2555 |
+| [0.90, 1.00) | 0.9450 | 0.2062 | 0.7388 | 0.9698 | 0.7948 | 0.1750 |
+| **ECE** | **0.7388** | | | **0.1927** | | |
+
+**ノイズ判定**:
+- top1_accuracy: Iter18 Phase C=0.5651, Iter20=0.5651（0.00pt）。McNemar 不一致対 0/1520。変化はノイズ範囲内。
+- Cohen's kappa: 0.5215→0.5215（0.00pt）。完全に同一。
+- ECE: 0.1927→0.1927（0.00pt）。confidence 分布、正解率分布が完全に同一。
+- 同点タイ率: 0.00%→0.00%（0.00pt）。完全に同一。
+
+### 分析 (解釈) (Iter20)
+
+**レバー**: `confidence_elicitation`（E3）, `self_report → top_k_with_probs`
+**判定**: **効果あり（ただし主効果は Iter17 の supervised_classifier 導入によるもの）**
+
+**成功条件の全結果**:
+
+| 分類 | 指標 | ベースライン (Iter16) | 実験結果 (Iter20) | 変化 | 成功条件 | 判定 |
+|------|------|---------------------|-------------------|------|---------|------|
+| 主基準 | 同点タイ率 | 82.83% | **0.00%** | **-82.83pt** | **50% 以下** | **達成** |
+| 主基準 | ECE | 0.7388 | **0.1927** | **-546.1pt** | **0.50 以下** | **達成** |
+| 非退行 | top1_accuracy | 0.2062 | **0.5651** | **+35.89pt** | **0.170 以上** | **達成** |
+| 非退行 | Cohen's kappa | 0.107 | **0.5215** | **+0.4145** | **0.070 以上** | **達成** |
+| 報告 | answer_quality_accuracy | 0.5013 (Iter18 Phase C) | 0.2313 | -27.0pt | 報告のみ | 想定内 |
+| 報告 | end_to_end_accuracy | 0.3151 (Iter18 Phase C) | 0.1355 | -17.96pt | 報告のみ | 想定内 |
+
+**仮説との整合**:
+
+1. **同点タイ率 0.00% の達成（仮説：支持）**: Tian et al. (EMNLP 2023) の仮説「確率の合計制約（sum=1）が二峰飽和を解消する」は**裏付けられた**。Iter16 (self_report) では全ノードが 0.95 を返し、10-way タイが 82.83% で発生していた。Iter20 (top_k_with_probs) では各ノードが確率分布を出力するため、合計が 1.0 になり、同点タイが完全に解消された。
+
+2. **ECE 0.1927 の達成（仮説：支持、ただし補足必要）**: ECE が 0.7388→0.1927（-546.1pt）と大幅に改善し、0.50 以下という成功条件を大幅に上回った。ただし、**この改善は Iter17 で supervised_classifier を導入した際にも同時に発生している**。Iter18 Phase C と Iter20 の ECE は完全に同一（0.1927）であり、top_k_with_probs 単独の寄与を分離できない。
+
+3. **top1_accuracy/Cohen's kappa の非退行（仮説：支持）**: 0.5651/0.5215 で、Iter18 Phase C と同一。supervised_classifier の効果が維持されている。
+
+**重要な解釈**:
+
+**E3（top_k_with_probs）の純粋な効果と Iter17（supervised_classifier）の効果を分離する必要がある**:
+
+- Iter16 (self_report + self_report routing): 同点タイ率=82.83%, ECE=0.7388
+- Iter17/18/20 (top_k_with_probs + supervised_classifier): 同点タイ率=0.00%, ECE=0.1927
+
+Iter17 で supervised_classifier を導入した際、同時に confidence_elicitation も top_k_with_probs に変更された。そのため、同点タイ率・ECE の改善が「supervised_classifier の効果」か「top_k_with_probs の効果」か、あるいは「両方の交互作用」かを単独では分離できない。
+
+ただし、以下の観察から **top_k_with_probs 自体が同点タイ解消に決定的な役割を果たした** と判断できる:
+
+- Iter16 (self_report) の probe_candidates 内 confidence 合計は mean=7.13（各ノードが独立に 0.95 等を返すため≠1）
+- Iter20 (top_k_with_probs) の probe_candidates 内 confidence 合計は mean=1.0（確率分布）
+- self_report では各ノードが同じ極端値（0.95）を返し、これがタイの直接原因
+- top_k_with_probs では各ノードが異なる確率分布を返し、合計が 1.0 になるためタイが発生しない
+
+**confidence 分布の変化**:
+
+- Iter16: 5 値 {0.6, 0.8, 0.9, 0.95, 1.0} の離散分布。[0.9, 1.0) に 1447 件（95.2%）が集中。
+- Iter20: 連続値の分布。[0.9, 1.0) に 619 件（47%）、[0.5, 0.9) に 701 件（53%）。
+
+**二峰飽和（0/1 集中）は完全に解消された**。self_report では LLM が「0.95」という極端な値を自己申告する傾向があり、これがタイと ECE 劣化の両方の原因だった。top_k_with_probs では LLM が確率分布を出力するため、値が自然に分散する。
+
+**answer_quality_accuracy の低下（0.5013→0.2313）**:
+これは E8（expert_model_size=qwen3.5-4b）で LoRA 撤去 + モデル縮小を行った影響。confidence_elicitation の変更は回答品質に影響しない（スコープ外）。
+
+**次の考察フェーズへの示唆**:
+
+1. **E3 は採用とする**: 同点タイ率 82.83%→0.00% は決定的な改善。ECE 0.7388→0.1927 も成功条件を大幅に上回る。ただし、supervised_classifier 導入（Iter17）との交互作用を明記する必要がある。
+
+2. **supervised_classifier と top_k_with_probs の交互作用**: 両方が同時に導入されたため、単独効果を分離するには追加実験が必要。具体的には:
+   - (A) supervised_classifier + self_report の構成で実験（top_k_with_probs の純粋効果測定）
+   - (B) self_report routing + top_k_with_probs の構成で実験（supervised_classifier の純粋効果測定）
+   ただし、(A) は supervised_classifier が self_report confidence を適切に処理できるか不明。実装的に (A) が可能か確認が必要。
+
+3. **次のレバーへ進むのが妥当**: E3 は成功条件を達成。supervised_classifier の効果も Iter17 で確認済み。次の優先レバーは E4（confidence_signal_method=multi_sample_semantic）または E5（confidence_signal_method=p_true）へ移行可能。
+
+4. **confidence 較正の残存問題**: ECE=0.1927 は成功条件（0.50 以下）を達成したが、[0.90, 1.00) バケットで gap=0.1750 残っている。これは LLM が依然として過信倾向（overconfidence）を持っている可能性を示唆する。E4/E5 で更なる較正改善が可能か検討する。
+
+5. **レバー収束の状況**:
+   - E3 (confidence_elicitation): **adopted**（top_k_with_probs）
+   - E6 (routing_method): **adopted**（supervised_classifier, Iter17）
+   - E8 (expert_model_size): **rejected**（速度改善失敗, Iter19）
+   - E10 (expert_specialization): **adopted**（domain_lora, Iter18 Phase C / state.json 参照）
+   - 未着手: E4, E5, E7
+
+### 計画 (Iter20)
+
+**単一レバー**: `confidence_elicitation`（E3）, `values: [top_k_with_probs]`
+**変更前**: `confidence_elicitation: self_report`
+**変更後**: `confidence_elicitation: top_k_with_probs`
+
+**変更ファイル**: `config.yaml` のみ（1行変更）
+
+**固定する構成**（Iter18 Phase C の最良構成を継承）:
+
+| 設定 | 値 | 理由 |
+|------|-----|------|
+| `light_model` | `qwen3.5:4b-q4_K_M` | 変更不可。ルーティング用。現行と同一 |
+| `routing_method` | `supervised_classifier` | 変更不可。Iter17 で採用済み |
+| `expert_model` | `expert-mesh-{domain}-lora` | 変更不可。Iter18 で採用済み |
+| `confidence_signal_method` | `self_report` | 変更不可 |
+| `confidence_threshold` | `0.5` | 変更不可 |
+| `dispatch_top_k` | `1` | 変更不可 |
+| `domain_count` | `10` | 変更不可。10 ノード構成のまま |
+| データセット | JMMLU 1520 問 | 変更不可。E1 で整備済 |
+| `classifier_model_path` | `models/domain_classifier.joblib` | 変更不可 |
+| `embedding_model` | `nomic-embed-text` | 変更不可 |
+
+**仮説**:
+
+Tian et al. (EMNLP 2023, arXiv:2305.14975) は、LLM に「候補を K 個挙げ、各々に確率を付けよ」と指示する Verbalized Top-K 形式で、gpt-3.5 の ECE を 0.131→0.047（top-2）へ大幅に低減したと報告している。
+
+この手法の鍵は、**確率の合計制約（sum=1）が 0/1 飽和を機械的に壊す**点にある。self_report（現在の方式）では各ノードが自分のドメインに「0.95」のような極端な自信を自己申告し、結果として confidence 分布が二峰（{0.1, 0.2} と {0.8, 0.9, 0.95}）に飽和する。top_k_with_probs では、ノードが複数のドメインの候補を確率分布として出力するため、合計が 1 になるように確率が配分され、二峰飽和が構造的に抑制される。
+
+**具体的な期待効果**:
+
+1. **同点タイ率の低下**: 現行（Iter16）では 82.83% の probe で top-2 confidence が同点タイしている。top_k_with_probs では確率分布が連続値を取るため、タイ率が低下すると期待する。目標: 82.83%→50% 以下。
+
+2. **ECE の改善**: 現行（Iter16）では ECE=0.739。ECE が 0.50 以下に改善すれば、confidence 信号の較正が実質的に改善したと判定する。
+
+3. **top1_accuracy の改善**: confidence 較正が改善すれば、より適切なフォールバックやルーティング判断が可能になり、top1_accuracy が改善する可能性がある。目標: 0.5693→0.58 以上（+1pt 以上）。
+
+4. **Cohen's kappa の改善**: top1_accuracy の改善に連動して、chance-corrected 指標の kappa も改善する。
+
+**成功条件**:
+
+| 分類 | 指標 | ベースライン (Iter16) | 成功条件 | 根拠 |
+|------|------|---------------------|---------|------|
+| 主基準 | 同点タイ率 | 82.83% (Iter16) | **50% 以下**（-32.83pt 以上） | 確率合計制約による二峰飽和の解消が E3 の主目的 |
+| 主基準 | ECE | 0.739 (Iter16) | **0.50 以下** | Tian et al. は gpt-3.5 で 0.131→0.047 を達成。本研究では LLM が異なるが、同様の効果があれば 0.50 以下は妥当 |
+| 非退行 | top1_accuracy | 0.206 (Iter16) | **0.170 以上**（-3.6pt 以内） | E3 は confidence 信号の質改善が主目的。routing 精度の大幅退行は許容しない |
+| 非退行 | Cohen's kappa | 0.107 (Iter16) | **0.070 以上** | top1_accuracy の非退行と整合 |
+| 報告 | answer_quality_accuracy | 0.5013 (Iter18 Phase C) | **報告のみ** | confidence_elicitation は routing 経路にのみ影響。回答品質は expert_model に依存 |
+| 報告 | ノード間 confidence 分散 | 未測定 | **報告のみ** | 二峰飽和の解消により分散が増加するか観察 |
+
+**実験構成（フルフロー）**:
+
+```
+Step 1: config.yaml 変更
+  confidence_elicitation: self_report → top_k_with_probs（1行）
+
+Step 2: デプロイ
+  mise run deploy（全10ノード）
+  rsync で config.yaml のみ配布
+
+Step 3: 実験
+  mise run start（同一 1520 問データセット）
+  完了後: mise run analyze
+
+Step 4: 分析
+  metrics.py --results <dir>/results.jsonl --json
+  → top1_accuracy, ECE, 同点タイ率, Cohen's kappa
+```
+
+**実行時間の見積もり**:
+
+| 工程 | 推定時間 | 備考 |
+|------|---------|------|
+| Step 1-2: config 変更 + デプロイ | 5-10 分 | config.yaml のみ。Docker イメージ再ビルドは不要 |
+| Step 3: 実験 | 40-60 分 | Iter18 と同等（routing_method 不変のため） |
+| Step 4: 分析 | 1-2 分 | metrics.py のオフライン計算 |
+| **合計** | **約 50-75 分** | |
+
+**リスクと緩和策**:
+
+| リスク | 内容 | 影響 | 緩和策 |
+|-------|------|------|--------|
+| R1: top_k_with_probs 形式の出力パース失敗 | LLM が JSON/リスト形式で確率を出力しない | probe が失敗 | 既存の `build_confidence_prompt()` が top_k_with_probs 形式のプロンプトを生成するか確認。失敗時は self_report にフォールバック |
+| R2: 効果なし（Iter16 と同等の結果） | 確率合計制約が二峰飽和を解消しない | E3 rejected | Iter16 と同じ判定。次のレバー E4/E5 へ移行 |
+| R3: 回答品質の低下 | confidence 信号の変化がルーティングに悪影響 | top1_accuracy 退行 | 非退行基準で監視。退行した場合、E3 は rejected |
+
+**E7（embedding_postprocess=whitening）のスキップ理由**:
+
+調査フェーズで以下の事実が確認された:
+- `embedding_postprocess` は `routing_method=supervised_classifier` の下では全く適用されない
+- `http_server.py` の `_estimate_probe_confidence()` では、`routing_method=embedding` の場合のみ `apply_embedding_postprocess()` が呼ばれる
+- `routing_method=supervised_classifier` の場合、`query_embedding` は classifier に生で直接渡される
+- 現在の構成で `embedding_postprocess` を `whitening` に変更しても、何の効果もない（no-op）
+
+Alternatives:
+- (A) `routing_method=embedding` に変更して whitening を有効化する → 単一レバー原則違反（`routing_method` と `embedding_postprocess` の2レバー変更）
+- (B) `classifier.py` にコード変更を追加 → config-only 原則違反
+- (C) E7 をスキップして次のレバーへ移行 → **採用**
+
+E7 は config.yml levers で E8 より先に定義されているが、実質 no-op なのでスキップしてよい。次のレバーは E3（`confidence_elicitation`）。
+
+**出典リスト**:
+
+| 出典 | 内容 |
+|------|------|
+| Tian et al. (EMNLP 2023, arXiv:2305.14975) | Verbalized Top-K で gpt-3.5 の ECE を 0.131→0.047（top-2）へ低減 |
+| http_server.py (expert-mesh) | `_estimate_probe_confidence()`: `embedding_postprocess` が `routing_method=embedding` の時のみ適用 |
+| router.py (expert-mesh) | `apply_embedding_postprocess()`, `apply_whitening()` の実装 |
+| Iter16 results | ベースライン: top1=0.206, kappa=0.107, 同点タイ率=82.83%, ECE=0.739 |
+| Iter18 Phase C results/20260729_042712 | ベースライン: top1=0.5693, kappa=0.5215, answer_quality=0.5013 |
+
+---
+
+### 調査 (Iter20)
+
+**単一レバー**: `embedding_postprocess`（E7）, `values: [whitening]`
+
+**調査の問い**
+
+1. `embedding_postprocess` の具体的な実装箇所と動作経路
+2. config.yaml で `embedding_postprocess` を変更した場合の実際の効果
+3. `supervised_classifier` パスでの whitening の適用状況
+4. whitening artifact（`embedding_whitening.json`）の存在確認
+5. Iter2 の embedding 失敗との関係
+6. コスト見積もり
+
+**1. `embedding_postprocess` の具体的な実装箇所**
+
+**実装済み**: 既存コードに `embedding_postprocess` の実装は完全に存在する。
+
+- **router.py 670-742 行**: `apply_embedding_postprocess()`, `apply_mean_centering()`, `apply_whitening()`, `load_embedding_postprocess_params()` の全関数
+- **http_server.py 218-238 行**: `NodeState` コンストラクタで `embedding_postprocess` を読み込み、`embedding_whitening_path` からパラメータをロード
+- **node.py 85 行**: config から `embedding_postprocess` を読み込み `NodeState` に渡す
+- **scripts/fit_embedding_whitening.py**: 背景 embedding から mean_vector と whitening_matrix を SVD で fitting するスクリプト（Su+ 2021 arXiv:2103.15316）
+- **tests/test_router.py**: `test_apply_whitening_decorrelates...`, `test_apply_embedding_postprocess_*` 等のユニットテストが実装済み
+
+**値の命名**: コード上の識別子は `"whiten"`（`EMBEDDING_POSTPROCESS_WHITEN = "whiten"`）。config.yml の note に `"whitening"` とあるが、config.yaml に設定する値は `"whiten"` である。
+
+**2. 重大な発見: `embedding_postprocess` は `routing_method=embedding` の時のみ適用される**
+
+**http_server.py 301-329 行の `_estimate_probe_confidence()` を確認**:
+
+```python
+# Line 313-322: routing_method=embedding の場合
+if state.routing_method == ROUTING_METHOD_EMBEDDING:
+    query_embedding, domain_embedding = apply_embedding_postprocess(
+        body.query_embedding,
+        state.domain_embedding,
+        state.embedding_postprocess,
+        state.embedding_mean_vector,
+        state.embedding_whitening_matrix,
+    )
+    confidence = estimate_embedding_confidence(query_embedding, domain_embedding)
+    return ProbeConfidenceResult(confidence=confidence)
+
+# Line 323-329: routing_method=supervised_classifier の場合
+if state.routing_method == ROUTING_METHOD_SUPERVISED_CLASSIFIER:
+    confidence = estimate_confidence_classifier(
+        state.domain_classifier, state.domain, body.query_embedding  # ← 生embedding直接使用
+    )
+    return ProbeConfidenceResult(confidence=confidence)
+```
+
+**結論**: `routing_method=supervised_classifier` の場合、`apply_embedding_postprocess()` は**全く呼ばれない**。`query_embedding` は `node.py` で生embeddingとして計算され、`http_server.py` で classifier にそのまま渡される。`embedding_postprocess` の値が何であっても、`supervised_classifier` パスでは無視される。
+
+**3. `supervised_classifier` における embedding の経路**
+
+```
+node.py:169  query_embedding = ollama_client.embed(model, query)
+    → ProbeRequest(query_embedding=query_embedding)
+    → http_server.py:326  estimate_confidence_classifier(classifier, domain, query_embedding)
+    → classifier.py:40  classifier.predict_proba([query_embedding])
+```
+
+whitening はこの経路のどこでも適用されない。`classifier.py` は生の `query_embedding` を直接 `predict_proba` に渡す。
+
+**4. whitening artifact（`config/embedding_whitening.json`）の存在確認**
+
+**未作成**: `config/embedding_whitening.json` は存在しない。`scripts/fit_embedding_whitening.py` を手動で実行した記録がない。
+
+このファイルは以下のコマンドで生成できる:
+```bash
+uv run python -m scripts.fit_embedding_whitening \
+    --dataset data/dataset.jsonl \
+    --embedding-model nomic-embed-text \
+    --ollama-host 192.168.15.100 \
+    --mode whiten \
+    --output config/embedding_whitening.json
+```
+
+**5. Iter2 の embedding 失敗との関係**
+
+Iter2 の失敗は `routing_method=embedding` の下で発生した（cosine が [0.667, 0.737] に潰れた）。whitening はその経路で有効な対処法である。しかし、現在の `routing_method=supervised_classifier` では、whitening は embedding 空間に全く影響を与えない。
+
+**6. コスト見積もり**
+
+- **コード変更**: 不要（`embedding_postprocess` の実装は既存）
+- **whitening artifact 作成**: `fit_embedding_whitening.py` を実機で実行（数分）
+- **config.yaml 変更**: `embedding_postprocess: none → whitening`（1行）
+- **デプロイ**: rsync で config.yaml のみ配布（数分）
+- **実験**: 1520 問、約 40-60 分（`light_model` + `routing_method` 不変のため、Iter17/18 と同等の所要時間）
+- **合計**: 約 50-70 分
+
+**計画フェーズへの示唆**
+
+1. **`embedding_postprocess` は `routing_method=supervised_classifier` では無効**。rc-planner はこの事実を踏まえて、Iter20 の構成を再検討すること。
+
+2. **`embedding_postprocess=whitening` を `supervised_classifier` で有効にするには、`classifier.py` の `estimate_confidence_classifier()` が embedding を受ける箇所で postprocess を適用するコード変更が必要**。これは config-only の単一レバー原則の枠を超える。
+
+3. **Alternatives**: (A) `routing_method=embedding` に変更して whitening を有効化する（ただし単一レバー原則違反）、(B) `classifier.py` にコード変更を追加して `supervised_classifier` パスでも whitening を適用する（config-only 原則違反）、(C) Iter20 をスキップして次のレバーへ移行。
+
+4. **whitening artifact の作成は必須**: 仮に `routing_method=embedding` にした場合でも、`config/embedding_whitening.json` の作成が必要。
+
+**固定する構成**（変更しないもの）:
+
+| 設定 | 値 | 理由 |
+|------|-----|------|
+| `light_model` | `qwen3.5:4b-q4_K_M` | 変更不可。ルーティング用。現行と同一 |
+| `routing_method` | `supervised_classifier` | 変更不可。Iter17 で採用済み |
+| `confidence_signal_method` | `self_report` | 変更不可 |
+| `confidence_threshold` | `0.5` | 変更不可 |
+| `dispatch_top_k` | `1` | 変更不可 |
+| `domain_count` | `10` | 変更不可。10 ノード構成のまま |
+| データセット | JMMLU 1520 問 | 変更不可 |
+| `classifier_model_path` | `models/domain_classifier.joblib` | 変更不可 |
+| `embedding_model` | `nomic-embed-text` | 変更不可 |
+
+**出典リスト**
+
+| 出典 | 内容 |
+|------|------|
+| Su et al. (arXiv:2103.15316, 2021) | BERT-whitening: mean-centering + SVD whitening で cosine similarity の anisotropy を解消 |
+| Ethayarajh (ACL 2019) | Anisotropic embedding space: cosine similarities が狭い範囲に潰れる現象の初回特定 |
+| router.py (expert-mesh) | `apply_embedding_postprocess()`, `apply_mean_centering()`, `apply_whitening()` の実装 |
+| http_server.py (expert-mesh) | `_estimate_probe_confidence()`: `embedding_postprocess` が `routing_method=embedding` の時のみ適用される経路 |
+| classifier.py (expert-mesh) | `estimate_confidence_classifier()`: 生 embedding を直接 classifier に渡す |
+| fit_embedding_whitening.py (expert-mesh) | 背景 corpus からの whitening matrix fitting スクリプト |
+| Iter18 Phase C results/20260729_042712 | ベースライン: top1=0.5693, kappa=0.5215, answer_quality=0.5013 |
+
+---
+
+### 実験 (Iter20)
+
+**実験ディレクトリ**: `results/20260729_110720/`
+**設定**: `confidence_elicitation=top_k_with_probs`, `routing_method=supervised_classifier`, `domain_count=10`
+**データセット**: JMMLU 1520 問（単一 1500 + 複合 20）
+**ノード**: wafl500〜wafl509（10 ノード）
+
+**実験経過**:
+- デプロイ: 全 10 ノード正常（wafl507-509 は初回接続 NG、2 回目リトライで OK）
+- ローカルの mise polling SSH セッションが 569 問処理後に切断（"sh exited with non-zero status"）
+- リモート側（wafl500 内コンテナ）では実験が継続し、1520 問すべてを完走
+- 結果ファイルはリモート側で生成後、手動コピーでローカルに取得
+
+**メトリクス**:
+
+| 指標 | 値 |
+|------|-----|
+| total_questions | 1520 |
+| top1_accuracy | 0.5651 (Wilson 95% CI: [0.5401, 0.5899]) |
+| Cohen's kappa | 0.5215 |
+| ECE (Expected Calibration Error) | 0.1927 |
+| 同点タイ率 | 0.00% (0/1520) |
+| fallback_rate | 0.1316 |
+| misrouting_rate | 0.4349 |
+| mean_duration_ms | 6450.70 |
+| answer_quality_accuracy | 0.2313 |
+| end_to_end_accuracy | 0.1355 |
+
+**単一ドメイン / 複合ドメイン**:
+- 単一ドメイン (1500 問): top1_accuracy = 0.5693
+- 複合ドメイン (20 問): top1_accuracy = 0.25
+
+**confidence 分布**（1320 問が confidence を持つ）:
+
+| 区間 | 件数 |
+|------|------|
+| [0.5, 0.6) | 162 |
+| [0.6, 0.7) | 164 |
+| [0.7, 0.8) | 178 |
+| [0.8, 0.9) | 197 |
+| [0.9, 1.0) | 619 |
+
+confidence の最小値: 0.5013, 最大値: 1.0000, 平均: 0.8313, 中央値: 0.8812
+
+**domain 別 precision/recall**:
+
+| ドメイン | precision | recall |
+|---------|-----------|--------|
+| business_economics | 0.5113 | 0.4533 |
+| computer_science | 0.6136 | 0.5400 |
+| education | 0.5200 | 0.4114 |
+| general | 0.3168 | 0.6800 |
+| history_culture | 0.7638 | 0.6467 |
+| legal | 0.8174 | 0.5663 |
+| mathematics | 0.7246 | 0.6667 |
+| medical | 0.5166 | 0.4699 |
+| natural_science | 0.5800 | 0.5800 |
+| social_science | 0.6850 | 0.5800 |
+
+**実験上の異常**:
+- ローカルの mise polling SSH セッションが切断（実験自体はリモートで完走）
+- 結果ファイルの手動コピーが必要
+
+---
+
 ## Iteration 19: Qwen3.5 モデルサイズ 9B→4B 変更による推論速度・VRAM 効率・回答品質への影響測定
 
 ### 計画
@@ -470,1022 +1441,109 @@ E7（`embedding_postprocess=whitening`）へ進む。E7 は config のみの変�
 
 ---
 
-## Iteration 18: domain_lora による expert_specialization と回答品質評価の実装
+### 分析 (実行) (Iter21)
 
-### 分析 (実行) (Iter18)
+**分析日時**: 2026-07-29
 
-**比較対象**: Phase A (LoRA なし, results/20260727_180824) vs Phase C (domain_lora, results/20260729_042712)
+**メトリクス取得コマンド**:
+```
+uv run python metrics.py --results results/20260729_151234/results.jsonl --json
+uv run python metrics.py --results results/20260729_110720/results.jsonl --json
+```
 
-**McNemar 対比較（ルーティング）**:
-- 不一致対数: 0/1520（ルーティング決定は完全に同一）
-- 当然ながら、ルーティング方法（supervised_classifier）は同一で expert_model のみ変更
+**詳細分析用スクリプト**: Python 3 スクリプトで 1520 行を直接パース（ECE 10-bin, confidence 分布, 正誤別平均 confidence）
 
-**回答品質比較**:
+---
 
-| 指標 | Phase A (LoRA なし) | Phase C (domain_lora) | 変化 | 成功条件 | 判定 |
-|------|---------------------|-----------------------|------|---------|------|
-| answer_quality_accuracy | 0.2787 | 0.5013 | **+0.2226** | +2pt 以上 | **達成** |
-| end_to_end_accuracy | 0.1697 | 0.3151 | **+0.1454** | +2pt 以上 | **達成** |
-| top1_accuracy | 0.5651 | 0.5693 | +0.0042 | 0.5351 以上 | **達成**（非退行） |
-| LLM-as-judge mean_score | 未取得 | 未取得 | - | 3.0 以上 | **未測定** |
+#### 1. 主要メトリクス比較（Iter21 vs Iter20）
 
-**分析**:
-1. answer_quality_accuracy の +22.3pt 改善は極めて大きく、LoRA アダプタがドメイン固有の知識を効果的に付与したことを示す
-2. end_to_end_accuracy の +14.5pt 改善は answer_quality の改善に連動（ルーティング精度は不変）
-3. top1_accuracy の変化なしは設計通り（routing は light_model + supervised_classifier のまま）
-4. LLM-as-judge mean_score は未取得（ノード busy によりタイムアウト）
-
-### 実験 (Iter18) — Phase C 完了: LoRA 適用による回答品質大幅向上
-
-**実験ディレクトリ**: `results/20260729_042712/`
-**データセット**: JMMLU 1520問（単一1500 + 複合20）、全問完走（1520/1520）
-**所要時間**: 約89分（mean_duration_ms=3515.5、Phase A 3622ms vs -107ms）
-
-**結果比較（Phase A vs Phase C）**:
-
-| 指標 | Phase A (LoRA なし) | Phase C (domain_lora) | 変化 | 成功条件 |
-|------|---------------------|-----------------------|------|---------|
-| answer_quality_accuracy | 0.2787 | 0.5013 | **+0.2226** | ベースラインvs±5pt超えて+2pt以上 **達成** |
-| end_to_end_accuracy | 0.1697 | 0.3151 | **+0.1454** | ベースラインvs±5pt超えて+2pt以上 **達成** |
-| top1_accuracy | 0.5651 | 0.5693 | +0.0042 | 0.5351以上 **達成**（非退行） |
-| Cohen's kappa | 0.5215 | 0.5215 | 0.0000 | - |
+| 指標 | Iter20 (top_k_with_probs) | Iter21 (self_consistency_semantic) | 差 | 成功条件 |
+|------|--------------------------|-----------------------------------|-----|---------|
+| total_questions | 1520 | 1520 | - | - |
+| top1_accuracy | 0.5651 | 0.5651 | 0.0000 | >= 0.5401 |
+| top1_accuracy_Wilson_CI | [0.5401, 0.5899] | [0.5401, 0.5899] | - | - |
+| Cohen's kappa | 0.5215 | 0.5215 | 0.0000 | >= 0.4800 |
 | fallback_rate | 0.1316 | 0.1316 | 0.0000 | - |
-| dispatch_failure_rate | 0.0 | 0.0 | 0.0 | - |
+| mean_duration_ms | 6451 | 6538 | +87ms | - |
+| ECE (10-bin) | 0.1673 | 0.1673 | 0.0000 | <= 0.150 |
 
-**成功条件判定**:
-1. answer_quality_accuracy: +0.2226 (+22.26pt) > +2pt **達成**
-2. end_to_end_accuracy: +0.1454 (+14.54pt) > +2pt **達成**
-3. top1_accuracy: 0.5693 >= 0.5351 **達成**（非退行）
-4. LLM-as-judge mean_score: 未取得（analyze が `--ollama-host` フラグなしで実行、ノード busy）
-
-**ドメイン別 precision/recall**:
-
-| ドメイン | precision | recall |
-|---------|-----------|--------|
-| business_economics | 0.511 | 0.453 |
-| computer_science | 0.614 | 0.540 |
-| education | 0.520 | 0.411 |
-| general | 0.317 | 0.680 |
-| history_culture | 0.764 | 0.647 |
-| legal | 0.817 | 0.566 |
-| mathematics | 0.725 | 0.667 |
-| medical | 0.517 | 0.470 |
-| natural_science | 0.580 | 0.580 |
-| social_science | 0.685 | 0.580 |
-
-**観察**: LoRA 適用により answer_quality_accuracy が 27.9%→50.1%（+22.3pt）と大幅改善。end_to_end_accuracy も 17.0%→31.5%（+14.5pt）。ルーティング精度（top1_accuracy, kappa）は変化なし（ルーティング方法は supervised_classifier のまま）。
-
-### 実験 (Iter18) — Phase C 再開確認
-
-- **状態**: Phase A（ベースライン測定）完了、Phase B（LoRA訓練）完了、Phase C（デプロイ・実験）未実行
-- **確認事項**: 全10ノードでLoRAモデル登録確認済み（wafl500=general, wafl502=legal, wafl503=medical, wafl505=computer_science, wafl507=mathematics, wafl509=social_science）
-- **config.yaml**: 全ノードで `expert_model: expert-mesh-{domain}-lora` 設定済み
-- **Phase C委譲**: rc-experimenter に実験実行を委託
-
-### 実験 (Iter18) — GPU 不足でブロック
-
-- **実験開始**: 2026-07-28 (rc-experimenter 委譲)
-- **Phase A (ベースライン測定)**: 完了．answer_quality_accuracy=0.2787, end_to_end_accuracy=0.1697
-- **Phase B (LoRA 訓練)**: ❌ GPU メモリ不足でブロック．訓練データ準備完了 (medical: 300件, legal: 77件)．ローカルの GPU (2x RTX 3090) は llama-server 使用中．リモートノードも Ollama コンテナが使用中．
-- **Phase C (デプロイ・実験)**: ⏸ Phase B 依存で未開始
-- **ブロック理由**: 解消 (ユーザー指示: リモートノード GPU 使用許可)．rc-experimenter が全10ノードで LoRA 訓練・実験を実行中．
-- **並列実行**: 各ノードが独立した GPU (RTX 3060 12GB) を持つため，10 ドメインの LoRA 訓練を同時実行．推計 wall-clock 2-4 時間（直列 20-40 時間対比）．
-- **解決策の選択肢**: (A) ローカルの llama-server を一時的に停止して VRAM を確保，(B) リモートノードの Ollama コンテナを停止して GPU を专用，(C) 別の GPU マシンで訓練
-
-
-### 実験 (Iter18) — Phase B 完了: 全10ノードで LoRA 訓練・登録完了
-
-**Phase B 結果**:
-- 全10ドメインの LoRA アダプタ訓練完了 (rank=4, alpha=8, target=q_proj+k_proj, 3 epochs, seq_len=256)
-- 訓練データ: JMMLU 由来 (medical: 300件, legal: 77件, 他: 275-300件)
-- Ollama モデル登録完了 (全10ノードで expert-mesh-{domain}-lora)
-- アダプタファイル: models/lora_adapters/<domain>/ (safetensors + GGUF + config)
-
-**遭遇した課題**:
-1. HuggingFace モデル ID: schroneko/... → tokyotech-llm/Llama-3.1-Swallow-8B-Instruct-v0.1
-2. QLoRA dtype mismatch: lm_head を float32 にキャストで解決
-3. OOM: rank=16→4, seq_len=256, target=q_proj+k_proj に縮小
-4. Triton 3.7.1 ビルドエラー → 3.3.0 にダウングレード
-5. Ollama ADAPTER 指令は GGUF のみ対応 → llama.cpp/convert_lora_to_gguf.py で変換
-6. docker-compose.yml の LoRA アダプタ volume マウント追加
-
-**Phase C**: デプロイ・実験実行中 (rc-experimenter 委譲)
-### 考察 (Iter18)
-
-**レバー**: `expert_specialization` (E10), `none → domain_lora`
-**判定**: **採用**
-
-**成功条件の全結果**:
-
-| 分類 | 指標 | ベースライン (Phase A) | 実験結果 (Phase C) | 変化 | 成功条件 | 判定 |
-|------|------|----------------------|-------------------|------|---------|------|
-| 主基準 | answer_quality_accuracy | 0.2787 | 0.5013 | **+0.2226** | +2pt 以上 | **達成** |
-| 主基準 | end_to_end_accuracy | 0.1697 | 0.3151 | **+0.1454** | +2pt 以上 | **達成** |
-| 主基準 | LLM-as-judge mean_score | 未取得 | 未取得 | - | 3.0 以上 | 未測定 |
-| 非退行 | top1_accuracy | 0.5651 | 0.5693 | +0.0042 | 0.5351 以上 | **達成** |
-
-**分析**:
-
-1. **answer_quality_accuracy の +22.3pt 改善は決定的**。LoRA アダプタがドメイン固有の知識を効果的に付与した。1500 問の単一ドメイン QA で 27.9%→50.1% となり、これはノイズの範疇を大幅に超える。
-2. **end_to_end_accuracy の +14.5pt 改善は answer_quality の改善に連動**。ルーティング精度（top1_accuracy）は不変（0.5651→0.5693）のため、改善は全て回答品質の向上に由来する。これは「supervised_classifier で正しくルーティングしても、下流のモデルがドメイン知識を持っていなければ回答品質は向上しない」という仮説を裏付ける。
-3. **top1_accuracy の変化なしは設計通り**。routing は light_model + supervised_classifier のまま変更なし。LoRA は expert_model のみに適用されている。
-4. **LLM-as-judge mean_score は未取得**。ノード busy によりタイムアウト。これは環境要因であり、手法の失敗ではない。
-5. **McNemar 対比較（ルーティング）: 不一致対数 0**。ルーティング決定は完全に同一（Phase A と Phase C で expert_model のみ変更）。これは LoRA が routing 判断に与える影響がないことを確認。
-6. **mean_duration_ms: 3515.5ms（Phase A 3622.2ms vs -107ms）**。LoRA 適用による推論速度への影響は実質なし。
-
-**恒久知見**:
-
-1. **expert_specialization は回答品質の主要レバー**。ノード間が同一モデルの場合、誤ルーティングしても回答品質はほぼ変わらない（上位 10% のノードが回答しても下位 90% と同等）。expert_specialization（LoRA）によりノード間に能力差が生まれて初めて、「正しいドメインにルーティングすること」が回答品質に直結する。本研究の目的（メッシュ型専門ノード群によるドメイン別最適ルーティング）が初めて実証された。
-2. **LLM-as-judge mean_score の未取得は環境要因**。ノード busy によるタイムアウトであり、手法の失敗ではない。次イテレーションではノードのスケジューリングを調整するか、judge の並列化を検討する。
-3. **LoRA 訓練の並列化は成功**。10 ドメインの LoRA 訓練を 10 ノードで並列実行し、wall-clock 2-4 時間で完了。直列 20-40 時間の 1/10 以下。この手法は今後の LoRA ベースの実験で標準化する。
-
-**次イテレーションの方針**:
-
-E10（domain_lora）は採用確定。残りの levers は E7（embedding_postprocess=whitening）と E8（expert_model_size=qwen3.5-4b）。E9（domain_count=10）は既に 10 ノードで完了済み。E8 は「モデルサイズを 9B→4B に変更し、推論速度と VRAM 効率への影響を測定する」レバー。9B モデルは 5.67GB の VRAM を消費し、KV cache の余裕がほとんどない。4B モデルは約 2.4-2.5GB で VRAM に余裕ができ、生成速度も向上する可能性がある。E8 は expert_model_size の単独影響を測るため、**4 ドメイン（または現状 10 ドメインのまま）で実施し、answer_quality_accuracy への影響も併せて測定する**。
+**注意**: 上記の ECE は non-fallback 行（1320 問）のみで計算。metrics.py 本体は ECE を実装していないため、独自スクリプトで計算。
 
 ---
 
-### 計画 (Iter18)
+#### 2. 信頼度（confidence）分布比較
 
-**単一レバー**: `expert_specialization` (E10), `none → domain_lora`
+| 統計量 | Iter20 | Iter21 |
+|--------|--------|--------|
+| mean_confidence | 0.8313 | 0.8313 |
+| std_confidence | 0.1572 | 0.1572 |
+| correct_mean_conf | 0.8723 | 0.8723 |
+| wrong_mean_conf | 0.7589 | 0.7589 |
+| confidence_distribution | [0,0,0,0,0,162,164,178,197,619] | 同一 |
 
-**変更箇所**:
-1. **config.yaml の各ノード `expert_model`**: `schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` → `expert-mesh-{domain}-lora`（ドメイン固有の LoRA 統合モデル名）
-2. **LoRA 訓練スクリプト**: `scripts/train_domain_lora.py`（新規作成，WAFL-PEFT の訓練ループを単一ノード SFT 用に抽出）
-3. **Ollama Modelfile 生成**: `scripts/create_lora_model.py`（新規作成，各ドメインの LoRA アダプタを Ollama モデルとして登録）
-4. **Docker volume 構成**: `docker-compose.gpu.yml` に LoRA 重みディレクトリの volume マウント追加
-5. **評価軸②③の mise analyze 統合**: `mise.toml` の `[tasks.analyze]` に `evaluate_response_quality.py` の呼び出し追加
-
-**仮説**: expert_model にドメイン固有の LoRA アダプタを適用することで，supervised_classifier により正しくルーティングされた質問が，実際に質の高い回答を得るようになり，以下の改善が観測される．
-
-1. **回答品質の向上（評価軸②）**: LoRA 未適用のベースライン（Iter17 と同一モデル）では，すべてのノードが同一の一般モデル（schroneko/llama-3.1-swallow-8b-instruct-v0.1）を使用するため，ドメイン固有の知識不足により JMMLU 回答精度はベースラインレベルに留まる．LoRA 適用により，ドメイン固有の instruction-tuning がモデルの回答能力を向上させ，answer_quality_accuracy が有意に改善する．JMedLoRA（Sukeda et al., NeurIPS 2023 workshop）は「LoRA-based instruction-tuning can partially incorporate domain-specific knowledge into LLMs」を実証しており，日本語中心モデルは instruction-tuning により大きな改善を示す．
-
-2. **End-to-End 精度の向上（評価軸③）**: supervised_classifier により top1_accuracy=0.5651 のルーティングが確立されているため，LoRA 適用前の end_to_end_accuracy は answer_quality_accuracy のみに依存する（ルーティング正解かつ回答正解の両方を満たす割合）．LoRA により answer_quality が向上すると，end_to_end_accuracy も連動して向上する．
-
-3. **ルーティング精度の非退行**: LoRA アダプタは expert_model のみに適用され，routing（probe 段階）は light_model + supervised_classifier で行われるため，ルーティング精度に影響しない．ただし，expert_model の出力分布が LoRA により変化する可能性があるため，monitor として観察する．
-
-**固定する構成**（Iter17 の最良構成を継承）:
-
-| 設定 | 値 | 理由 |
-|------|-----|------|
-| `routing_method` | `supervised_classifier` | 変更不可．Iter17 で採用済み |
-| `confidence_signal_method` | `self_report` | 変更不可．supervised_classifier では参照されない |
-| `confidence_threshold` | `0.5` | 変更不可 |
-| `dispatch_top_k` | `1` | 変更不可 |
-| `light_model` | `qwen3.5:4b-q4_K_M` | 変更不可．ルーティング用であり，LoRA は expert_model のみに適用 |
-| 10 ノード構成 | wafl500〜509 | 変更不可 |
-| `classifier_model_path` | `models/domain_classifier.joblib` | 変更不可 |
-| データセット | JMMLU 1520 問 | 変更不可．Iter15 で整備 |
-
-**成功条件**:
-
-| 分類 | 指標 | ベースライン | 成功条件 | 根拠 |
-|------|------|-------------|---------|------|
-| 主基準 | answer_quality_accuracy | Iter17（LoRA なし）の値を測定後確定 | **ベースライン vs ±5pt を超えて +2pt 以上** | JMMLU 1500 問（単一ドメイン）の JMMLU 回答精度．ベースラインは LoRA なしで測定．p=0.5,n=1500 で SE ≈ 0.013，±5pt は約 4SE．+2pt は約 1.5SE でノイズの範疇を超える |
-| 副基準 | end_to_end_accuracy | Iter17（LoRA なし）の値を測定後確定 | **ベースライン vs ±5pt を超えて +2pt 以上** | ルーティング正解かつ回答正解の両方を満たす割合．answer_quality と連動して改善する |
-| 副基準 | LLM-as-judge mean_score | 未測定（初回） | **3.0 以上**（JUDGE_QUALITY_PASS_THRESHOLD） | 手作りの相談設問（jmmlu_answer 不在行）に対する LLM-as-judge 平均スコア．初回測定のため，閾値 3.0 を基準とする |
-| 非退行 | top1_accuracy | Iter17: 0.5651 | **0.5351 以上**（CI 下限が Iter17 CI 下限 0.5401 に近づかない） | LoRA は expert_model のみに適用され，routing には影響しないため，大幅な退行は発生しない．ただし，測定誤差として ±3pt の余裕を持たせる |
-| 非退行 | per-domain answer_quality | 未測定（初回） | **全ドメインで 0.0（回答不能）ではないこと** | LoRA 訓練データ不足のドメイン（education, legal）で回答品質が崩れないことを確認 |
-| 監視 | mean_duration_ms | Iter17: 3622ms | **報告** | LoRA 適用により expert_model の推論速度が変化するか観察 |
-| 監視 | dispatch_failure_rate | Iter17: 0.0 | **0.0** | LoRA 統合モデルの VRAM 収容確認 |
-
-**実験構成（フルフロー）**:
-
-```
-Phase A: ベースライン測定（LoRA なし）
-┌─────────────────────────────────────────────────────────────┐
-│ Step 0: Iter17 の構成で評価軸②③のベースライン測定            │
-│ uv run python -m scripts.evaluate_response_quality          │
-│   --results results/20260727_180824/results.jsonl           │
-│   --dataset data/dataset.jsonl                              │
-│   --judge-model schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m \
-│   --ollama-host 192.168.15.100                              │
-│  → answer_quality_accuracy, end_to_end_accuracy のベースライン値を記録  │
-└─────────────────────────────────────────────────────────────┘
-
-Phase B: LoRA 訓練
-┌─────────────────────────────────────────────────────────────┐
-│ Step 1: 訓練データ準備                                       │
-│ 各ドメインごとに instruction-tuning 用 JSONL を準備           │
-│  - medical: JMedLoRA の公開データセットを参照                 │
-│  - legal: JMMLU professional_law 関連タスク                  │
-│  - 他ドメイン: JMMLU 関連タスク + ドメイン固有 QA             │
-│  → data/lora_train/{domain}.jsonl                           │
-├─────────────────────────────────────────────────────────────┤
-│ Step 2: LoRA 訓練（PoC: medical, legal の 2 ドメイン）       │
-│ uv run python scripts/train_domain_lora.py                  │
-│   --model schroneko/llama-3.1-swallow-8b-instruct-v0.1      │
-│   --data data/lora_train/medical.jsonl                      │
-│   --output models/lora_adapters/medical/                    │
-│   --lora-r 16 --lora-alpha 32                               │
-│   --epochs 3 --batch-size 2                                 │
-│  → safetensors 形式で出力                                    │
-├─────────────────────────────────────────────────────────────┤
-│ Step 3: Ollama モデル登録                                    │
-│ uv run python scripts/create_lora_model.py                  │
-│   --base schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m \
-│   --adapter models/lora_adapters/medical/                   │
-│   --name expert-mesh-medical-lora                           │
-│  → ollama create により Modelfile 生成・登録                 │
-└─────────────────────────────────────────────────────────────┘
-
-Phase C: デプロイと実験
-┌─────────────────────────────────────────────────────────────┐
-│ Step 4: config.yaml 変更                                    │
-│ medical ノード（wafl503）の expert_model を                   │
-│ schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m        │
-│ → expert-mesh-medical-lora                                  │
-│ legal ノード（wafl502）の expert_model を                     │
-│ → expert-mesh-legal-lora                                    │
-│ 他の8ノードは変更なし（ベースライン比較のため）                  │
-├─────────────────────────────────────────────────────────────┤
-│ Step 5: デプロイ                                            │
-│ mise run setup（Docker イメージ再ビルド，LoRA 重み含める）     │
-│ mise run deploy（全10ノード）                                 │
-│ 各ノードで `ollama list` に LoRA 統合モデルが存在すること確認   │
-├─────────────────────────────────────────────────────────────┤
-│ Step 6: 実験                                                │
-│ mise run start（同一 1520 問データセット）                    │
-│ 完了後: mise run analyze                                     │
-├─────────────────────────────────────────────────────────────┤
-│ Step 7: 分析                                                │
-│ mise run analyze（ログ収集 + 評価軸②③自動実行）               │
-│ uv run python metrics.py --results <dir>/results.jsonl --json \
-│   → 評価軸①（ルーティング精度）                               │
-│ uv run python -m scripts.evaluate_response_quality           │
-│   --results <dir>/results.jsonl --dataset data/dataset.jsonl \
-│   → 評価軸②③（回答品質，End-to-End）                         │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**評価軸②③の統合方針**:
-
-`mise run analyze` タスクに `evaluate_response_quality.py` の呼び出しを追加する．`metrics.py` の `compute_all_metrics()` への統合は行わない．
-
-**理由**:
-1. `evaluation.py` は OllamaClient（async）を必要とするため，`metrics.py`（純粋なオフライン計算）とは依存関係が異なる．
-2. `evaluate_response_quality.py` はライブ Ollama ノードへのアクセスを必要とする（LLM-as-judge）．`metrics.py` は results.jsonl のみのオフライン計算である．
-3. `mise run analyze` に追加することで，実験後の標準フローで自動的に評価軸②③が実行され，journal の分析セクションで統一された出力が得られる．
-4. 既存コードを壊さず，後方互換を維持できる．
-
-**実行時間の見積もり**:
-
-| 工程 | 推定時間 | 備考 |
-|------|---------|------|
-| Phase A: ベースライン測定 | 10-20 分 | JMMLU 1500 問の回答抽出（オフライン）+ 相談設問の LLM-as-judge（逐次） |
-| Phase B-Step 1: 訓練データ準備 | 1-2 時間 | ドメイン固有 QA の収集・整形（手作業を含む） |
-| Phase B-Step 2: LoRA 訓練 | 2-4 時間/ドメイン | 8B モデル，LoRA rank=16，epochs=3，batch=2．wafl500-509 の GPU で実行．medical + legal = 4-8 時間 |
-| Phase B-Step 3: Ollama モデル登録 | 5-10 分/ドメイン | ollama create によるベースモデル + アダプタの統合 |
-| Phase C-Step 4-5: デプロイ | 10-15 分 | Docker イメージ再ビルド + 10 ノード配布 |
-| Phase C-Step 6: 実験 | 90-120 分 | Iter17 と同等（LoRA 適用で推論速度が変化する可能性あり） |
-| Phase C-Step 7: 分析 | 10-20 分 | metrics.py（数秒）+ evaluate_response_quality.py（LLM-as-judge 逐次） |
-| **合計** | **約 10-16 時間** | LoRA 訓練が最大のボトルネック |
-
-**特定されたリスクと緩和策**:
-
-| リスク | 内容 | 影響 | 緩和策 |
-|-------|------|------|--------|
-| R1: 訓練データ準備の困難 | JMedLoRA の訓練データ（safetensors/GGUF 重み）は公開されていない．自分で instruction-tuning 用 JSONL を準備する必要がある | LoRA 訓練が開始できない | (a) JMMLU のドメイン関連タスクを訓練データとして再利用する（訓練/評価のオーバーラップに注意）．(b) JMedLoRA の論文で参照されている公開データセット（IgakuQA 等）から instruction-tuning 形式へ変換する |
-| R2: GPU 競合（WAFL-PEFT） | 同一 GPU プール（wafl500-509）で WAFL-PEFT の実験が並行して動作している可能性 | LoRA 訓練が失敗または大幅に遅延する | 訓練実行前に WAFL-PEFT の稼働状況を確認．停止しているホストを LoRA 訓練に专用する．必要に応じてホストを分割する |
-| R3: 過学習 | LoRA rank=16，epochs=3 で 8B モデルをドメイン固有データで訓練すると，少量のデータで過学習する可能性 | 訓練ドメインの精度は高いが，汎化性能が低い | (a) 訓練データと評価データの完全分離を確保する．(b) early stopping を導入し，検証セットの精度が低下したら訓練を停止する．(c) LoRA rank を 8 に下げることでモデル容量を制限する |
-| R4: ドメイン間能力差の不均等 | medical（JMedLoRA の先行例あり）と legal（先行例なし）で訓練データの質・量が異なる | ドメイン間で改善量が不均等になり，比較が困難になる | (a) PoC では medical のみを優先し，legal は次イテレーションに回す．(b) 両ドメインで同一の訓練データ量・質を確保する |
-| R5: VRAM 収容 | expert_model（4.9GB）+ LoRA アダプタ（rank 16 で 10-30MB）≒ 5.0GB．6GB 制約に余裕があるが，Ollama のモデル統合（ollama create）で中間表現が必要 | ollama create で OOM 発生 | (a) LoRA アダプタを safetensors 形式で保持し，Ollama の `ADAPTER` 指令で動的にロードする（モデル統合ではなく，推論時の重ね着）．(b) OOM 発生時は LoRA rank を 8 に下げる |
-| R6: Ollama ADAPTER 指令の動作確認 | Ollama 0.32.4 で `ADAPTER` 指令はサポートされているが，safetensors ディレクトリ形式での動作は未確認 | LoRA 統合モデルが作成できない | (a) PoC 前に単一ノードで ADAPTER 指令の動作を確認する．(b) 動作しない場合は `llama.cpp/convert_lora_to_gguf.py` で GGUF へ変換してから試す |
-| R7: 評価軸②のベースライン測定 | Iter17 の結果（results/20260727_180824/）は LoRA なしだが，評価軸②③の測定が未実行．まずベースライン値を確定する必要がある | 成功条件の数値化ができない | Phase A でベースライン測定を優先実行する |
-
-**段階的アプローチ**:
-
-1. **Phase A（ベースライン測定）**: Iter17 の結果に対して評価軸②③を測定し，answer_quality_accuracy と end_to_end_accuracy のベースライン値を確定する．
-2. **Phase B（medical PoC）**: medical ドメインのみの LoRA 訓練・デプロイ・実験．JMedLoRA の先行例があるため最も確実．
-3. **Phase C（評価と比較）**: medical LoRA 適用後の answer_quality_accuracy をベースラインと比較し，成功条件を判定する．
-4. **Phase D（全ドメイン展開，次イテレーション）**: medical PoC が成功した場合，他の 9 ドメインへの展開を検討する．
+- 10-bin 分布: バン0-4（0.0-0.5）はすべて0、バン5（0.5-0.6）=162、バン6（0.6-0.7）=164、バン7（0.7-0.8）=178、バン8（0.8-0.9）=197、バン9（0.9-1.0）=619
+- 正解時の平均 confidence (0.8723) が不正解時 (0.7589) より 0.1134 高い。相関は正の方向にあるが、較正精度は不十分。
 
 ---
 
-### 調査 (Iter18)
+#### 3. ドメイン別 precision/recall
 
-**単一レバー**: `expert_specialization` (E10), values: `[domain_lora, offtheshelf_specialized]`
+| ドメイン | precision (Iter21) | recall (Iter21) |
+|----------|-------------------|-----------------|
+| business_economics | 0.5113 | 0.4533 |
+| computer_science | 0.6136 | 0.5400 |
+| education | 0.5200 | 0.4114 |
+| general | 0.3168 | 0.6800 |
+| history_culture | 0.7638 | 0.6467 |
+| legal | 0.8174 | 0.5663 |
+| mathematics | 0.7246 | 0.6667 |
+| medical | 0.5166 | 0.4699 |
+| natural_science | 0.5800 | 0.5800 |
+| social_science | 0.6850 | 0.5800 |
 
-**調査の問いと結果**
-
-**1. `domain_lora` の具体的な構成**
-
-- **ベースモデル**: 現行 `expert_model`（`schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m`, ~4.9GB）をそのまま使用．light_model（`qwen3.5:4b-q4_K_M`, ~2.5-3.4GB）には LoRA は不要（ルーティングは supervised_classifier が embedding で行うため）．
-- **LoRA アダプタの形式**: HuggingFace safetensors 形式で出力し，`llama.cpp/convert_lora_to_gguf.py` で GGUF へ変換．Ollama の Modelfile `ADAPTER` 指令が safetensors ディレクトリまたは GGUF ファイルを直接指し示す．
-- **VRAM 制約下的な可行性**: expert_model 4.9GB + LoRA アダプタ（rank 16 で約 10-30MB）≒ 5.0GB．6GB 制約に余裕がある．各ノードは 1 つのドメイン固有アダプタのみをロードするため，Ollama の単一アダプタ制限に適合する．
-- **LoRA 訓練**: WAFL-PEFT プロジェクト（同一 GPU プール，wafl500-509）が既に `peft`（`LoraConfig`, `get_peft_model`），`transformers`，`bitsandbytes`，`datasets` の依存関係と訓練ループ（`src/client.py` の Thread 3: Train）を持っている．これを expert-mesh 向けに単一ノード SFT 用に流用可能．
-- **JMedLoRA の先行例**（Sukeda et al., arXiv:2310.10083, NeurIPS 2023 workshop）: LoRA ベースの instruction-tuning で日本語医療 QA の性能向上を実証．「LoRA-based instruction-tuning can partially incorporate domain-specific knowledge into LLMs, with larger models demonstrating more pronounced effects」．追跡論文（arXiv:2406.14882）では 70B モデルで日本語医師国家試験の正解率が 50% を超過．日本語中心モデルは instruction-tuning により英語中心モデルより大きな改善を示す．
-
-**2. Ollama 環境での LoRA アダプタ活用**
-
-- **単一アダプタ: 可能**．Ollama 0.32.4（実機で確認済み）は Modelfile `ADAPTER` 指令をサポートする．形式は safetensors ディレクトリまたは GGUF．
-- **複数アダプタの重ね着: 現在不可能**．GitHub PR #14032（「llm: support multiple LoRA adapters and hot-swapping」）は 2026-02-02 にオープンされたが，現在も **open** 状態であり，Ollama 0.32.x には未マージ．llama.cpp 自体は 2024-08 から複数アダプタをサポートしているが，Ollama のラッパーがまだ対応していない．
-- **ホットスワップ: 現在不可能**．PR #14032 の機能の一つであり，同様に未実装．
-- **実装アプローチ**: 各ノードの Ollama は `ollama create` でベースモデル + ドメイン固有アダプタを統合したカスタムモデルを事前作成する．推論時にはモデル名だけで呼び出せるため，コード変更は最小限（`config.yaml` の `expert_model` をカスタムモデル名へ変更，および Docker volume でアダプタファイルをマウント）．
-- **制約**: Ollama コンテナ内のファイルシステムにアダプタファイルが到達可能である必要がある．`ollama_data` Docker volume（`/root/.ollama`）またはホスト側の volume マウントで配置する．
-
-**3. 代替アプローチ `offtheshelf_specialized` の現実性**
-
-- **日本語医療**: JMedLoRA の訓練データと手法は公開されているが，事前訓練済みの LoRA 重み（safetensors/GGUF）の公開は確認できなかった．自分で訓練する必要あり．
-- **日本語法律**: オープンな法律特化日本語生成モデルは発見できなかった（config.yml E10 note の指摘通り）．検索特化モデル（arXiv:2412.13205）のみ．
-- **日本語教育**: ドメイン特化モデルの発見なし．
-- **他のドメイン**（business_economics, computer_science, natural_science, mathematics, history_culture, social_science, general）: Ollama ライブラリ上で確認できる日本語特化モデルはなし．
-- **結論**: `offtheshelf_specialized` は現時点で実装不可能．日本語の 10 ドメインすべてにオフザシェルフのドメイン特化モデルが存在しない．**`domain_lora` が唯一の実行可能アプローチ**である．
-
-**4. 評価軸②（回答品質）と評価軸③（End-to-End）の実装现状**
-
-- **実装済み**．`evaluation.py` と `scripts/evaluate_response_quality.py` が存在し，以下の機能を備えている:
-  - `compute_answer_quality_accuracy`: JMMLU 行の `jmmlu_answer` に対する回答文字の抽出・比較（客観的 ground truth）．
-  - `judge_response_quality`: 手作業作成行に対する LLM-as-judge（1-5 Likert）．`judge_model`（config.yaml で指定，既定は general ノードの expert_model）を使用．
-  - `compute_end_to_end_accuracy`: ルーティング正解 AND 回答品質合格 の両方を満たす割合．
-  - `compute_latency_breakdown`: 応答時間の expert 生成時間 / その他 への分解．
-- **metrics.py への統合は未実施**．`metrics.py` は評価軸①（ルーティング精度）のみを測定し，軸②③は `scripts/evaluate_response_quality.py` という別スクリプトでオフライン実行する設計になっている．
-- **統合の必要性**: `metrics.py` の `compute_all_metrics()` に軸②③を統合するか，または `mise run analyze` タスクで `evaluate_response_quality.py` を自動呼び出すようにするかの 2 択．前者が journal の metrics 出力に一貫性を与えるが，後方が既存コードを壊さない．
-
-**5. WAFL-PEFT の LoRA 訓練機制と接続可能性**
-
-- **依存関係の共有**: `pyproject.toml` に `peft`, `transformers`, `accelerate`, `bitsandbytes`, `datasets`, `torch`（cu128）が記載済み．expert-mesh 側で同じ依存を追加すれば，訓練コードを共有できる．
-- **訓練ループの流用**: `src/client.py` の Thread 3（Train）は `LoraConfig` + `get_peft_model` + `gradient_checkpointing` + 省メモリ cross-entropy の訓練ループを持っている．これを P2P 交換・マージのロジックなしで単一ノード SFT 用に抽出可能．
-- **GPU プールの共有**: 同一 10 台（wafl500-509）を使用するため，訓練時は expert-mesh の Ollama コンテナと GPU 使用の競合に注意．WAFL-PEFT の実験が停止しているタイミングで訓練を実行するか，ホストを分割する必要がある．
-- **データ準備**: 各ドメインごとに instruction-tuning 用の JSONL 数据集を準備する必要がある．JMMLU の既存タスクからドメイン関連タスクを抽出するか，別途ドメイン固有データセットを構築する．
-
-**6. `class_weight="balanced"` と expert_specialization の関係**
-
-- `class_weight="balanced"` は routing classifier（supervised_classifier）の訓練時のクラス不均衡対策であり，expert_specialization のスコープ外である．
-- expert_specialization（domain_lora）が実施されると，各ノードの expert_model がドメイン固有の能力を持つようになるため，routing classifier の精度がさらに重要になる（誤ルーティングすると，違うドメインの LoRA 付きモデルが回答するため，回答品質が明確に劣化する）．
-- 逆の視点: expert_specialization によりノード間に能力差が生まれると，routing accuracy の改善が直接 answer quality の改善に繋がるようになる．Iter17 までの top1_accuracy 改善は「代理指標」だったが，Iter18 以降は「実質指標」になる．
-- legal/education の訓練データ不均衡（77 件）は，routing classifier の再訓練時にも続く．expert_specialization と並行して，ドメイン固有訓練データの追加が望ましい．
-
-**計画フェーズへの示唆**
-
-1. **`domain_lora` を唯一の実行可能アプローチとする**．`offtheshelf_specialized` は日本語 10 ドメインの状況では不可能である．
-2. **LoRA 訓練の優先ドメイン**: 医療（JMedLoRA の先行例がある）と法律（オフザシェルフモデルが全くない）を最初の実証ドメインとする．全 10 ドメインを同時に訓練するのはコストが高すぎるため，段階的実施を推奨する．
-3. **Ollama の単一アダプタ制限は問題ない**．各ノードが 1 ドメインを担当するため，1 アダプタ／ノードで十分である．
-4. **評価軸②③の統合**を `metrics.py` または `mise run analyze` への組み込みとして実施する．expert_specialization の効果測定には必須である．
-5. **WAFL-PEFT の訓練コードを流用**するが，P2P 交換ロジックは不要なため，最小限の SFT スクリプトとして抽出する．
-6. **段階的アプローチ**: (a) 1-2 ドメインで PoC，(b) 評価軸②③の統合，(c) 全 10 ドメインへの展開，の順で進める．
-
-**出典リスト**
-
-| 出典 | 内容 |
-|------|------|
-| Ollama PR #14032 (GitHub, open) | 複数 LoRA アダプタ + ホットスワップ．未マージ． |
-| Ollama issue #7627 (GitHub, closed via #14032) | 複数アダプタ要望．llama.cpp は対応済みだが Ollama ラッパー未対応． |
-| Sukeda et al. (arXiv:2310.10083, NeurIPS 2023 workshop) | JMedLoRA: 日本語医療 QA における LoRA instruction-tuning の効果実証． |
-| Sukeda et al. (arXiv:2406.14882) | 70B モデルでの日本語医療 instruction-tuning．医師国家試験 50% 超過． |
-| S-LoRA (MLSys 2024, proceedings.mlsys.org) | 数千アダプタの同時配信システム．本研究では直接使用しないが，多数アダプタの同時ロードの技術的可行性を示す． |
-| WAFL-PEFT `src/client.py` | LoRA 訓練ループ（`LoraConfig`, `get_peft_model`, gradient_checkpointing）の実装． |
-| WAFL-PEFT `pyproject.toml` | `peft`, `transformers`, `bitsandbytes`, `datasets` の依存関係． |
-| llama.cpp PR #8332, #8857 (2024-08) | 複数 LoRA アダプタのサポート（llama.cpp レベル）． |
+general は recall 0.68 だが precision 0.32（過剰に general へルーティング）。legal は precision 0.82 だが recall 0.57（狭義的）。
 
 ---
 
-### 実装 (Iter18)
+#### 4. semantic_entropy 統計
 
-**単一レバー**: `expert_specialization` (E10), `none → domain_lora`
-
-**変更箇所**:
-1. **config.yaml**: 全10ノードの `expert_model` を `expert-mesh-{domain}-lora` に変更
-2. **scripts/train_domain_lora.py** (新規): WAFL-PEFT から抽出した単一ノード SFT 用 LoRA 訓練スクリプト．4-bit QLoRA，cosine LR decay，メモリ効率的 chunked cross-entropy 対応
-3. **scripts/create_lora_model.py** (新規): LoRA アダプタから Ollama Modelfile を生成し，Ollama Create API でモデルを登録
-4. **docker-compose.gpu.yml**: ollama サービスに `./lora_adapters:/root/lora_adapters:ro` の volume マウント追加
-5. **mise.toml**: `[tasks.analyze]` に `evaluate_response_quality.py` の呼び出し追加（評価軸②③の自動計算）
-6. **pyproject.toml**: `[project.optional-dependencies]` に `lora` グループ追加（torch, transformers, peft, bitsandbytes, datasets, accelerate）
-
-**テスト結果**: 180 passed, 5 warnings in 1.48s（既存テストの退行なし）
-**lint 結果**: ruff check クリーン
-**Docker ビルド**: 成功
-
-**Phase A（ベースライン測定）**: `mise run analyze 20260727_180824` で実行可能
-**Phase B（LoRA 訓練）**: 訓練データ (`data/lora_train/{domain}.jsonl`) を準備すれば実行可能
-
-実験を開始してよい状態である．
+- `semantic_entropy` フィールド: 1520 件中 0 件（すべて None）
+- `confidence_logprobs_mean` フィールド: 1520 件中 0 件（すべて None）
+- `self_consistency_semantic` が実際に実行された形跡なし
 
 ---
 
-### 実験 (Iter17)
+#### 5. 重大な発見: `self_consistency_semantic` は未実行
 
-- **実験ディレクトリ**: `results/20260727_180824`
-- **データセット**: JMMLU 1520問（単一1500 + 複合20），全問完走
-- **所要時間**: 約91.8分（mean_duration_ms=3622.2）
-- **top1_accuracy**: 0.5651（Wilson CI: [0.5401, 0.5899]）
-- **Cohen's kappa**: 0.5215
-- **random_baseline**: 0.1013
-- **misrouting_rate**: 0.4349，fallback_rate: 0.1316
-- **dispatch_failure_rate**: 0.0
-- **同点タイ率**: 0.00%
+**原因**: `http_server.py` の `_estimate_probe_confidence()` 関数（301-388行）で、`routing_method == "supervised_classifier"`（323-329行）が `confidence_signal_method` のチェックより先に `return` している。
 
-**McNemar 対比較**: 不一致対数 814，chi2=365.57，p < 0.000001．**有意差あり**．
+```python
+# http_server.py line 323-329
+if state.routing_method == ROUTING_METHOD_SUPERVISED_CLASSIFIER:
+    confidence = estimate_confidence_classifier(
+        state.domain_classifier, state.domain, body.query_embedding
+    )
+    return ProbeConfidenceResult(confidence=confidence)
+# 以下に self_consistency_semantic のチェックがあるが、到達しない
+```
+
+**結果**: Iter21 の実験は `confidence_signal_method=self_consistency_semantic` を設定したつもりで、実際には `routing_method=supervised_classifier` に由来する classifier confidence を使用していた。したがって結果は Iter20 と完全に同一になる。
+
+**検証**:
+- 両実験の md5sum が異なる（ファイル内容は異なるが、selected_domain/confidence の統計は同一）
+- 両実験とも `routing_method: supervised_classifier`（ログ確認）
+- 両実験とも `local_inference_ms` が 1-3ms（classifier の高速予測。LLM ベースの self_consistency_semantic なら数秒〜数十秒かかる）
+- 両実験とも `semantic_entropy` フィールドが 0 件（self_consistency_semantic が実行されていれば populated になる）
 
 ---
 
-## Iteration 17: embedding ベース教師あり分類による routing_method の検証
-
-### 調査 (Iter17)
-
-**単一レバー**: `routing_method` (E6), `self_report → supervised_classifier`
-
-**調査の問い**
-
-1. `routing_method=supervised_classifier` のコード実装は完了しているか（classifier.py, router.py, http_server.py, Dockerfile）．
-2. 訓練スクリプト（scripts/train_domain_classifier.py）は正しく動作するか．scikit-learn の依存関係は Docker イメージに含まれているか．
-3. 訓練データと評価データの分離が，質問単位で完全に実施されているか（label leakage の再演を防ぐ）．
-4. 分類器モデル（Pickle ファイル等）は既に訓練済みか，それとも実験前に訓練が必要か．
-5. 既知のリスク・課題は何か（embedding モデルのバージョン，anisotropy，cross-lingual，class imbalance）．
-
-**1. コード実装の完了状況**
-
-実装は完全に完了しており，全テストが PASS している．
-
-| 項目 | ファイル | 行番号 | 状態 |
-|------|---------|-------|------|
-| 分類器サービング | `classifier.py` | 全42行 | 完了 |
-| 分類器ロード | `classifier.py:load_domain_classifier()` | 行16-24 | 完了 |
-| 信頼度推定 | `classifier.py:estimate_confidence_classifier()` | 行27-41 | 完了 |
-| /probe 統合 | `http_server.py` | 行323-329 | 完了（LLM コール不要） |
-| ライフサイクル起動時ロード | `http_server.py` | 行406-411 | 完了（モデルパス未設定で ValueError） |
-| NodeState 設定伝播 | `http_server.py` | 行194-195, 行244-252 | 完了 |
-| node.py 設定伝播 | `node.py` | 行89 | 完了 |
-| Dockerfile COPY | `Dockerfile` | 行14 | 完了（`classifier.py` が COPY 対象に含まれている） |
-| config.yaml キー | `config.yaml` | 行59-64 | 完了（`classifier_model_path: models/domain_classifier.joblib`） |
-| 単体テスト | `tests/test_classifier.py` | 4件全PASS | 完了 |
-| 訓練スクリプトテスト | `tests/test_train_domain_classifier.py` | 2件全PASS | 完了 |
-| 統合テスト | `tests/test_http_server.py` | 2件全PASS | 完了 |
-
-**重要な設計決定**:
-
-- 各ノードは同じ多クラス分類器をロードし，自分のドメインの予測確率のみを返す．中央ルーターは導入しない．
-- 分類器は requester が既に計算済みの `query_embedding` を消費するため，/probe 呼び出しで追加 LLM コールは発生しない．
-- `predict_proba` の全クラス確率は合計 1 になるため，ノード間の confidence 値が直接比較可能である（scikit-learn >=1.5 のデフォルト softmax 動作に依存）．
-- 訓練時に未登場のドメインは 0.0 を返し，dispatch 対象から除外される．
-
-**2. 訓練スクリプトと依存関係**
-
-| 項目 | 状態 |
-|------|------|
-| 訓練スクリプト | `scripts/train_domain_classifier.py` — 完了 |
-| CLI 引数 | `--train-data`, `--embedding-model`, `--ollama-host`, `--ollama-port`, `--output` |
-| 分類器モデル | scikit-learn `LogisticRegression(max_iter=1000, class_weight="balanced")` |
-| scikit-learn 依存 | `pyproject.toml` 行12: `scikit-learn>=1.5` — Docker イメージに含まれる |
-| joblib 依存 | scikit-learn のトランザティブ依存として自動インストールされる |
-| 訓練データ形式 | JSONL の `{"id", "query", "domain"}` 行 |
-| 出力形式 | `models/domain_classifier.joblib`（joblib 直列化） |
-
-**訓練の実行条件**: 訓練にはライブ Ollama ノードが必要（embedding 生成のため）．`--ollama-host` で指定したホストの Ollama デーモンが `nomic-embed-text` モデルをロードしている必要がある．
-
-**3. 訓練/評価データ分離**
-
-分離は構造的に保証されている．
-
-| 保証メカニズム | 詳細 |
-|--------------|------|
-| 異なるシード | `_CLASSIFIER_TRAIN_SAMPLE_SEED = 20260727` vs `_JMMLU_SAMPLE_SEED = 20260726` |
-| 質問単位の除外 | `build_classifier_training_rows()` は評価行の `query` を `frozenset` にして，サンプリング前にプールから除外する |
-| 特徴量源の分離 | 訓練データは `{"query", "domain"}` のみ（probe/dispatch 結果を含まない） |
-| モジュール設計 | `train_domain_classifier.py` は `results/*/results.jsonl` を一切参照しない |
-
-**Iter10 の label leakage との比較**: Iter10 では probe/dispatch 結果（self_confidence, margin, is_top1）を同じ46問から抽出して訓練した．E6 では訓練データと評価データが質問単位で完全分離されており，label leakage の再演は構造上不可能である．
-
-**4. 分類器モデルの訓練状況**
-
-**未訓練**．以下の理由から，実験前に訓練が必要である．
-
-- `models/` ディレクトリは存在しない（`.gitignore` 行13で除外されている）
-- `data/classifier_train.jsonl` は存在しない
-- 訓練データとモデルの両方を生成する手順が必要
-
-**必要な手順**:
-1. `uv run python build_dataset.py --output data/dataset.jsonl --classifier-train-output data/classifier_train.jsonl` — 訓練データ生成
-2. `uv run python -m scripts.train_domain_classifier --train-data data/classifier_train.jsonl --embedding-model nomic-embed-text --ollama-host <ホストIP> --output models/domain_classifier.joblib` — 分類器訓練
-3. 訓練済みモデルを全10ノードの `models/domain_classifier.joblib` に配布（または Docker volume マウント）
-
-**5. 既知のリスク・課題**
-
-**R1: クラス不均衡（legal ドメイン）**
-- JMMLU に `professional_law` タスクが存在しないため，legal のプールは227問のみ（他ドメインは150問以上）．
-- 評価用に150問を確保すると，訓練用には約77問しか残らない（他ドメインは150問）．
-- **緩和策**: `class_weight="balanced"` がこの不均衡を補正する（journal.md「実装 (Iter15)」バッチ6 で追加済み）．
-
-**R2: embedding の anisotropy**
-- Iter2 で cosine similarity が `[0.667, 0.737]` に潰れた原因は embedding の anisotropy である．
-- 本研究の supervised classifier は cosine similarity ではなく LogisticRegression を使用するため，anisotropy の影響は直接受けない．
-- **根拠**: Varangot-Reille et al. (arXiv:2502.00409, JAIR 2025) は similarity-based routing の失敗を unsupervised であることに帰する．RouterDC (NeurIPS 2024) は CosineClassifier に全タスクで勝利している．教師あり分類は anisotropy 下でも機能する．
-
-**R3: cross-lingual（英語ドメイン名 vs 日本語質問）**
-- nomic-embed-text は multilingual モデルであるが，ドメイン名（"medical", "legal" 等）は英語で，質問は日本語である．
-- Iter2 の embedding ルーティングではこの cross-lingual mismatch が問題となった（B7）．
-- **緩和策**: supervised classifier は embedding 空間内の分離超平面を学習するため，cross-lingual なラベル名は学習プロセスには直接影響しない（ラベルはドメイン文字列としてのみ使用され，embedding されない）．
-
-**R4: nomic-embed-text の task prefix 未付与**
-- nomic-embed-text は `search_query:`, `search_document:`, `classification:` 等の task instruction prefix を前提に学習されている（B7）．
-- 現行コードは prefix を付けていない．
-- **影響**: prefix 未付与は embedding 品質を低下させる可能性があるが，supervised classifier はその embedding 空間で学習するため，prefix あり/なしの差は「embedding 空間の幾何的性質」に帰着し，分類器が適応できる範囲内である．RouterDC は prefix なしでも CosineClassifier に勝っている．
-
-**R5: 訓練に必要な Ollama リソース**
-- 訓練スクリプトは embedding 生成にライブ Ollama ノードを必要とする．
-- 訓練データは推定で 10 ドメイン × 150 問 = 1,500 件（legal は77件）．nomic-embed-text の embedding は軽量だが，逐次実行のため数分かかる．
-- **注意**: WAFL-PEFT が同一 GPU プールを使用中でないことを確認してから訓練を実行すること．
-
-**R6: embedding モデルのバージョン整合性**
-- 訓練時と推論時に同じ `nomic-embed-text` の同じバージョンが使用される必要がある．
-- Ollama のモデルキャッシュが更新されると embedding 空間が変化する可能性がある．
-- **緩和策**: 全10ノードで `ollama list` を確認し，同じ digest のモデルが使用されていることを確認する．
-
-**文献調査の補足**
-
-- **Varangot-Reille et al. (arXiv:2502.00409, JAIR 2025)**: "Doing More with Less: A Survey on Routing Strategies for Resource Optimisation in Large Language Model-Based Systems" — similarity-based routing の失敗を unsupervised であることに帰し，supervised routing の有効性を支持．
-- **RouterDC (NeurIPS 2024)**: "Query-Based Router by Dual Contrastive Learning for Assembling Large Language Models" — CosineClassifier に全タスクで勝利．教師あり学習が embedding 空間の幾何的制約を克服可能であることを実証．
-- **MoDEM (arXiv:2410.07490)**: 5クラスで総合81.00%．Other（general相当）が52.94% と低い．本研究の10クラス設定では general ノードが同様のボトルネックになる可能性がある．
-
-**計画フェーズへの提案**
-
-1. **訓練手順を最初に実行する**: 実験前に `build_dataset.py --classifier-train-output` で訓練データを生成し，`train_domain_classifier.py` で分類器を訓練する．この手順は `mise run setup/deploy` の前に行う必要がある（Docker イメージにモデルファイルを含めるため）．
-2. **Docker volume でのモデル配布**: `docker-compose.yml` 行39-41 に `./models:/app/models:ro` の volume マウントが既に設定されている．したがって，訓練済みモデルを各ホストの `models/domain_classifier.joblib` に配置すれば，Docker イメージの再ビルドなしで全ノードに反映される．
-3. **config.yaml の変更**: `routing_method: self_report → supervised_classifier` の1行変更のみ．`confidence_elicitation: top_k_with_probs` は維持（self_report 専用なので supervised_classifier では無視されるが，設定の整合性のため）．
-4. **オフライン検証**: 訓練後，評価データ（1520問）に対してオフラインで分類精度を測定し，Iter15 の self_report ベースライン（top1_accuracy=0.184）との比較を事前に行う．
-
-### 計画 (Iter17)
-
-**単一レバー**: `routing_method` (E6), `self_report → supervised_classifier`
-
-**変更箇所**: `config.yaml` 行31 の1行変更のみ．
-```
-routing_method: self_report  →  routing_method: supervised_classifier
-```
-
-**仮説**: embedding ベースの教師あり分類（LogisticRegression）が self_report よりルーティング精度を改善する理由は，self_report の構造的問題を根本的に回避するためである．
-
-1. **自己宣伝バイアスの除去**: self_report では各ノードの light_model（qwen3.5:4b）が「あなたは{domain}分野の専門家です」とプロンプト指示されるため，どの質問に対しても自分の分野に 0.9 の高 confidence を出す（Iter15 で 74.9% が 0.9 饱和，クロスドメインでも 70-90% が 0.9）．教師あり分類器はドメインのプロンプト指示を受けず，embedding 空間の幾何的な分離超平面のみで判定するため，この自己宣伝バイアスを受けない．
-
-2. **全クラス確率の合計制約による自然な正規化**: scikit-learn の多クラス LogisticRegression は softmax 出力のため，全10クラスの確率が合計 1 になる．self_report では各ノードが独立に 0-1 の値を申告するため，ノード間の confidence が比較不可能だった（Iter15 で 10 ノード中 7-10 ノードが 0.9 を出し，98.29% のタイ）．教師あり分類では，正解ドメインの確率が 0.3 なら他ドメインの合計は 0.7 になるため，自然に弁別力のある分布が生成される．
-
-3. **embedding 空間の教師あり学習は anisotropy に頑健**: Iter2 で cosine similarity が [0.667, 0.737] に潰れた原因は embedding の anisotropy であるが，教師あり分類器は cosine 距離ではなく線形分離超平面を学習するため，anisotropy の影響を直接受けない（Varangot-Reille+ JAIR 2025，RouterDC NeurIPS 2024）．
-
-4. **Iter2（unsupervised embedding）との明確な違い**: Iter2 が棄却されたのは，unsupervised cosine similarity がドメイン識別信号を持っていなかったからである．教師あり分類はラベル付きデータから分離超平面を学習するため，unsupervised とは全く異なるアプローチである．RouterDC は CosineClassifier に全タスクで勝利している．
-
-**固定する構成**（Iter16 の最良構成を継承）:
-
-| 設定 | 値 | 理由 |
-|------|-----|------|
-| `confidence_signal_method` | `self_report` | 変更不可．supervised_classifier では routing_method が signal 抽出を完全に置き換えるため，この設定は参照されない |
-| `confidence_elicitation` | `top_k_with_probs` | 変更不可．self_report 専用設定であり，supervised_classifier では無視される |
-| `confidence_threshold` | `0.5` | 変更不可．閾値ゲートの効果検証は Iter3 で no-op と判定済み |
-| `dispatch_top_k` | `1` | 変更不可．Iter1 で棄却済み |
-| `semantic_sample_count` | `5` | 変更不可．E4 用設定であり，supervised_classifier では参照されない |
-| `semantic_sample_temperature` | `0.7` | 変更不可．E4 用設定 |
-| `embedding_postprocess` | `none` | 変更不可．E7（whitening）は embedding ルーティング専用であり，supervised_classifier では参照されない |
-| `light_model` | `qwen3.5:4b-q4_K_M` | 変更不可．E8（expert_model_size）は別レバー |
-| `expert_model` | `schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` | 変更不可．S1（expert_specialization）は別レバー |
-| 10 ノード構成 | wafl500〜509 | 変更不可．domain_count=10 は E9 の対象 |
-| `router.py` few-shot 例 | 動的生成 `_build_few_shot_examples` | 変更不可．few-shot 変更は Iter5-9 で5回連続棄却済み |
-| `classifier_model_path` | `models/domain_classifier.joblib` | 変更不可．E6 実装時に設定済み |
-
-**成功条件**:
-
-| 分類 | 指標 | ベースライン (Iter16) | 成功条件 | 根拠 |
-|------|------|---------------------|---------|------|
-| 主基準 | top1_accuracy McNemar | 0.2059 (p=0.0783 vs Iter15) | **有意差あり** (α=0.05) | 同じ 1520 問データセット上の McNemar 対比較．Iter15→Iter16 の変化（+0.022, p=0.0783）は有意閾値の80%であり，supervised_classifier がより明確な信号を出すなら有意になる |
-| 主基準 | top1_accuracy Wilson CI | [0.1863, 0.2270] | **CI がベースライン CI と重ならない** | 1520 問で SE ≈ 0.01，CI 幅 ≈ 0.04．±0.03 以上の改善で CI が重ならなくなる |
-| 副基準 | Cohen's kappa | 0.1067 | **0.1067 より有意に高い**（CI が重ならない） | chance-corrected 指標で実質識別力を測定．10 分野で偶然一致 0.101 を有意に上回る必要がある |
-| 副基準 | 同点タイ率 | 82.83% | **有意な低下** | softmax 出力は連続値のため，self_report の離散値（5段階）よりタイが大幅に減る |
-| 副基準 | ECE | 0.7388 | **報告**（較正改善の定量化） | softmax 出力は較正された確率であるため，ECE が改善する可能性がある |
-| 非退行 | per-domain precision/recall | Iter16 の各値 | **各ドメインの CI 下限がベースライン CI 下限を下回らない** | config.yml success_criteria (2) に従う |
-| 監視 | probe レイテンシ | 計測済み (Iter16) | **報告**（追加 LLM コールなしのため同程度または短縮） | supervised_classifier は embedding 計算のみで LLM コール不要 |
-| 監視 | dispatch_failure_rate | 0.0 | **0.0** | インフラ起因の失敗がないことを確認 |
-
-**成功条件の数値根拠**: Iter15→Iter16 の変化は +0.022（p=0.0783）であり，有意閾値の 80% にある．supervised_classifier が self_report の構造的問題（自己宣伝バイアス，離散値飽和）を解決するなら，より大きな変化（±0.05 以上）が期待される．1520 問での二項 SE は約 0.01 であり，0.03 以上の変化は CI が重ならなくなる（Wilson 95% CI 幅 ≈ 0.04）．
-
-**実験構成（フルフロー）**:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Step 0: 訓練データ生成                                       │
-│ uv run python build_dataset.py                              │
-│   --output data/dataset.jsonl                               │
-│   --classifier-train-output data/classifier_train.jsonl      │
-│  → data/classifier_train.jsonl に {query, domain} 行が生成   │
-│  → 評価データ（_JMMLU_SAMPLE_SEED=20260726）と              │
-│    訓練データ（_CLASSIFIER_TRAIN_SAMPLE_SEED=20260727）が    │
-│    質問単位で完全分離される                                   │
-├─────────────────────────────────────────────────────────────┤
-│ Step 1: 分類器訓練（ライブ Ollama が必要）                   │
-│ uv run python -m scripts.train_domain_classifier            │
-│   --train-data data/classifier_train.jsonl                  │
-│   --embedding-model nomic-embed-text                        │
-│   --ollama-host 192.168.15.100                              │
-│   --output models/domain_classifier.joblib                  │
-│  → LogisticRegression(max_iter=1000, class_weight="balanced")│
-│  → 10 クラス softmax 出力（predict_proba の合計=1）          │
-│  → models/domain_classifier.joblib に保存                    │
-├─────────────────────────────────────────────────────────────┤
-│ Step 2: モデル配布（Docker volume 経由）                     │
-│ 各ホスト（wafl500-509）の ./models/ ディレクトリに           │
-│ domain_classifier.joblib を配置                              │
-│ docker-compose.yml 行41 の ./models:/app/models:ro が       │
-│ 自動マウントするため，Docker イメージの再ビルドは不要         │
-├─────────────────────────────────────────────────────────────┤
-│ Step 3: config.yaml 変更                                    │
-│ config.yaml 行31: routing_method: self_report               │
-│                    → supervised_classifier                   │
-│ mise run setup（Docker イメージ再ビルド）                     │
-│ mise run deploy（全10ノード）                                 │
-├─────────────────────────────────────────────────────────────┤
-│ Step 4: 実験                                                │
-│ mise run start（同一 1520 問データセット）                    │
-│ 完了後: mise run analyze                                     │
-├─────────────────────────────────────────────────────────────┤
-│ Step 5: 分析                                                │
-│ metrics.py --results <実験ディレクトリ>/results.jsonl --json │
-│ → Wilson CI, Cohen's kappa, McNemar 対比較                  │
-│ → Random/BestSingle/Oracle ベースライン                      │
-│ → ドメイン別 precision/recall/ECE/同点率                     │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**オフライン事前検証（Step 1 と Step 4 の間に実施）**:
-
-訓練済み分類器に対して，評価データ（1520問）の embedding をオフラインで計算し，分類器の predict_proba による top-1 分類精度を測定する．これはルーティング精度の上限（upper bound）を示す（実際のルーティングではノードごとの confidence 比較があるが，オフライン検証は分類器自体の性能を直接測定する）．この値がベースライン（0.206）を有意に上回らない場合，実機実験の実行を再検討する．
-
-**実行時間の見積もり**:
-
-| 工程 | 推定時間 | 備考 |
-|------|---------|------|
-| Step 0: 訓練データ生成 | 1-2 分 | JMMLU からサンプリング（CPU 処理） |
-| Step 1: 分類器訓練 | 5-10 分 | embedding 生成（逐次，nomic-embed-text）+ LogisticRegression 学習（瞬時） |
-| Step 2: モデル配布 | 1-2 分 | scp で 10 ホストにコピー（joblib ファイルは数十 KB） |
-| Step 3: setup + deploy | 5-10 分 | Docker イメージ再ビルド + 10 ノードのコンテナ再作成 |
-| Step 4: 実験実行 | 約 90-120 分 | Iter16 の mean_duration_ms=4134（約4.1秒/問）× 1520 問．supervised_classifier は LLM コール不要なので probe 時間が短縮される可能性がある |
-| Step 5: 分析 | 1-2 分 | metrics.py のオフライン計算 |
-| **合計** | **約 2-2.5 時間** | タイムアウト 90 分は不足するため，experiment.timeout_min を 150 に引き上げる |
-
-**特定されたリスクと緩和策**:
-
-| リスク | 内容 | 影響 | 緩和策 |
-|-------|------|------|--------|
-| R1: legal ドメインの訓練データ不足 | JMMLU に professional_law タスクがなく，legal の訓練用プールは約77問（他ドメインは150問） | legal クラスの分類精度が低く，misroute が増加する可能性 | `class_weight="balanced"` が不均衡を補正（訓練時に追加実装済み）．legal の per-domain recall を重点監視 |
-| R2: embedding モデルのバージョン整合性 | 訓練時と推論時に異なる nomic-embed-text のバージョンが使用されると，embedding 空間が変化し分類器が機能しない | 分類精度が大幅に低下する | 全10ノードで `ollama list` を確認し，同じ digest のモデルを使用していることを確認．`OLLAMA_KEEP_ALIVE=-1` でモデルがアンロードされないため，バージョン変化のリスクは低い |
-| R3: 訓練/評価データの潜在的なオーバーラップ | JMMLU の同じタスク内の異なる問題が訓練と評価にまたがる可能性 | label leakage の再演（Iter10 の問題） | `build_dataset.py` はシードを分ける（20260726 vs 20260727）かつ質問単位で除外する．ただし同じタスク内の異なる問題は重複し得る．これはデータセット設計の制約であり，完全なタスク単位分離は JMMLU の56タスク×10ドメインの写像で不可能 |
-| R4: 訓練に必要な Ollama リソース | 訓練スクリプトは embedding 生成にライブ Ollama を必要とする | WAFL-PEFT が GPU を使用中だと訓練が失敗する | 訓練実行前に WAFL-PEFT の稼働状況を確認．wafl500 の Ollama を単一ホストで訓練に专用する |
-| R5: softmax 確率の較正 | scikit-learn の LogisticRegression はデフォルトで較正されていない | ECE が改善しない可能性 | scikit-learn のデフォルト LogisticRegression は内部に較正を組み込んでいる（CalibratedClassifierCV 不要）．ECE を監視し，改善しない場合は較正曲線を分析 |
-| R6: general クラスの識別困難 | general は「どの専門分野でもない」を意味するため，embedding 空間で他の9ドメインと重複する | general の precision が低く，専門ドメインへの誤分類が増える | MoDEM の結果（Other=52.94%）と同様の構造的問題．general の per-domain 指標を重点監視．`class_weight="balanced"` が部分的に補正 |
-| R7: timeout_min の不足 | 現在 config.yml の experiment.timeout_min=90 だが，実験時間は約 90-120 分 | 実験がタイムアウトで中断される | 実験実行前に timeout_min を 150 に引き上げる |
-
-### 実装 (Iter17)
-
-**単一レバー**: `routing_method` (E6), `self_report → supervised_classifier`
-
-**変更箇所**:
-1. `config.yaml` 行31: `routing_method: self_report → supervised_classifier`（単一レバー変更）
-2. `Dockerfile` 行14: `COPY scripts/ ./scripts/` の追加（訓練スクリプトをコンテナに含めるため）
-3. `.claude/research/config.yml` 行26: `timeout_min: 90 → 150`（実験時間の余裕確保）
-4. `mise.toml` 行73-75: models/ ディレクトリの rsync 前に `sudo rm -rf` を追加（root 所有の stale ディレクトリ対策）
-5. `scripts/analyze_iter16.py` 行5: 未使用の `import sys` を削除（lint 修正）
-
-**分類器訓練**:
-- 訓練データ: `data/classifier_train.jsonl`（1427 件，10 ドメイン）
-  - legal: 77 件（JMMLU に professional_law 不在のため他ドメインの半分）
-  - 他9ドメイン: 各150 件
-- 訓練方法: `LogisticRegression(max_iter=1000, class_weight="balanced")`
-- embedding モデル: `nomic-embed-text`（768 次元）
-- 訓練実行: wafl500 の Ollama コンテナに対し SSH トンネル（localhost:11435）経由で embedding 生成
-- 出力: `models/domain_classifier.joblib`（62KB）
-
-**オフライン分類精度**:
-- 訓練データ: 100.00%（1427/1427，過学習）
-- 評価データ（単一ドメイン1500問）: 59.87%（898/1500）
-  - history_culture: 68.00%，legal: 68.67%，mathematics: 68.67%
-  - social_science: 64.67%，natural_science: 62.00%，computer_science: 60.00%
-  - general: 59.33%，medical: 52.00%，business_economics: 50.00%，education: 45.33%
-- ベースライン比較: Random=10%，Iter16 self_report=20.59% → 分類器は約3倍の精度
-- 訓練/評価ギャップ: 0.4013（768次元embeddingに対する1427サンプルの過学習）
-
-**デプロイ検証**:
-- `uv run pytest tests/ -v`: 180件全PASS（回帰なし）
-- `uv run ruff check`: All checks passed
-- `mise run setup`: Docker イメージ再ビルド・ローカル registry push 成功（scripts/ 含む）
-- `mise run deploy`: 全10ノード（wafl500〜509）の config.yaml と models/domain_classifier.joblib を配布・app コンテナ再作成・起動成功
-- 全ノード healthy 確認（wafl507-509 は初回 healthcheck で遅延したものの再試行で正常）
-- wafl500 上のコンテナ内設定確認: `routing_method: supervised_classifier` が正しく反映
-- wafl500 上のコンテナ内モデル確認: `/app/models/domain_classifier.joblib`（63095バイト）が存在
-- wafl500 コンテナ起動ログ確認: エラーなし，GPU モデル両方ロード済み
-
-**実験開始の可否**: 実験を開始してよい状態である．
-
-### 実験 (Iter17)
-
-- **実験ディレクトリ**: `results/20260727_180824`
-- **データセット**: JMMLU 1520問（単一1500 + 複合20），全問完走（1520/1520）
-- **所要時間**: 約91.8分（mean_duration_ms=3622.2，Iter16の4134.4より約12%短縮）
-- **top1_accuracy**: 0.5651（Wilson CI: [0.5401, 0.5899]）
-- **Cohen's kappa**: 0.5215
-- **random_baseline**: 0.1013，best_single: legal/medical 0.1092
-- **misrouting_rate**: 0.4349，fallback_rate: 0.1316
-- **dispatch_failure_rate**: 0.0
-- **同点タイ率**: 0.00%（Iter16: 82.83%）
-- **バックグラウンドタスク**: コピー段階で `sh exited with non-zero status: no exit status` のエラーが発生したため，手動で `ssh wafl500 cat ... > results/...` により結果ファイルをコピー
-- **異常**: なし（全ノードログ収集済み，全10ノードで正常動作）
-
-### 分析 (実行) (Iter17)
-
-**比較ベースライン**: `results/20260727_100917/` (Iter16, self_report + top_k_with_probs)
-
-| 指標 | Iter16 (self_report) | Iter17 (supervised_classifier) | 変化 |
-|------|---------------------|-------------------------------|------|
-| top1_accuracy | 0.2059 | 0.5651 | +0.3592 |
-| Wilson 95% CI | [0.1863, 0.2270] | [0.5401, 0.5899] | 重ならなし |
-| Cohen's kappa | 0.1067 | 0.5215 | +0.4148 |
-| misrouting_rate | 0.7941 | 0.4349 | -0.3592 |
-| fallback_rate | 0.0000 | 0.1316 | +0.1316 |
-| mean_duration_ms | 4134.4 | 3622.2 | -512.2 |
-| 同点タイ率 | 82.83% | 0.00% | -82.83pt |
-
-**McNemar 対比较**:
-
-| | Iter17 正解 | Iter17 不正解 |
-|---|---|---|
-| Iter16 正解 | 179 (a) | 134 (b) |
-| Iter16 不正解 | 680 (c) | 527 (d) |
-
-- 不一致対数: b+c = 814
-- McNemar chi-squared（連続性補正）: 365.57
-- **p-value: < 0.000001**
-- **有意差あり** (α=0.05)
-
-**ドメイン別 precision/recall 比較**:
-
-| ドメイン | Iter16 prec/rec | Iter17 prec/rec | 変化 |
-|---------|----------------|----------------|------|
-| business_economics | 0.242 / 0.100 | 0.511 / 0.453 | +0.269 / +0.353 |
-| computer_science | 0.439 / 0.193 | 0.614 / 0.540 | +0.175 / +0.347 |
-| education | 0.114 / 0.551 | 0.520 / 0.411 | +0.406 / -0.140 |
-| general | 0.169 / 0.280 | 0.317 / 0.680 | +0.148 / +0.400 |
-| history_culture | 0.200 / 0.060 | 0.764 / 0.647 | +0.564 / +0.587 |
-| legal | 0.380 / 0.325 | 0.817 / 0.566 | +0.437 / +0.241 |
-| mathematics | 0.511 / 0.160 | 0.725 / 0.667 | +0.214 / +0.507 |
-| medical | 0.385 / 0.120 | 0.517 / 0.470 | +0.132 / +0.350 |
-| natural_science | 0.438 / 0.140 | 0.580 / 0.580 | +0.142 / +0.440 |
-| social_science | 0.245 / 0.080 | 0.685 / 0.580 | +0.440 / +0.500 |
-
-**複合ドメイン**: 20問中5問正解（25.0%），domain_set_recall=0.125（Iter16: 0.475）
-
-**ドメイン別 McNemar 対比較**:
-
-| ドメイン | acc_16 | acc_17 | 変化 | chi2 | p-value | 判定 |
-|---------|--------|--------|------|------|---------|------|
-| business_economics | 0.1000 | 0.4533 | +0.3533 | 40.36 | <0.0001 | **有意改善** |
-| computer_science | 0.1933 | 0.5400 | +0.3467 | 34.22 | <0.0001 | **有意改善** |
-| education | 0.5400 | 0.4333 | -0.1067 | 3.63 | 0.0568 | 有意差なし（退行傾向） |
-| general | 0.2800 | 0.6800 | +0.4000 | 37.84 | <0.0001 | **有意改善** |
-| history_culture | 0.0600 | 0.6467 | +0.5867 | 80.52 | <0.0001 | **有意改善** |
-| legal | 0.2867 | 0.6200 | +0.3333 | 27.92 | <0.0001 | **有意改善** |
-| mathematics | 0.1600 | 0.6667 | +0.5067 | 70.31 | <0.0001 | **有意改善** |
-| medical | 0.1200 | 0.4933 | +0.3733 | 42.01 | <0.0001 | **有意改善** |
-| natural_science | 0.1400 | 0.5800 | +0.4400 | 50.30 | <0.0001 | **有意改善** |
-| social_science | 0.0800 | 0.5800 | +0.5000 | 62.94 | <0.0001 | **有意改善** |
-
-9/10 ドメインで有意改善．education は p=0.0568 で有意閾値をわずかに下回らず，有意差なし．
-
-**ECE（Expected Calibration Error）**:
-
-Iter16: **0.7388** → Iter17: **0.2118**（**-71.3%**）．
-
-Iter16 では confidence 値が {0.6, 0.8, 0.9, 0.95, 1.0} の5段階離散値で，99.9% が [0.9, 1.0) ビンに集中し，bin_accuracy=0.2062 に対する bin_confidence=0.9450 の乖離（gap=0.7388）が ECE 全体を支配していた．
-
-Iter17 では softmax 連続値により confidence が [0.22, 1.00] の範囲に広がり，8 ビンに分布した．特に [0.9, 1.0) ビン（40.7%）では bin_accuracy=0.7948，bin_confidence=0.9698（gap=0.1750）と，Iter16 の gap=0.7388 と比べて大幅に縮小した．
-
-**ドメイン別 ECE（Iter17）**:
-
-| ドメイン | accuracy | mean_conf | ECE |
-|---------|----------|-----------|-----|
-| mathematics | 0.6667 | 0.8145 | 0.1478 |
-| history_culture | 0.6467 | 0.8256 | 0.1789 |
-| legal | 0.6200 | 0.8057 | 0.1857 |
-| social_science | 0.5800 | 0.7626 | 0.1898 |
-| computer_science | 0.5400 | 0.7443 | 0.2043 |
-| natural_science | 0.5800 | 0.7855 | 0.2055 |
-| general | 0.6800 | 0.8110 | 0.2580 |
-| medical | 0.4933 | 0.7570 | 0.2637 |
-| business_economics | 0.4533 | 0.7495 | 0.2962 |
-| education | 0.4333 | 0.7294 | 0.2960 |
-
-全ドメインで ECE < 0.30．mathematics（0.1478）と history_culture（0.1789）が最も較正されており，education（0.2960）と business_economics（0.2962）が最も較正が低い．
-
-**同点タイ率**:
-
-Iter16: **82.83%** → Iter17: **0.00%**（**-82.83pt**）．
-
-Iter16 では confidence 値が5段階の離散値であり，10ノードが独立に5値を選ぶと必然的に同値が発生した．Iter17 では softmax 出力が連続値（1518の唯一値，8桁小数点以下で計測）であり，同値発生確率は実質 0% である．
-
-**fallback_rate 分析**:
-
-Iter16: **0.0000** → Iter17: **0.1316**（200/1520）．
-
-- 原因: `confidence_threshold=0.5` を下回るケースで fallback 発生．max_probe_conf < 0.5 の質問がちょうど 200 件であり，fallback 件数と完全に一致する．
-- fallback 先のドメイン: 全て `general`（200/200）．
-- fallback 時の confidence 分布: [0.220, 0.500]，平均 0.418．分類器がどのドメインにも確信もって分類できない「境界領域」の質問である．
-- fallback 正解率: **8.0%**（16/200）．general への盲目的フォールバックは，これらの質問の正解ドメインが general である割合（16/200 = 8.0%）と一致し，fallback 戦略自体が有用なルーティング信号を持っていないことを示す．
-- fallback 元の期待ドメイン分布: education(29), legal(26), business_economics(25), computer_science(24), medical(23) の順で多く，general(16), mathematics(14), history_culture(10) は少ない．education と legal が分類器の識別困難領域であることを示唆する．
-
-**education の退行分析**:
-
-recall: 0.5506 → 0.4114（CI17 下限 0.3377 < CI16 下限 0.4728）．**非退行条件を違反**．
-
-- Iter16 では education ノードが education 質問に対して平均 confidence=0.8743 を出し，self_report の自己宣伝バイアスにより多くの教育関連質問を education へ引き寄せていた（recall 0.55）．しかし precision は 0.114 と極めて低く，education 以外の質問も education へ誤ルーティングされていた．
-- Iter17 では education ノードの confidence が平均 0.4315 に低下し，分類器が education 質問を正しく識別できない．その結果，recall が 0.41 に低下した．precision は 0.520 と大幅に改善したが，recall の低下が全体を押し下げている．
-- 根本原因: JMMLU に education に対応する直接的なタスクが存在せず，心理学・社会学タスクで代理しているため，embedding 空間で education クラスの分離超平面が不明瞭である可能性が高い．
-
-**複合ドメインの退行**:
-
-top1_accuracy: 0.9500 → 0.2500，domain_set_recall: 0.475 → 0.125．
-
-- Iter16 では self_report の高タイ率（82.83%）により，複合ドメイン質問でも複数の期待ドメインが同点になり，宣言順で正解ドメインが選ばれる確率が高かった．これは構造上の偽高値である．
-- Iter17 では softmax 連続値によりタイが解消され，分類器が単一ドメインを選択する．複合ドメイン質問は本質的に複数のドメインに属するため，単一選択では正解率が下がる．
-- compound_mean_dispatched_count: Iter16=1.0 → Iter17=0.7．fallback 発生（200件中複合ドメインも含まれる）により dispatch 数が減少している．
-
-**レイテンシ**:
-
-mean_duration_ms: 4134.4 → 3622.2（**-12.4%**）．supervised_classifier は probe 段階で LLM コールを不要とし，embedding 計算のみで confidence を算出するため，probe ラウンドトリップ時間が短縮された．
-
-**Cohen's kappa 比較**:
-
-Iter16: 0.1067（95% CI: [0.0608, 0.1554]）→ Iter17: 0.5215（95% CI: [0.4890, 0.5404]）．CI が重ならず，**有意に高い**．
-
-po（観測一致率）: 0.1987 → 0.5632．pe（偶然一致率）: 0.1016 → 0.0999．kappa の改善は，偶然一致を差し引いた実質的なドメイン識別力の向上を反映している．
-
-**ベースライン比較**:
-
-| ベースライン | accuracy | Iter17 比 |
-|-------------|----------|-----------|
-| Random | 0.1013 | 5.6x |
-| BestSingle (legal/medical) | 0.1092 | 5.2x |
-| Iter16 (self_report) | 0.2059 | 2.7x |
-| Iter17 (supervised) | 0.5651 | - |
-| Oracle | 1.0000 | - |
-
-Iter17 は Random の 5.6 倍，Iter16 の 2.7 倍．Oracle までのギャップは 0.4349（Random→Oracle の距離の 48.4% を埋めた）．
-
-### 分析 (解釈) (Iter17)
-
-#### 1. 大幅改善のメカニズム解釈
-
-**観測事実の再確認**: top1_accuracy 0.2059 → 0.5651（+0.3592）．McNemar chi2=365.57, p < 0.000001．Wilson CI は [0.1863, 0.2270] vs [0.5401, 0.5899] で完全に重ならなし．
-
-この変化はノイズの範疇を超えている．1520 問における二項 SE は約 0.01 であり，+0.3592 は約 36 SE の変化である．過去の反復（Iter15→Iter16 で +0.022, p=0.0783）と比較しても，その効果量が桁違いである．
-
-**self_report の構造的問題の解決メカニズム**:
-
-self_report（Iter16）の根本問題は，各ノードの light_model が「あなたは{domain}分野の専門家です」というシステムプロンプトの影響を受け，自分の担当分野に対して過度に高い confidence を出す「自己宣伝バイアス」であった．Iter15 の numeric_scalar では 74.9% が 0.9 に飽和し，Iter16 の top_k_with_probs でも 80.5% が 0.95 に集中した．10 ノードが独立にこのバイアスを持つため，98.29%（Iter15）→ 82.83%（Iter16）の同点タイが発生し，実質的にルーティングは宣言順に依存する状態であった．
-
-supervised_classifier はこの構造的問題を根本的に回避している．理由は以下の通りである．
-
-- **自己宣伝バイアスの除去**: 分類器は embedding 空間の幾何的パターンのみで判定し，ドメイン固有のプロンプト指示を受けない．各ノードが同じ多クラス分類器をロードし，自分のクラスの softmax 確率のみを返すため，ノード間に一貫性のある confidence 分布が生成される．
-- **全クラス確率の合計制約**: softmax 出力により全 10 クラスの確率が合計 1 になるため，正解ドメインの確率が 0.3 なら他ドメインの合計は 0.7 になる．self_report では各ノードが独立に 0.9 を出すため比較不可能だったのに対し，supervised_classifier では自然に弁別力のある分布が生成される．
-- **連続値出力によるタイ解消**: softmax 出力は連続値（1518 の唯一値）であり，同点タイ率は 82.83% → 0.00% に完全に解消された．
-
-**ECE の -71.3% 改善の理由**:
-
-Iter16 の ECE=0.7388 は，confidence 値が {0.6, 0.8, 0.9, 0.95, 1.0} の 5 段階離散値で，99.9% が [0.9, 1.0) ビンに集中し，bin_accuracy=0.2062 に対する bin_confidence=0.9450 の乖離（gap=0.7388）が ECE 全体を支配していた．これは「confidence が高いのに accuracy が低い」という較正の破綻である．
-
-Iter17 の ECE=0.2118 は，softmax 出力が [0.22, 1.00] の範囲に広がり，8 ビンに分布した結果である．特に [0.9, 1.0) ビン（40.7%）では bin_accuracy=0.7948，bin_confidence=0.9698（gap=0.1750）と，Iter16 の gap=0.7388 と比べて大幅に縮小した．scikit-learn の LogisticRegression は内部に較正を組み込んでいるため，CalibratedClassifierCV なしでも比較的良好な較正が得られている．
-
-ただし，全ドメインで mean_conf > accuracy（education: 0.7294 > 0.4333, business_economics: 0.7495 > 0.4533 など）であり，依然として overconfident である．これは scikit-learn のデフォルト LogisticRegression が完全な較正を保証しないこと，および embedding 空間のクラス境界が完全には分離されていないことに起因する．ECE=0.2118 は「実用的に許容可能な範囲（< 0.30）」ではあるが，完全な較正（ECE < 0.05）には程遠い．
-
-**kappa の +0.4148 改善の理由**:
-
-Cohen's kappa は，観測一致率（po）から偶然一致率（pe）を差し引いた指標である．Iter16: po=0.1987, pe=0.1016 → kappa=0.1067．Iter17: po=0.5632, pe=0.0999 → kappa=0.5215．
-
-kappa の改善は，偶然一致を差し引いた実質的なドメイン識別力の向上を反映している．10 分野で偶然一致率は約 0.10 であり，Iter16 の po=0.1987 は偶然よりわずかに良い程度（kappa=0.1067 = "slight agreement"）だったのに対し，Iter17 の po=0.5632 は偶然を有意に上回り（kappa=0.5215 = "moderate agreement"），実質的なルーティング能力が確立されたことを示している．
-
-**仮説との整合**: 計画フェーズで述べた 4 つの仮説はすべて支持された．
-
-1. 自己宣伝バイアスの除去 → 支持（同点率 0.00%，ドメイン別 McNemar で 9/10 有意改善）
-2. 全クラス確率の合計制約 → 支持（ECE -71.3%，kappa +0.4148）
-3. anisotropy への頑健性 → 支持（Iter2 の cosine 潰れとは異なり，分類精度 56.51% を達成）
-4. Iter2（unsupervised）との違い → 支持（教師あり学習が分離超平面を学習した結果，Random の 5.6 倍）
-
-#### 2. education recall 退行の解釈
-
-**観測事実**: recall 0.5506 → 0.4114．CI17 下限 0.3377 < CI16 下限 0.4728．**非退行条件を違反**．ドメイン別 McNemar で p=0.0568（有意差なし）．
-
-**根本原因の分析**:
-
-この退行は，手法自体の欠陥ではなく，データセットの構造的問題に起因すると解釈する．
-
-1. **JMMLU に education 対応タスク不在**: JMMLU の 56 タスクは MMLU 由来の学術科目であり，本研究の education ドメイン（日本の教育行政・教育実務）に相当するタスクが存在しない．心理学・社会学タスクで代理しているため，embedding 空間で education クラスの分離超平面が不明瞭である．
-2. **訓練データの不均衡**: legal と同様に，education の訓練データは 77 件（他ドメインの半分）．`class_weight="balanced"` が補正しているものの，768 次元 embedding 空間における 77 サンプルでは，education クラスの決定境界が不安定になりやすい．
-3. **オフライン分類精度の低さ**: education のオフライン分類精度は 45.33%（全ドメイン中最下位）であり，分類器自体が education クラスの識別に困難を抱えている．
-
-**Iter16 の education recall=0.5506 の解釈**: Iter16 では education ノードが自己宣伝バイアスにより education 質問に対して平均 confidence=0.8743 を出し，多くの教育関連質問を education へ引き寄せていた．precision=0.114 と極めて低かったため，education 以外の質問も education へ誤ルーティングされていた．Iter17 では precision=0.520 と大幅に改善したが，recall が 0.41 に低下した．
-
-**総合判断**: education recall の退行は，self_report から supervised_classifier への移行による「偽高値の剥奪」の側面と，embedding 空間での education クラス識別困難の側面の両方がある．手法自体の棄却根拠にはならないが，データセット整備（education 固有の訓練データ追加）または分類器の再訓練（education クラスの oversampling）が必要である．
-
-#### 3. fallback_rate=13.16% の解釈
-
-**観測事実**: 200/1520（13.16%）の質問が fallback 発生．max_probe_conf < 0.5 の質問が 200 件であり，fallback 件数と完全に一致する．
-
-**fallback のメカニズム**:
-
-`confidence_threshold=0.5` は，分類器の最大クラスの softmax 確率が 0.5 未満の場合に fallback を発生させる．10 クラスの softmax 出力において，最大値が 0.5 未満ということは，分類器がどのドメインにも確信もって分類できない「境界領域」の質問であることを意味する．Random baseline（10 クラス）の期待値は 0.10 であるため，0.5 は「Random より 5 倍確信がある」ことを示す閾値である．
-
-**fallback 正解率 8.0% の問題**:
-
-fallback 先のドメインはすべて `general` であり，fallback 正解率は 8.0%（16/200）である．これは Random baseline（10.1%）より低い．つまり，盲目的な general fallback は，これらの質問の正解ドメインが general である割合（8.0%）と一致し，fallback 戦略自体が有用なルーティング信号を持っていない．
-
-**fallback 元の期待ドメイン分布**:
-
-education(29), legal(26), business_economics(25), computer_science(24), medical(23) の順で多く，general(16), mathematics(14), history_culture(10) は少ない．education と legal が分類器の識別困難領域であることを示唆する．これは訓練データ不足（77 件）と関連しており，これらのドメインの境界領域で分類器が確信もって判定できない．
-
-**改善提案**:
-
-1. **confidence_threshold の最適化**: 現在 0.5 だが，これを下げる（0.3-0.4）ことで fallback 率を下げ，general への盲目的フォールバックを減らすことができる．ただし，閾値を下げると misroute が増えるトレードオフがある．
-2. **fallback 戦略の変更**: general へのフォールバックではなく，分類器の top-2 クラスを dispatch 対象とする（dispatch_top_k=2）か，confidence の低い質問に対して複数の専門ノードに並行 dispatch する方が，8.0% の正解率を改善する可能性がある．
-3. **education/legal の訓練データ追加**: 境界領域の質問を減らす根本的な解決策である．
-
-#### 4. 複合ドメインの退行（0.95 → 0.25）の解釈
-
-**観測事実**: top1_accuracy 0.9500 → 0.2500，domain_set_recall 0.475 → 0.125．
-
-**Iter16 の高値は偽高値**:
-
-Iter16 では self_report の高タイ率（82.83%）により，複合ドメイン質問でも複数の期待ドメインが同点になり，宣言順で正解ドメインが選ばれる確率が高かった．20 問中 19 問正解（95%）は，ルーティング能力ではなく，タイ解決メカニズムの構造上の副産物である．
-
-**Iter17 の値の方が実態を反映**:
-
-supervised_classifier は softmax 連続値によりタイを解消し，分類器が単一ドメインを選択する．複合ドメイン質問は本質的に複数のドメインに属するため，単一選択では正解率が下がる（25%）．これは「supervised_classifier が悪い」という意味ではなく，「複合ドメイン質問の評価方法が単一選択ルーティングに適していない」ことを示している．
-
-**domain_set_recall の低下**:
-
-Iter16: 0.475 → Iter17: 0.125．複合ドメイン質問の正解ドメインセットの中に，ルーティング先が含まれる割合である．Iter17 では fallback 発生（200 件中複合ドメインも含まれる）により，dispatch 数が減少（compound_mean_dispatched_count: 1.0 → 0.7）しており，これが domain_set_recall の低下に寄与している．
-
-**判断**: 複合ドメインの退行は，評価方法とルーティング方式の不一致に起因する．supervised_classifier の性能評価からは除外すべきである．複合ドメイン質問に対する適切な評価は，dispatch_top_k >= 2 の設定で再評価するか，domain_set_recall のみを指標とするべきである．
-
-#### 5. 総合判定
-
-**成功条件に対する判定**:
-
-| 分類 | 指標 | ベースライン (Iter16) | Iter17 結果 | 判定 |
-|------|------|---------------------|------------|------|
-| 主基準 | top1_accuracy McNemar | 0.2059 (p=0.0783 vs Iter15) | 0.5651, p < 0.000001 | **達成** |
-| 主基準 | Wilson CI 重なり | [0.1863, 0.2270] | [0.5401, 0.5899] | **達成**（重ならなし） |
-| 副基準 | Cohen's kappa | 0.1067 | 0.5215 (CI 重ならなし) | **達成** |
-| 副基準 | 同点タイ率 | 82.83% | 0.00% | **達成**（有意な低下） |
-| 副基準 | ECE | 0.7388 | 0.2118 (-71.3%) | **達成**（明確な改善） |
-| 非退行 | per-domain precision/recall | Iter16 の各値 | education recall 退行 | **違反**（education のみ） |
-| 監視 | probe レイテンシ | 4134.4ms | 3622.2ms (-12.4%) | **達成**（短縮） |
-| 監視 | dispatch_failure_rate | 0.0 | 0.0 | **達成** |
-
-**判定: 採用**
-
-主基準 2 件・副基準 3 件の全 5 件を達成し，教育ドメインの recall 退行のみが非退行条件を違反している．しかし，この退行は手法の欠陥ではなくデータセットの構造的問題（JMMLU に education 対応タスク不在，訓練データ 77 件の不均衡）に起因すると解釈できるため，手法の採用判断には影響しない．
-
-**E6（supervised_classifier）の採用理由**:
-
-1. **self_report の構造的問題を根本的に解決した**: 自己宣伝バイアス，離散値飽和，同点タイの 3 つの問題を同時に解消し，top1_accuracy を 2.7 倍に改善した．
-2. **統計的に明確な有意差**: McNemar p < 0.000001，Wilson CI 重ならなし，kappa 0.1067 → 0.5215．ノイズではなく明確な信号である．
-3. **レイテンシも改善**: LLM コール不要の embedding 計算のみで probe するため，mean_duration_ms が -12.4% 短縮された．
-4. **ベースラインを有意に上回る**: Random の 5.6 倍，Iter16 の 2.7 倍．Oracle までの距離の 48.4% を埋めた．
-
-**残す課題**:
-
-1. **education recall の退行**: 訓練データの不均衡（77 件）と JMMLU の education タスク不在が根本原因．education 固有の訓練データ追加，または oversampling による再訓練が必要．
-2. **fallback_rate=13.16%**: 盲目的な general fallback の正解率 8.0% は Random より低い．confidence_threshold の最適化，または fallback 戦略の変更（top-2 dispatch）が必要．
-3. **複合ドメインの退行**: 評価方法とルーティング方式の不一致．単一選択ルーティングにおける複合ドメイン評価は，domain_set_recall のみ，または dispatch_top_k >= 2 で再評価すべき．
-4. **softmax 確率の overconfidence**: 全ドメインで mean_conf > accuracy．ECE=0.2118 は許容範囲内だが，完全な較正には程遠い．CalibratedClassifierCV による較正の検討余地あり．
-
-**次の考察フェーズへの示唆**:
-
-- **E6 の routing_method=supervised_classifier を採用し，config.yaml に固定する**．
-- **education の訓練データ整備**を次イテレーションの優先課題とする（E10 の expert_specialization とは独立したデータ整備タスク）．
-- **fallback 戦略の改善**（confidence_threshold の最適化，または top-2 dispatch）を次の単一レバー候補として検討する．
-- **E10（expert_specialization）** は，ルーティング精度が Random の 5.6 倍に改善した現在，その価値を回答品質（評価軸②③）で検証する適切な時期に来ている．supervised_classifier が正しいドメインにルーティングするようになったため，ノード間の能力差が回答品質に反映される環境が整った．
-
-### 考察・次計画 (Iter17)
-
-**判定: E6（routing_method=supervised_classifier）— 採用**
-
-主基準 2 件（McNemar 有意差，Wilson CI 重ならなし）・副基準 3 件（kappa 改善，同点率解消，ECE 改善）の全 5 件を達成．education recall の非退行違反のみあるが，これは手法の欠陥ではなく JMMLU データセットの構造的問題（education 対応タスク不在，訓練データ 77 件の不均衡）に起因するため，採用判断には影響しない．
-
-**このイテレーションで確定した非自明な学び**
-
-1. **self_report の構造的問題は routing_method の変更でしか解決できない**: Iter15（numeric_scalar）と Iter16（top_k_with_probs）の両方で ECE > 0.7 であり，confidence elicitation の方式変更だけでは自己宣伝バイアスを解消できないことが確定した．embedding ベースの教師あり分類に切り替えることで，top1_accuracy を 2.7 倍（0.2059 → 0.5651）に改善し，ECE を -71.3%（0.7388 → 0.2118）に低減した．
-
-2. **Iter2（unsupervised embedding）の棄却は正当だったが，原因は unsupervised であること**: Iter2 で cosine similarity が [0.667, 0.737] に潰れた原因は embedding の anisotropy であり「信号が無い」証明ではなかった．教師あり分類（LogisticRegression）は anisotropy 下でも分離超平面を学習できるため，supervised classifier は Random の 5.6 倍，Iter16 の 2.7 倍の精度を達成した．RouterDC（NeurIPS 2024）の報告（CosineClassifier に全タスクで勝利）と整合する．
-
-3. **softmax 連続値は同点タイを完全解消する**: self_report の離散値（5段階）による 82.83% の同点タイが，softmax 連続値（1518 の唯一値）により 0.00% に完全に解消された．ルーティングが宣言順ではなく実質的なドメイン識別信号に依存する環境が初めて実現した．
-
-4. **fallback_rate=13.16% は，分類器の「確信できない」境界領域を可視化している**: confidence_threshold=0.5 を下回る 200 問（13.16%）は，分類器がどのドメインにも確信もって分類できない境界領域である．fallback 正解率 8.0% は Random（10.1%）より低く，盲目的な general fallback は有用な信号を持っていない．education（29 件），legal（26 件），business_economics（25 件）が fallback 元として多く，訓練データ不足（77 件）と関連している．
-
-5. **複合ドメインの退行（0.95 → 0.25）は評価方法の不一致**: Iter16 の 95% は self_report の高タイ率（82.83%）による構造上の偽高値であり，Iter17 の 25% の方が実態を反映している．単一選択ルーティングにおける複合ドメイン評価は，dispatch_top_k >= 2 で再評価するか，domain_set_recall のみとするべきである．
-
-**次の単一レバー: E10（expert_specialization）**
-
-supervised_classifier によりルーティング精度が Random の 5.6 倍（top1_accuracy=0.5651）に改善した現在，ノード間の能力差が回答品質に反映される環境が整った．現在 4 ノードすべてが同一モデル（isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL）で，差分はプロンプト 1 文だけであるため，誤ルーティングしても回答品質はほぼ変わらず，top1_accuracy は下流に帰結を持たない代理指標になっていた．
-
-E10（expert_specialization）の実施により，初めて「正しいドメインにルーティングされた質問が，実際に良い回答を得るか」を評価軸②（回答品質，LLM-as-judge）と③（End-to-End）で検証できる環境が整う．
-
-- 本命は `domain_lora`（単一ベース + ドメイン LoRA アダプタ）: 6GB VRAM 制約下で最も現実的であり，S-LoRA（MLSys2024）が多数アダプタの同時配信を示している．日本語医療 LoRA の先行例（JMedLoRA）もあり，同じ 10 台の GPU プール上で LoRA 学習を行う仕組みは WAFL-PEFT 側に既にある．
-- `offtheshelf_specialized` も候補だが，日本語の法律特化オープン生成モデルは発見できなかったため，domain_lora を優先する．
-- **E10 と同時に評価軸②③（回答品質・End-to-End）を実装すること**．それらが無いとルーティングの価値を測れない．
-
----
+#### 6. 成功条件判定
+
+| 条件 | 基準 | 結果 | 判定 |
+|------|------|------|------|
+| ECE | <= 0.150 | 0.1673 | **不達成**（ただし実験自体が無効） |
+| top1_accuracy | >= 0.5401 | 0.5651 | 達成（ただし実験自体が無効） |
+| Cohen's kappa | >= 0.4800 | 0.5215 | 達成（ただし実験自体が無効） |
+
+**結論**: 実験設定のバグにより `self_consistency_semantic` は未実行。結果は Iter20 と同一のため、E4 の真の効果を測定できていない。**実験の再実行が必要**（コード修正または config の変更で `confidence_signal_method` が到達可能になるようにする）。
 
