@@ -1,16 +1,16 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter19",
+  "iteration": "Iter20",
   "phase": "investigate",
   "status": "running",
-  "current_lever": null,
+  "current_lever": "embedding_postprocess",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1753776000,
+  "updated_at": 1785288000,
   "last_slack_ts": null,
   "iteration_thread_ts": null,
   "notion_toggle_created": false,
-  "last_commit": "PLACEHOLDER",
+  "last_commit": null,
   "e10_results": {
     "lever": "expert_specialization=domain_lora",
     "answer_quality_accuracy": 0.5013,
@@ -18,5 +18,14 @@
     "top1_accuracy": 0.5693,
     "cohens_kappa": 0.5215,
     "judgment": "adopted"
+  },
+  "e8_results": {
+    "lever": "expert_model_size=qwen3.5-4b-q4_K_M",
+    "answer_quality_accuracy": 0.2373,
+    "end_to_end_accuracy": 0.1434,
+    "top1_accuracy": 0.5651,
+    "mean_duration_ms": 6498,
+    "vram_gb": 3.4,
+    "judgment": "rejected"
   }
 }

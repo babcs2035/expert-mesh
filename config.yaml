@@ -86,58 +86,58 @@ nodes:
     port: 8080
     domain: general
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-general-lora
+    expert_model: qwen3.5:4b-q4_K_M
   wafl501:
     host: 192.168.15.101
     port: 8080
     domain: education
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-education-lora
+    expert_model: qwen3.5:4b-q4_K_M
   wafl502:
     host: 192.168.15.102
     port: 8080
     domain: legal
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-legal-lora
+    expert_model: qwen3.5:4b-q4_K_M
   wafl503:
     host: 192.168.15.103
     port: 8080
     domain: medical
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-medical-lora
+    expert_model: qwen3.5:4b-q4_K_M
   wafl504:
     host: 192.168.15.104
     port: 8080
     domain: business_economics
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-business_economics-lora
+    expert_model: qwen3.5:4b-q4_K_M
   wafl505:
     host: 192.168.15.105
     port: 8080
     domain: computer_science
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-computer_science-lora
+    expert_model: qwen3.5:4b-q4_K_M
   wafl506:
     host: 192.168.15.106
     port: 8080
     domain: natural_science
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-natural_science-lora
+    expert_model: qwen3.5:4b-q4_K_M
   wafl507:
     host: 192.168.15.107
     port: 8080
     domain: mathematics
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-mathematics-lora
+    expert_model: qwen3.5:4b-q4_K_M
   wafl508:
     host: 192.168.15.108
     port: 8080
     domain: history_culture
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-history_culture-lora
+    expert_model: qwen3.5:4b-q4_K_M
   wafl509:
     host: 192.168.15.109
     port: 8080
     domain: social_science
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: expert-mesh-social_science-lora
+    expert_model: qwen3.5:4b-q4_K_M

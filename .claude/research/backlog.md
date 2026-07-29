@@ -5,6 +5,15 @@
 
 ---
 
+## B34 [auto-decided 2026-07-29] Iter19 総括と次イテレーションの単一レバー決定
+
+- 状況: Iter19（E8: expert_model_size=qwen3.5-4b-q4_K_M）の結果、rejected 判定。主目的の推論速度改善は完全に反証（6498ms vs 3515ms, 1.85 倍遅い）。VRAM 改善のみ（5.67GB→3.4GB, -40%）では不十分。回答品質も大幅低下（-26.4pt）。
+- 自動選択: 次イテレーション（Iter20）の単一レバーを `embedding_postprocess`（E7）とする。`iteration_name` は「embedding_postprocess=whitening による embedding 空間の幾何的性質とルーティング精度への影響測定」。E7 は config のみの変更（embedding_postprocess=whitening）で、コード変更不要、コスト極めて低い。
+- 根拠: (1) E8 は rejected 確定。E7 は config.yml levers で E8 より先に定義されている（優先度高い）。(2) E7 は「mean-centering + whitening 後に cosine を取る」で、Iter2 の embedding 失敗が『幾何』由来か『信号不在』由来かを切り分ける最小実験。(3) config-only 変更で検証可能（コスト極めて低い）。(4) E7 の成功条件は top1_accuracy/Kappa の改善であり、expert_model_size の遅延問題とは無関係。
+- 要レビュー: (1) E7 の config-only 変更が正しく適用されるか確認すること。(2) whitening 適用後の embedding 分散・平均値を metrics.py で計測できているか確認すること。
+
+---
+
 ## B33 [auto-decided 2026-07-29] Iter18 総括と次イテレーションの単一レバー決定
 
 - 状況: Iter18（E10: expert_specialization=domain_lora）の実験・分析が完了．Phase A（LoRA なしベースライン: answer_quality_accuracy=0.2787）と Phase C（domain_lora: answer_quality_accuracy=0.5013）の比較．
