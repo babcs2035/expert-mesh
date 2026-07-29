@@ -27,7 +27,7 @@ remote_dir: "~/workspace/ktakahashi/expert-mesh"
 # ("self_report": the light_model self-scores confidence). Design doc 2.4
 # prioritizes B first; A is kept opt-in for the comparison experiment.
 calibrated_routing: false
-confidence_signal_method: self_consistency_semantic
+confidence_signal_method: self_report
 routing_method: supervised_classifier
 # confidence_elicitation (E3) only applies to the self_report signal
 # method: "numeric_scalar" asks for a single 0-1 confidence value;
@@ -86,58 +86,58 @@ nodes:
     port: 8080
     domain: general
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-general-lora
   wafl501:
     host: 192.168.15.101
     port: 8080
     domain: education
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-education-lora
   wafl502:
     host: 192.168.15.102
     port: 8080
     domain: legal
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-legal-lora
   wafl503:
     host: 192.168.15.103
     port: 8080
     domain: medical
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-medical-lora
   wafl504:
     host: 192.168.15.104
     port: 8080
     domain: business_economics
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-business_economics-lora
   wafl505:
     host: 192.168.15.105
     port: 8080
     domain: computer_science
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-computer_science-lora
   wafl506:
     host: 192.168.15.106
     port: 8080
     domain: natural_science
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-natural_science-lora
   wafl507:
     host: 192.168.15.107
     port: 8080
     domain: mathematics
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-mathematics-lora
   wafl508:
     host: 192.168.15.108
     port: 8080
     domain: history_culture
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-history_culture-lora
   wafl509:
     host: 192.168.15.109
     port: 8080
     domain: social_science
     light_model: qwen3.5:4b-q4_K_M
-    expert_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-social_science-lora
