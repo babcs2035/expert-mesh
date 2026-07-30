@@ -1,0 +1,36 @@
+{
+  "total_questions": 34,
+  "top1_accuracy": 0.9705882352941176,
+  "misrouting_rate": 0.02941176470588236,
+  "fallback_rate": 0.0,
+  "dispatch_failure_rate": 0.0,
+  "mean_duration_ms": 12274.14705882353,
+  "precision_recall_per_domain": {
+    "general": {
+      "precision": 1.0,
+      "recall": 0.9
+    },
+    "legal": {
+      "precision": 1.0,
+      "recall": 0.9285714285714286
+    },
+    "medical": {
+      "precision": 0.9166666666666666,
+      "recall": 0.7857142857142857
+    }
+  },
+  "single_domain_question_count": 30,
+  "single_domain_top1_accuracy": 0.9666666666666667,
+  "compound_domain_question_count": 4,
+  "compound_domain_top1_accuracy": 1.0,
+  "compound_coverage": {
+    "compound_rows_evaluated": 4,
+    "compound_covered_domain_count": 5,
+    "compound_expected_domain_total": 8,
+    "compound_domain_set_recall": 0.625,
+    "compound_domain_coverage_ratio_mean": 0.625,
+    "compound_domain_jaccard_mean": 0.625,
+    "compound_mean_dispatched_count": 1.25,
+    "compound_coverage_available": true
+  }
+}

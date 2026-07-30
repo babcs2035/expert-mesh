@@ -1,0 +1,16 @@
+expert-mesh-1  | INFO:     Started server process [1]
+expert-mesh-1  | INFO:     Waiting for application startup.
+expert-mesh-1  | INFO:     Application startup complete.
+expert-mesh-1  | INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+expert-mesh-1  | [INFO] {"level": "INFO", "node_id": "wafl500", "event": "advertise_received", "unix_time_s": 1783578290.3264976, "from_node": "wafl500"}
+expert-mesh-1  | INFO:     127.0.0.1:48816 - "POST /advertise HTTP/1.1" 200 OK
+expert-mesh-1  | [INFO] {"level": "INFO", "node_id": "wafl500", "event": "advertise_received", "unix_time_s": 1783578291.1222932, "from_node": "wafl503"}
+expert-mesh-1  | INFO:     192.168.15.103:60530 - "POST /advertise HTTP/1.1" 200 OK
+expert-mesh-1  | [INFO] {"level": "INFO", "node_id": "wafl500", "event": "advertise_received", "unix_time_s": 1783578297.761035, "from_node": "healthcheck"}
+expert-mesh-1  | INFO:     127.0.0.1:39692 - "POST /advertise HTTP/1.1" 200 OK
+expert-mesh-1  | INFO:     Shutting down
+expert-mesh-1  | INFO:     Waiting for application shutdown.
+expert-mesh-1  | INFO:     Application shutdown complete.
+expert-mesh-1  | INFO:     Finished server process [1]
+expert-mesh-1  | INFO:     Started server process [1]
+expert-mesh-1  | INFO:     Waiting for application startup.

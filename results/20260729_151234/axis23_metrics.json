@@ -1,0 +1,24 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/mnt/data-raid/ktakahashi/workspace/expert-mesh/scripts/evaluate_response_quality.py", line 158, in <module>
+    main()
+  File "/mnt/data-raid/ktakahashi/workspace/expert-mesh/scripts/evaluate_response_quality.py", line 138, in main
+    outcome = asyncio.run(
+              ^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/mnt/data-raid/ktakahashi/workspace/expert-mesh/scripts/evaluate_response_quality.py", line 81, in _run
+    results = _read_jsonl(results_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/data-raid/ktakahashi/workspace/expert-mesh/scripts/evaluate_response_quality.py", line 41, in _read_jsonl
+    with open(path, encoding="utf-8") as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'results/20260729_151234/results.jsonl'

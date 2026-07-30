@@ -1,0 +1,433 @@
+app-1  | INFO:     Started server process [1]
+app-1  | INFO:     Waiting for application startup.
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "gpu_status", "unix_time_s": 1784603776.1329916, "model": "isotnek/qwen3.5:9B-Unsloth-UD-Q4_K_XL", "size_vram_bytes": 5666399845, "using_gpu": true}
+app-1  | INFO:     Application startup complete.
+app-1  | INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603776.2070312, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:33004 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603777.0527058, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:41872 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603786.8783157, "from_node": "healthcheck"}
+app-1  | INFO:     192.168.15.100:44344 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603794.5083938, "request_id": "fdf317b3-5516-4183-a363-9c79b8bbcff0", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.95, "received_at_unix_time_s": 1784603793.6732621, "local_inference_ms": 835}
+app-1  | INFO:     192.168.15.100:44348 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603803.476914, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:59464 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603804.7561648, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:47016 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603806.0783792, "request_id": "fdf317b3-5516-4183-a363-9c79b8bbcff0", "received_at_unix_time_s": 1784603794.5178678, "local_inference_ms": 11560}
+app-1  | INFO:     192.168.15.100:44362 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603806.2488708, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:41082 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603807.0522118, "request_id": "c3873f1d-8254-4ef6-a7c5-6793c65e4ff5", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.95, "received_at_unix_time_s": 1784603806.154712, "local_inference_ms": 897}
+app-1  | INFO:     192.168.15.100:36558 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603807.0927496, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:47298 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603823.0663965, "request_id": "c3873f1d-8254-4ef6-a7c5-6793c65e4ff5", "received_at_unix_time_s": 1784603807.065169, "local_inference_ms": 16001}
+app-1  | INFO:     192.168.15.100:36562 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603823.9870546, "request_id": "0584236f-ec69-4fc2-adcc-48f28f0fbac3", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.95, "received_at_unix_time_s": 1784603823.1423178, "local_inference_ms": 844}
+app-1  | INFO:     192.168.15.100:57558 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603833.5160203, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:55234 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603834.7969165, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:59110 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603836.289334, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:44672 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603837.1249561, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:36792 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603840.2749062, "request_id": "0584236f-ec69-4fc2-adcc-48f28f0fbac3", "received_at_unix_time_s": 1784603823.9959772, "local_inference_ms": 16278}
+app-1  | INFO:     192.168.15.100:57572 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603841.1761208, "request_id": "38847a42-c085-4478-b987-f80435a703bc", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.9, "received_at_unix_time_s": 1784603840.3511117, "local_inference_ms": 825}
+app-1  | INFO:     192.168.15.100:56990 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603853.17854, "request_id": "38847a42-c085-4478-b987-f80435a703bc", "received_at_unix_time_s": 1784603841.581513, "local_inference_ms": 11597}
+app-1  | INFO:     192.168.15.100:57002 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603854.1159632, "request_id": "450d6b4b-3f2f-464d-a706-d4c3928e76e5", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.9, "received_at_unix_time_s": 1784603853.252535, "local_inference_ms": 863}
+app-1  | INFO:     192.168.15.100:52570 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603863.5549295, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:36838 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603864.8359458, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:55582 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603866.3288944, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:54256 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603867.1667883, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:48614 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603870.5979671, "request_id": "450d6b4b-3f2f-464d-a706-d4c3928e76e5", "received_at_unix_time_s": 1784603854.4905043, "local_inference_ms": 16107}
+app-1  | INFO:     192.168.15.100:52582 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603871.5005639, "request_id": "2af54d98-f5e1-434f-95d5-d2a03ed008c0", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.9, "received_at_unix_time_s": 1784603870.6795204, "local_inference_ms": 821}
+app-1  | INFO:     192.168.15.100:41052 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603887.6987085, "request_id": "2af54d98-f5e1-434f-95d5-d2a03ed008c0", "received_at_unix_time_s": 1784603871.5134997, "local_inference_ms": 16185}
+app-1  | INFO:     192.168.15.100:41064 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603888.619762, "request_id": "2f03bdf8-0ff0-43ea-aad1-1c408e3a51d4", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.9, "received_at_unix_time_s": 1784603887.8020232, "local_inference_ms": 817}
+app-1  | INFO:     192.168.15.100:44574 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603893.594895, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:44588 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603894.8759482, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:50266 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603896.3681006, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:36572 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603897.206189, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:39142 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603900.4581144, "request_id": "2f03bdf8-0ff0-43ea-aad1-1c408e3a51d4", "received_at_unix_time_s": 1784603888.9202437, "local_inference_ms": 11537}
+app-1  | INFO:     192.168.15.100:44586 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603901.397298, "request_id": "90eb7d8b-d579-4895-8d80-3361c1bf2d2a", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.95, "received_at_unix_time_s": 1784603900.5364697, "local_inference_ms": 860}
+app-1  | INFO:     192.168.15.100:43510 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603917.5650036, "request_id": "90eb7d8b-d579-4895-8d80-3361c1bf2d2a", "received_at_unix_time_s": 1784603901.4060707, "local_inference_ms": 16158}
+app-1  | INFO:     192.168.15.100:43518 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603918.5058622, "request_id": "91017064-7d03-437a-a810-6320e7919458", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.9, "received_at_unix_time_s": 1784603917.6617227, "local_inference_ms": 844}
+app-1  | INFO:     192.168.15.100:58688 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603923.6363935, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:58698 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603924.9151256, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:56374 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603926.4086795, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:57074 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603927.2436314, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:35742 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603932.2954948, "request_id": "91017064-7d03-437a-a810-6320e7919458", "received_at_unix_time_s": 1784603918.8700008, "local_inference_ms": 13425}
+app-1  | INFO:     192.168.15.100:58694 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603933.6920598, "request_id": "599de405-46f9-4450-8db2-eec450261b65", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.95, "received_at_unix_time_s": 1784603932.3654153, "local_inference_ms": 1326}
+app-1  | INFO:     192.168.15.100:37314 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784603946.6205878, "request_id": "599de405-46f9-4450-8db2-eec450261b65", "received_at_unix_time_s": 1784603933.7009754, "local_inference_ms": 12919}
+app-1  | INFO:     192.168.15.100:37322 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603947.5145392, "request_id": "37898f15-c0e1-40c1-acb4-d32470b0a1cc", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784603946.698347, "local_inference_ms": 816}
+app-1  | INFO:     192.168.15.100:42524 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603953.6771407, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:42534 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603954.954359, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:50908 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603956.447144, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:47200 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603957.2827208, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:37996 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603964.5526023, "request_id": "945fc27d-04be-4caf-8a31-68bd3dc208a1", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784603963.7994585, "local_inference_ms": 753}
+app-1  | INFO:     192.168.15.100:37104 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603976.9857004, "request_id": "921706a7-b979-40c4-b4ba-4ff6df3b1517", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784603976.1963034, "local_inference_ms": 789}
+app-1  | INFO:     192.168.15.100:59620 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603983.7161841, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:59624 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603985.0122554, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:55814 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603986.485912, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:43830 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784603987.3190699, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:39366 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784603994.0933993, "request_id": "3465fc3f-fcdf-459d-881f-d1ccbf57e147", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784603993.34414, "local_inference_ms": 749}
+app-1  | INFO:     192.168.15.100:53968 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604006.953899, "request_id": "51f3da99-63f1-49b6-b606-924a585155e3", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784604006.1615112, "local_inference_ms": 792}
+app-1  | INFO:     192.168.15.100:34810 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604013.7547216, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:34812 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604015.066022, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:52240 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604016.5248883, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:41944 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604017.3563094, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:47306 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604023.2838492, "request_id": "07f8556b-2686-469a-b815-c605507d2f16", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784604022.525607, "local_inference_ms": 758}
+app-1  | INFO:     192.168.15.100:42948 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604035.7812638, "request_id": "e3534166-a7eb-41e8-bf36-e556fd5f1729", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604035.0407555, "local_inference_ms": 740}
+app-1  | INFO:     192.168.15.100:47476 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604043.7943003, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:45336 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604045.105851, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:55856 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604046.565252, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:35916 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604047.406085, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:52396 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604052.1063228, "request_id": "cd9c1555-a8e6-4c97-9bf8-a9a3a41a4ed0", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784604051.3632195, "local_inference_ms": 743}
+app-1  | INFO:     192.168.15.100:38930 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604069.4103467, "request_id": "309a3d74-75b6-455c-89f8-31384eb6dba1", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604068.6669917, "local_inference_ms": 743}
+app-1  | INFO:     192.168.15.100:48504 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604073.8347042, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:48510 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604075.1451554, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:52588 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604076.6047106, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:38382 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604077.4526165, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:54722 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604082.6705368, "request_id": "ed4729de-6626-4da5-8bab-2cbbda899d81", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784604081.4152546, "local_inference_ms": 1255}
+app-1  | INFO:     192.168.15.100:50278 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604098.538354, "request_id": "ec5f8dd0-667f-4798-ad0f-44f8a24640c9", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784604097.7962751, "local_inference_ms": 742}
+app-1  | INFO:     192.168.15.100:53072 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604103.874856, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:53080 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604105.186155, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:33476 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604106.642875, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:38724 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604107.491278, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:58210 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604111.8860652, "request_id": "83580b16-8d50-44ea-ba1a-1734d4390d65", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604110.6944258, "local_inference_ms": 1191}
+app-1  | INFO:     192.168.15.100:52782 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604128.3086824, "request_id": "99a61487-a69a-4bb4-9fd4-d5064d5da80a", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784604127.5689986, "local_inference_ms": 739}
+app-1  | INFO:     192.168.15.100:51050 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604133.9322605, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:51052 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604135.227162, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:44418 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604136.6806006, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:37208 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604137.5490491, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:52546 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604140.7815895, "request_id": "e6ce2c7c-242f-4ec5-a2e4-09006c825736", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784604140.0474863, "local_inference_ms": 734}
+app-1  | INFO:     192.168.15.100:40982 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604157.5033984, "request_id": "05df32f2-b3a9-4f77-bc21-90f9e0342a5c", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604156.7481816, "local_inference_ms": 755}
+app-1  | INFO:     192.168.15.100:54796 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604163.9736078, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:54812 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604165.2674484, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:59484 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604166.7185345, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:45504 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604167.5871947, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:58214 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604170.2524498, "request_id": "ce00db9e-8a0e-4221-a46e-0a5fd3455297", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604169.5038278, "local_inference_ms": 748}
+app-1  | INFO:     192.168.15.100:59500 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604186.7802985, "request_id": "fa67be83-6e7c-4fe7-9335-0a3426c0619e", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604186.038369, "local_inference_ms": 741}
+app-1  | INFO:     192.168.15.100:46934 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604194.0162916, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:46940 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604195.3021772, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:42174 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604196.7559874, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:55058 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604197.623904, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:50554 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604199.600725, "request_id": "90be9ef4-1c30-44c7-b1cc-e82227e9f7e7", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.95, "received_at_unix_time_s": 1784604198.843213, "local_inference_ms": 757}
+app-1  | INFO:     192.168.15.100:35280 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784604215.5570595, "request_id": "90be9ef4-1c30-44c7-b1cc-e82227e9f7e7", "received_at_unix_time_s": 1784604199.6681798, "local_inference_ms": 15888}
+app-1  | INFO:     192.168.15.100:35288 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604216.4627686, "request_id": "71289a13-7d3d-4473-8e64-e4b511e21e66", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604215.634042, "local_inference_ms": 828}
+app-1  | INFO:     192.168.15.100:39076 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604224.0551906, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:39092 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604225.342129, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:34940 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604226.7972336, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:48682 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604227.6851764, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:40762 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604229.2993257, "request_id": "68b6bc6b-4a05-4ce8-8aa6-5057900f1280", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604228.119506, "local_inference_ms": 1179}
+app-1  | INFO:     192.168.15.100:49206 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604245.8495789, "request_id": "5a7bd5ae-3acd-4d4c-9ee2-be9d1f478c4d", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.85, "received_at_unix_time_s": 1784604245.08692, "local_inference_ms": 762}
+app-1  | INFO:     192.168.15.100:38598 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604254.0961654, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:54734 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604255.379855, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:50632 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604256.851565, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:38622 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604257.7211967, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:43770 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784604262.051335, "request_id": "5a7bd5ae-3acd-4d4c-9ee2-be9d1f478c4d", "received_at_unix_time_s": 1784604245.8867702, "local_inference_ms": 16164}
+app-1  | INFO:     192.168.15.100:54728 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604262.9618664, "request_id": "c25d2e45-00b5-4b92-becd-53a335037153", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604262.1363568, "local_inference_ms": 825}
+app-1  | INFO:     192.168.15.100:43118 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604280.7268157, "request_id": "d4ed14a8-e19e-4853-9246-527f6c748db4", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604279.9124744, "local_inference_ms": 814}
+app-1  | INFO:     192.168.15.100:60792 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604284.1388366, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:60806 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604285.421255, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:42696 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604286.893475, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:38468 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604287.7615879, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:38812 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604293.3011239, "request_id": "23bb6879-aa3b-4e77-a292-dcb19a8db393", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604292.192668, "local_inference_ms": 1108}
+app-1  | INFO:     192.168.15.100:52770 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604310.700987, "request_id": "e7455b7f-7c28-480e-8810-d60962b64f64", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604309.9259062, "local_inference_ms": 775}
+app-1  | INFO:     192.168.15.100:60548 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604314.17823, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:60552 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604315.456635, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:56980 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604316.9457157, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:44712 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604317.8018486, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:40552 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604328.1633162, "request_id": "e351586f-2599-4f2d-b46a-8225262736c3", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784604327.4176903, "local_inference_ms": 745}
+app-1  | INFO:     192.168.15.100:54820 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604340.5455618, "request_id": "e93fe97e-b598-4f51-a167-9361500ad252", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604339.8072314, "local_inference_ms": 738}
+app-1  | INFO:     192.168.15.100:54204 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604344.2175088, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:54208 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604345.4921465, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:45360 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604346.9954035, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:38460 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604347.8452613, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:35644 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604358.4036236, "request_id": "41f88f37-23b5-4ca7-8a6f-09cd26a9ca3d", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604357.622907, "local_inference_ms": 780}
+app-1  | INFO:     192.168.15.100:37068 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604374.2698317, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:54686 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604374.421403, "request_id": "b1e8c36f-33dc-462f-9165-549c2f26a1b3", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604373.6721375, "local_inference_ms": 749}
+app-1  | INFO:     192.168.15.100:54684 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604375.5312068, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:35244 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604377.0339563, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:53750 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604377.8883724, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:44012 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604387.3014836, "request_id": "10c09624-b0cd-4002-a676-d3d3ce59795d", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.1, "received_at_unix_time_s": 1784604386.5619752, "local_inference_ms": 739}
+app-1  | INFO:     192.168.15.100:58146 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604404.0812843, "request_id": "98e62cc6-50dc-49cb-9d15-51eb4148b114", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604403.3428693, "local_inference_ms": 738}
+app-1  | INFO:     192.168.15.100:58472 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604404.3131819, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:58474 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604405.5696142, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:41904 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604407.0746539, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:47818 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604407.9284463, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:37708 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604416.8652432, "request_id": "95a24357-2938-4d55-a2d0-0a9303917a3a", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604416.124243, "local_inference_ms": 740}
+app-1  | INFO:     192.168.15.100:47682 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604434.00231, "request_id": "63a1f4b1-81c8-4b8d-9a96-26cdc0d06dd4", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.9, "received_at_unix_time_s": 1784604433.2554407, "local_inference_ms": 746}
+app-1  | INFO:     192.168.15.100:32902 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604434.3517165, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:32910 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604435.6093452, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:54236 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604437.1112046, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:54540 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604437.966289, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:59008 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "dispatch_done", "unix_time_s": 1784604447.9459522, "request_id": "63a1f4b1-81c8-4b8d-9a96-26cdc0d06dd4", "received_at_unix_time_s": 1784604434.3589456, "local_inference_ms": 13587}
+app-1  | INFO:     192.168.15.100:32916 - "POST /dispatch HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604449.2750053, "request_id": "51419b49-2d99-45dd-b565-5dbbcd8e642f", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604448.0175498, "local_inference_ms": 1257}
+app-1  | INFO:     192.168.15.100:58608 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604461.685326, "request_id": "2bdd15b4-43e2-429d-82a8-c3fd794ebdbe", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604460.9371228, "local_inference_ms": 748}
+app-1  | INFO:     192.168.15.100:60240 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604464.3930628, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:60252 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604465.6521878, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:41056 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604467.1527245, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:58154 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604468.0053685, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:50068 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "probe_done", "unix_time_s": 1784604478.9217057, "request_id": "8a7b0a0b-68e2-425a-bd1c-d74432d03a38", "from_node": "wafl500", "routing_method": "self_report", "confidence": 0.2, "received_at_unix_time_s": 1784604478.1814702, "local_inference_ms": 740}
+app-1  | INFO:     192.168.15.100:46960 - "POST /probe HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604494.4284532, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:48674 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604495.6910672, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:43060 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604497.1885536, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:47770 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604498.040494, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:59678 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604524.4723554, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:49890 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604525.726966, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:46686 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604527.2324052, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:50082 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604528.0835268, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:53992 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604554.5077136, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:45448 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604555.771395, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:58838 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604557.2679844, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:57322 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604558.1185474, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:35436 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604584.5475304, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:45614 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604585.8105078, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:59592 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604587.3106892, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:52636 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604588.1588786, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:43806 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604614.5818527, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:34670 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604615.889721, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:42230 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604617.3469448, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:34262 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604618.1955767, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:38278 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604644.62455, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:46926 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604645.9283185, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:35546 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604647.3883674, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:58744 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604648.2343378, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:37352 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604674.698462, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:59430 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604675.970753, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:43088 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604677.424372, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:60714 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604678.2688363, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:36766 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604704.7426739, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:53116 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604706.0079021, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:40726 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604707.467603, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:35324 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604708.3100152, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:40314 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604734.7735682, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:33882 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604736.048334, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:38752 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604737.5003958, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:42478 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604738.3433192, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:56452 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604764.8164158, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:57628 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604766.0789084, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:53692 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604767.5431445, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:40240 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604768.3836994, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:60756 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604794.8538907, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:58444 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604796.123636, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:59484 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604797.5794072, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:46654 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604798.4161744, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:60372 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604824.8953502, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:39048 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604826.1587732, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:35326 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604827.6217258, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:53758 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604828.4588943, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:48616 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604854.9330876, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:57842 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604856.2015283, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:49006 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604857.658078, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:39558 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604858.4942315, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:37870 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604884.977248, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:49576 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604886.2318952, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:38172 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604887.7001488, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:54484 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604888.5417774, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:49660 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604915.014165, "from_node": "wafl500"}
+app-1  | INFO:     192.168.15.100:47200 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604916.2754378, "from_node": "wafl502"}
+app-1  | INFO:     192.168.15.102:39562 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604917.7335532, "from_node": "wafl503"}
+app-1  | INFO:     127.0.0.1:47310 - "POST /advertise HTTP/1.1" 200 OK
+app-1  | [INFO] {"level": "INFO", "node_id": "wafl503", "event": "advertise_received", "unix_time_s": 1784604918.5954242, "from_node": "wafl501"}
+app-1  | INFO:     192.168.15.101:58540 - "POST /advertise HTTP/1.1" 200 OK

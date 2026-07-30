@@ -7,7 +7,7 @@
   "current_lever": "routing_architecture=central_router_bugfixed",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785397500,
+  "updated_at": 1785413451,
   "e25_results": {
     "lever": "eval_dataset_compound_expansion_20_to_100",
     "single_domain_top1_accuracy": 0.5693333333333334,

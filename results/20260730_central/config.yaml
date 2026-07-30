@@ -1,0 +1,166 @@
+# Unified configuration for all nodes: shared settings and per-node settings
+# (host/port/domain/model names). Hostnames, IPs, model names, and deploy
+# paths are documented ONLY in this file — never hardcode them in code.
+embedding_model: nomic-embed-text
+confidence_threshold: 0.5
+# light_model switched from 9B to qwen3.5:4b-q4_K_M (~2.4-2.5GB) for the
+# 10-node mesh: 9B (5.67GB measured resident, docs/d0001 §1.5) left too
+# little VRAM headroom once 6 more nodes were added, and light_model is
+# called on every /probe regardless of which node ends up dispatched to,
+# so its cost dominates routing latency. expert_model (only invoked for
+# the node actually dispatched to) stays a separate, potentially larger
+# model — see the S1 domain-specialization note near the nodes section.
+# probe_timeout_s/dispatch_timeout_s below are still calibrated to the old
+# 9B model's measured latency; they should be re-measured against 4b
+# before being treated as accurate for the new light_model.
+probe_timeout_s: 120.0
+# dispatch_timeout_s is based on qwen3.5:9b expert model generation time
+# for DISPATCH_MAX_TOKENS=512. The original estimate (170s + margin = 200s)
+# proved insufficient: real-machine measurement on wafl503 (medical, 3
+# questions) showed 238-259s of actual generation time, so 200s caused every
+# dispatch to time out. Raised to 400s (~1.5x the observed max) to restore
+# margin for CPU inference variance.
+dispatch_timeout_s: 400.0
+remote_dir: "~/workspace/ktakahashi/expert-mesh"
+# routing_method selects method A ("embedding": cosine similarity between
+# query_embedding and each node's domain_embedding, no LLM call) or method B
+# ("self_report": the light_model self-scores confidence). Design doc 2.4
+# prioritizes B first; A is kept opt-in for the comparison experiment.
+calibrated_routing: false
+confidence_signal_method: self_report
+routing_method: supervised_classifier
+# confidence_elicitation (E3) only applies to the self_report signal
+# method: "numeric_scalar" asks for a single 0-1 confidence value;
+# "top_k_with_probs" asks for 2 labeled candidates with probabilities
+# summing to 1 (Tian et al. 2023), which reduces 0/1 saturation.
+confidence_elicitation: top_k_with_probs
+# self_consistency_semantic (E4) samples semantic_sample_count verdicts at
+# semantic_sample_temperature and discounts the fits-fraction by the
+# entropy of their clustered reasons. Each probe call under this method
+# makes semantic_sample_count + up-to-(semantic_sample_count-1) LLM calls
+# (verdict sampling + entailment clustering), so probe_timeout_s may need
+# raising when this method is active.
+semantic_sample_count: 5
+semantic_sample_temperature: 0.7
+# p_true (E5, Kadavath et al. 2022) requires ollama v0.12.11+ for
+# top_logprobs support; if a node's ollama is older, estimate_confidence_p_true
+# falls back to numeric_scalar self_report automatically (confirm the real
+# ollama version on each node before treating a p_true run as valid).
+# dispatch_top_k > 1 sends /dispatch to multiple confidence-qualifying nodes
+# in parallel (design doc 2.5); the highest-confidence answer is kept.
+dispatch_top_k: 1
+# embedding_postprocess (E7) applies mean-centering or whitening (Su+2021)
+# to query_embedding/domain_embedding before cosine scoring, addressing the
+# anisotropy that collapsed Iter2's cosine similarities into a narrow band.
+# Only used when routing_method: embedding. embedding_whitening_path points
+# at the artifact produced by scripts/fit_embedding_whitening.py.
+embedding_postprocess: none
+embedding_whitening_path: config/embedding_whitening.json
+# routing_method: supervised_classifier (E6) loads the same trained
+# classifier (scripts/train_domain_classifier.py's output) on every node;
+# each node reads off only its own domain's predicted probability, so no
+# central router is introduced. classifier_model_path is only read when
+# routing_method is set to this value.
+classifier_model_path: models/domain_classifier.joblib
+# judge_model (evaluation axis 2, scripts/evaluate_response_quality.py's
+# --judge-model default) reuses the general node's expert_model as
+# LLM-as-judge for hand-authored consultation rows (no ground-truth
+# answer to compare against), rather than deploying a dedicated judge
+# model. Not read by node.py/http_server.py; only by that offline script.
+judge_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m
+
+# 10-domain mesh (p0001 Iter15): wafl500-509 on 192.168.15.100-109. Domain
+# names match build_dataset.py's _DOMAIN_TASK_MAP so the JMMLU-backed
+# dataset's expected_domains line up with actual node domains.
+#
+# expert_model (S1, E10 expert_specialization=domain_lora): each node uses
+# a domain-specific LoRA-integrated model (expert-mesh-{domain}-lora) built
+# from schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m + a domain LoRA
+# adapter trained via scripts/train_domain_lora.py and registered via
+# scripts/create_lora_model.py. This addresses the Iter15 finding that all
+# nodes shared the same general-purpose model, making routing accuracy an
+# proxy metric with no downstream effect on answer quality.
+nodes:
+  wafl500:
+    host: 192.168.15.100
+    port: 8080
+    domain: general
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-general-lora
+  wafl501:
+    host: 192.168.15.101
+    port: 8080
+    domain: education
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-education-lora
+  wafl502:
+    host: 192.168.15.102
+    port: 8080
+    domain: legal
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-legal-lora
+  wafl503:
+    host: 192.168.15.103
+    port: 8080
+    domain: medical
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-medical-lora
+  wafl504:
+    host: 192.168.15.104
+    port: 8080
+    domain: business_economics
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-business_economics-lora
+  wafl505:
+    host: 192.168.15.105
+    port: 8080
+    domain: computer_science
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-computer_science-lora
+  wafl506:
+    host: 192.168.15.106
+    port: 8080
+    domain: natural_science
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-natural_science-lora
+  wafl507:
+    host: 192.168.15.107
+    port: 8080
+    domain: mathematics
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-mathematics-lora
+  wafl508:
+    host: 192.168.15.108
+    port: 8080
+    domain: history_culture
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-history_culture-lora
+  wafl509:
+    host: 192.168.15.109
+    port: 8080
+    domain: social_science
+    light_model: qwen3.5:4b-q4_K_M
+    expert_model: expert-mesh-social_science-lora
+
+# Central router experiment settings
+# The central router runs embedding + classification locally, but answer
+# generation is offloaded to a remote host via SSH to avoid loading all 10
+# LoRA models on a single 6 GB host.
+#
+# Since Ollama runs only inside Docker on the expert nodes (not on wafl-ctrl5),
+# answer generation uses curl via SSH to the appropriate expert node.
+# Each domain maps to the expert node that holds its LoRA model.
+central_router:
+  ssh_user: denjo
+  embed_node_host: wafl502
+  domain_nodes:
+    general:            {host: wafl500, model: expert-mesh-general-lora:latest}
+    education:          {host: wafl501, model: expert-mesh-education-lora:latest}
+    legal:              {host: wafl502, model: expert-mesh-legal-lora:latest}
+    medical:            {host: wafl503, model: expert-mesh-medical-lora:latest}
+    business_economics: {host: wafl504, model: expert-mesh-business_economics-lora:latest}
+    computer_science:   {host: wafl505, model: expert-mesh-computer_science-lora:latest}
+    natural_science:    {host: wafl506, model: expert-mesh-natural_science-lora:latest}
+    mathematics:        {host: wafl507, model: expert-mesh-mathematics-lora:latest}
+    history_culture:    {host: wafl508, model: expert-mesh-history_culture-lora:latest}
+    social_science:     {host: wafl509, model: expert-mesh-social_science-lora:latest}
