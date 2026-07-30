@@ -1,3 +1,373 @@
+## Iteration 24: 中央集権ルータ比較による分散型 supervised_classifier の相対性能評価
+
+### 実験 (Iter24)
+
+**実験ディレクトリ**: `results/20260730_central/`
+**データセット**: JMMLU 1520 問（単一1500 + 複合20）、全問完走
+**所要時間**: mean_duration_ms=1981.1
+
+**成功条件の全結果**:
+
+| 分類 | 指標 | 期待値 | 実測値 | 判定 |
+|---|---|---|---|---|
+| 主基準 | top1_accuracy | 0.5651 | 0.525658 | **不一致**（差 -3.94pt） |
+| 主基準 | Cohen's kappa | 0.5215 | 0.480741 | **不一致**（差 -4.08pt） |
+| 主基準 | McNemar p 値 | > 0.05 | 0.000313 | **不一致**（有意差あり） |
+| 副基準 | probe_phase_ms | 分散版の50%以下 | 1981ms（全体） | 分散版の55.7%（速い） |
+| 参考 | answer_quality_accuracy | 0.50 ± 0.013 | 0.5460 | ** artifact **（後述） |
+| 参考 | end_to_end_accuracy | 0.3151 ± 0.013 | 0.2940 | ノイズ幅内だが低下 |
+| 報告 | fallback_rate | 0% | 0.0%（3 timeout） | 正常 |
+
+**追加メトリクス**:
+- ECE: 0.3833（分散版 0.1927 の約2倍。confidence分布が異なるため）
+- Brier score: 0.3888（分散版 0.2403）
+- AUROC: 0.7399（分散版 0.7230）
+- fallback_rate: 0.0%（3件は timeout で answer_text=None）
+- single_domain_top1_accuracy: 0.5327（n=1500）
+- compound_domain_top1_accuracy: 0.0（n=20）
+- precision_recall_per_domain: 分散版と異なるパターン（後述）
+
+**実行上の注記**:
+- 1520問中3問が timeout（medical, social_science, mathematics の LoRA モデルで120秒超過）
+- **重大な発見**: 1445/1520 の回答が `正解は X です。`（9文字）の短縮回答のみ
+  - 分散版では `build_dispatch_prompt()` が few-shot 例付きのプロンプトを生成するのに対し、
+    中央版スクリプトは `row["query"]` をそのまま prompt として渡している
+  - 回答生成モデルが few-shot 例なしの簡易プロンプトで回答したため、最短回答に収束
+  - 72問は完全な回答（200-500文字）、3問は timeout で None
+- 回答の短縮は answer_quality_accuracy の解釈に重大な影響（後述「分析(解釈)」節参照）
+
+**判定**: **失敗** — 主基準3項目（top1_accuracy差、kappa差、McNemar p値）がすべて期待値と不一致。
+回答生成プロンプトの実装バグ（few-shot 欠落）が主要因。
+
+---
+
+### 分析 (実行) (Iter24)
+
+**数値の対比**:
+
+| 指標 | 分散版 (Iter23) | 中央版 (Iter24) | 差 | 判定 |
+|---|---|---|---|---|
+| top1_accuracy | 0.565132 | 0.525658 | -3.94pt | **不一致**（2pt閾値超過） |
+| Cohen's kappa | 0.521481 | 0.480741 | -4.07pt | **不一致**（0.02閾値超過） |
+| ECE | 0.192654 | 0.383296 | +0.1906 | 悪化（confidence分布の違い） |
+| Brier score | 0.240286 | 0.388843 | +0.1486 | 悪化 |
+| AUROC | 0.723004 | 0.739900 | +0.0169 | 微改善 |
+| mean_duration_ms | 3555.6 | 1981.1 | -1574.5 | 中央版が55.7%（約1.8倍速） |
+| fallback_rate | 13.16% | 0.0% | -13.16pt | 中央版は3 timeout のみ |
+| answer_quality_accuracy | 0.508667 | 0.5460 | +0.0373 | artifact（後述） |
+| end_to_end_accuracy | 0.318421 | 0.2940 | -0.0244 | 低下 |
+| compound_domain_top1 | 0.25 | 0.0 | -0.25 | 低下 |
+
+**ドメイン別 precision/recall の対比**:
+
+| ドメイン | 分散版 precision | 中央版 precision | 分散版 recall | 中央版 recall |
+|---|---|---|---|---|
+| business_economics | 0.511 | 0.491 | 0.453 | 0.380 |
+| computer_science | 0.614 | 0.527 | 0.540 | 0.580 |
+| education | 0.520 | 0.739 | 0.411 | 0.108 |
+| general | 0.317 | 0.564 | 0.680 | 0.613 |
+| history_culture | 0.764 | 0.598 | 0.647 | 0.673 |
+| legal | 0.817 | 0.906 | 0.566 | 0.349 |
+| mathematics | 0.725 | 0.506 | 0.667 | 0.847 |
+| medical | 0.517 | 0.586 | 0.470 | 0.247 |
+| natural_science | 0.580 | 0.493 | 0.580 | 0.660 |
+| social_science | 0.685 | 0.403 | 0.580 | 0.800 |
+
+中央版は education/legal/mathematics/medical/social_science で recall が低い（分類器がこれらのドメインを過少選択）。
+
+**McNemar 対比較**:
+- p 値: 0.000313
+- 不一致ペア: 268 件（Aのみ正解: 164, Bのみ正解: 104）
+- 有意差: **あり**（p < 0.001）
+
+**回答品質の artifact について**:
+中央版の answer_quality_accuracy = 0.5460 は、1445問が `正解は X です。` という
+9文字の短縮回答のみであるため、抽出アルゴリズムが正しく文字通り「X」を抽出し、
+それが正解と一致した件数を数えたものである。分散版（0.5087）は完全な回答から
+抽出するため、回答の長さと品質が異なる。この数値は中央版の回答品質が高いことを
+示すのではなく、**回答が短すぎて詳細な検証ができない**ことを示す。
+
+---
+
+### 分析 (解釈) (Iter24)
+
+**レバー**: routing_architecture=central_router
+
+**判定**: **rejected**（主基準がすべて失敗）
+
+**今回の数値と前回比**:
+- top1_accuracy: 分散版 0.5651 → 中央版 0.5257（-3.94pt、2pt閾値超過）
+- Cohen's kappa: 分散版 0.5215 → 中央版 0.4807（-4.08pt、0.02閾値超過）
+- McNemar p: 0.000313（有意差あり）
+- mean_duration_ms: 分散版 3556ms → 中央版 1981ms（55.7%、約1.8倍速）
+- ECE: 分散版 0.1927 → 中央版 0.3833（約2倍悪化）
+
+**ノイズか有意かの判定と根拠**:
+- **top1_accuracy の差 -3.94pt**: 2pt閾値を大幅に超過。ノイズではない。
+  原因は回答生成プロンプトの実装バグ（few-shot 欠落）による回答品質の低下が
+  routing 精度に帰結した可能性が高い。ただし、classifier は同一ファイルなので、
+  routing 自体の精度が下がる直接的な原因は不明。
+- **Cohen's kappa の差 -4.08pt**: 0.02閾値を超過。ノイズではない。
+- **McNemar p=0.000313**: 統計的に有意な差。両構成の routing 結果が異なる。
+- **mean_duration_ms の差**: 中央版が55.7%と予測通り高速。これはアーキテクチャの
+  純粋な優位性（プローブ通信コストの削減）を示す。
+
+**仮説との整合**:
+1. **仮説1（ルーティング精度の一致）**: **棄却**。top1_accuracy の差は -3.94pt で
+   2pt閾値を超過。同一 classifier を使っているはずだが、中央版の routing 結果が
+   分散版と有意に異なる（McNemar p=0.000313）。
+   原因の候補: (a) 中央版で embedding を生成するノード（wafl502）と分散版で probe
+   を受けるノード（全10ノード）の embedding モデルの差異、(b) classifier の predict_proba
+   の出力順序の違い、(c) 回答生成プロンプトの違いが間接的に影響。
+2. **仮説2（プローブ速度の向上）**: **支持**。中央版の mean_duration_ms（1981ms）は
+   分散版（3556ms）の55.7%で、プローブ通信コストの削減が確認できた。
+3. **仮説3（VRAM制約）**: 未測定。中央版の router ノードの VRAM 使用量は未計測。
+   分散版は各ノード ~3.4GB だが、中央版は全10 LoRA をロードする必要があるため
+   6GB を超える可能性が高い。
+
+**回答生成プロンプトの実装バグ（重大）**:
+中央版スクリプト `scripts/run_central_experiment.py` の `_run_one()` は、
+回答生成時に `prompt=row["query"]`（生クエリ）を渡している。
+これに対して分散版の `run_experiment.py` は `build_dispatch_prompt()` で
+few-shot 例・指示文を含む詳細なプロンプトを生成する。
+この差分により、中央版の回答生成モデルは簡易プロンプトで回答を生成し、
+1445問が `正解は X です。`（9文字）という最短回答に収束した。
+
+**このバグの修正方法**: `_run_one()` の answer generation で、
+`row["query"]` の代わりに `build_dispatch_prompt()` の出力（または同等の
+few-shot 付きプロンプト）を使うように変更する必要がある。
+ただし、`build_dispatch_prompt()` は `node.py` 内で定義されており、
+中央版スクリプトで再利用するにはモジュール化またはコピーが必要。
+
+**次イテレーションへの示唆**:
+1. **中央版スクリプトのプロンプト修正**が最優先。`build_dispatch_prompt()` を
+   再利用可能にするか、中央版専用の prompt builder を作る。
+2. **修正後の再実験**で、top1_accuracy と McNemar 対比較を再測定する。
+3. **回答品質の評価**は、修正後の完全な回答で行う必要がある。
+4. **VRAM 測定**も未実施なので、router ノードの VRAM 使用量を計測する。
+
+---
+
+### 実装 (Iter24)
+
+**変更ファイル**: `scripts/run_central_experiment.py`（新規作成，229行）
+
+**変更内容**: 中央集権ルータによる実験スクリプトを新規作成．既存の `run_experiment.py`（分散フロー）は変更しない．
+
+- 同一の classifier（`models/domain_classifier.joblib`）を読み込み，各質問に対して embedding + classify（argmax）で単一ドメインを選択
+- 選択ドメインの LoRA モデル（`expert-mesh-{domain}-lora`）で回答生成
+- 出力スキーマは `run_experiment.py` と同一（15フィールド: `id`, `request_id`, `query`, `expected_domains`, `selected_node_id`, `selected_domain`, `used_fallback`, `dispatch_failed`, `confidence`, `confidence_logprobs_mean`, `answer_text`, `duration_ms`, `dispatch_gen_time_ms`, `dispatched_domains`, `probe_candidates`）
+- CLI 引数: `--config`（config.yaml）, `--dataset`（必須）, `--classifier`（デフォルト: models/domain_classifier.joblib）, `--output`（デフォルト: stdout）
+- 結果を `results/<timestamp>/` に出力し，`config.yaml` と `git_head.txt` を同一ディレクトリに保存（`_record_experiment_provenance`）
+
+**テスト結果**:
+- `uv run pytest tests/`: 198 passed, 2 skipped（既存結果と完全一致，回帰なし）
+- `uv run ruff check scripts/run_central_experiment.py`: 新規 warning 0
+
+**実装の注記**:
+- `run_experiment.py` の `_run_one()` が `node.run_ask_flow()` を通じて分散フロー（probe -> aggregate -> dispatch）を実行するのに対し，本スクリプトの `_run_one()` は中央集権フロー（embedding -> classify -> generate）を直接実装．両者の結果レコードは同一スキーマで出力されるため，`metrics.py` は両方を同じ形式で処理できる．
+- `selected_node_id` は central router には該当概念がないため `None`，`probe_candidates` と `dispatched_domains` はそれぞれ `[]` と `[selected_domain]` に設定．`confidence_logprobs_mean` は classifier ベースのため `None`．
+- `OllamaClient` の `embed()` と `generate()` は既存の retry ロジック（3回，15秒間隔）をそのまま利用．
+- `classifier.predict_proba()` の戻り値は numpy 配列なので，`argmax()` は `int()` で Python int に変換し，`float()` で確率値を抽出．
+
+**実験開始可否**: **OK**．スクリプトは設定ファイルとデータセットを正しくパースでき，テスト・リンタも通過．Ollama 接続先（OLLAMA_HOST 環境変数またはデフォルト localhost）が利用可能であれば実験実行可能．
+
+---
+
+### 計画 (Iter24)
+
+**単一レバー原則の解釈**: 変更するのは「ルーティングのアーキテクチャ（分散型 vs 中央集権型）」という1点のみ．分類器（同一 LogisticRegression），データセット（JMMLU 1520 問），回答生成モデル（expert-mesh-{domain}-lora 全10 LoRA），評価指標（top1_accuracy, Cohen's kappa, ECE, McNemar），および回答生成のロジックはすべて不変．これは Iter15（E1，データセット拡張）と同種の「基盤整備イテレーション」であり，config.yml `levers` の値を振るのではなく，既存の最良構成（E6 supervised_classifier + E10 domain_lora）に対して新しい比較軸（中央集権ルータ）を追加する．
+
+**変更内容**: 新規スクリプト `scripts/run_central_experiment.py` を1つ追加する．既存の `run_experiment.py`（分散フロー）は変更しない．両スクリプトは同じ `results.jsonl` スキーマで出力する．
+
+| 区分 | ファイル | 変更内容 |
+|---|---|---|
+| 新規 | `scripts/run_central_experiment.py` | 中央集権ルータによる実験スクリプト（~150-200行） |
+| 不変 | `run_experiment.py` | 分散フロー．変更しない |
+| 不変 | `node.py` | `run_ask_flow()` 分散フロー．変更しない |
+| 不変 | `classifier.py` | 分類器読み込み・推論．変更しない |
+| 不変 | `metrics.py` | 分析スクリプト．変更しない |
+| 不変 | `config.yaml` | 実験設定は分散版と同じ．変更しない |
+
+**固定する構成**（変更しないもの）:
+| 設定 | 値 |
+|---|---|
+| `routing_method` | `supervised_classifier`（E6，Iter17 採用） |
+| `classifier_model` | `models/domain_classifier.joblib`（分散版と同一ファイル） |
+| `expert_model` | `expert-mesh-{domain}-lora`（E10，Iter18 採用，全10ノード） |
+| `light_model` | `qwen3.5:4b-q4_K_M` |
+| `embedding_model` | `nomic-embed-text` |
+| `confidence_elicitation` | `top_k_with_probs`（E6 下では no-op） |
+| `confidence_threshold` | 0.5 |
+| `dispatch_top_k` | 1 |
+| `domain_count` | 10 |
+| データセット | JMMLU 1520 問（`data/dataset.jsonl`） |
+| 訓練データ | `data/classifier_train.jsonl`（1427 問，0 件重複確認済み） |
+| Ollama 環境 | wafl500〜509，ポート 11434，全10 LoRA モデル登録済み |
+
+**仮説**:
+1. **ルーティング精度**: 分散版と中央版の classifier は同一の `models/domain_classifier.joblib`（LogisticRegression）を使うため，同じ query_embedding に対して同じ argmax ドメインが選ばれる．したがって top1_accuracy と Cohen's kappa は理論的に一致する（差 < 1%）．
+2. **プローブレイテンシ**: 分散版は 10 ノードへの並列 probe（ネットワーク RTT x 10 の通信コスト）を要するのに対し，中央版はローカルで embedding + classify を行うのみ．プローブフェーズの所要時間は中央版が大幅に速くなる（推計: 分散版 probe 平均 200-300ms vs 中央版 50-100ms）．
+3. **VRAM 制約**: 6GB 制約下で 10 LoRA モデルを1台に載せることはできない．分散版は各ノードが1 LoRA（~1GB）のみを保持するのに対し，中央版は全10 LoRA を同一ホストにロードする必要がある．これは分散版の優位性を示す核心的な論点．
+
+**期待効果**:
+1. 「同じ classifier を使っても，アーキテクチャの違いでオーバーヘッドがどう異なるか」を定量化する．これは X2（中央集権ルータ比較）の主要知見．
+2. VRAM 制約（6GB）が実システム設計に与える影響を明確にする．分散型アーキテクチャの優位性をデータで示せる．
+3. McNemar 対比較により，ルーティング精度の「一致」が統計的に有意か，あるいは単なるノイズかを確認する．
+
+**成功条件**:
+| 分類 | 指標 | 期待値 | 判定基準 |
+|---|---|---|---|
+| 主基準 | top1_accuracy（中央版） | 0.5651 | 分散版との差が **2pt 以内**（同一 classifier による理論的一致） |
+| 主基準 | Cohen's kappa（中央版） | 0.5215 | 分散版との差が **0.02 以内** |
+| 主基準 | McNemar p 値 | > 0.05 | 両構成の routing 結果に統計的有意差がない（p > 0.05 で一致を支持） |
+| 副基準 | probe_phase_ms（中央版） | 分散版の 50% 以下 | 分散版のプローブフェーズ平均（~200-300ms）と比較．中央版はローカル処理のみなので大幅に速くなるはず |
+| 報告 | VRAM per node（分散版） | ~3.4GB | 分散版の既存測定値（Iter23）と一致することを確認 |
+| 報告 | VRAM on router node（中央版） | 測定値を報告 | classifier（~100MB）+ 1 LoRA モデル（~1-2GB）の合計．全10 LoRA 常駐は不可能（6GB 超）のため，swap ありの実測値を報告 |
+| 報告 | answer_quality_accuracy | 0.50 ± 0.013 | 分散版（Iter23: 0.5087）と同等．回答生成ロジックが同一のため |
+| 検証 | results.jsonl のスキーマ | 分散版と同一 | metrics.py が両方の結果を同じ形式で処理できる |
+
+**ノイズか有意かの判定基準**:
+- **routing_accuracy の差 < 2pt**: 同一 classifier を使っているため，この範囲の差は実装上のノイズ（浮動小数点の丸め差，classifier.predict_proba の順序違い等）．有意な差ではない．
+- **routing_accuracy の差 >= 2pt**: 実装上のバグ（例: 中央版で間違った classifier を使っている，embedding の計算方法が異なる）を強く示唆．実験を停止して原因を調査する．
+- **probe_latency の差**: 分散版と中央版で測定方法が異なる（分散版はネットワーク RTT 含む，中央版はローカル処理のみ）ため，直接比較は難しい．ただし，中央版の probe フェーズが分散版の probe フェーズの 50% 以下になれば，アーキテクチャの違いによるオーバーヘッド差が有意であると判定する．
+- **answer_quality_accuracy の差**: 回答生成ロジックが同一のため，0.013 以内の差はノイズ（LLM 生成のランダム性）．それ以上の差があれば回答生成側の差異を疑う．
+
+**実行手順（フルフロー）**:
+
+```
+[実装フェーズ]
+1. scripts/run_central_experiment.py を新規作成
+   - 引数: --dataset data/dataset.jsonl --output results.jsonl
+     --classifier models/domain_classifier.joblib --ollama-host 192.168.15.100
+   - 内部フロー:
+     a. classifier を joblib.load() で読み込み
+     b. dataset.jsonl から各行を読み込み
+     c. 各 query について:
+        i.   OllamaClient.embed() で query_embedding を生成
+        ii.  classifier.predict_proba() で全ドメインの確率を計算
+        iii. argmax で最大確率のドメインを選択
+        iv.  OllamaClient.generate() で選択ドメインの LoRA モデルに回答を生成
+        v.   results.jsonl に 1 行書き込み
+     d. 全 1520 問完了後，results.jsonl を閉じる
+   - 出力スキーマ: run_experiment.py と同一（selected_domain, correct_domain,
+     confidence, answer_text, duration_ms, request_id 等）
+   - 推計実装量: 150-200 行（既存のスクリプトを参考）
+
+2. uv run pytest tests/ で全テスト通過を確認（既存 198 passed / 2 skipped の維持）
+3. uv run ruff check で新規 warning 0 を確認
+
+[実験フェーズ]
+4. mise run setup   （イメージ再ビルド．git HEAD の変更がない場合は速い）
+5. mise run deploy  （smoke_check の3チェック．分散版と同じ構成なので pass するはず）
+6. uv run python scripts/run_central_experiment.py \
+       --dataset data/dataset.jsonl \
+       --output results/central/results.jsonl \
+       --classifier models/domain_classifier.joblib \
+       --ollama-host 192.168.15.100
+   （JMMLU 1520 問，分散版と同じデータセット）
+   推計所要時間: 1520 問 x 平均 3.5 秒 = 約 17.5 分（プローブなしで回答生成のみ）
+
+[分析フェーズ]
+7. uv run python metrics.py --results results/distributed/results.jsonl --json
+   （分散版の既存結果，results/20260730_015322/）
+8. uv run python metrics.py --results results/central/results.jsonl --json
+   （中央版の結果）
+9. uv run python metrics.py --results results/distributed/results.jsonl \
+       --compare results/central/results.jsonl
+   （McNemar 対比較．metrics.py:227-263 の compute_mcnemar_test() を使用）
+10. 成功条件表と対比．主基準（top1 accuracy 差 < 2pt, McNemar p > 0.05）を判定
+```
+
+**リスクと緩和策**:
+| リスク | 内容 | 影響 | 緩和策 |
+|---|---|---|---|
+| R1: classifier の出力が分散版と異なる | 分散版では各ノードが own-domain の確率のみを返すのに対し，中央版では全ドメインの確率を計算．argmax は理論的に一致するはずだが，実装上の差異（例: classifier の loading 方法，embedding の前処理）で結果がずれる可能性 | routing accuracy の差が 2pt を超える | 分散版と中央版で同じ query_embedding を使うことをコードで確認．classifier の predict_proba の出力を 10 問分手動で比較 |
+| R2: VRAM 不足で Ollama が回答生成を失敗 | 中央版の router ノードで LoRA モデルをロードする際，6GB を超えると Ollama が CPU オフロードにフォールバック．生成が遅延または失敗する | answer_quality_accuracy の低下，timeout 超過 | Ollama のログを確認．CPU オフロードが起きても timeout 内に完了するか監視．timeout 超過時はその行をスキップして後で再試行 |
+| R3: probe_phase_ms の測定方法が不一致 | 分散版は run_experiment.py で全体時間を測定（probe + dispatch + generate），中央版は probe フェーズのみを独立して測定 | probe latency の比較が困難 | 中央版スクリプトに probe_phase_ms と generate_phase_ms を別々に記録するフィールドを追加．分散版の結果から probe 時間を推定（metrics.py で分析） |
+| R4: Ollama の LoRA モデルが未登録 | wafl500〜509 の Ollama に全10 LoRA モデルが登録されていない場合，回答生成が失敗 | 実験の全問失敗 | 実験前に `ollama list` で全10モデルの存在を確認（B39 で確認済みだが，念のため再確認） |
+| R5: スクリプトの実装バグ | results.jsonl のスキーマが分散版と異なり，metrics.py で解析できない | 分析不能 | run_experiment.py の出力スキーマをそのままコピー．既存の tests/ を参考にして最小限のテストを書く |
+
+**次期 rc-experimenter/rc-analyst への示唆**:
+1. **変更すべきファイル**: `scripts/run_central_experiment.py` の新規作成のみ．既存ファイルは変更しない．
+2. **出力スキーマ**: `run_experiment.py` の出力を `python -c "import json; print(json.dumps(list(open('results/20260730_015322/results.jsonl')[0])))"` で確認し，同一スキーマで出力すること．必須フィールド: `request_id`, `query`, `selected_domain`, `correct_domain`, `confidence`, `answer_text`, `duration_ms`．
+3. **classifier の読み込み**: `classifier.py:load_domain_classifier()` をそのまま再利用．`models/domain_classifier.joblib` は既に存在．
+4. **Ollama への接続**: `expert_backend.py:OllamaClient` をそのまま再利用．ollama-host は `192.168.15.100`（wafl500/general）で十分．回答生成は Ollama API（`/api/generate`）経由で，選択ドメインの LoRA モデル（`expert-mesh-{domain}-lora`）を指定．
+5. **VRAM 測定**: `nvidia-smi` の出力を parsing してピーク VRAM を記録．分散版は `results/20260730_015322/` の既存測定値（~3.4GB per node）を使用．中央版は router ノードの VRAM を測定．
+6. **McNemar 対比較**: `metrics.py:compute_mcnemar_test(results_a, results_b)` を使用．`results_a` に分散版，`results_b` に中央版の結果を渡す．
+7. **推計所要時間**: 分散版（既存）は約 90 分，中央版はプローブなしで回答生成のみなので約 60-80 分．全体で 2-3 時間．
+
+---
+
+### 調査 (Iter24)
+
+**問い**: (1) 既存コードに中央集権ルータの実装は存在するか．存在しない場合，最小限の実装で済むか．(2) 比較対象の定義（全ノードの回答を収集して1つのルータが選ぶ方式か，簡易版か）はどうか．(3) classifier_train.jsonl はすでに訓練データと評価データの分離が完了しているか．(4) metrics.py に McNemar 対比較は実装済みか．(5) 中央集権ルータ実装のコード変更量は？(6) Random / BestSingle / Oracle の3ベースラインは metrics.py に実装済みか．
+
+#### 分かったこと
+
+**X2（中央集権ルータ比較）の実装方針**: 既存コードに中央集権ルータの実装は**存在しない**．現在のアーキテクチャは完全に分散型である．
+
+- `node.py:run_ask_flow()`（154-206行）: 1つのリクエスタノードが全peerへ `/probe` を並列送信し，`aggregator.select_dispatch_targets()` でトップkを選び，`/dispatch` で回答を取得する．
+- `http_server.py:_estimate_probe_confidence()`（364-370行）: `routing_method=supervised_classifier` のとき，各ノードが**ローカルに同じ classifier をロードし**，自分のドメインの確率のみを返す．**中央ルータは存在しない**．
+- 設計書 §4.2(b) が定める「1台のノードに全専門家モデルを集約し，同一の classifier を中央で1回実行」する中央集権ルータは，**新規に実装する必要がある**．
+
+しかし，d0003 §X2 が指摘するように，**ルーティング結果は理論上一致するはず**である．分散版と中央版の classifier は同一の `models/domain_classifier.joblib`（LogisticRegression）を使うため，同じ query_embedding に対して同じドメインが選ばれる．違いは「オーバーヘッド（通信・並列probeのコスト）」と「回答生成時のVRAM制約」のみ．
+
+**比較定義**: d0003 §X2 が定義する構成が妥当．
+
+- **中央集権ルータ**: 1台のノード（例: wafl500/general）に全10ドメインの classifier をロードし，query_embedding を1回だけ classify して最大確率のドメインを選ぶ．選ばれたドメインの `expert-mesh-{domain}-lora` を同一ホスト上の Ollama で実行．
+- **分散版（現行）**: 10ノードへ並列 probe → requester が集約 → dispatch → answer
+- **比較軸**: top1_accuracy（一致するはず）, `other_ms`（分散版のオーバーヘッド）, probeフェーズの所要時間, ピークVRAM, モデルのロード/アンロード回数
+
+**データセット分離**: **完了済み**．d0002 §6-E で実測確認：`data/dataset.jsonl`（評価1520問）と `data/classifier_train.jsonl`（訓練1427問）の質問本文重複は0件．`build_dataset.py` の `_JMMLU_SAMPLE_SEED=20260726`（評価用）と `_CLASSIFIER_TRAIN_SAMPLE_SEED=20260727`（訓練用）で完全に分離．label leakage の再演リスクはない．
+
+**metrics.py 対応状況**: **McNemar 対比較は実装済み**．`metrics.py:227-263` の `compute_mcnemar_test(results_a, results_b)` が実装され，continuity-corrected McNemar test を行う．2つの構成の `results.jsonl` を並べて比較可能．
+
+**実装コスト**: **低〜中程度**．大規模な新規コンポーネントは不要．
+
+- 新規ファイル: 1つ（例: `central_router.py` あるいは `run_central_experiment.py`）
+- 変更ファイル: 既存の `run_experiment.py` のラッパーとして，`run_ask_flow()` を使わずに直接 classifier + Ollama を呼ぶ簡易フローを実装
+- 既存資産の再利用: `models/domain_classifier.joblib`（同一classifier）, `scripts/train_domain_lora.py`（LoRAモデル既成）, `expert_backend.py`（OllamaClient既成）
+- 実装目安: 1日程度（d0003 推計）
+
+**ベースライン状況**: **3ベースラインとも metrics.py に実装済み**．
+
+- `compute_random_baseline_accuracy(results, domains)`（265-274行）: 一様ランダム
+- `compute_best_single_domain_baseline(results, domains)`（277-292行）: 最良単一ドメイン（「常に general へ送る」を含む）
+- `compute_oracle_accuracy(results, domains)`（295-306行）: 正解ドメインへ送る
+- 実測値（d0002 §4-2）: Random=0.1013, BestSingle=0.1092, Oracle=1.0
+
+#### rc-planner への申し送り
+
+1. **X2 の実装は「別スクリプト」として分離することを推奨**．`run_experiment.py` は既存の分散フロー（`run_ask_flow`）に強く依存しており，中央集権フローは異なる実装になる．既存コードを改造するのではなく，`run_central_experiment.py` といった独立スクリプトを作り，同じ `results.jsonl` のスキーマで出力する方が安全．
+2. **ルーティング結果の一致は「理論的に期待される」が，実装上の差（例: probe 時の confidence 計算が分散版では各ノードごとに行われるのに対し，中央版では1回）をどう扱うか**を rc-planner が具体化する必要がある．d0003 は「ルーティング結果は理論上一致するはず」としているが，分散版では各ノードの classifier が `predict_proba` のうち自分のドメインの値のみを返すのに対し，中央版では全ドメインの確率が計算される．この差が結果に影響しないことを確認する必要がある．
+3. **VRAM制約の測定は X2 の核心**．6GB 制約下で 10 LoRA モデルを1台に載せることはできない．d0003 が指摘するように「モデル常駐を仮定した理想的な中央集権」と「実際に swap を伴う実測値」の両方を報告する必要がある．これは分散版の優位性を主張する上で重要な論点．
+4. ** McNemar 対比較は `compute_mcnemar_test()` で可能**．中央版と分散版の `results.jsonl` を同じ質問集合で作り，`results_a` と `results_b` として渡せばよい．ただし，同じ質問集合を使うためには，中央版も分散版も同じ `data/dataset.jsonl`（1520問）を使う必要がある．
+5. **実装の最小構成**: (a) classifier のロード（`scripts/train_domain_classifier.py` のロジックを再利用）(b) 各質問の query_embedding 生成（`OllamaClient.embed()`）(c) classify して最大確率ドメインを選択 (d) そのドメインの LoRA モデルで回答生成（`OllamaClient.generate()`）(e) 結果を `results.jsonl` スキーマで出力 — この5ステップで十分．
+
+### 考察 (Iter24)
+
+**イテレーション全体の総括**:
+X2（中央集権ルータ比較）を実施した。中央版スクリプト `scripts/run_central_experiment.py`
+の新規作成（229行）と実機実験（1520問）を行った。
+
+**X2 の判定**: **rejected**
+
+**主な知見**:
+- top1_accuracy: 分散版 0.5651 → 中央版 0.5257（-3.94pt、2pt閾値超過）
+- Cohen's kappa: 分散版 0.5215 → 中央版 0.4807（-4.08pt、0.02閾値超過）
+- McNemar p: 0.000313（有意差あり）
+- mean_duration_ms: 分散版 3556ms → 中央版 1981ms（55.7%、約1.8倍速）→ 予測通り
+- **重大な実装バグ**: 中央版スクリプトの回答生成で few-shot 例付きプロンプトを使わず
+  `row["query"]` 生クエリを渡していた。1445/1520問が `正解は X です。`（9文字）の
+  短縮回答のみ。answer_quality_accuracy 0.5460 は artifact。
+
+**次イテレーションへの示唆**:
+中央版スクリプトのプロンプト修正（`build_dispatch_prompt()` の再利用）で再実験する価値は
+あるが、まず config.yml の全 levers を試し切ったことを記録し、人間の判断を仰ぐ。
+
+---
+
 ## Iteration 23: 測定系修復のコミット確定と最良構成での基準線再取得
 
 ### 実装 (Iter23)

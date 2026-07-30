@@ -38,22 +38,53 @@ journal_retention: 3
 # Wilson 95% CI 幅 約20pt）に基づいており，統計的に成立していなかったためである．
 # したがって E1（評価集合の拡張）を最優先とし，これを終えるまで他のレバーの結果は判定不能とみなす．
 #
-# 【2026-07-26/27 重要】下記 E1〜E7・expert_model_size・domain_count・expert_specialization は，
-# ユーザーが対話セッションで単一レバー原則を明示的に上書きし，**全て一括で実装済み**（journal.md
-# 「実装 (Iter15)」節参照）．すなわちこの levers リストは「次に選ぶ候補」ではなく「コードとしては
-# 全て実装済みだが，どの構成をこのまま検証対象にするかがまだ決まっていない」状態を指す．
-# 次期 rc-planner は以下を前提に判断すること:
-# - 現在 config.yaml が指す構成（confidence_signal_method=self_report, routing_method=self_report,
-#   domain_count=10, light_model=qwen3.5:4b, expert_model=schroneko/llama-3.1-swallow-8b-instruct-v0.1
-#   ほぼ全ノード共通）で，全1520問のJMMLUデータセットに対する実験が2026-07-27に実行された
-#   （results/20260727_010532/，journal.md「実験 (Iter15)」節参照）．これがE1（eval_set_size）
-#   検証の実データであり，**再実装は不要**．
-# - E2（stp_sign_check）は既にオフライン検証済み（scripts/verify_stp_sign_flip.py，2026-07-22の
-#   Iter13結果に対して実行し，「符号反転で0.87相当に戻る」仮説は不支持と確定）．再実行不要．
-# - E3〜E7・expert_specialization(S1)は，routerコード・config.yamlのキーとしては実装済みだが，
-#   「どの1つを次イテレーションでconfig.yamlに設定して実機検証するか」は未決定．次イテレーションは
-#   config.yamlのconfidence_signal_method/confidence_elicitation/routing_method/embedding_postprocess
-#   のいずれか1キーだけを変更する形で単一レバー原則に復帰できる（コード変更は不要なため）．
+# 【2026-07-29 全面更新】d0002_research_cycle_findings_2026-07.md（総括調査）・
+# d0003_next_experiments_2026-07.md（次の実験計画）を根拠に，本節を Iter22 時点の実態へ合わせて
+# 書き直した．次期 rc-planner・rc-investigator は，journal.md 単体ではなく必ず上記 2 文書を先に
+# 読むこと（docs/d0003 §1「着手前に理解すべき構造的制約」は必読）．
+#
+# 現在 config.yaml が指す構成（本セッションで F1 として修正済み）:
+#   confidence_signal_method=self_report, routing_method=supervised_classifier,
+#   confidence_elicitation=top_k_with_probs（no-op，下記注記参照）,
+#   expert_model=expert-mesh-{domain}-lora（10 ノード，Iter18 で採用），
+#   light_model=qwen3.5:4b-q4_K_M，domain_count=10．
+#   直前の HEAD では expert_model が Iter19 で棄却された qwen3.5:4b-q4_K_M のまま残置され，
+#   confidence_signal_method も Iter21/22 で無効と判明した self_consistency_semantic のままだった
+#   （d0002 §6-C）．F1 でこれを最良既知構成へ戻した．
+#
+# レバーごとの状態（d0002 §3 のイテレーション別結果一覧が一次情報）:
+# - E1（eval_set_size）: 採用．1520 問データセットで Wilson CI / McNemar / 3 ベースラインを整備済み．再実装不要．
+# - E2（stp_sign_check）: 棄却．オフライン検証済み，再実行不要．
+# - E3（confidence_elicitation=top_k_with_probs）: **採用は取り下げ．supervised_classifier 下では
+#   コードパスに到達しない no-op（http_server.py:_estimate_probe_confidence の分岐順序，d0002 §6-B）．
+#   有効な測定は Iter16 の 1 回のみで McNemar p=0.0783（有意差なし）・ECE 悪化．D1 参照，判定保留中**．
+# - E4（confidence_signal_method=self_consistency_semantic）: **「no-op」ではない．時系列に注意**．
+#   Iter21 実行時点の HEAD では routing_method のチェックが confidence_signal_method より先に
+#   return する分岐順序だったため，E4 を設定しても実際には E6（supervised_classifier）が動き続け，
+#   E4 のコードパスは 1 度も実行されなかった（これが Iter21 の無効判定の理由．backlog B38）．
+#   Iter22 でこの分岐順序を入れ替える修正が行われたが，デプロイ漏れで Iter22 自体はやはり旧分岐順序
+#   のまま実行された（journal.md 参照）．**しかし現在の HEAD（`30e3627`）にはこの分岐順序修正が
+#   実際に反映されている**．したがって，**今後この状態から config.yaml で confidence_signal_method
+#   を self_consistency_semantic に変更して実験すると，Iter21/22 とは異なり今度こそ実際に E4 の
+#   コードパスが発火し，E6 の分類器分岐に到達できなくなる**（http_server.py:_estimate_probe_confidence
+#   の分岐順序，d0002 §6-D）．**つまり E4 を単純に設定するだけの実験は，単一レバー原則に反して
+#   E6 の効果を丸ごと消してしまう**．再設計が前提．docs/d0003 §5 X3 参照（X3-a: 分類器と2段構成に
+#   する／X9 の較正を先に試すことを推奨）．
+# - E5（p_true）: 未実施．Ollama v0.12.11+ の実機確認が前提（docs/d0003 X7）．**E4 と全く同じ分岐構造
+#   の問題を持つ**：現在の HEAD で設定すると E6 の分類器分岐へ到達できなくなり，E6 が無効化される．
+#   「no-op」ではなく「E6を上書きする」副作用である点に注意．
+# - E6（routing_method=supervised_classifier）: **採用済み（Iter17）．top1_accuracy 0.2059→0.5651，
+#   kappa 0.1067→0.5215．研究の主要な成果．data/dataset.jsonl と classifier_train.jsonl の質問本文
+#   重複は 0 件確認済み（d0002 §6-E，label leakage なし）**．
+# - E7（embedding_postprocess=whitening）: **実施不要．supervised_classifier 下で no-op（backlog B35）**．
+# - E8（expert_model_size=qwen3.5-4b）: 棄却済み（Iter19）．mean_duration が 1.85 倍遅化，answer_quality 悪化．
+# - E10（expert_specialization=domain_lora）: **採用済み（Iter18）．answer_quality 0.2787→0.5013．
+#   ノード間の実能力差が生まれ，top1_accuracy が初めて下流に帰結を持つ指標になった**．
+#
+# 次に着手すべき優先順位は docs/d0003 §0 のとおり: 第1段階（F1〜F5，測定系の修復）→ 第2段階（X1 基準線再取得）
+# → 第3段階（X2 中央集権ルータ比較，X4 複合ドメイン評価，X5 fallback 見直し）→ 第4段階（X3/X7/X8/X9）．
+# F3（metrics.py への ECE/AUROC/Brier/同点率/分散の統合）が未完了の間は，confidence 信号系レバーの
+# 判定に success_criteria (4) の指標が使えないことに注意する．
 levers:
   # --- E1: 最優先．これ以前に他のレバーを振っても判定できない ---
   - {name: eval_set_size, values: [200, 400],
@@ -77,7 +108,11 @@ levers:
      note: "[2026-07-26 p0001] Tian et al., EMNLP 2023 (arXiv:2305.14975) は『候補を K 個挙げ各々に
             確率を付けよ』形式で gpt-3.5 の ECE を 0.131→0.047（top-2）へ低減したと報告．確率の合計
             制約が verbalized confidence の 0/1 飽和を機械的に壊す．現状の二峰分布問題への最安の対処．
-            同点率とノード間 confidence 分散も併せて計測すること"}
+            同点率とノード間 confidence 分散も併せて計測すること．
+            [2026-07-29 d0002 §6-B] **routing_method=supervised_classifier の下では no-op**（http_server.py
+            の分岐が routing_method で先に return するため到達しない）．self_report に戻さない限り
+            測定できない．有効な唯一の測定は Iter16（top1 0.2059，McNemar p=0.0783 で有意差なし，
+            ECE は 0.7146→0.7388 と悪化）．linguistic 側は未実施のまま"}
 
   # --- E4: Iter11 の再試行．ただし文献の前提条件を満たす形で ---
   - {name: confidence_signal_method, values: [self_consistency_semantic],
@@ -87,7 +122,19 @@ levers:
             T=0.7 を採用．つまり Iter11 は不確実性を消す設定で不確実性を測っており，手法の棄却根拠に
             ならない．T=0.7〜1.0・N=5 とし，集約は平均ではなく意味クラスタの出現頻度エントロピー
             （Discrete Semantic Entropy）にする．**着手前に必ずユニーク回答数を計測し多様性が出ることを
-            確認する**こと（省略すると Iter11 を再演する）"}
+            確認する**こと（省略すると Iter11 を再演する）．
+            [2026-07-29 d0002 §6-D，2026-07-30 追記で時系列を訂正] Iter21/22 は無効判定だが，理由は
+            「E4 が動いた上で E6 と衝突したから」ではない．Iter21 時点の HEAD では routing_method の
+            チェックが confidence_signal_method より先に return する順序だったため，E4 のコードパスは
+            1 度も実行されず，実際には E6 がそのまま動いていた．Iter22 でこの順序を入れ替える修正が
+            行われたがデプロイ漏れで反映されず，結局 Iter21/22 とも E4 は未実行のまま終わった．
+            **しかし現在の HEAD（`30e3627`）にはこの順序修正が実際に反映されている**．つまり今この状態
+            で config.yaml の confidence_signal_method を self_consistency_semantic に変更すると，
+            過去とは違い今度こそ E4 が実行され，E6（supervised_classifier）の分類器分岐に到達できなく
+            なる．「no-op」ではなく「E6を丸ごと上書きする」変更である点に注意．E6 を維持したまま較正
+            だけを試すなら X9（分類器の較正，CalibratedClassifierCV）の方が安価で先に試すべき．再設計
+            する場合は docs/d0003 X3-a（分類器の argmax はそのまま，confidence だけを semantic entropy
+            で補正する2段構成）を参照"}
 
   # --- E5: logprobs ベース．STP とは測定対象が異なることを明文化してから実施 ---
   - {name: confidence_signal_method, values: [p_true],
@@ -97,7 +144,11 @@ levers:
             であり測定対象が異なる．この区別を journal に明記してから実施すること．
             **前提: Ollama v0.12.11 以降が必要（logprobs / top_logprobs 対応）．実機のバージョンを
             先に確認すること**．反証: Tian et al. Table 1 は gpt-3.5 で 'Is True' が verbalized より
-            較正が悪いと報告．Kadavath の好結果は 52B base + 20-shot 設定である"}
+            較正が悪いと報告．Kadavath の好結果は 52B base + 20-shot 設定である．
+            [2026-07-30] E4 と全く同じ分岐構造の問題を持つ．現在の HEAD（`30e3627`，E4 の分岐順序
+            修正が反映済み）で config.yaml の confidence_signal_method を p_true に設定すると，
+            E6（supervised_classifier）の分類器分岐に到達できなくなる．「no-op」ではなく
+            「E6を丸ごと上書きする」変更である"}
 
   # --- E6: 教師ありルーター．中央ルーター無しの構造は維持できる ---
   - {name: routing_method, values: [supervised_classifier],
@@ -116,7 +167,9 @@ levers:
      note: "[2026-07-26 p0001 F4] mean-centering + whitening 後に cosine を取る（Su+ 2021
             arXiv:2103.15316）．Iter2 の失敗が『幾何』由来か『信号不在』由来かを切り分ける最小実験．
             反証: whitening は教師なしのままなので survey の指摘（unsupervised だから失敗する）は
-            解消されない．安価な切り分け以上の位置付けをしないこと"}
+            解消されない．安価な切り分け以上の位置付けをしないこと．
+            [2026-07-29 d0002 §6-B] **実施不要．routing_method=supervised_classifier 下では
+            embedding_postprocess 自体が読まれない no-op**（backlog B35 で既に判明）"}
 
   # --- E8〜E10: 実験規模の拡大．E1 を終えてから 1 イテレーションに 1 つずつ ---
   - {name: expert_model_size, values: [qwen3.5-4b],

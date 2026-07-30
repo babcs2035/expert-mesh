@@ -3,6 +3,93 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B41 [auto-decided 2026-07-30] Iter24: X2 中央集権ルータ比較の実施計画
+
+- 状況: Iter23（X1 基準線再取得）が成功（主基準4項目が期待値と完全に一致）．次は docs/d0003
+  第3段階の X2（中央集権ルータ比較）へ移行．
+- 自動選択: 単一レバーを `routing_architecture=central_router` として，新規スクリプト
+  `scripts/run_central_experiment.py` を作成し，分散版（現行）と比較する．
+- 根拠: (1) d0003 で X2 が「最重要」と位置付けられている．(2) rc-investigator の調査で，
+  実装コストが低〜中程度（1 新規スクリプト，~150-200行）と見積もられた．(3) ルーティング結果は
+  理論上一致するはず（同一 classifier），違いはオーバーヘッド（通信・VRAM）のみ．(4) McNemar 対
+  比較は metrics.py に実装済み．(5) データセット分離は完了済み（0 件重複）．
+- 計画の詳細: journal.md「計画 (Iter24)」節を参照．成功条件は top1 accuracy 差 < 2pt, McNemar
+  p > 0.05, probe latency 改善 50% 以上．VRAM 測定は「理想（全モデル常駐）」と「実測（swap あり）」
+  の両方を報告．
+- 実装示唆: `run_experiment.py` は変更せず，`scripts/run_central_experiment.py` の新規作成のみ．
+  出力スキーマは run_experiment.py と同一．classifier は `classifier.py:load_domain_classifier()`
+  を再利用．Ollama 接続は `expert_backend.py:OllamaClient` を再利用．
+
+---
+
+## B40 [user-approved 2026-07-30] `/research-cycle continue` 実行前の敵対的総点検・追加修正
+
+- 状況: B39 で行った環境修復（F1〜F5）自体に見落としがないかを敵対的にレビューした．独立した
+  subagent によるレビューと自己点検の両方で，以下を発見した．
+- **[重大・修正済み] `.claude/research/config.yml` の E4（`confidence_signal_method=self_consistency_semantic`）・
+  E5（`p_true`）の記述が誤解を招く形だった**: E3・E7（真の no-op）と同列に「Iter21/22 とも無効」
+  「分岐の排他構造」とまとめていたが，E4/E5 は「no-op」ではなく，**現在の HEAD（`30e3627`，Iter22 の
+  分岐順序修正が実際に反映済み）でこれらを設定すると，E6（supervised_classifier）の分類器分岐に
+  到達できなくなり，E6 の効果を丸ごと上書きする**という積極的な副作用を持つ．さらに時系列の誤りも
+  あった：Iter21/22 は「E4 が動いた上で E6 に退行した」のではなく「分岐順序修正が未適用/未デプロイ
+  だったため E4 が 1 度も実行されなかった」だけである．config.yml のレバー全体コメント・E4/E5 個別
+  note を訂正した．次期 rc-planner がこれを読んで X3（E4 再設計）を検討する際の誤解を防ぐ．
+- **[重大・user-approved で修正済み] `state.json` の `iteration` が `"Iter22"`（無効判定済み）のまま，
+  SKILL.md が定める「イテレーション完了時の初期化」が未実施だった**: B39 の時点では `current_lever`
+  のみに着目し「rc-planner が上書きするので実害なし」と判断していたが，`rc-experimenter.md` に
+  「実験ディレクトリ名を config の name_scheme と**現イテレーション番号**から決める」と明記されており，
+  このまま continue すると次の実験が誤って Iter22 として記録されるリスクを見落としていた．ユーザーに
+  確認の上，SKILL.md 127-135 行の初期化手順を代行した: `iteration`: `"Iter22"` → `"Iter23"`，
+  `current_lever`/`experiment_dir`/`experiment_deadline`/`iteration_thread_ts`: null，
+  `notion_toggle_created`: false，`iteration_name`: null，`updated_at`: 現在時刻に更新．
+  `e10_results`/`e20_results`/`e8_results`/`e22_results`（SKILL.md の必須スキーマ外の参照情報）は
+  そのまま残した．
+- **[軽微・修正済み] `tools/smoke_check.py` の `_SIGNAL_FIELD_EXPECTATIONS` に到達不能な dead entry**:
+  `"semantic_entropy"` というキーを追加していたが，実際の `confidence_signal_method` の値は常に
+  `"self_consistency_semantic"`（Python 定数名 `CONFIDENCE_SIGNAL_SEMANTIC_ENTROPY` との混同）．削除した．
+- **[軽微・修正済み] `run_experiment.py:168` の `write_text` に `encoding="utf-8"` 欠落**: 追加した．
+- **[軽微・未修正，報告のみ]** `smoke_check.py` の SSH コマンドにタイムアウト未設定（healthcheck.py の
+  `HEALTHCHECK_TIMEOUT_S` と不整合）．`routing_method=embedding` 用の専用チェック未実装（現状未使用の
+  設定のため実害小）．`metrics.py` の `compute_tie_rate`/`compute_confidence_dispersion` の
+  `probe_candidates` 1件のみのケース，`compute_auroc` の同点ケースのテスト未カバー（数式自体は
+  検算済みで正しい）．いずれも次回以降の課題として残す．
+- 検証: 修正後 `uv run pytest -q` 198 passed / 2 skipped，`uv run ruff check` 全通過，
+  `config.yml`/`state.json` の構文検証済み．
+
+---
+
+## B39 [auto-decided 2026-07-29] continue 実行前の環境修復・state.json 不整合の申し送り
+
+- 状況: d0002_research_cycle_findings_2026-07.md（Iter1〜22 総括調査）・d0003_next_experiments_2026-07.md
+  （次の実験計画）を新規作成する総括調査の一環として，`/research-cycle continue` 実行前に対処すべき
+  修正を行った．その過程で `state.json` の不整合を発見した:
+  `phase="investigate"` だが `current_lever="confidence_signal_method=self_consistency_semantic"`
+  （Iter22 で無効と判明済みのレバー）のままで，`iteration` も `"Iter22"` のまま増分されていない．
+  SKILL.md の「イテレーション完了時」手順（`current_lever=null`・`iteration` インクリメント等への
+  リセット）を経ずに，ユーザー指示による実験停止で `phase=investigate, status=running` へ直接
+  書き換えられたため（journal.md「実験 (Iter22) — 停止（ユーザー指示）」参照）．
+- 自動選択: `state.json` 自体は research-cycle オーケストレータの管理領域のため直接書き換えず，
+  次に起動する rc-investigator が journal.md 冒頭の訂正記録節（本 backlog と同日付）を読んで
+  正しい前提（E6+E10 が最良既知構成，E3/E4 は no-op/無効，config.yaml は F1 で最良既知構成へ復元済み）
+  から調査を再開できるようにした．`current_lever` の古い値は，rc-planner がフェーズ2で新しいレバーを
+  確定した時点で上書きされるため実害はないと判断した．
+- 実施した環境修復（docs/d0003 第1段階 F1・F1-b 相当，詳細は journal.md 冒頭「記録訂正・環境修復」節）:
+  1. `config.yaml`: `expert_model` を10ノード全て `expert-mesh-{domain}-lora`（Iter18 採用構成）へ復元．
+     `confidence_signal_method` を `self_report` へ復元（`self_consistency_semantic` のままだと
+     `routing_method=supervised_classifier` の分岐に到達せず E6 の成果が無効化されるため）．
+     wafl500〜509 の Ollama に対応 LoRA モデルが全10ノード登録済みであることを実機で確認済み．
+  2. `.claude/research/config.yml`: `levers` 節の前提コメント（Iter15 時点のまま）を Iter22 時点へ
+     全面更新．E3（confidence_elicitation）・E4（self_consistency_semantic）・E7（embedding_postprocess）
+     の note に no-op / 排他構造の注記を追加．
+  3. journal.md 冒頭に，ECE 系列の誤記載・top1_accuracy と single_domain_top1_accuracy の取り違え・
+     E3 採用判定の取り下げ（D1 相当）を訂正として追記．
+- 要レビュー: 次期 rc-planner は，config.yml の levers 節が示す優先順位（docs/d0003 §0: 第2段階 X1 基準線
+  再取得 → 第3段階 X2 中央集権ルータ比較・X4 複合ドメイン評価・X5 fallback 見直し）に従って次の一手を
+  選ぶこと．docs/d0003 の F2（デプロイ検証ゲート）・F3（metrics.py 指標統合）・F5（再現性マニフェスト）
+  は本セッションで別途着手中のため，完了状況を journal.md で確認してから X1 に着手すること．
+
+---
+
 ## B38 [auto-decided 2026-07-29] Iter21: 実験無効（bug 発見）, Iter22 で E4 再実行
 
 - 状況: Iter21（`confidence_signal_method=self_consistency_semantic`）の結果は無効。`http_server.py` の `_estimate_probe_confidence()` で `routing_method=supervised_classifier` の early return（line 323-329）が `confidence_signal_method` チェックより先に実行されており、`self_consistency_semantic` のコードパスが 1 回も到達していない。
