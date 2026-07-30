@@ -49,7 +49,7 @@ semantic_sample_temperature: 0.7
 # dispatch_top_k > 1 sends /dispatch to multiple confidence-qualifying nodes
 # in parallel (design doc 2.5); aggregation_method then picks the final
 # answer among them.
-dispatch_top_k: 1
+dispatch_top_k: 2
 # aggregation_method (research_frontier item 5, 2026-07-30): how to pick the
 # final answer when dispatch_top_k > 1 produces multiple candidates. A no-op
 # when dispatch_top_k == 1 (a single candidate is always "the best").
