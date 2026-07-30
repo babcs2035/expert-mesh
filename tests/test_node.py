@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, patch
 
+from aggregator import AGGREGATION_METHOD_LLM_JUDGE, AGGREGATION_METHOD_MAX_CONFIDENCE
 from expert_backend import OllamaClient
 from http_client import PeerClient
 from node import (
@@ -47,7 +48,14 @@ async def test_dispatch_to_targets_single_target_passthrough() -> None:
     peer_client.dispatch.return_value = expected
 
     result = await _dispatch_to_targets(
-        peer_client, peers, targets, DispatchRequest(request_id="r1", full_query="q"), 30.0
+        peer_client,
+        peers,
+        targets,
+        DispatchRequest(request_id="r1", full_query="q"),
+        30.0,
+        AGGREGATION_METHOD_MAX_CONFIDENCE,
+        AsyncMock(spec=OllamaClient),
+        None,
     )
     assert result is expected
 
@@ -73,10 +81,53 @@ async def test_dispatch_to_targets_picks_highest_confidence_among_top_k() -> Non
     peer_client.dispatch.side_effect = _dispatch_side_effect
 
     result = await _dispatch_to_targets(
-        peer_client, peers, targets, DispatchRequest(request_id="r1", full_query="q"), 30.0
+        peer_client,
+        peers,
+        targets,
+        DispatchRequest(request_id="r1", full_query="q"),
+        30.0,
+        AGGREGATION_METHOD_MAX_CONFIDENCE,
+        AsyncMock(spec=OllamaClient),
+        None,
     )
     assert result.node_id == "node-b"
     assert peer_client.dispatch.await_count == 2
+
+
+async def test_dispatch_to_targets_llm_judge_picks_judge_choice() -> None:
+    """With aggregation_method=llm_judge, the judge's chosen candidate is returned."""
+    peers = [
+        {"node_id": "node-a", "host": "localhost", "port": 8080, "domain": "general"},
+        {"node_id": "node-b", "host": "localhost", "port": 8081, "domain": "medical"},
+    ]
+    targets = [_probe_response("node-a", 0.9), _probe_response("node-b", 0.6)]
+    peer_client = AsyncMock(spec=PeerClient)
+    response_a = DispatchResponse(
+        request_id="r1", node_id="node-a", answer_text="weak but confident", confidence=0.9, gen_time_ms=100
+    )
+    response_b = DispatchResponse(
+        request_id="r1", node_id="node-b", answer_text="better answer", confidence=0.6, gen_time_ms=100
+    )
+
+    async def _dispatch_side_effect(peer: dict, request: DispatchRequest, timeout_s: float):
+        return response_a if peer["node_id"] == "node-a" else response_b
+
+    peer_client.dispatch.side_effect = _dispatch_side_effect
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = '{"best": 2}'
+
+    result = await _dispatch_to_targets(
+        peer_client,
+        peers,
+        targets,
+        DispatchRequest(request_id="r1", full_query="q"),
+        30.0,
+        AGGREGATION_METHOD_LLM_JUDGE,
+        ollama_client,
+        "judge-model",
+    )
+    # The judge picked candidate 2 (response_b) despite node-a's higher confidence.
+    assert result.node_id == "node-b"
 
 
 async def test_dispatch_to_targets_returns_none_when_all_fail() -> None:
@@ -87,7 +138,14 @@ async def test_dispatch_to_targets_returns_none_when_all_fail() -> None:
     peer_client.dispatch.return_value = None
 
     result = await _dispatch_to_targets(
-        peer_client, peers, targets, DispatchRequest(request_id="r1", full_query="q"), 30.0
+        peer_client,
+        peers,
+        targets,
+        DispatchRequest(request_id="r1", full_query="q"),
+        30.0,
+        AGGREGATION_METHOD_MAX_CONFIDENCE,
+        AsyncMock(spec=OllamaClient),
+        None,
     )
     assert result is None
 

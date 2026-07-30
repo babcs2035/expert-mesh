@@ -8,7 +8,16 @@ import uuid
 import uvicorn
 import yaml
 
-from aggregator import select_best_dispatch_response, select_dispatch_targets
+from aggregator import (
+    AGGREGATION_METHOD_LLM_JUDGE,
+    AGGREGATION_METHOD_MAJORITY_VOTE,
+    AGGREGATION_METHOD_MAX_CONFIDENCE,
+    select_best_dispatch_response,
+    select_best_dispatch_response_llm_judge,
+    select_best_dispatch_response_majority_vote,
+    select_dispatch_targets,
+    validate_aggregation_method,
+)
 from expert_backend import OllamaClient
 from http_client import PeerClient
 from http_server import (
@@ -104,22 +113,42 @@ async def _dispatch_to_targets(
     targets: list[ProbeResponse],
     dispatch_request: DispatchRequest,
     dispatch_timeout_s: float,
+    aggregation_method: str,
+    ollama_client: OllamaClient,
+    judge_model: str | None,
 ) -> DispatchResponse | None:
     """Send /dispatch to every selected target concurrently and pick the best answer.
 
-    With top_k == 1 (the Phase 0 default) this degrades to a single call;
-    with top_k > 1 (design doc 2.5: "multiple candidates step forward") all
-    candidates are dispatched in parallel and select_best_dispatch_response
-    picks the highest-confidence responder.
+    With top_k == 1 (the Phase 0 default) every aggregation_method degrades
+    to returning that single candidate; with top_k > 1 (design doc 2.5:
+    "multiple candidates step forward") all candidates are dispatched in
+    parallel and aggregation_method picks among them (research_frontier
+    item 5, 2026-07-30): max_confidence (Phase 0 default, no extra LLM
+    calls), majority_vote (agreement among extracted JMMLU answer letters),
+    or llm_judge (an extra LLM call to pick the best candidate).
     """
     target_peers = [next(p for p in peers if p["node_id"] == t.node_id) for t in targets]
-    dispatch_responses = await asyncio.gather(
-        *(
-            peer_client.dispatch(peer, dispatch_request, timeout_s=dispatch_timeout_s)
-            for peer in target_peers
+    dispatch_responses = [
+        r
+        for r in await asyncio.gather(
+            *(
+                peer_client.dispatch(peer, dispatch_request, timeout_s=dispatch_timeout_s)
+                for peer in target_peers
+            )
         )
-    )
-    return select_best_dispatch_response([r for r in dispatch_responses if r is not None])
+        if r is not None
+    ]
+    if aggregation_method == AGGREGATION_METHOD_MAJORITY_VOTE:
+        return select_best_dispatch_response_majority_vote(dispatch_responses)
+    if aggregation_method == AGGREGATION_METHOD_LLM_JUDGE:
+        return await select_best_dispatch_response_llm_judge(
+            dispatch_responses,
+            dispatch_request.full_query,
+            ollama_client,
+            judge_model,
+            timeout_s=dispatch_timeout_s,
+        )
+    return select_best_dispatch_response(dispatch_responses)
 
 
 async def _fallback_answer(ollama_client: OllamaClient, light_model: str, query: str) -> str:
@@ -163,6 +192,10 @@ async def run_ask_flow(
     peers = _build_peers(config, self_node_id)
     ollama_client = ollama_client or OllamaClient()
     self_node_config = config["nodes"][self_node_id]
+    aggregation_method = config.get("aggregation_method", AGGREGATION_METHOD_MAX_CONFIDENCE)
+    validate_aggregation_method(aggregation_method)
+    if aggregation_method == AGGREGATION_METHOD_LLM_JUDGE and config.get("judge_model") is None:
+        raise ValueError("aggregation_method=llm_judge requires config.yaml's judge_model to be set")
 
     request_id = str(uuid.uuid4())
     query_summary = query[:QUERY_SUMMARY_MAX_LENGTH]
@@ -196,7 +229,14 @@ async def run_ask_flow(
 
     dispatch_request = DispatchRequest(request_id=request_id, full_query=query)
     dispatch_response = await _dispatch_to_targets(
-        peer_client, peers, targets, dispatch_request, config.get("dispatch_timeout_s", 30.0)
+        peer_client,
+        peers,
+        targets,
+        dispatch_request,
+        config.get("dispatch_timeout_s", 30.0),
+        aggregation_method,
+        ollama_client,
+        config.get("judge_model"),
     )
     return AskResult(
         request_id=request_id,
