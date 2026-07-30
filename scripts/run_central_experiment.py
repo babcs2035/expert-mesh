@@ -34,9 +34,7 @@ Usage:
 import argparse
 import asyncio
 import json
-import os
 import shlex
-import subprocess
 import sys
 import time
 import uuid
@@ -48,6 +46,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from classifier import load_domain_classifier  # noqa: E402
+from http_server import DISPATCH_MAX_TOKENS, build_dispatch_prompt  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -71,14 +70,22 @@ class SshEmbeddingClient:
         self._embed_node_host = embed_node_host
 
     async def embed(self, model: str, text: str) -> list[float]:
-        """Return a 768-D embedding vector for the given text."""
-        payload = json.dumps({"model": model, "input": text}).encode("utf-8")
+        """Return a 768-D embedding vector for the given text.
+
+        Uses /api/embeddings with a `prompt` field (not the newer /api/embed
+        batch endpoint with `input`), matching expert_backend.OllamaClient.embed()
+        exactly. Iter24 used /api/embed here, a different Ollama endpoint than
+        the distributed mesh's OllamaClient.embed() — a likely cause of the
+        routing mismatch found in Iter24 (backlog B44), independent of the
+        answer-generation prompt bug.
+        """
+        payload = json.dumps({"model": model, "prompt": text}).encode("utf-8")
         # Use stdin piping to avoid SSH quoting issues entirely.
         cmd = (
             f"ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=no "
             f"{shlex.quote(self._ssh_user)}@{shlex.quote(self._embed_node_host)} "
             f"curl -s --max-time 60 "
-            f"http://127.0.0.1:11434/api/embed -d @-"
+            f"http://127.0.0.1:11434/api/embeddings -d @-"
         )
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -98,7 +105,7 @@ class SshEmbeddingClient:
                 )
                 return [0.0] * 768
             resp = json.loads(stdout.decode("utf-8"))
-            emb = resp.get("embeddings", [[]])[0]
+            emb = resp.get("embedding", [])
             return [float(v) for v in emb]
         except asyncio.TimeoutError:
             proc.kill()
@@ -124,17 +131,30 @@ class HttpOllamaGenerator:
         model: str,
         prompt: str,
         *,
+        max_tokens: int,
         timeout_s: int = 120,
     ) -> str | None:
-        """Call Ollama on the given node and return the answer text."""
+        """Call Ollama on the given node and return the answer text.
+
+        Uses /api/chat with a messages list (not /api/generate with a bare
+        prompt), matching expert_backend.OllamaClient.generate() exactly —
+        Iter24 used /api/generate here, which is a different Ollama endpoint
+        than the distributed mesh's answer-generation path (backlog B44).
+        """
         payload = json.dumps(
-            {"model": model, "prompt": prompt, "stream": False}
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "think": False,
+                "options": {"num_predict": max_tokens},
+            }
         ).encode("utf-8")
         cmd = (
             f"ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=no "
             f"{shlex.quote(self._ssh_user)}@{shlex.quote(node_host)} "
             f"curl -s --max-time {timeout_s} "
-            f"http://127.0.0.1:11434/api/generate -d @-"
+            f"http://127.0.0.1:11434/api/chat -d @-"
         )
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -154,7 +174,7 @@ class HttpOllamaGenerator:
                 )
                 return None
             resp = json.loads(stdout.decode("utf-8"))
-            return (resp.get("response") or "").strip() or None
+            return (resp.get("message", {}).get("content") or "").strip() or None
         except asyncio.TimeoutError:
             proc.kill()
             print(f"[HttpOllamaGenerator] generate timed out (model={model})", file=sys.stderr)
@@ -212,6 +232,11 @@ async def _run_one(
     confidence = float(probabilities[max_idx])
 
     # Step 3: Generate answer on the expert node for the selected domain.
+    # Uses the same build_dispatch_prompt() the distributed mesh's /dispatch
+    # endpoint uses (http_server.py), not the raw query — Iter24 passed
+    # row["query"] directly here, which was the proximate cause of the
+    # 9-character truncated answers that made Iter24's answer_quality_accuracy
+    # an artifact (backlog B44).
     node_info = domain_nodes.get(selected_domain)
     if node_info is None:
         answer_text = None
@@ -219,7 +244,8 @@ async def _run_one(
         answer_text = await generator.generate(
             node_host=node_info["host"],
             model=node_info["model"],
-            prompt=row["query"],
+            prompt=build_dispatch_prompt(selected_domain, row["query"]),
+            max_tokens=DISPATCH_MAX_TOKENS,
             timeout_s=120,
         )
 
