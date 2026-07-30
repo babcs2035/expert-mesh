@@ -60,7 +60,7 @@ dispatch_top_k: 2
 #     max_confidence for hand-authored consultation rows (no letter to vote on).
 #   llm_judge: an extra LLM call (judge_model) picks the best candidate
 #     (aggregator.select_best_dispatch_response_llm_judge); requires judge_model.
-aggregation_method: majority_vote
+aggregation_method: llm_judge
 # embedding_postprocess (E7) applies mean-centering or whitening (Su+2021)
 # to query_embedding/domain_embedding before cosine scoring, addressing the
 # anisotropy that collapsed Iter2's cosine similarities into a narrow band.
