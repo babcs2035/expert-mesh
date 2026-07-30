@@ -244,9 +244,11 @@ research_frontier:
      ＋scripts/evaluate_response_quality.py に実装済みで mise run analyze に組み込み済み．JMMLU行は正解
      抽出，手作り相談行（compound行）はLLM-as-judge（config.yaml:judge_model）で採点する．metrics.py
      冒頭のdocstring「axis2/3は未実装」は古い記述であり誤り"
-  - "ベースライン比較(設計書4.2節): Random/BestSingle/Oracle は metrics.py に実装済み．中央集権ルータは
-     Iter24で実施したが回答生成プロンプトの実装バグ（few-shot欠落ではなく，生クエリ渡し）でrejectedと
-     なったため，2026-07-30にプロンプト修正のうえ再実験する（backlog B44）"
+  - "[完了・2026-07-30] ベースライン比較(設計書4.2節): Random/BestSingle/Oracle は metrics.py に実装済み．
+     中央集権ルータはIter26で再実験し，confidence_threshold・fallback方策を分散版と揃えた結果，
+     ルーティング精度は完全一致（McNemar discordant=0, p=1.0）した一方，中央版は分散版より約25.7%遅い
+     （SSH越しの往復コストが分散版のprobeオーバーヘッド137.5ms/問を上回るため）と判明した．adopted．
+     詳細はjournal.md「Iteration 26」節・backlog B46参照"
   - "top-k dispatchの高度な集約方式: 現状は自己申告confidenceの単純最大値選択(aggregator.select_best_dispatch_response)のみ．
      2026-07-30に多数決集約・LLM-as-judge集約を追加する．物理ノードは10ドメイン10台で1:1のため「ノード
      冗長化」は現構成では組めず，代わりに dispatch_top_k>=2 による複数ドメイン候補の集約として実装する"
