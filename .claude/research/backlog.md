@@ -3,6 +3,40 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B45 [user-approved 2026-07-30] Iter25: データセット拡充後の基準線再取得
+
+- 状況: B44 の方針決定に基づき，項目2（複合ドメイン評価データセット拡充）を実施．データセットが
+  1520問→1600問へ変わったため，Iter23のX1基準線はもはや直接比較できず，新データセットでの基準線
+  再取得（Iter25）を実施した．
+- 結果: single_domain_top1_accuracy=0.5693・Cohen's kappa=0.5215・answer_quality_accuracy=0.508667が
+  Iter23と完全一致（ルーティング・回答品質は無変化）．overall top1_accuracyの低下（0.5651→0.5556）は
+  複合設問の母数増加（20→100）による合成比率の変化であり回帰ではない．compound_domain_top1_accuracy
+  は初めて統計的に議論できる規模（n=100）で0.35と測定された．詳細はjournal.md「Iteration 25」節参照．
+- 判定: adopted（新基準線として確定）．以後のIter26（中央集権ルータ再実験）・Iter27（集約方式比較）は
+  この基準線（results/20260730_145356/）と比較する．
+- 実験の実体（provenance）: `results/20260730_145356/`に`config.yaml`・`git_head.txt`・`metrics.json`を
+  事後的に追加保存した（`mise run start`タスク自体はresults.jsonlのみコピーする仕様のため，F5の趣旨に
+  合わせて手動で補完．次回以降このタスク自体を拡張する余地がある）．
+
+---
+
+## B44 [user-approved 2026-07-30] research_frontier 項目を全て実装・設定する方針決定
+
+- 状況: converged状態（B42）でのcontinue後，ユーザーから直接「research_frontier 項目を全て実装・設定
+  せよ」との指示を受けた．調査したところ，項目1（新規ドメイン追加）・項目3（LLM-as-judge/E2E評価）は
+  既にコード実装済みで，config.ymlの記述が古いだけだったと判明した．
+- ユーザーに3点確認し，以下の方針で合意した:
+  1. 全体方針: 未完了分（項目2・4・5）のみ着手し，項目1・3はconfig.ymlの記述を実態へ更新するに留める
+  2. 複合ドメイン評価データセット（項目2）の拡充規模: 100問程度へ拡充（d0003 X4 / D4 の推奨に従う）
+  3. 項目4（中央集権ルータ再実験）・項目5（新集約方式）: 実機（wafl500〜509）での実験まで本セッション
+     内で実行する
+- 実施内容: (1) config.yml research_frontier節・metrics.py docstringの是正 (2) 複合ドメイン設問20→100問
+  拡充（Iter25，本ファイルB45参照）(3) scripts/run_central_experiment.pyのプロンプト・APIエンドポイント
+  不一致を修正（backlog B43参照）(4) aggregator.pyに多数決集約・LLM-as-judge集約を追加
+- 要レビュー: 項目4・5の実機実験（Iter26・Iter27）は本セッション内で継続実施中．
+
+---
+
 ## B43 [auto-decided 2026-07-30] Iter24 実装ファイルの commit 漏れを是正
 
 - 状況: `converged` 後の `/research-cycle continue` 実行時，`git status` で `scripts/run_central_experiment.py`
