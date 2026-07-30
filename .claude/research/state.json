@@ -6,7 +6,7 @@
   "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785389151,
+  "updated_at": 1785389217,
   "e24_results": {
     "lever": "routing_architecture=central_router",
     "top1_accuracy": 0.525658,
@@ -24,7 +24,7 @@
   "last_slack_ts": null,
   "iteration_thread_ts": null,
   "notion_toggle_created": false,
-  "last_commit": "5d633ca",
+  "last_commit": "8b0bd6c",
   "iteration_name": null,
   "e10_results": {
     "lever": "expert_specialization=domain_lora",
