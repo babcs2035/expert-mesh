@@ -226,19 +226,30 @@ levers:
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
+#
+# 【2026-07-30 全面更新】ユーザー指示「research_frontier 項目を全て実装・設定せよ」を受けて実態調査した
+# ところ，項目1・3は既にコード実装済みであり，本節の記述が古いだけだったと判明した（backlog B44参照）．
+# 各項目に現状を注記する．
 research_frontier:
-  - "【ユーザー承認・2026-07-20】新規専門ドメインの追加: 192.168.15.100〜109（最大10台，同一スペック）への
-     拡張が可能になったことを受け，medical/legal/general以外の専門ドメインを追加してメッシュの専門分野を
-     拡充する．具体的なドメイン候補選定・データセット拡充(build_dataset.py)・新規モデル準備・
-     config.yamlへのノード追加・router.pyのドメイン別プロンプト(few-shot例含む)整備が必要な大きめの変更．
-     次期rc-planner着手時に具体化すること．単一レバー原則のため，Iteration 2(routing_method)完了後，
-     かつ既存3ノードの構成を変えない形で着手する（新規ノード追加は既存ノードの挙動に影響しないため
-     並行可能だが，比較対象の交絡を避けるため順序を守る）"
-  - "評価用データセットの本格化: build_dataset.pyの仮データ→設計書4.3節が定義する実際のドメインQAベンチマーク(階層1)・社会実装シナリオデータセット(階層2)"
-  - "回答品質評価(評価軸②，LLM-as-judge)・End-to-End評価(評価軸③)の実装（現状metrics.pyはルーティング精度(評価軸①)のみ）"
-  - "ベースライン比較(設計書4.2節): 単一汎用小型モデル・中央集権ルーター・オラクルルーティングとの比較実験（未実装）"
+  - "[完了・2026-07-30確認] 新規専門ドメインの追加: 192.168.15.100〜109（最大10台）を使い，Iter18（E10
+     domain_lora 採用）で10ドメイン全て稼働中（general/education/legal/medical/business_economics/
+     computer_science/natural_science/mathematics/history_culture/social_science，wafl500〜509）．
+     10ノードが物理的な上限のため追加拡張の余地なし．なお当初の記述にあった「router.pyのfew-shot例」は
+     実在せず（http_server.py:build_dispatch_prompt() はドメイン指示文のみで few-shot 例を含まない），
+     このコメント自体が誤りだった"
+  - "評価用データセットの本格化: 階層1（JMMLU実QAベンチマーク，1520問）は[完了]．階層2（社会実装シナリオ・
+     複合ドメイン設問）は2026-07-30時点で20問→100問へ拡充中（d0003 X4，D4は「n≥100」を採用として解決）．
+     build_dataset.py の _COMPOUND_QUESTIONS 参照"
+  - "[完了・2026-07-30確認] 回答品質評価(評価軸②，LLM-as-judge)・End-to-End評価(評価軸③): evaluation.py
+     ＋scripts/evaluate_response_quality.py に実装済みで mise run analyze に組み込み済み．JMMLU行は正解
+     抽出，手作り相談行（compound行）はLLM-as-judge（config.yaml:judge_model）で採点する．metrics.py
+     冒頭のdocstring「axis2/3は未実装」は古い記述であり誤り"
+  - "ベースライン比較(設計書4.2節): Random/BestSingle/Oracle は metrics.py に実装済み．中央集権ルータは
+     Iter24で実施したが回答生成プロンプトの実装バグ（few-shot欠落ではなく，生クエリ渡し）でrejectedと
+     なったため，2026-07-30にプロンプト修正のうえ再実験する（backlog B44）"
   - "top-k dispatchの高度な集約方式: 現状は自己申告confidenceの単純最大値選択(aggregator.select_best_dispatch_response)のみ．
-     ノード冗長化(同一ドメイン複数ノード)による多数決・LLM-as-judge集約の実験基盤としても位置づけられる"
+     2026-07-30に多数決集約・LLM-as-judge集約を追加する．物理ノードは10ドメイン10台で1:1のため「ノード
+     冗長化」は現構成では組めず，代わりに dispatch_top_k>=2 による複数ドメイン候補の集約として実装する"
   - "無線アドホック化・ネットワーク不安定性への対応（設計書Phase3，本フェーズのスコープ外）"
 
 baselines: []   # ベースライン比較は research_frontier の項目であり levers 探索後に着手

@@ -1,11 +1,10 @@
 """Compute routing-accuracy metrics from run_experiment.py's output (design doc 4.1, axis 1).
 
 Only axis 1 (routing accuracy: Top-1 accuracy, precision/recall, misrouting
-rate) is implemented here. Axis 2 (answer quality, e.g. LLM-as-judge) and
-axis 3 (end-to-end accuracy combining both) require either human raters or
-domain QA benchmarks with graded answers, which are out of scope for this
-placeholder dataset (see build_dataset.py's docstring) and are left as a
-Phase 2+ follow-up once real evaluation data exists.
+rate) is implemented here. Axis 2 (answer quality, LLM-as-judge) and axis 3
+(end-to-end accuracy combining both) are implemented in evaluation.py /
+scripts/evaluate_response_quality.py, wired into `mise run analyze` — see
+those modules rather than this one.
 
 Usage:
     uv run python metrics.py --results results.jsonl
