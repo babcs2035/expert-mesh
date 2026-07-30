@@ -463,21 +463,19 @@ def main() -> None:
         )
         sys.exit(1)
     fallback_node_host = general_node["host"]
-    fallback_model = next(
-        (
-            node_config["light_model"]
-            for node_config in config["nodes"].values()
-            if node_config["host"] == fallback_node_host
-        ),
-        None,
-    )
-    if fallback_model is None:
+    # central_router.domain_nodes[domain].host is an SSH-connectable hostname
+    # equal to the node's config.yaml `nodes` key (e.g. "wafl500"), NOT the
+    # `nodes.<id>.host` field (that one is the node's LAN IP, used by the
+    # distributed mesh's own peer-to-peer HTTP calls — a different "host").
+    fallback_node_config = config["nodes"].get(fallback_node_host)
+    if fallback_node_config is None:
         print(
-            f"[run_central_experiment] error: no config.yaml nodes entry with "
-            f"host={fallback_node_host!r} to read light_model from",
+            f"[run_central_experiment] error: no config.yaml nodes entry keyed "
+            f"{fallback_node_host!r} to read light_model from",
             file=sys.stderr,
         )
         sys.exit(1)
+    fallback_model = fallback_node_config["light_model"]
 
     if args.output is None:
         count = asyncio.run(
