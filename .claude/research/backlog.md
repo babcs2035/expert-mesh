@@ -3,6 +3,32 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B46 [auto-decided 2026-07-30] Iter26初回実行: fallback方策の違いが不一致の全原因と判明，再実験へ
+
+- 状況: バグ修正版 `scripts/run_central_experiment.py` で1600問の初回実験を実行したところ，
+  top1_accuracy=0.585（分散版Iter25=0.5556），McNemar p=1.6e-7で有意差ありという結果になった．
+  中央版の方が高精度という，Iter24（バグにより低精度）とは逆方向の予想外の結果．
+- 調査: embedding が wafl500/wafl502 間で完全に一致（bit単位で同一）することを実機で直接確認．
+  分類器のsha256ハッシュもローカル・実機間で完全一致．よって「同一classifier」の前提は崩れていない．
+- 原因判明: 分散版は `confidence_threshold=0.5` でargmaxドメインの確率をフィルタしてから
+  dispatchし，閾値未満なら`general`ノードのlight_modelへフォールバックする（`node.py:run_ask_flow`）．
+  中央版の初回実装は閾値なしの純粋argmaxで常にdispatchしていた．McNemarで不一致だった77件を
+  精査した結果，**全77件が分散版のfallback行（212件中）と完全に一致**していた（中央版が正解62件・
+  分散版が正解15件，いずれもfallback行のみ）．つまり「同一classifierなのに結果が違う」という
+  Iter24以来の謎は，実装バグではなく，2つの実装が異なる意思決定方策（閾値ゲート付きdispatch vs
+  無条件argmax）を比較していたことによる，単一レバー原則違反だったと判明した．
+- 自動選択: `run_central_experiment.py` に分散版と同一の `confidence_threshold` フィルタと
+  fallback ロジック（`node.py:FALLBACK_PROMPT_TEMPLATE`・`FALLBACK_MAX_TOKENS` を再利用，
+  fallback先は分散版実験のデフォルト requester と同じ `domain_nodes["general"]` のホスト）を
+  実装し，アーキテクチャのみを単一レバーとして分離できるようにした．回帰防止テスト
+  `tests/test_run_central_experiment.py` を追加（2件）．再実験を実施する．
+- 根拠: X2の目的は「同一classifierを前提に，分散か中央集権かというアーキテクチャのみのコストを
+  測る」ことであり，fallback方策の有無という別の変数が混入した状態での比較は単一レバー原則に
+  違反し，結論を導けない．
+- 要レビュー: 再実験の結果（journal.md「Iteration 26」節）を参照．
+
+---
+
 ## B45 [user-approved 2026-07-30] Iter25: データセット拡充後の基準線再取得
 
 - 状況: B44 の方針決定に基づき，項目2（複合ドメイン評価データセット拡充）を実施．データセットが

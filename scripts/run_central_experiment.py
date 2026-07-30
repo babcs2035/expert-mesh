@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from classifier import load_domain_classifier  # noqa: E402
 from http_server import DISPATCH_MAX_TOKENS, build_dispatch_prompt  # noqa: E402
+from node import FALLBACK_MAX_TOKENS, FALLBACK_PROMPT_TEMPLATE  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -204,13 +205,27 @@ async def _run_one(
     row: dict,
     embed_client: SshEmbeddingClient,
     generator: HttpOllamaGenerator,
+    confidence_threshold: float,
+    fallback_node_host: str,
+    fallback_model: str,
 ) -> dict:
     """Run a single dataset row through central routing and answer generation.
 
     Central flow (no probe/dispatch):
       1. Generate embedding for the query (SSH + curl to expert node Ollama).
       2. Classify to pick the best domain (argmax over all probabilities).
-      3. Generate an answer on the expert node for that domain via curl+SSH.
+      3a. If the argmax domain's own probability clears confidence_threshold,
+          generate an answer on that expert node for that domain.
+      3b. Otherwise, fall back to fallback_model on fallback_node_host —
+          mirroring node.py's run_ask_flow, which routes to the requester's
+          own light_model rather than dispatching when no candidate clears
+          the threshold (design doc 2.5). Iter26 originally always dispatched
+          via a bare argmax with no threshold, which produced a routing
+          accuracy difference vs the distributed mesh that was NOT an
+          architecture effect: all 77 McNemar-discordant rows in that run
+          were exactly the distributed mesh's fallback rows (backlog B46).
+          Applying the same threshold+fallback policy here isolates the
+          single lever X2 is meant to test (architecture only).
 
     The result record uses the same schema as run_experiment.py so that
     metrics.py can process both outputs identically.
@@ -228,25 +243,46 @@ async def _run_one(
 
     # argmax: select the domain with the highest predicted probability.
     max_idx = int(probabilities.argmax())
-    selected_domain = classes[max_idx]
-    confidence = float(probabilities[max_idx])
+    argmax_domain = classes[max_idx]
+    argmax_confidence = float(probabilities[max_idx])
 
-    # Step 3: Generate answer on the expert node for the selected domain.
-    # Uses the same build_dispatch_prompt() the distributed mesh's /dispatch
-    # endpoint uses (http_server.py), not the raw query — Iter24 passed
-    # row["query"] directly here, which was the proximate cause of the
-    # 9-character truncated answers that made Iter24's answer_quality_accuracy
-    # an artifact (backlog B44).
-    node_info = domain_nodes.get(selected_domain)
-    if node_info is None:
-        answer_text = None
+    if argmax_confidence >= confidence_threshold:
+        # Step 3a: Generate answer on the expert node for the selected domain.
+        # Uses the same build_dispatch_prompt() the distributed mesh's /dispatch
+        # endpoint uses (http_server.py), not the raw query — Iter24 passed
+        # row["query"] directly here, which was the proximate cause of the
+        # 9-character truncated answers that made Iter24's answer_quality_accuracy
+        # an artifact (backlog B44).
+        selected_domain = argmax_domain
+        confidence = argmax_confidence
+        used_fallback = False
+        node_info = domain_nodes.get(selected_domain)
+        if node_info is None:
+            answer_text = None
+        else:
+            answer_text = await generator.generate(
+                node_host=node_info["host"],
+                model=node_info["model"],
+                prompt=build_dispatch_prompt(selected_domain, row["query"]),
+                max_tokens=DISPATCH_MAX_TOKENS,
+                timeout_s=120,
+            )
     else:
+        # Step 3b: fall back, matching node.py's _fallback_answer exactly
+        # (same prompt template, same light_model, no per-node confidence).
+        used_fallback = True
+        confidence = None
         answer_text = await generator.generate(
-            node_host=node_info["host"],
-            model=node_info["model"],
-            prompt=build_dispatch_prompt(selected_domain, row["query"]),
-            max_tokens=DISPATCH_MAX_TOKENS,
-            timeout_s=120,
+            node_host=fallback_node_host,
+            model=fallback_model,
+            prompt=FALLBACK_PROMPT_TEMPLATE.format(query=row["query"]),
+            max_tokens=FALLBACK_MAX_TOKENS,
+            timeout_s=600,
+        )
+        # run_experiment.py's fallback case sets selected_domain to the
+        # requester's own domain (here: the domain owning fallback_node_host).
+        selected_domain = next(
+            domain for domain, info in domain_nodes.items() if info["host"] == fallback_node_host
         )
 
     duration_ms = int((time.monotonic() - start) * 1000)
@@ -267,7 +303,7 @@ async def _run_one(
         "expected_domains": row["expected_domains"],
         "selected_node_id": None,
         "selected_domain": selected_domain,
-        "used_fallback": False,
+        "used_fallback": used_fallback,
         "dispatch_failed": False,
         "confidence": confidence,
         "confidence_logprobs_mean": None,
@@ -289,6 +325,9 @@ async def run_experiment(
     output: TextIO,
     ssh_user: str,
     embed_node_host: str,
+    confidence_threshold: float,
+    fallback_node_host: str,
+    fallback_model: str,
 ) -> int:
     """Run every dataset row sequentially and write one JSON result line per row.
 
@@ -299,6 +338,12 @@ async def run_experiment(
     Args:
         ssh_user: SSH user for remote answer generation.
         embed_node_host: Host for embedding (one of the expert nodes).
+        confidence_threshold: Below this, fall back instead of dispatching
+          to the argmax domain (matches config.yaml's confidence_threshold).
+        fallback_node_host: Host used for fallback generation (matches
+          run_experiment.py's default requester node: the first configured
+          peer, i.e. domain_nodes["general"]'s host).
+        fallback_model: light_model used for fallback generation.
     """
     rows = _read_dataset(dataset_path)
     embed_client = SshEmbeddingClient(ssh_user, embed_node_host)
@@ -311,6 +356,9 @@ async def run_experiment(
             row,
             embed_client,
             generator,
+            confidence_threshold,
+            fallback_node_host,
+            fallback_model,
         )
         output.write(json.dumps(record, ensure_ascii=False) + "\n")
         output.flush()
@@ -401,6 +449,36 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # Fallback (design doc 2.5): mirrors run_experiment.py's default requester
+    # (the first configured peer, domain_nodes["general"]'s host) so both
+    # architectures apply the identical confidence_threshold + fallback
+    # policy — see _run_one's docstring / backlog B46 for why this matters.
+    confidence_threshold = config.get("confidence_threshold", 0.5)
+    general_node = domain_nodes.get("general")
+    if general_node is None:
+        print(
+            "[run_central_experiment] error: central_router.domain_nodes must "
+            "include a 'general' entry for fallback generation",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    fallback_node_host = general_node["host"]
+    fallback_model = next(
+        (
+            node_config["light_model"]
+            for node_config in config["nodes"].values()
+            if node_config["host"] == fallback_node_host
+        ),
+        None,
+    )
+    if fallback_model is None:
+        print(
+            f"[run_central_experiment] error: no config.yaml nodes entry with "
+            f"host={fallback_node_host!r} to read light_model from",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     if args.output is None:
         count = asyncio.run(
             run_experiment(
@@ -411,6 +489,9 @@ def main() -> None:
                 sys.stdout,
                 ssh_user=ssh_user,
                 embed_node_host=embed_node_host,
+                confidence_threshold=confidence_threshold,
+                fallback_node_host=fallback_node_host,
+                fallback_model=fallback_model,
             )
         )
     else:
@@ -424,6 +505,9 @@ def main() -> None:
                     args.dataset,
                     f,
                     ssh_user=ssh_user,
+                    confidence_threshold=confidence_threshold,
+                    fallback_node_host=fallback_node_host,
+                    fallback_model=fallback_model,
                     embed_node_host=embed_node_host,
                 )
             )
