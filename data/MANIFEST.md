@@ -20,10 +20,15 @@ uv run python build_dataset.py \
 サンプリングシードを分離し，さらに質問本文単位でも重複排除している（docs/d0002 §2-1・§6-E で
 本文重複 0 件を実測確認済み）．
 
+**2026-07-30 更新（research_frontier 項目2 / d0003 X4）**: 複合ドメイン設問（`_COMPOUND_QUESTIONS`）を
+20問→100問（43組み合わせ，10ドメイン全体をカバー）へ拡充した．JMMLU由来の単一ドメイン設問（1500問，
+サンプリングシード・タスクマップとも無変更）と分類器訓練データは影響を受けず，
+`data/classifier_train.jsonl` のハッシュは変更前と完全一致することを確認済み．
+
 | ファイル | sha256 | 行数 |
 |---|---|---|
-| `data/dataset.jsonl` | `2997f4fae97ec5da3be58d7030615de154873348b8ffcf99d80dbabfc59478f8` | 1520 |
-| `data/classifier_train.jsonl` | `eb89bf7b0ad6303d41f2b668549f85362988de1eaee7b4faf98b3d3f5edcd9ef` | 1427 |
+| `data/dataset.jsonl` | `485a85f522bbf304f8abf28d4955315d175475d5a68b3c8e8007f6571f1d40e9` | 1600 |
+| `data/classifier_train.jsonl` | `eb89bf7b0ad6303d41f2b668549f85362988de1eaee7b4faf98b3d3f5edcd9ef` | 1427（無変更） |
 
 出典: JMMLU（`nlp-waseda/JMMLU`, commit `3637b25e444ccfdcde4d23a783cbe8e674faa01b`）．ライセンス CC BY-NC-ND 4.0．
 

@@ -133,7 +133,13 @@ def test_write_dataset_excludes_restricted_license_tasks_when_flagged() -> None:
 
 
 def test_write_dataset_keeps_hand_authored_compound_tier() -> None:
-    """Compound rows are the hand-authored medical/legal/education combinations, not JMMLU-derived."""
+    """Compound rows are hand-authored cross-domain pairs, not JMMLU-derived.
+
+    2026-07-30 (research_frontier item 2 / d0003 X4): expanded from 3 pairs
+    (medical/legal/education only) to 43 pairs spanning all 10 domains, so
+    this allow-list is now the full set of pairs _COMPOUND_QUESTIONS uses
+    rather than just the original medical-heavy trio.
+    """
     rows = _write_fixture_dataset()
 
     compound_domain_pairs = {
@@ -143,6 +149,46 @@ def test_write_dataset_keeps_hand_authored_compound_tier() -> None:
         ("legal", "medical"),
         ("education", "medical"),
         ("education", "legal"),
+        ("business_economics", "legal"),
+        ("business_economics", "computer_science"),
+        ("business_economics", "medical"),
+        ("business_economics", "natural_science"),
+        ("business_economics", "mathematics"),
+        ("business_economics", "history_culture"),
+        ("business_economics", "social_science"),
+        ("business_economics", "education"),
+        ("business_economics", "general"),
+        ("computer_science", "legal"),
+        ("computer_science", "medical"),
+        ("computer_science", "natural_science"),
+        ("computer_science", "mathematics"),
+        ("computer_science", "history_culture"),
+        ("computer_science", "social_science"),
+        ("computer_science", "education"),
+        ("computer_science", "general"),
+        ("legal", "natural_science"),
+        ("medical", "natural_science"),
+        ("mathematics", "natural_science"),
+        ("history_culture", "natural_science"),
+        ("natural_science", "social_science"),
+        ("education", "natural_science"),
+        ("general", "natural_science"),
+        ("legal", "mathematics"),
+        ("mathematics", "medical"),
+        ("history_culture", "mathematics"),
+        ("mathematics", "social_science"),
+        ("education", "mathematics"),
+        ("general", "mathematics"),
+        ("history_culture", "legal"),
+        ("history_culture", "medical"),
+        ("history_culture", "social_science"),
+        ("education", "history_culture"),
+        ("general", "history_culture"),
+        ("legal", "social_science"),
+        ("medical", "social_science"),
+        ("education", "social_science"),
+        ("general", "social_science"),
+        ("general", "legal"),
     }
     for row in rows:
         if row["is_compound"]:
