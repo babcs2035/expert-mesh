@@ -3,6 +3,27 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B43 [auto-decided 2026-07-30] Iter24 実装ファイルの commit 漏れを是正
+
+- 状況: `converged` 後の `/research-cycle continue` 実行時，`git status` で `scripts/run_central_experiment.py`
+  （未追跡）と `config.yaml` の `central_router` 節（未commit）が working tree に残っていることを発見した．
+  Iter24 完了コミット（`ee1d549`）は `.claude/research/*` のみを含み，レバーの実装本体は一度も commit
+  されていなかった．
+- 追加発見: 実際のファイル（411行，SSH経由で各ドメインノードへ委譲する方式）は journal（229行，ローカル
+  `OllamaClient` 直接利用）・Slack報告（253行）のいずれとも一致せず，実装が複数回改訂されたにもかかわらず
+  記録が更新されていなかった．また ruff の未使用 import（`os`, `subprocess`）2件が残っており，「ruff 0
+  warning」の過去報告と食い違う．詳細は journal.md 先頭「記録訂正・commit 漏れの是正」節を参照．
+- 自動選択: 実験を実際に生成したコードをそのまま（lint 修正等の事後整形をせず）git commit した．再現性を
+  記録の見た目より優先するのが妥当と判断．`state.json` の heartbeat・`last_commit` も同時に同期した．
+- 根拠: (1) 該当コードは既に判定確定済み（rejected）の実験を生成した実体であり，改変すると再現性が損なわれる
+  (2) commit 自体は可逆な操作であり，自律判断ポリシー上「通常の git commit」に該当する (3) 内容は用途外の
+  ファイルを含まず，今回の変更に直接関係する範囲に限定した．
+- 要レビュー: rc-implementer が計画からの実装方針変更（local→SSH ピボット等）を journal に記録する運用を
+  徹底すること．必要であれば SKILL.md のイテレーション完了時コミット検証手順に「実コード・設定ファイルの
+  commit 有無」を明記する改訂を検討されたい．
+
+---
+
 ## B42 [auto-decided 2026-07-30] Iter24完了: 全levers試し切り完了、converged
 
 - 状況: Iter24（X2: 中央集権ルータ比較）がrejectedで完了。config.yml の全 levers（E1〜E10）を試し切り。

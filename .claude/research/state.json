@@ -6,7 +6,7 @@
   "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785388353,
+  "updated_at": 1785389151,
   "e24_results": {
     "lever": "routing_architecture=central_router",
     "top1_accuracy": 0.525658,

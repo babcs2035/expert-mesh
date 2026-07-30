@@ -1,3 +1,38 @@
+## 記録訂正・commit 漏れの是正（2026-07-30，`/research-cycle continue` 実行時）
+
+**背景**: Iter24 完了後の `continue` 呼び出し時，`git status` で `scripts/run_central_experiment.py`（未追跡）・
+`config.yaml`（`central_router` 節，未commit）・`.claude/research/state.json`（heartbeat のみの軽微な差分）が
+working tree に残っていることを発見した．Iter24 完了コミット（`ee1d549`）は `.claude/research/*` のみを
+含んでおり，Iter24 の単一レバー（`routing_architecture=central_router`）を実装したコード自体は
+一度も git に commit されていなかった．過去の記述は書き換えず，本節を追記として残す．
+
+**発見1（実装内容が journal の記述と乖離）**: 本節より前の「実装 (Iter24)」節は `scripts/run_central_experiment.py`
+を「229行，`OllamaClient.embed()`/`generate()` をローカルでそのまま利用」と記述しているが，working tree に
+残っていた実際のファイルは 411 行であり，`SshEmbeddingClient`／`HttpOllamaGenerator`（`config.yaml:central_router`
+の `ssh_user`/`domain_nodes` を読み，SSH 経由で各ドメインの担当ノードへ curl する方式）に置き換わっていた．
+これは「調査 (Iter24)」節が指摘した VRAM 制約（6GB に 10 LoRA を1台で載せられない）に対応するための
+実装上のピボットと推測されるが，その変更判断・理由は journal に一度も記録されていない．
+Slack の「フェーズ3: 実装」報告は「253行」と述べており，journal（229行）とも実ファイル（411行）とも
+一致しない．3者の食い違いは，実装が複数回改訂されたにもかかわらず記録が都度更新されなかったことを示す．
+
+**発見2（ruff warning の不一致）**: journal・Slack・Notion はいずれも「ruff 0 warning」としているが，
+現在の working tree のファイルには未使用 import（`os`, `subprocess`）による F401 が 2 件ある．
+Iter24 の判定（rejected）自体は主基準（top1/kappa/McNemar）に基づくため，この lint 差分は判定を
+覆すものではない．
+
+**是正内容**: 上記のコード一式（`scripts/run_central_experiment.py` 新規追加，`config.yaml` の
+`central_router` 節追加）は，実際に Iter24 の実験を生成した実体であるため，lint 警告を含めて
+**そのままの内容で** git commit した（実験の再現性を優先し，事後的な整形は行わない）．
+`.claude/research/state.json` の heartbeat 差分（`updated_at`）は現在時刻へ更新し，`last_commit` を
+本コミットのハッシュへ同期した．
+
+**次回への申し送り**: rc-implementer は，計画からの実装方針の変更（今回でいう local→SSH のピボット）が
+発生した場合，その理由を「実装 (IterN)」節に都度追記すること．イテレーション完了時の commit 検証
+（SKILL.md 記載）は `.claude/research/` 配下だけでなく，そのイテレーションで変更した実コード・設定ファイルが
+実際に commit されているかも対象に含めるべきである．
+
+---
+
 ## Iteration 24: 中央集権ルータ比較による分散型 supervised_classifier の相対性能評価
 
 ### 実験 (Iter24)
