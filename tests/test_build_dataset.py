@@ -13,6 +13,7 @@ from pathlib import Path
 from build_dataset import (
     _RESTRICTED_LICENSE_TASKS,
     _build_rows,
+    _classifier_task_sample_weight,
     _ensure_parent_dir,
     build_classifier_training_rows,
     write_dataset,
@@ -222,8 +223,16 @@ def test_build_classifier_training_rows_never_overlaps_eval_queries() -> None:
     assert len(train_rows) > 0
 
 
-def test_build_classifier_training_rows_have_query_and_domain_only() -> None:
-    """Training rows carry only {id, query, domain} — no probe/dispatch-derived fields."""
+def test_build_classifier_training_rows_have_query_domain_and_sample_weight_only() -> None:
+    """Training rows carry only {id, query, domain, sample_weight} — no probe/dispatch-derived fields.
+
+    sample_weight (Iter32) is computed deterministically from the JMMLU task
+    name at generation time (see _classifier_task_sample_weight); it is
+    unrelated to Iter10's label leakage (probe/dispatch-derived features
+    such as self_confidence, margin, is_top1 evaluated on the same
+    questions used for online testing), which this test guards against by
+    construction (the field set below has no room for such fields).
+    """
     eval_rows = _write_fixture_dataset(domain_target_size=1)
     train_rows = build_classifier_training_rows(
         _FIXTURE_ZIP,
@@ -233,8 +242,19 @@ def test_build_classifier_training_rows_have_query_and_domain_only() -> None:
         eval_rows=eval_rows,
     )
     for row in train_rows:
-        assert set(row) == {"id", "query", "domain"}
+        assert set(row) == {"id", "query", "domain", "sample_weight"}
         assert row["domain"] in _TEN_DOMAINS
+        assert isinstance(row["sample_weight"], float)
+
+
+def test_classifier_task_sample_weight_upweights_only_the_two_weak_proxy_tasks() -> None:
+    """high_school_psychology/moral_disputes (Iter32 weak-recall proxy tasks) get 2.0;
+    sociology (the third education proxy task, relatively strong) and any other task
+    (e.g. a task from an unrelated domain) default to 1.0, unchanged from pre-Iter32."""
+    assert _classifier_task_sample_weight("high_school_psychology") == 2.0
+    assert _classifier_task_sample_weight("moral_disputes") == 2.0
+    assert _classifier_task_sample_weight("sociology") == 1.0
+    assert _classifier_task_sample_weight("anatomy") == 1.0
 
 
 def test_ensure_parent_dir_creates_missing_directory(tmp_path) -> None:

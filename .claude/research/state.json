@@ -1,21 +1,22 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter31",
-  "iteration_name": "分類器較正のtemperature scaling方式によるargmax不変性の実証とECE目標到達可否の検証",
+  "iteration": "Iter32",
+  "iteration_name": "educationドメインの代理タスク妥当性見直しによる訓練データ品質改善（Y5）",
   "phase": "reflect",
   "status": "running",
-  "current_lever": "classifier_calibration=temperature",
-  "experiment_dir": null,
+  "current_lever": "classifier_training_data_composition=education_proxy_task_revision (weak-task sample_weight: high_school_psychology=2.0, moral_disputes=2.0, others=1.0)",
+  "experiment_dir": "results/iter32_calibrated_predictions.jsonl",
   "experiment_deadline": null,
-  "updated_at": 1785502428,
+  "updated_at": 1785506592,
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 30: 考察 (Iter30))",
-      ".claude/research/backlog.md (B51, B50)",
-      ".claude/research/config.yml (levers: classifier_calibration)"
+      ".claude/research/journal.md (Iteration 32: 計画 (Iter32))",
+      ".claude/research/journal.md (Iteration 32: 調査 (Iter32))",
+      ".claude/research/backlog.md (B52)",
+      ".claude/research/config.yml (levers: classifier_training_data_composition)"
     ],
-    "planned_lever": "classifier_calibration=temperature",
-    "note": "Iter30でisotonicはECE 0.193358->0.121424(目標0.150達成，2.86ptの余裕)・top1非退行(McNemar p=0.301)だが，medical_recallがBH補正(q=0.05)後も有意に悪化(0.4831->0.3820, p=0.000144)しpartial確定．medicalは訓練150件の多数派ドメインで小標本仮説では説明できず，isotonic較正曲線がmedicalクラス固有に系統的にスコアを圧縮している疑い（較正後最大確率0.7062が他9ドメイン0.7496-0.8795を全て下回る）．次はmethod='temperature'（sklearn>=1.8，本リポジトリscikit-learn==1.9.0で利用可能，config.yml levers末尾にtemperatureを追記済み）を検証する．クラスごとの個別較正器を持たず単一スカラーTで変換するためargmax不変が理論保証され，isotonic/plattのOvR方式由来のリスク（クラス固有歪み・tie・0/1張り付き）を構造的に排除する．留保: 較正の柔軟性がisotonic/plattより低くECE改善幅が目標未達になる可能性がある．cv=3感度分析は今回優先しない（medicalは訓練データが十分でcv変更では根本原因に届かないと判断，B51参照）。per-domain非退行チェックはIter30で確立した3段構成（recall=ドメイン別McNemar・precision=Fisher正確検定・20指標へBH補正q=0.05）をそのまま踏襲すること。"
+    "planned_lever": "classifier_training_data_composition=education_proxy_task_revision",
+    "note": "計画(Iter32)で候補(2)「弱い代理タスク(high_school_psychology/moral_disputes)への2.0倍sample_weight」を単一レバーとして選定した（候補(1)のサンプル数増量は同一タスク構成比のまま量を増やすだけで効果限定的と判断し見送り）．build_dataset.pyのbuild_classifier_training_rows()に_classifier_task_sample_weight()を追加し分類器訓練行にsample_weightフィールドを付与，scripts/train_domain_classifier.pyのtrain_classifier()でCalibratedClassifierCV.fit()にsample_weightとして渡す．較正手法はtemperatureのまま変更しない．**重要な訂正**: config.yml/backlog B52が引用する成功条件の閾値「business_economics 0.4533」はIter17-19頃の陳腐化した値で，Y1(fallback廃止)・Y4(較正導入)後の現状を反映していない．journal「実験・分析(実行)(Iter31)」の実測（temperature較正後，現行production相当）では現状下限はmedical_recall=0.5112（business_economics=0.5417）．Iter32の主基準はeducation_recallがmedical_recall(0.5112)を上回ることに更新した．Iter32自身の比較のbeforeはresults/iter31_calibrated_predictions.jsonl（education_recall=0.4588，温度較正後の現production相当）を使う．詳細・変更ファイル・成功条件はjournal.md「計画 (Iter32)」節を参照．"
   },
   "e30_results": {
     "lever": "classifier_calibration=isotonic (CalibratedClassifierCV method='isotonic', cv=5, ensemble=True)",
@@ -143,10 +144,10 @@
     },
     "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
   },
-  "last_slack_ts": "1785499774.203289",
-  "iteration_thread_ts": "1785500572.793649",
+  "last_slack_ts": "1785506610.303509",
+  "iteration_thread_ts": "1785504046.611419",
   "notion_toggle_created": true,
-  "last_commit": "35e144d",
+  "last_commit": "2ff3b77",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,

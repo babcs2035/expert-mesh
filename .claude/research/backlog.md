@@ -3,6 +3,73 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B53 [auto-decided 2026-07-31] Iter32 は rejected で確定．sample_weightはclass_weightと結合し逆効果．次は抽出比率の再配分
+
+- 状況: Iter32（classifier_training_data_composition=education_proxy_task_revision，弱い代理タスク
+  `high_school_psychology`・`moral_disputes`への`sample_weight=2.0`，Y5）の rc-analyst 判定
+  （rejected）を rc-reflector が検証・確定させた．
+- **判定: rejected（確定，rc-analyst 提案を覆さず）**．主基準（education_recallがmedical_recall
+  基準0.5112を上回ること，point estimate）が不成立であるだけでなく，education_recall自体が
+  before比で悪化（0.4588→0.4412，-1.76pt）し，全体top1_accuracyも統計的に有意に悪化した
+  （McNemar p=0.0026，discordant 11件が全て悪化方向，改善方向0件）．得られた利得が一つもない．
+- **機序（sklearnソース・実データで実測確認済み）**: `LogisticRegression(class_weight="balanced")`
+  は`sample_weight`に依存してクラス重みを再計算する（`sklearn/utils/class_weight.py`の
+  `compute_class_weight`が`sample_weight`込みの重み付きクラス別合計を分母に使う）ため，
+  taskへの`sample_weight`増加と`class_weight`によるドメイン間バランス調整は独立ではなく
+  数式レベルで結合していた．education用`sample_weight`増加により
+  `class_weight_[education]`が0.9513→0.5931へ自動的に下がり，狙った2倍の強化は実質+24.7%へ
+  減衰し，変更対象外だった`sociology`行の実効重みも-37.7%失われ，同時にeducation以外の
+  9ドメイン全てに一律+7.6%の相対的優位を与える副作用を生んだ．
+- **学び**: 「単一レバー原則を実装上は守っていても，`sklearn`側の既存の仕組み
+  （`class_weight='balanced'`）と数式レベルで結合しているレバーは，実質的に複数の量を
+  同時に動かしてしまう」という一般化可能な知見．本リポジトリの分類器訓練で今後
+  `sample_weight`を使う場合は，`class_weight`との結合の有無を必ず先に確認すべき事項として
+  記録する．計画(Iter32)は`sample_weight *= class_weight_`という乗算関係（一次情報で確認済み）
+  までは把握していたが，`class_weight_`自体が`sample_weight`の値に連動して再計算される点
+  （入れ子の依存関係）を見落としていた．次にsample_weightを使う設計を検討する際は，両方向の
+  依存を確認すること．
+- **実験用ファイルの扱い**: `models/domain_classifier_iter32_reweighted.joblib`・
+  `data/classifier_train_iter32_reweighted.jsonl`はいずれも削除した（rejectedが確定し
+  機序も特定済みのため再利用の見込みがなく，数値的な結果はjournal.md「分析(解釈) (Iter32)」
+  「考察 (Iter32)」節に記録済みで十分参照可能．両方とも`.gitignore`対象のため削除はgit履歴に
+  残らない）．`results/iter32_calibrated_predictions.jsonl`はIter29〜31の
+  `resultsXX_calibrated_predictions.jsonl`と同様に一次結果データとしてgit追跡対象に残した．
+- **自動選択: 次イテレーション（Iter33）の単一レバーを
+  `classifier_training_data_composition=education_proxy_task_resampling`とする**．config.yml の
+  `classifier_training_data_composition`レバーの`values`へ`education_proxy_task_resampling`を
+  追記した（`[education_proxy_task_revision]`→
+  `[education_proxy_task_revision, education_proxy_task_resampling]`）．`iteration_name`は
+  「education代理タスク抽出比率の再配分（sample_weight不使用）によるclass_weight結合回避型
+  データ構成変更（Y5継続）」．
+- **根拠（次のレバーの選定理由）**: Iter32の失敗は「弱いタスクへの重み付け」という着想自体では
+  なく，`sample_weight`という実装手段が`class_weight="balanced"`と結合していたことに起因する．
+  したがって次点は，同じ着想（`sociology`優位・弱い2タスク劣位という配分の是正）を
+  `sample_weight`を一切使わない形（抽出段階でのタスク別目標件数の変更）で実現する．
+  **`education`の総行数を150件（他ドメインと同数）のまま変えない**ことが設計上の要点で，
+  これにより`class_weight_[education]`はIter31以前と完全に同じ値（0.9513）のままとなり，
+  `sample_weight`を使わないためsklearn側の結合バグの影響を受けない．これは
+  rc-analystが次への示唆で挙げた「サンプル数を増やしつつsociologyの比率を高める折衷案」を
+  一歩進め，**サンプル数自体は増やさず構成比のみを変える**ことで，候補(1)（単純な
+  サンプル数増量，150→298）が抱える同種のclass_weight連動リスク（総行数を増やせば
+  `class_weight_[education]`がさらに下がる）も同時に回避する．具体的な配分比率（例:
+  sociology 90・high_school_psychology 30・moral_disputes 30）は次の計画フェーズで確定する．
+- **留保（次の計画フェーズへの申し送り）**: この変更も「代理タスクの意味的ギャップという
+  根本原因」自体は解消しない．`sociology`自体が「学校教育行政実務」という`education`の
+  実務上の定義とは主題が異なる学部教養レベルの社会学問題であることに変わりはなく，
+  達成できるのは「3タスクのうち相対的に混同されにくいタスクの寄与を増やす」という限定的な
+  改善にとどまる可能性が高い．目標未達に終わった場合の次点候補は，journal.md「分析(解釈)
+  (Iter32)」節に整理済み（候補(3)＝4択形式を保った手作り問題追加，または埋め込み特徴量
+  自体・base estimatorの見直し）．
+- 要レビュー: (1) Y2（`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認
+  は引き続き必要（B49・B50・B51・B52既存項目，新規の追加事項なし）．(2) fallback設計思想の
+  論文上の位置付け（B48）も未解決．(3) 「`education_recall`という既存メトリクスの改善」と
+  「`education`ドメインの実務忠実性」の両立不可能性（B52既出）は今回の結果を経てもなお
+  未解決のまま．(4) config.yml・backlog B52 の「business_economics 0.4533」という陳腐化した
+  記述は，計画(Iter32)がjournalで訂正済み（現状下限はmedical_recall 0.5112）だが，config.yml
+  本体・backlog B52本文の訂正はまだ未実施（本イテレーションでも範囲外として申し送りを維持）．
+
+---
+
 ## B52 [auto-decided 2026-07-31] Iter31 は adopted で確定．本番反映を実施．次は Y5（education 訓練データ）
 
 - 状況: Iter31（classifier_calibration=temperature，Y4）の rc-analyst 判定（adopted）を

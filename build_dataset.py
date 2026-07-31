@@ -156,6 +156,24 @@ _DOMAIN_TASK_MAP: dict[str, list[str]] = {
     ],
 }
 
+# Iter32 (classifier_training_data_composition=education_proxy_task_revision, Y5):
+# confusion-matrix実測（journal Iter32調査）でeducationの3代理タスクのうち
+# high_school_psychology(recall 0.438)・moral_disputes(0.435)がsociology(0.625)より
+# 明確に弱いと判明した。classifier訓練行にタスク別のsample_weightを付与し，弱い2タスクの
+# 決定境界寄与を重くする。マップに無いタスク（他9ドメイン全て・sociology含む）は
+# _DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT(1.0)のまま，Iter31以前と同じ挙動になる。
+_CLASSIFIER_TASK_SAMPLE_WEIGHTS: dict[str, float] = {
+    "high_school_psychology": 2.0,
+    "moral_disputes": 2.0,
+}
+_DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT = 1.0
+
+
+def _classifier_task_sample_weight(task_name: str) -> float:
+    """Per-row training weight for build_classifier_training_rows() (Iter32)."""
+    return _CLASSIFIER_TASK_SAMPLE_WEIGHTS.get(task_name, _DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT)
+
+
 _RESTRICTED_LICENSE_TASKS: frozenset[str] = frozenset(
     {
         "japanese_history",
@@ -709,7 +727,7 @@ def build_classifier_training_rows(
     domain_task_map: dict[str, list[str]],
     eval_rows: list[dict],
 ) -> list[dict]:
-    """Build E6 classifier training rows ({id, query, domain}), disjoint from eval_rows' questions.
+    """Build E6 classifier training rows ({id, query, domain, sample_weight}), disjoint from eval_rows' questions.
 
     Guards against Iter10's label leakage (the training features there were
     derived from probe/dispatch results on the same 46 questions used for
@@ -732,6 +750,12 @@ def build_classifier_training_rows(
     scripts/train_domain_classifier.py does not currently compensate for
     this (e.g. via class_weight), so the classifier may underperform on
     legal specifically for reasons unrelated to the signal itself.
+
+    Each row also carries a per-task sample_weight (Iter32, see
+    _classifier_task_sample_weight): rows drawn from a task listed in
+    _CLASSIFIER_TASK_SAMPLE_WEIGHTS get that weight, all others default to
+    1.0, so pre-Iter32 behavior (uniform weighting) is unchanged unless a
+    task is explicitly listed.
     """
     eval_queries = frozenset(row["query"] for row in eval_rows if not row["is_compound"])
     zip_bytes = _load_jmmlu_zip_bytes(jmmlu_zip_path)
@@ -747,8 +771,15 @@ def build_classifier_training_rows(
 
     rows = []
     for domain in sorted(domain_groups):
-        for index, (query, _answer, _task_name) in enumerate(domain_groups[domain], start=1):
-            rows.append({"id": f"{domain}-train-{index:03d}", "query": query, "domain": domain})
+        for index, (query, _answer, task_name) in enumerate(domain_groups[domain], start=1):
+            rows.append(
+                {
+                    "id": f"{domain}-train-{index:03d}",
+                    "query": query,
+                    "domain": domain,
+                    "sample_weight": _classifier_task_sample_weight(task_name),
+                }
+            )
     return rows
 
 

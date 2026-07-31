@@ -199,8 +199,35 @@ levers:
   # --- Y5: 【2026-07-31 Iter31考察で選定・backlog B52】Y4完了・Y2はユーザー確認待ちで
   #     自律着手不能のため次点として選定．config.yaml/公開APIの変更を伴わないデータのみの
   #     変更で着手できる（スキーマ変更なし，ユーザー確認不要） ---
-  - {name: classifier_training_data_composition, values: [education_proxy_task_revision],
-     note: "[2026-07-31 d0004 §5 Y5 / d0003 X8 / backlog B52] 【Iter31時点でスコープを絞り込み
+  - {name: classifier_training_data_composition,
+     values: [education_proxy_task_revision, education_proxy_task_resampling],
+     note: "[2026-07-31 d0004 §5 Y5 / d0003 X8 / backlog B52・B53]
+            【2026-07-31 Iter32考察・backlog B53で追記】`education_proxy_task_revision`
+            （弱い代理タスクhigh_school_psychology・moral_disputesへの`sample_weight=2.0`）は
+            **rejected（確定）**。主基準（education_recallがmedical_recall基準0.5112を上回る
+            こと）が不成立なだけでなく，education_recall自体が0.4588→0.4412へ悪化し，全体
+            top1_accuracyも有意悪化（McNemar p=0.0026，discordant11件全て悪化方向）。
+            **機序（sklearnソース・実データで実測確認済み）**:
+            `LogisticRegression(class_weight=\"balanced\")`は`sample_weight`に依存してクラス
+            重みを再計算するため，taskへの`sample_weight`増加と`class_weight`のドメイン間
+            バランス調整は独立ではなく数式レベルで結合している。education用`sample_weight`
+            増加で`class_weight_[education]`が0.9513→0.5931へ自動的に下がり，狙った2倍の強化は
+            実質+24.7%に減衰，変更対象外のsociology行の実効重みも-37.7%失われ，同時に
+            education以外9ドメイン全てに一律+7.6%の相対的優位を与える副作用を生んだ
+            （詳細journal.md「分析(解釈) (Iter32)」「考察 (Iter32)」節）。
+            **重み倍率を3.0〜4.0へ引き上げる案は上記機序によりむしろ悪化を助長するため
+            推奨しない**。
+            **次点として`education_proxy_task_resampling`を追加**: `sample_weight`を一切
+            使わず，`build_classifier_training_rows()`の抽出段階で3代理タスク別の目標件数を
+            変更する（`education`の総行数150件は他ドメインと同数のまま変えず，相対的に良好な
+            sociology(recall 0.625)の割合を増やし，弱い2タスク(high_school_psychology 0.438・
+            moral_disputes 0.435)の割合を減らす）。総行数を変えないことで
+            `class_weight_[education]`はIter31以前と同じ値(0.9513)のまま保たれ，`sample_weight`
+            を使わないためIter32で判明したclass_weight結合バグの影響を受けない設計。
+            具体的な配分比率は次の計画フェーズで確定する（例: sociology 90・
+            high_school_psychology 30・moral_disputes 30）。この変更も代理タスクの意味的
+            ギャップという根本原因は解消しないという留保付き（journal.md「考察 (Iter32)」参照）。
+            【Iter31時点でスコープを絞り込み
             済み】d0003 X8はeducation・legal双方のデータ不均衡是正を対象としていたが，Iter31の
             実測（journal.md「考察 (Iter31)」節）でlegalは既にX8の成功条件（他ドメイン下限
             business_economics 0.4533を上回ること）を満たしていた（legal_recall 0.5833）．

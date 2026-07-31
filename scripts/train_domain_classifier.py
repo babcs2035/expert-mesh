@@ -9,6 +9,10 @@ margin, is_top1, ...) evaluated on the same questions used for online
 testing. Every function here takes {"query": ..., "domain": ...} rows
 (e.g. from build_dataset.py's build_classifier_training_rows), so there
 is no parameter through which probe/dispatch results could leak in.
+Rows may additionally carry a "sample_weight" field (Iter32,
+classifier_training_data_composition=education_proxy_task_revision), which
+is passed through to CalibratedClassifierCV.fit() unchanged; rows without
+it (pre-Iter32 data) default to 1.0, i.e. unweighted.
 
 Usage (module mode; requires a live ollama node reachable for embeddings):
     uv run python -m scripts.train_domain_classifier \\
@@ -71,6 +75,11 @@ def _load_training_rows(train_data_path: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+def _extract_sample_weights(rows: list[dict]) -> list[float]:
+    """Per-row training weight (Iter32); rows without it (pre-Iter32 data) default to 1.0."""
+    return [row.get("sample_weight", 1.0) for row in rows]
+
+
 async def build_training_features(
     ollama_client: OllamaClient, embedding_model: str, rows: list[dict]
 ) -> tuple[list[list[float]], list[str]]:
@@ -88,7 +97,10 @@ async def build_training_features(
 
 
 def train_classifier(
-    embeddings: list[list[float]], labels: list[str], cv: int = _CALIBRATION_CV
+    embeddings: list[list[float]],
+    labels: list[str],
+    cv: int = _CALIBRATION_CV,
+    sample_weight: list[float] | None = None,
 ) -> CalibratedClassifierCV:
     """Fit a calibrated multi-class classifier from embedding features to domain labels.
 
@@ -116,12 +128,24 @@ def train_classifier(
     exposed as a parameter so tests can exercise the same code path with
     a smaller fold count on toy data, rather than branching test code
     away from what production actually runs.
+
+    `sample_weight` (Iter32, classifier_training_data_composition=
+    education_proxy_task_revision) is forwarded to
+    CalibratedClassifierCV.fit(), which passes it through to the base
+    estimator's fit() on each fold. This is independent of
+    class_weight="balanced" above: LogisticRegression.fit() internally
+    multiplies sample_weight *= class_weight_ (confirmed against this
+    repo's installed scikit-learn==1.9.0,
+    sklearn/linear_model/_logistic.py:436), so the existing domain-level
+    balancing and this row-level, task-driven weighting compose rather
+    than override each other. Defaults to None (all rows weighted equally,
+    i.e. identical behavior to pre-Iter32 callers).
     """
     base_estimator = LogisticRegression(max_iter=_MAX_ITER, class_weight="balanced")
     calibrated_model = CalibratedClassifierCV(
         base_estimator, method=_CALIBRATION_METHOD, cv=cv, ensemble=True
     )
-    calibrated_model.fit(embeddings, labels)
+    calibrated_model.fit(embeddings, labels, sample_weight=sample_weight)
     return calibrated_model
 
 
@@ -129,9 +153,10 @@ async def _train_and_save(
     train_data_path: str, embedding_model: str, ollama_host: str, ollama_port: int, output_path: str
 ) -> None:
     rows = _load_training_rows(train_data_path)
+    sample_weight = _extract_sample_weights(rows)
     ollama_client = OllamaClient(host=f"http://{ollama_host}:{ollama_port}")
     embeddings, labels = await build_training_features(ollama_client, embedding_model, rows)
-    model = train_classifier(embeddings, labels)
+    model = train_classifier(embeddings, labels, sample_weight=sample_weight)
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
