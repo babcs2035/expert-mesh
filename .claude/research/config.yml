@@ -147,21 +147,29 @@ levers:
 
   # --- Y4: 【2026-07-31 Iter28考察で選定・backlog B49】Y2より先に着手．オフライン・低コスト・
   #     スキーマ変更不要でY1と並行可能．Y2着手前の判断材料にもなる ---
-  - {name: classifier_calibration, values: [platt, isotonic],
-     note: "[2026-07-31 d0004 §5 Y4 / d0003 X9 / backlog B49] 現状ECE=0.204，全ドメインで
-            mean_confidence > accuracy の過信．分類器のオフライン性能は訓練100.00%に対し
-            評価59.87%で過学習傾向．
+  - {name: classifier_calibration, values: [platt, isotonic, temperature],
+     note: "[2026-07-31 d0004 §5 Y4 / d0003 X9 / backlog B49・B50・B51] 現状ECE=0.204，
+            全ドメインでmean_confidence > accuracy の過信．分類器のオフライン性能は訓練100.00%
+            に対し評価59.87%で過学習傾向．
             **実施方法**: `scripts/train_domain_classifier.py:train_classifier()`
             （現在 `LogisticRegression(max_iter=1000, class_weight='balanced')` を素朴に
             fit するだけ）に `sklearn.calibration.CalibratedClassifierCV`（`method='sigmoid'`
-            がPlatt，`method='isotonic'`がisotonic）を導入し，既存訓練データ
-            （`data/classifier_train.jsonl`，1427件）を交差検証で較正する．
+            がPlatt，`method='isotonic'`がisotonic，`method='temperature'`がtemperature
+            scaling，いずれもscikit-learn>=1.8で利用可能．本リポジトリは`scikit-learn==1.9.0`
+            固定で確認済み）を導入し，既存訓練データ（`data/classifier_train.jsonl`，1427件）
+            を交差検証で較正する．
             **オフラインで完結する（実機1600問本走は不要）**: 較正前後のECEはコマンドラインで
-            即座に比較でき，`predict_proba`の値だけが変わりargmaxの順位は理論上ほぼ不変のため，
-            top1_accuracyの非退行確認だけ軽い実機検証（または保存済みembeddingでのオフライン
-            再計算）で足りる．
-            **成功条件（d0003 X9）**: ECEが0.150以下（-5.4pt以上）になり，かつtop1_accuracyが
-            非退行であること．
+            即座に比較でき，top1_accuracyの非退行確認だけ軽い実機検証（または保存済みembedding
+            でのオフライン再計算）で足りる．
+            **成功条件（d0003 X9）**: ECEが0.150以下になり，かつtop1_accuracyが非退行であること
+            （Iter30以降はper-domain 20指標のBH補正後・悪化方向の有意指標0件も条件に追加，
+            backlog B51）．
+            **各手法の実測実績（2026-07-31時点）**: platt（Iter29）ECE 0.19336→0.16751
+            （目標未達，partial）．isotonic（Iter30）ECE 0.19336→0.121424（目標達成）だが
+            `medical_recall`がBH補正後も有意に悪化（0.4831→0.3820, p=0.000144，partial）．
+            temperatureは未実施（Iter31で検証予定，backlog B51）．temperatureはクラスごとの
+            個別較正器を持たず単一スカラーTでロジット全体を割る変換のため，top1_accuracy不変が
+            理論的に保証される一方，ECE改善幅はisotonic・plattより小さい可能性がある留保あり．
             **X3/X7との関係**: E4（semantic entropy再設計）・E5（p_true）は現行の排他的if連鎖
             の下でE6を無効化するため着手見送り中．同じ目的（confidenceの較正）をY4が桁違いに
             安く達成できるかを先に確認し，その結果を見てからX3/X7の要否を判断する．

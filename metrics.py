@@ -17,6 +17,8 @@ import sys
 from collections import Counter, defaultdict
 from typing import TextIO
 
+from scipy.stats import fisher_exact
+
 # z-score for a two-sided 95% confidence interval (Wilson score interval).
 _Z_95 = 1.959963984540054
 
@@ -223,6 +225,39 @@ def _standard_normal_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
+def _mcnemar_from_correctness(
+    correct_a: dict[str, bool], correct_b: dict[str, bool]
+) -> dict[str, float]:
+    """Continuity-corrected McNemar test over two id->correctness maps covering the same ids.
+
+    Extracted from compute_mcnemar_test (Iter30) so per-domain callers
+    (compute_domain_recall_mcnemar_test) can supply a domain-specific
+    correctness definition without duplicating the discordant-pair/chi2/
+    p-value arithmetic. Callers are responsible for ensuring both dicts
+    share the same key set; this helper trusts that invariant rather than
+    re-checking it, since both current callers already validate ids
+    against their own domain-appropriate error message.
+    """
+    ids = correct_a.keys()
+    discordant_a_only = sum(1 for row_id in ids if correct_a[row_id] and not correct_b[row_id])
+    discordant_b_only = sum(1 for row_id in ids if correct_b[row_id] and not correct_a[row_id])
+    discordant_pairs = discordant_a_only + discordant_b_only
+    if discordant_pairs == 0:
+        chi2_statistic = 0.0
+    else:
+        chi2_statistic = (abs(discordant_a_only - discordant_b_only) - 1) ** 2 / discordant_pairs
+    # chi-square(1) is the distribution of a squared standard normal, so its
+    # upper-tail probability is the two-sided normal tail: 2*(1-Phi(sqrt(x))).
+    p_value = 2.0 * (1.0 - _standard_normal_cdf(math.sqrt(max(chi2_statistic, 0.0))))
+    return {
+        "discordant_a_only": discordant_a_only,
+        "discordant_b_only": discordant_b_only,
+        "discordant_pairs": discordant_pairs,
+        "chi2_statistic": chi2_statistic,
+        "p_value": p_value,
+    }
+
+
 def compute_mcnemar_test(results_a: list[dict], results_b: list[dict]) -> dict[str, float]:
     """Continuity-corrected McNemar test comparing two paired top1-correctness sets.
 
@@ -241,24 +276,123 @@ def compute_mcnemar_test(results_a: list[dict], results_b: list[dict]) -> dict[s
 
     correct_a = {r["id"]: r["selected_domain"] in r["expected_domains"] for r in results_a}
     correct_b = {r["id"]: r["selected_domain"] in r["expected_domains"] for r in results_b}
+    return _mcnemar_from_correctness(correct_a, correct_b)
 
-    discordant_a_only = sum(1 for row_id in ids_a if correct_a[row_id] and not correct_b[row_id])
-    discordant_b_only = sum(1 for row_id in ids_a if correct_b[row_id] and not correct_a[row_id])
-    discordant_pairs = discordant_a_only + discordant_b_only
-    if discordant_pairs == 0:
-        chi2_statistic = 0.0
-    else:
-        chi2_statistic = (abs(discordant_a_only - discordant_b_only) - 1) ** 2 / discordant_pairs
-    # chi-square(1) is the distribution of a squared standard normal, so its
-    # upper-tail probability is the two-sided normal tail: 2*(1-Phi(sqrt(x))).
-    p_value = 2.0 * (1.0 - _standard_normal_cdf(math.sqrt(max(chi2_statistic, 0.0))))
-    return {
-        "discordant_a_only": discordant_a_only,
-        "discordant_b_only": discordant_b_only,
-        "discordant_pairs": discordant_pairs,
-        "chi2_statistic": chi2_statistic,
-        "p_value": p_value,
+
+def compute_domain_recall_mcnemar_test(
+    results_a: list[dict], results_b: list[dict], domain: str
+) -> dict[str, float]:
+    """McNemar test on a single domain's recall, comparing two paired result sets.
+
+    Iter30 (per-domain non-regression checklist, journal Iter30 investigation
+    finding 2): recall's denominator (rows where `domain` is one of the
+    expected domains) is unchanged by a calibration pass -- only the
+    numerator (whether the mesh selected `domain` on such a row) can flip --
+    so recall is a paired/matched comparison and McNemar applies directly,
+    the same way compute_mcnemar_test applies to overall top1_accuracy.
+    Rows are paired by `id`; only rows where `domain in expected_domains`
+    are scored, with correctness defined as `selected_domain == domain`
+    (the definition of recall's numerator condition, see
+    compute_precision_recall_per_domain). Raises ValueError if the two
+    result sets don't cover the same question ids, matching
+    compute_mcnemar_test's guard against silently pairing mismatched rows.
+    """
+    ids_a = {r["id"] for r in results_a}
+    ids_b = {r["id"] for r in results_b}
+    if ids_a != ids_b:
+        raise ValueError("results_a and results_b must cover the same set of ids")
+
+    correct_a = {
+        r["id"]: r["selected_domain"] == domain
+        for r in results_a
+        if domain in r["expected_domains"]
     }
+    correct_b = {
+        r["id"]: r["selected_domain"] == domain
+        for r in results_b
+        if domain in r["expected_domains"]
+    }
+    return _mcnemar_from_correctness(correct_a, correct_b)
+
+
+def compute_domain_precision_fisher_test(
+    results_a: list[dict], results_b: list[dict], domain: str
+) -> dict[str, float]:
+    """Two-sample Fisher exact test on a single domain's precision, comparing two result sets.
+
+    Iter30 (per-domain non-regression checklist, journal Iter30
+    investigation finding 2): unlike recall, precision's denominator (rows
+    where the mesh selected `domain`) is itself a function of the argmax
+    decision under test, so a calibration pass can change which rows even
+    belong to the denominator. That breaks McNemar's same-subject-pairing
+    assumption, so precision is instead compared as two independent
+    proportions via a 2x2 contingency table
+    [[tp_a, selected_a - tp_a], [tp_b, selected_b - tp_b]], where `tp` is
+    the count of rows with `selected_domain == domain and domain in
+    expected_domains` (precision's numerator). Fisher's exact test (rather
+    than a chi-square/normal approximation) is used because per-domain
+    selected-row counts can be small (Iter29 measured as low as the low
+    tens for some domains), where the exact test remains valid but a
+    chi-square approximation would not.
+
+    Raises ValueError if either side selected `domain` zero times: a 2x2
+    table with a zero-count row/column is a degenerate precision estimate
+    (0/0), not a legitimate observation to test, matching
+    compute_wilson_confidence_interval's convention of refusing rather
+    than silently dividing by zero.
+    """
+    selected_a = [r for r in results_a if r["selected_domain"] == domain]
+    selected_b = [r for r in results_b if r["selected_domain"] == domain]
+    if not selected_a or not selected_b:
+        raise ValueError(
+            f"domain {domain!r} must be selected at least once in both results_a and results_b"
+        )
+    true_positive_a = sum(1 for r in selected_a if domain in r["expected_domains"])
+    true_positive_b = sum(1 for r in selected_b if domain in r["expected_domains"])
+    contingency_table = [
+        [true_positive_a, len(selected_a) - true_positive_a],
+        [true_positive_b, len(selected_b) - true_positive_b],
+    ]
+    odds_ratio, p_value = fisher_exact(contingency_table, alternative="two-sided")
+    return {
+        "true_positive_a": true_positive_a,
+        "selected_a": len(selected_a),
+        "true_positive_b": true_positive_b,
+        "selected_b": len(selected_b),
+        "odds_ratio": float(odds_ratio),
+        "p_value": float(p_value),
+    }
+
+
+def apply_benjamini_hochberg(p_values: list[float], q: float = 0.05) -> list[bool]:
+    """Benjamini-Hochberg step-up FDR control; returns per-input significance flags.
+
+    Iter30 (journal Iter30 investigation finding 2): Iter29's per-domain
+    non-regression check compared 20 metrics (10 domains x precision/
+    recall) with no multiple-comparison correction and flagged 9/20 as
+    "regressed" purely from that inflation (all 9 had overlapping
+    confidence intervals with their before-value, i.e. were consistent
+    with noise). BH controls the false discovery rate across the whole
+    batch of p-values rather than each test's own alpha in isolation:
+    sort p-values ascending, find the largest rank i such that
+    p_(i) <= (i/m)*q, and mark that rank and every smaller p-value as
+    significant (larger ones are not, even if individually below q).
+    Preserves the caller's input order in the returned list so it can be
+    zipped back against the original (domain, metric) labels.
+    """
+    if not p_values:
+        return []
+    m = len(p_values)
+    order = sorted(range(m), key=lambda i: p_values[i])
+    is_significant = [False] * m
+    largest_significant_rank = -1
+    for rank, index in enumerate(order, start=1):
+        if p_values[index] <= (rank / m) * q:
+            largest_significant_rank = rank
+    for rank, index in enumerate(order, start=1):
+        if rank <= largest_significant_rank:
+            is_significant[index] = True
+    return is_significant
 
 
 def compute_random_baseline_accuracy(results: list[dict], domains: list[str]) -> float:

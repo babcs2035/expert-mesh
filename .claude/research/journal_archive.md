@@ -1,3 +1,140 @@
+## Iteration 27: 高度な集約方式（majority_vote / llm_judge）の比較実験 — 実験不成立（no-op）
+
+**背景**: research_frontier 項目5（top-k dispatch の高度な集約方式）の実機比較（backlog B47）．
+`aggregator.py` への実装は commit `178960a` で完了しており，`config.yaml` の
+`dispatch_top_k` を 1→2（`cde9247`），`aggregation_method` を
+`max_confidence`→`majority_vote`（`7f72b1a`）→`llm_judge`（`32af2e0`）と切り替えて
+1600 問を 3 回実行した．
+
+**本節は 2026-07-31 に事後整理として記録した**．実験は 07-30 22:45 〜 07-31 03:44 に完走していたが，
+分析・記録・コミットが行われないまま約 12 時間停止していた（停止の経緯は本節末尾および
+docs/d0004 §6-1 を参照）．
+
+### 実験 (Iter27)
+
+| 実験ディレクトリ | 集約方式 | 実行時の HEAD | 期間 | 完走 |
+|---|---|---|---|---|
+| `results/20260730_224515/results_topk2_maxconf.jsonl` | max_confidence | `9b7f393` | 07-30 22:45 → 07-31 00:21 | 1600/1600 |
+| `results/20260731_002420/results_topk2_majorityvote.jsonl` | majority_vote | `7f72b1a` | 07-31 00:24 → 02:00 | 1600/1600 |
+| `results/20260731_020358/results_topk2_llmjudge.jsonl` | llm_judge | `32af2e0` | 07-31 02:03 → 03:44 | 1600/1600 |
+
+3 ディレクトリとも当初 `config.yaml`・`git_head.txt`・`metrics.json` を欠いていた（F5 の provenance は
+標準経路 `mise run start` でのみ機能するが，Iter27 は独自の呼び出しで実行されたため．docs/d0004 §6-2）．
+**2026-07-31 に事後補完した**（Iter25 で B45 が行ったのと同じ方式．各実行の開始時刻と Iter27 の
+コミット時刻が 1 対 1 に対応するため HEAD を一意に確定できた）．補完した `config.yaml` スナップショットは
+3 件とも `dispatch_top_k: 2` と意図どおりの `aggregation_method` を持っており，
+**設定自体は正しく反映されていて，不成立の原因は閾値ゲートのみであることが独立に裏付けられた**．
+
+### 分析 (実行) (Iter27)
+
+Iter25 基準線（`results/20260730_145356/`，1600 問）との対比．
+
+| 指標 | 基準線 | max_confidence | majority_vote | llm_judge |
+|---|---|---|---|---|
+| top1_accuracy | 0.555625 | 0.555625 | 0.555625 | 0.555625 |
+| single_domain_top1_accuracy | 0.5693333 | 0.5693333 | 0.5693333 | 0.5693333 |
+| compound_domain_top1_accuracy | 0.35 | 0.35 | 0.35 | 0.35 |
+| compound_domain_set_recall | 0.165 | 0.165 | 0.165 | 0.165 |
+| Cohen's κ | 0.5214815 | 0.5214815 | 0.5214815 | 0.5214815 |
+| ECE | 0.2040206 | 0.2040206 | 0.2040206 | 0.2040206 |
+| fallback_rate | 0.1325 | 0.1325 | 0.1325 | 0.1325 |
+| mean_duration_ms | 3626.8 | 3599.3 | 3606.9 | 3751.2 |
+| answer_quality（JMMLU1500） | 0.5087 | 0.4960 | 0.4913 | 0.5080 |
+| McNemar（対基準線） | — | discordant=0, p=1.0 | discordant=0, p=1.0 | discordant=0, p=1.0 |
+| **2 ノードへ dispatch した問題数** | 0 | **0/1600** | **0/1600** | **0/1600** |
+
+ルーティング系の指標が小数点以下すべてで一致し，McNemar の不一致ペアも 3 方式とも 0 件．
+`dispatched_domains` の長さが 2 以上の行は 1 件も存在しなかった．
+
+### 分析 (解釈) (Iter27)
+
+**レバー**: `aggregation_method`（`dispatch_top_k=2` を前提）
+
+**判定**: **invalid（実験不成立）**．「集約方式に差が無い」ではなく，
+**集約が一度も実行されていない**．
+
+**機序**: `aggregator.select_dispatch_targets()`（`aggregator.py:39`）は
+`confidence >= confidence_threshold` で候補を絞ってから top-k を取る．
+`routing_method=supervised_classifier` では各ノードが 10 クラス LogisticRegression の
+自分のクラスの確率のみを返し，10 ノードの総和は 1 になる．よって 2 ノードが同時に
+`>= 0.5` を満たすには p₁ + p₂ ≥ 1.0 が必要で，事実上起こり得ない．
+
+実データでも **2 位 confidence の最大値は 0.4955** であり，閾値 0.5 に一度も到達していない
+（mean 0.1407 / median 0.1081 / p99 0.4580）．**この結論はデプロイの成否とは無関係に成立する**．
+
+閾値を下げた場合に 2 ノード目が適格になる件数（同データで逆算）: 0.4→75 件（4.7%），
+0.3→230 件（14.4%），0.25→365 件（22.8%），0.2→509 件（31.8%）．
+ただし閾値を下げると 1 位側の適格数（＝ fallback しない件数）も同時に動く．
+`confidence_threshold` が **fallback ゲートと dispatch 候補ゲートの 2 役を兼ねている**ため，
+現行実装では集約方式も fallback 方策も単一レバーとして分離できない．
+詳細と対処案は docs/d0004 §3・§5 Y2 を参照．
+
+なお複合設問 100 問はすべて 2 ドメインであり，`dispatch_top_k` が実効 1 である限り
+`compound_domain_set_recall` の構造的上限は 0.500（実測 0.165）である．top_k=2 が
+実際に効けば上限は 1.000 になる．
+
+**副産物 — 回答品質のノイズ床の確定（d0003 X6 に相当）**:
+本イテレーションの 3 実行はルーティングが完全に決定論的で同一だったため，Iter25 基準線と
+併せて「生成のランダム性のみが異なる 4 回の反復」になった．これは X6 が計画しながら
+未実施だった測定そのものである．
+
+- `answer_quality_accuracy`（JMMLU1500）: 0.5087 / 0.4960 / 0.4913 / 0.5080
+- 平均 0.5010，**標準偏差 0.87pt**，範囲 1.73pt，**2SD = ±1.74pt，3SD = ±2.61pt**
+- 行単位では **359/1500（23.9%）**が反復間で正誤反転
+
+これまで使ってきた暫定値 1.3pt（n=2，d0002 §6-F）を，n=4 の実測 3SD = 2.6pt へ置き換える．
+`.claude/research/config.yml` の `success_criteria` に反映済み．
+この基準では Iter26 の回答品質 −1.53pt・End-to-End −1.50pt はノイズと確定し，
+E10 の +22.3pt は 3SD の 8 倍以上で堅牢なまま維持される．
+
+### 考察 (Iter27)
+
+**総括**: 約 5 時間の実機実行が no-op に費やされた．これは Iter16・20（E3），Iter21・22（E4），
+backlog B35（E7）と**同型の失敗**で，「config を正しく変えて実験も完走したが，その設定を読む
+コードに実行が到達しない」というパターンである．のべ 6 イテレーション・10 時間以上が
+この型で失われている．恒久対策（計画時のコードパス到達条件の明記，本走前の予備実行による
+発火確認，基準線との完全一致を「効果なし」ではなく「不成立」と解釈する既定）を
+docs/d0004 §4 に定めた．
+
+**次イテレーションの単一レバー**: **fallback 方策の廃止**（d0003 X5，d0004 Y1）を提案する．
+`aggregation_method` の再挑戦（d0004 Y3）は，`confidence_threshold` の二重責務を分離する
+コード変更（d0004 Y2，ユーザー確認が必要）を終えるまで着手しない．
+
+Y1 を最優先とする根拠は，**既存データから効果が実測済み**である点にある．
+`results/central_iter26/`（閾値なし純 argmax ＝ fallback 廃止相当）と
+`results/central_iter26b/`（現行の閾値 0.5 + general への fallback）は，アーキテクチャ・
+分類器・データセットが同一で fallback 方策だけが異なる（Iter26 で方策の食い違いに気付いた際の
+副産物．backlog B46）．
+
+| 指標 | fallback 廃止 | fallback あり（現行） | 差 |
+|---|---|---|---|
+| top1_accuracy | 0.5850 | 0.5556 | +2.94pt |
+| Cohen's κ | 0.5541 | 0.5215 | +3.26pt |
+| answer_quality（JMMLU1500） | 0.5507 | 0.4933 | +5.74pt（3SD の 2.2 倍） |
+| mean_duration_ms | 4234.8 | 4558.2 | −323ms |
+
+McNemar（現行 vs 廃止）: discordant 77 件（廃止のみ正解 62・現行のみ正解 15），**p = 1.59e-7**．
+fallback が発動した 212 問だけを見ると，general へ送った場合のルーティング正解は **18/212（8.5%）**，
+fallback せず argmax のドメインへ送った場合は **65/212（30.7%）**．
+現行 fallback は，分類器が迷っている問題を正解率 8.5% の選択肢へ振り替えている．
+
+**iteration_name**: 「fallback 方策の廃止によるルーティング精度・回答品質への影響測定」
+
+**実行上の申し送り**: Y1 の実験では `dispatch_top_k` を 2 から **1 へ戻す**こと
+（`confidence_threshold` を下げると候補ゲートも緩むため，top_k=1 に固定して単一レバーを保つ）．
+
+### 停止していた経緯（2026-07-31 に判明）
+
+実験は 07-31 03:44 に 3 本とも完走していたが，`state.json` は `phase="implement", status="running"`
+のまま 12 時間放置されていた．watchdog がこれを検知できなかったのは，
+**Iter23 の使い捨て heartbeat スクリプト `/tmp/iter23_heartbeat.sh` が 07-30 01:42 から
+動き続け，`state.json` の `updated_at` を 120 秒ごとに上書きしていた**ためである．
+停止条件のマーカー `/tmp/iter23_start.done` が生成されず，無限ループになっていた．
+本セッションで当該プロセス（PID 871683，稼働 1 日 14 時間）を停止した．
+詳細と再発防止は docs/d0004 §6-1 を参照．
+
+---
+
 ## Iteration 26: 中央集権ルータ比較の再実験（research_frontier 項目4 実施，X2再挑戦）
 
 **背景**: Iter24（X2: 中央集権ルータ比較）はrejected判定だったが，回答生成プロンプト・APIエンドポイント

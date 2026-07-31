@@ -1,21 +1,57 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter29",
-  "iteration_name": "分類器の較正（CalibratedClassifierCV）によるECE改善とルーティング非退行の検証",
+  "iteration": "Iter30",
+  "iteration_name": "分類器較正のisotonic方式によるECE目標達成の追試とドメイン別非退行の全数検証",
   "phase": "reflect",
   "status": "running",
-  "current_lever": "classifier_calibration=platt (CalibratedClassifierCV method='sigmoid', cv=5, ensemble=True; isotonicはPlattが不成功の場合のみ次回検証)",
+  "current_lever": "classifier_calibration=isotonic",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785492559,
+  "updated_at": 1785499226,
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 29: 考察 (Iter29))",
-      ".claude/research/backlog.md (B50, B49)",
+      ".claude/research/journal.md (Iteration 30: 考察 (Iter30))",
+      ".claude/research/backlog.md (B51, B50)",
       ".claude/research/config.yml (levers: classifier_calibration)"
     ],
-    "planned_lever": "classifier_calibration=isotonic",
-    "note": "Iter29でplattはECE 0.19336->0.16751(改善方向だが目標0.150未達)・top1非退行(McNemar p=0.139)でpartial確定．次はisotonicをcv=5/ensemble=True同一設定で追試する（config.yml既登録の候補，スキーマ変更・ユーザー確認不要）．cv=3感度分析はisotonic結果次第の副次分析に留め単一レバー原則を守ること．全10ドメインのCI比較を較正前後で最初から標準手順として実施すること（Iter29では事後に穴埋めした）．legal recall低下は訓練データ最少ドメイン固有と即断せず，Iter29追加分析（B50）の学びを踏まえること．"
+    "planned_lever": "classifier_calibration=temperature",
+    "note": "Iter30でisotonicはECE 0.193358->0.121424(目標0.150達成，2.86ptの余裕)・top1非退行(McNemar p=0.301)だが，medical_recallがBH補正(q=0.05)後も有意に悪化(0.4831->0.3820, p=0.000144)しpartial確定．medicalは訓練150件の多数派ドメインで小標本仮説では説明できず，isotonic較正曲線がmedicalクラス固有に系統的にスコアを圧縮している疑い（較正後最大確率0.7062が他9ドメイン0.7496-0.8795を全て下回る）．次はmethod='temperature'（sklearn>=1.8，本リポジトリscikit-learn==1.9.0で利用可能，config.yml levers末尾にtemperatureを追記済み）を検証する．クラスごとの個別較正器を持たず単一スカラーTで変換するためargmax不変が理論保証され，isotonic/plattのOvR方式由来のリスク（クラス固有歪み・tie・0/1張り付き）を構造的に排除する．留保: 較正の柔軟性がisotonic/plattより低くECE改善幅が目標未達になる可能性がある．cv=3感度分析は今回優先しない（medicalは訓練データが十分でcv変更では根本原因に届かないと判断，B51参照）。per-domain非退行チェックはIter30で確立した3段構成（recall=ドメイン別McNemar・precision=Fisher正確検定・20指標へBH補正q=0.05）をそのまま踏襲すること。"
+  },
+  "e30_results": {
+    "lever": "classifier_calibration=isotonic (CalibratedClassifierCV method='isotonic', cv=5, ensemble=True)",
+    "ece_before": 0.193357556998477,
+    "ece_after": 0.1214241251658703,
+    "ece_success_threshold_0_150_met": true,
+    "top1_accuracy_before": 0.585,
+    "top1_accuracy_after": 0.59375,
+    "mcnemar_discordant_a_only": 72,
+    "mcnemar_discordant_b_only": 86,
+    "mcnemar_p_value": 0.30103123736220994,
+    "flip_rate": 0.143125,
+    "flip_count": 229,
+    "flip_total": 1600,
+    "per_domain_bh_corrected_20_metrics": {
+      "note": "10 domains x precision/recall. recall via domain-subset McNemar, precision via Fisher exact (two-sample, unpaired), 20 p-values combined via Benjamini-Hochberg q=0.05.",
+      "bh_significant_metrics": ["education_recall (p=0.000796, improvement)", "medical_recall (p=0.000144, regression)"],
+      "regressed_and_bh_significant_count": 1,
+      "medical_recall": {"before": 0.4831, "after": 0.3820, "p_value": 0.000144, "discordant_a_only": 19, "discordant_b_only": 1},
+      "legal_recall": {"before": 0.5833, "after": 0.5889, "note": "improved, contrary to pre-registered small-sample hypothesis"}
+    },
+    "isotonic_specific_checklist": {
+      "exact_0_or_1_probability_rows": "1311/1600 (non-selected classes only, 0 rows among selected/ECE-relevant confidences)",
+      "uniform_fallback_rows": "0/1600",
+      "tie_rows": "0/1600",
+      "medical_max_calibrated_probability": 0.7062,
+      "other_domains_max_calibrated_probability_range": [0.7496, 0.8795]
+    },
+    "data_used": {
+      "train_data": "data/classifier_train.jsonl (1427 rows)",
+      "before_results": "results/20260731_162722/results.jsonl (Iter28 baseline, 1600 rows, not re-run)",
+      "after_results": "results/iter30_calibrated_predictions.jsonl (newly generated, 1600 rows, includes probabilities field)"
+    },
+    "judgment": "partial",
+    "production_rollout": "deferred (per-domain non-regression criterion not met: medical_recall BH-significant regression; models/domain_classifier.joblib unchanged)",
+    "note": "rc-analyst提案どおりrc-reflectorがpartialを確定（journal.md 考察(Iter30)参照）。ECE・top1_accuracyは明確に成立、per-domain 20指標BH補正後の悪化方向有意指標がmedical_recall 1件で不成立。medicalは訓練150件の多数派ドメインで小標本仮説は反証され、isotonic較正曲線のクラス固有の系統的圧縮が疑われる。次イテレーションはmethod='temperature'を検証する。"
   },
   "e28_results": {
     "lever": "fallback_policy=disabled (confidence_threshold: 0.5->0.0, dispatch_top_k: 2->1, aggregation_method: llm_judge->max_confidence)",
@@ -92,9 +128,9 @@
     "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
   },
   "last_slack_ts": "1785481958.859089",
-  "iteration_thread_ts": "1785490381.513699",
+  "iteration_thread_ts": "1785493918.395989",
   "notion_toggle_created": true,
-  "last_commit": "8a07f9a",
+  "last_commit": "fd9a9bc",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,

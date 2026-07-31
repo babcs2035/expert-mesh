@@ -3,6 +3,58 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B51 [auto-decided 2026-07-31] Iter30 は partial で確定．本番反映は見送り，次は temperature scaling を検証
+
+- 状況: Iter30（classifier_calibration=isotonic，Y4）の rc-analyst 判定（partial）を
+  rc-reflector が確定させた．
+- **判定: partial（部分的採用，確定，rc-analyst 提案を覆さず）**．d0003 X9 の成功条件は
+  「ECE≤0.150 かつ top1_accuracy 非退行 かつ per-domain 20指標の BH 補正後・悪化方向の
+  有意指標0件」の AND 条件．ECE は 0.193358→0.121424（目標に2.86ptの余裕）で成立，
+  top1_accuracy は McNemar p=0.301（非退行，方向は改善寄り）で成立するが，per-domain は
+  `medical_recall` がBH補正（q=0.05，20指標中2件通過のうち悪化方向1件）後もなお有意に悪化
+  （0.4831→0.3820, p=0.000144）しており不成立．3条件ANDのうち1条件不成立のため partial．
+- **本番反映: 見送り**（`models/domain_classifier.joblib` は較正前のまま，
+  `models/domain_classifier_isotonic.joblib` へ置き換えない）．理由は成功条件のAND条件が
+  未成立であること．`medical` は訓練150件の多数派ドメインであり，Iter29のlegalのような
+  「訓練データ拡充で解消しうる」という見立てが立たない．
+- **学び**: (1) isotonicの実際のリスクは事前に警戒していた小標本ドメイン（legal）ではなく
+  多数派ドメイン（medical）に現れた．「訓練データ量が少ないドメインほど較正の影響を受け
+  やすい」という直感的仮説は，Iter29（B50，computer_science/mathematics も偽陽性で該当）に
+  続き2イテレーション連続で反証された．較正関連レバーの事前リスク評価には訓練データ量だけで
+  なく較正曲線の形状・到達可能な確信度の天井の確認が要る．(2) BH補正を計画段階から組み込む
+  運用（調査(Iter30)の申し送り）は機能した．Iter29の「20指標中9指標が該当（うち有意は0件）」
+  という過検出をIter30では「20指標中2指標が該当（うち有意な悪化は1件）」まで絞り込めた．
+  (3) medical_recall悪化の原因は0/1張り付き（isotonic特有の既知病理，非選択クラスの
+  82%行で発生）でも小標本held-out不安定性でもなく，isotonic較正曲線がmedicalクラス固有に
+  系統的にスコアを圧縮する（較正後の最大確率0.7062が他9ドメイン0.7496〜0.8795を全て下回る）
+  という，事前に想定していなかった第3の機序である可能性が高い．
+- **自動選択: 次イテレーション（Iter31）の単一レバーを `classifier_calibration=temperature`
+  とする**．config.yml の `classifier_calibration` レバーの `values` へ `temperature` を
+  末尾追記した（`[platt, isotonic]` → `[platt, isotonic, temperature]`，可逆な値追加であり
+  スキーマ変更ではない）．`iteration_name` は「分類器較正のtemperature scaling方式による
+  argmax不変性の実証とECE目標到達可否の検証」．
+- **根拠（`cv=3`感度分析 と `method='temperature'` のどちらを優先するかの判断）**:
+  `cv=3`はisotonicという同一手法内のハイパラ変更に過ぎず，medicalは訓練150件のため`cv=5`
+  （1foldあたり約30件）を`cv=3`（同約50件）にしても sklearn 公式の目安「greater than
+  ~1000」からは変わらず大きく下回ったままであり，かつ悪化した19行のうち0/1張り付きが直接
+  原因の行は0件だったことから，fold サンプル数の微調整では根本原因（較正曲線のクラス固有
+  圧縮）に届きにくいと判断した．一方 `method='temperature'` は，クラスごとに個別の較正器を
+  fit せず単一スカラーTでロジット全体を変換する構造であるため，isotonic/plattが抱える
+  OvR方式由来の全リスク（クラス固有の曲線歪み・tie・0/1張り付き）を構造的に排除でき，
+  今回発見した根本原因に直接対処する．sklearn公式が「Tはsoftmaxの最大値の位置に影響しない」
+  と明記しておりtop1_accuracy不変が理論保証される点も，per-domain非退行という今回最も
+  厳しかった条件への対処として優先度が高いと判断した根拠である．
+- 要レビュー: (1) temperatureは多クラス全体で単一のTしか学習しないため，isotonic
+  （0.121424）はもとよりPlatt（0.16751，目標未達だった実績）と比べても較正の柔軟性が低く，
+  ECE改善幅がより小さくtemperatureが0.150に届かない可能性がある．その場合は「per-domain
+  非退行のためにはOvR方式の柔軟性を犠牲にできない」という新しい知見が得られ，isotonicの
+  運用調整（例: medicalのみ較正を無効化する等）を再検討する材料とする．(2) Y2
+  （`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認は引き続き必要
+  （B49既存項目）．(3) fallback設計思想の論文上の位置付け（B48）も未解決．(4) 較正済み
+  分類器の本番反映可否は，いずれかの較正手法が成功条件を完全に満たした時点で改めて判断する．
+
+---
+
 ## B50 [auto-decided 2026-07-31] Iter29 は partial で確定．本番反映は見送り，次は isotonic を追試
 
 - 状況: Iter29（classifier_calibration=platt，Y4）の rc-analyst 判定（partial）を rc-reflector が

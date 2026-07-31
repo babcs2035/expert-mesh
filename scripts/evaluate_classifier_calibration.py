@@ -25,6 +25,16 @@ using metrics.py's existing compute_ece / compute_mcnemar_test /
 compute_precision_recall_per_domain / compute_wilson_confidence_interval,
 not here.
 
+Iter30 (classifier_calibration=isotonic): each row's dict also carries a
+`probabilities` field ({domain: float} for every domain the classifier
+was trained on), not just the selected domain's confidence. isotonic's
+non-monotonic-across-folds fit can produce exact 0.0/1.0 probabilities,
+tied top candidates, or (rarely) an all-zero row that predict_proba
+replaces with a uniform distribution -- none of these are visible from
+the previously-sufficient (selected_domain, confidence) pair alone, so
+the experiment phase's isotonic-specific checklist (journal Iter30 plan,
+evaluation step 7) needs the full probability vector.
+
 Usage (module mode; requires a live ollama node reachable for embeddings):
     uv run python -m scripts.evaluate_classifier_calibration \\
         --dataset data/dataset.jsonl \\
@@ -77,6 +87,7 @@ async def predict_calibrated_rows(
                 "expected_domains": row["expected_domains"],
                 "selected_domain": classes[best_index],
                 "confidence": float(probabilities[best_index]),
+                "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
             }
         )
     return rows

@@ -3,8 +3,10 @@
 import itertools
 
 import pytest
+from scipy.stats import fisher_exact
 
 from metrics import (
+    apply_benjamini_hochberg,
     compute_all_metrics,
     compute_auroc,
     compute_best_single_domain_baseline,
@@ -13,6 +15,8 @@ from metrics import (
     compute_compound_coverage_metrics,
     compute_confidence_dispersion,
     compute_dispatch_failure_rate,
+    compute_domain_precision_fisher_test,
+    compute_domain_recall_mcnemar_test,
     compute_ece,
     compute_fallback_rate,
     compute_mcnemar_test,
@@ -292,6 +296,100 @@ def test_compute_mcnemar_test_raises_on_mismatched_ids() -> None:
     results_b = [_result("medical", ["medical"], row_id="q2")]
     with pytest.raises(ValueError):
         compute_mcnemar_test(results_a, results_b)
+
+
+def test_compute_domain_recall_mcnemar_test_matches_known_chi_square_critical_values() -> None:
+    """Same discordant-pair arithmetic as compute_mcnemar_test, restricted to one domain's recall.
+
+    All 44 rows have "legal" in expected_domains, so every row is in the
+    recall subset; two extra rows with a different expected domain are
+    added to confirm they are excluded from the subset rather than
+    perturbing the discordant counts below.
+    """
+    # (|b - c| - 1)^2 / (b + c) = (|29 - 15| - 1)^2 / 44 = 3.8409 (continuity-corrected).
+    results_a = [_result("legal", ["legal"], row_id=f"q{i}") for i in range(29)] + [
+        _result("other", ["legal"], row_id=f"q{i}") for i in range(29, 44)
+    ]
+    results_b = [_result("other", ["legal"], row_id=f"q{i}") for i in range(29)] + [
+        _result("legal", ["legal"], row_id=f"q{i}") for i in range(29, 44)
+    ]
+    # Noise rows outside the "legal" subset, discordant in the opposite
+    # direction: if these leaked into the subset they would change the
+    # discordant counts asserted below.
+    results_a.append(_result("other", ["medical"], row_id="noise1"))
+    results_a.append(_result("medical", ["medical"], row_id="noise2"))
+    results_b.append(_result("medical", ["medical"], row_id="noise1"))
+    results_b.append(_result("other", ["medical"], row_id="noise2"))
+
+    outcome = compute_domain_recall_mcnemar_test(results_a, results_b, "legal")
+
+    assert outcome["discordant_a_only"] == 29
+    assert outcome["discordant_b_only"] == 15
+    assert outcome["chi2_statistic"] == pytest.approx(3.841, abs=0.01)
+    assert outcome["p_value"] == pytest.approx(0.05, abs=0.005)
+
+
+def test_compute_domain_recall_mcnemar_test_raises_on_mismatched_ids() -> None:
+    """Refused (not silently wrong) when the two result sets don't share the same id set."""
+    results_a = [_result("legal", ["legal"], row_id="q1")]
+    results_b = [_result("legal", ["legal"], row_id="q2")]
+    with pytest.raises(ValueError):
+        compute_domain_recall_mcnemar_test(results_a, results_b, "legal")
+
+
+def test_compute_domain_precision_fisher_test_matches_scipy_fisher_exact_directly() -> None:
+    """The function's p-value/odds-ratio match a direct scipy.stats.fisher_exact call.
+
+    results_a selects "legal" 10 times (6 true positives, 4 false
+    positives); results_b selects "legal" 8 times (2 true positives, 6
+    false positives) -- a 2x2 table of [[6, 4], [2, 6]].
+    """
+    results_a = [_result("legal", ["legal"], row_id=f"a-tp{i}") for i in range(6)] + [
+        _result("legal", ["medical"], row_id=f"a-fp{i}") for i in range(4)
+    ]
+    results_b = [_result("legal", ["legal"], row_id=f"b-tp{i}") for i in range(2)] + [
+        _result("legal", ["medical"], row_id=f"b-fp{i}") for i in range(6)
+    ]
+
+    outcome = compute_domain_precision_fisher_test(results_a, results_b, "legal")
+
+    expected_odds_ratio, expected_p_value = fisher_exact([[6, 4], [2, 6]], alternative="two-sided")
+    assert outcome["true_positive_a"] == 6
+    assert outcome["selected_a"] == 10
+    assert outcome["true_positive_b"] == 2
+    assert outcome["selected_b"] == 8
+    assert outcome["odds_ratio"] == pytest.approx(expected_odds_ratio)
+    assert outcome["p_value"] == pytest.approx(expected_p_value)
+
+
+def test_compute_domain_precision_fisher_test_raises_when_domain_never_selected() -> None:
+    """A domain with zero selections on one side is a degenerate (0/0) precision, refused."""
+    results_a = [_result("legal", ["legal"], row_id="a1")]
+    results_b = [_result("medical", ["medical"], row_id="b1")]
+    with pytest.raises(ValueError):
+        compute_domain_precision_fisher_test(results_a, results_b, "legal")
+
+
+def test_apply_benjamini_hochberg_known_example() -> None:
+    """A textbook BH example: with q=0.05, the smallest 4 of 5 p-values clear the step-up line.
+
+    Thresholds are p_(i) <= (i/5)*0.05: 0.01<=0.01, 0.02<=0.02, 0.03<=0.03,
+    0.04<=0.04 all hold, but 0.20<=0.05 does not, so only the last (largest)
+    p-value is non-significant.
+    """
+    p_values = [0.01, 0.02, 0.03, 0.04, 0.20]
+    assert apply_benjamini_hochberg(p_values, q=0.05) == [True, True, True, True, False]
+
+
+def test_apply_benjamini_hochberg_all_non_significant() -> None:
+    """No p-value clears its step-up threshold -> every entry is False."""
+    p_values = [0.5, 0.6, 0.7]
+    assert apply_benjamini_hochberg(p_values, q=0.05) == [False, False, False]
+
+
+def test_apply_benjamini_hochberg_empty_input_is_empty_output() -> None:
+    """An empty p-value list returns an empty list, not an error."""
+    assert apply_benjamini_hochberg([], q=0.05) == []
 
 
 def test_compute_random_baseline_accuracy_uniform_single_domain_rows() -> None:

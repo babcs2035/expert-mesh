@@ -1,8 +1,8 @@
 """E6: offline training of the supervised domain classifier (routing_method=supervised_classifier).
 
 Trains a multi-class LogisticRegression from question-embedding features
-and domain labels ONLY, then wraps it in CalibratedClassifierCV (Iter29,
-classifier_calibration=platt) for better-calibrated predict_proba output.
+and domain labels ONLY, then wraps it in CalibratedClassifierCV (Iter30,
+classifier_calibration=isotonic) for better-calibrated predict_proba output.
 Deliberately never reads results/*/results.jsonl: Iter10's label leakage
 came from training on probe/dispatch-derived features (self_confidence,
 margin, is_top1, ...) evaluated on the same questions used for online
@@ -42,17 +42,26 @@ from expert_backend import OllamaClient
 # (see scikit-learn.org/stable/modules/calibration.html #1.16.3.3).
 _MAX_ITER = 1000
 
-# Iter29 (classifier_calibration=platt): method="sigmoid" (Platt scaling)
-# was chosen over "isotonic" because this training set is far below the
-# scale sklearn's own docs call safe for isotonic ("not recommended when
-# the number of calibration samples is too low (<<1000) since it then
-# tends to overfit" -- scikit-learn.org/stable/modules/calibration.html).
-# With the default cv=5 StratifiedKFold and ensemble=True, each fold's
-# held-out calibration slice is only ~30 rows/domain (~15 for legal,
-# the smallest domain at 77 rows total), well under that threshold.
-# isotonic is deferred to a future iteration, only if sigmoid fails to
-# meet the ECE<=0.150 success condition (journal Iter29 plan).
-_CALIBRATION_METHOD = "sigmoid"
+# Iter30 (classifier_calibration=isotonic): method="isotonic" is used here
+# because Iter29's method="sigmoid" (Platt) improved ECE (0.19336->0.16751)
+# but did not clear the 0.150 success threshold, and config.yml's
+# classifier_calibration lever (backlog B50) designates isotonic as the
+# next value to try automatically, before any other lever. This training
+# set (1427 rows) is still far below the scale sklearn's own docs call
+# safe for isotonic ("not recommended when the number of calibration
+# samples is too low (<<1000) since it then tends to overfit" --
+# scikit-learn.org/stable/modules/calibration.html); with cv=5 and
+# ensemble=True unchanged from Iter29, each fold's held-out calibration
+# slice is still only ~30 rows/domain (~15 for legal). isotonic's
+# non-parametric fit (effectively one degree of freedom per held-out
+# point) makes it more prone to overfitting at this scale than sigmoid,
+# and its out_of_bounds="clip" behavior means legal's sparse held-out
+# data can clip extreme scores to whatever value happens to sit at the
+# edge of that fold's observed range (journal Iter30 investigation
+# findings 1/3). This run is therefore watched closely for isotonic-
+# specific failure modes (exact 0/1 probabilities, ties, uniform
+# fallback rows) alongside the usual ECE/top1_accuracy comparison.
+_CALIBRATION_METHOD = "isotonic"
 _CALIBRATION_CV = 5
 
 
@@ -93,8 +102,13 @@ def train_classifier(
     weaker.
 
     The base estimator is then wrapped in CalibratedClassifierCV
-    (method="sigmoid"=Platt, ensemble=True; see _CALIBRATION_METHOD's
-    comment above for why sigmoid over isotonic at this data scale).
+    (method="isotonic", ensemble=True; see _CALIBRATION_METHOD's comment
+    above for the risk/benefit tradeoff at this data scale). isotonic's
+    piecewise-constant fit can produce tied probabilities across domains,
+    exact 0.0/1.0 outputs when a held-out score clips to an extreme
+    observed value, or (in the rare case every class calibrator returns
+    zero) a uniform-fallback row -- callers evaluating this model should
+    check for these alongside ordinary accuracy/ECE (journal Iter30).
     `cv` defaults to the production value (5-fold StratifiedKFold) but is
     exposed as a parameter so tests can exercise the same code path with
     a smaller fold count on toy data, rather than branching test code
