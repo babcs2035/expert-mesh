@@ -2,7 +2,7 @@
 # (host/port/domain/model names). Hostnames, IPs, model names, and deploy
 # paths are documented ONLY in this file — never hardcode them in code.
 embedding_model: nomic-embed-text
-confidence_threshold: 0.5
+confidence_threshold: 0.0
 # light_model switched from 9B to qwen3.5:4b-q4_K_M (~2.4-2.5GB) for the
 # 10-node mesh: 9B (5.67GB measured resident, docs/d0001 §1.5) left too
 # little VRAM headroom once 6 more nodes were added, and light_model is
@@ -49,7 +49,7 @@ semantic_sample_temperature: 0.7
 # dispatch_top_k > 1 sends /dispatch to multiple confidence-qualifying nodes
 # in parallel (design doc 2.5); aggregation_method then picks the final
 # answer among them.
-dispatch_top_k: 2
+dispatch_top_k: 1
 # aggregation_method (research_frontier item 5, 2026-07-30): how to pick the
 # final answer when dispatch_top_k > 1 produces multiple candidates. A no-op
 # when dispatch_top_k == 1 (a single candidate is always "the best").
@@ -60,7 +60,7 @@ dispatch_top_k: 2
 #     max_confidence for hand-authored consultation rows (no letter to vote on).
 #   llm_judge: an extra LLM call (judge_model) picks the best candidate
 #     (aggregator.select_best_dispatch_response_llm_judge); requires judge_model.
-aggregation_method: llm_judge
+aggregation_method: max_confidence
 # embedding_postprocess (E7) applies mean-centering or whitening (Su+2021)
 # to query_embedding/domain_embedding before cosine scoring, addressing the
 # anisotropy that collapsed Iter2's cosine similarities into a narrow band.
