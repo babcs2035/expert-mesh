@@ -3,6 +3,66 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B48 [auto-decided 2026-07-31] Iter27 は実験不成立（no-op）と判定．次は fallback 廃止（Y1）へ
+
+- 状況: Iter27（B47 の計画）の 3 実行（max_confidence / majority_vote / llm_judge，各 1600 問，
+  計約 5 時間）は 07-31 03:44 に完走していたが，分析・記録・コミットが行われないまま約 12 時間
+  停止していた．本セッションで事後整理した．
+- **判定: invalid（実験不成立）**．3 方式とも Iter25 基準線と主要指標が小数点以下まで完全一致し，
+  McNemar の不一致ペアは 3 方式とも 0 件．**`dispatched_domains` の長さが 2 以上の行が
+  1 件も無かった（0/1600）**．「集約方式に差が無い」のではなく，集約が一度も実行されていない．
+- 機序: `aggregator.select_dispatch_targets()` は `confidence >= confidence_threshold` で
+  候補を絞ってから top-k を取る．`supervised_classifier` では各ノードが 10 クラス確率の自分の分
+  のみを返し総和が 1 になるため，2 ノードが同時に 0.5 以上になるには p₁+p₂ ≥ 1.0 が必要で
+  起こり得ない．実測でも **2 位 confidence の最大値は 0.4955**．デプロイの成否と無関係に成立する．
+- **構造的問題（次の設計に直結）**: `confidence_threshold` が (a) fallback ゲートと
+  (b) dispatch 候補ゲートの 2 役を兼ねている．閾値を下げると両方が同時に動くため，
+  集約方式も fallback 方策も単一レバーとして分離できない．分離案は docs/d0004 §5 Y2．
+- 副産物: 3 実行 + Iter25 基準線が「生成のランダム性のみ異なる 4 反復」になり，**d0003 X6
+  （回答品質のノイズ床の確定）が実質完了した**．answer_quality の標準偏差 0.87pt，
+  **3SD = 2.61pt**．暫定値 1.3pt（n=2）を置き換え，`config.yml` の `success_criteria` に反映済み．
+- 自動選択: 次イテレーション（Iter28）の単一レバーを **fallback 方策の廃止**（d0003 X5 /
+  d0004 Y1）とする．`iteration_name` は「fallback 方策の廃止によるルーティング精度・
+  回答品質への影響測定」．
+- 根拠: 既存データから効果が実測済みである．`results/central_iter26/`（fallback 廃止相当）と
+  `results/central_iter26b/`（現行）はアーキテクチャ・分類器・データセットが同一で fallback
+  方策だけが異なる（B46 の副産物）．top1 +2.94pt，κ +3.26pt，answer_quality +5.74pt（3SD の
+  2.2 倍），レイテンシも −323ms，McNemar p=1.59e-7．**fallback が発動した 212 問だけを見ると，
+  general へ送ると 18/212（8.5%）しか正解しないが，argmax のドメインへ送れば 65/212（30.7%）
+  正解する**．d0002 §8-3 の「fallback は Random（10.1%）を下回る」が定量的に裏付けられた．
+- 実行上の注意: Y1 の実験では `dispatch_top_k` を現在の 2 から **1 へ戻す**こと．
+  `confidence_threshold` を下げると候補ゲートも緩むため，top_k=1 に固定して単一レバーを保つ．
+- 要レビュー: (1) 分散版で中央版と同じ fallback 廃止効果が再現するか（Iter26 の「アーキテクチャを
+  変えてもルーティングは完全一致」から予測されるが未確認）．(2) fallback を完全に廃止するか，
+  閾値を下げるに留めるか．廃止すると「確信が持てないときに汎用ノードへ退避する」という設計書の
+  意図自体を捨てることになるため，論文上の位置付けをどう書くかは人間判断が要る．
+
+---
+
+## B48-b [auto-decided 2026-07-31] 残留 heartbeat プロセスの停止と，運用上の 3 件の不備
+
+- 状況: Iter27 の停止が watchdog に検知されなかった原因を調査した．
+- **原因: Iter23 の使い捨てスクリプト `/tmp/iter23_heartbeat.sh`（PID 871683）が 2026-07-30 01:42 から
+  1 日 14 時間動き続け，`state.json` の `updated_at` を 120 秒ごとに上書きしていた**．
+  停止条件のマーカー `/tmp/iter23_start.done` が生成されず無限ループになっていた．
+  `updated_at` は watchdog がハング検知に使う唯一の指標であり，偽の heartbeat がこれを恒久的に
+  無効化していた．
+- 自動選択: 当該プロセスを `kill` した．停止を確認済み．
+- 根拠: 完了済みイテレーションの使い捨てスクリプトであり，機能は `state.json` の 1 フィールドを
+  上書きするだけ．研究記録に偽の生存信号を書き込み続ける害の方が大きい．可逆な操作である．
+- 併せて発見した不備 2 件（未修正・申し送り）:
+  1. **Iter27 の 3 実行に provenance が無い**: `config.yaml`・`git_head.txt`・`metrics.json` を欠き，
+     ファイル名も `results_topk2_*.jsonl` と非標準．F5 は `mise run start` の標準経路でのみ機能する．
+     標準経路を外れる場合は `_record_experiment_provenance()` を明示的に呼ぶこと．
+  2. **journal に実在しないコマンドが記録されている**: Iter24 計画節の
+     `metrics.py --results A --compare B` は `--compare` 引数が存在せず実行できない
+     （`compute_mcnemar_test()` は関数としてのみ存在し CLI 未公開）．
+- 要レビュー: 実験監視に `/tmp` の使い捨てスクリプトを使う運用自体を見直すか，
+  停止条件にタイムアウトを必須化するか．`state.json` の heartbeat は research-cycle
+  オーケストレータ自身のみが更新すべきである．
+
+---
+
 ## B47 [user-approved 2026-07-30] Iter27計画: 高度な集約方式の比較実験（research_frontier項目5）
 
 - 状況: Iter26（中央集権ルータ再実験，B46で修正済み）完了後の次イテレーションとして，項目5（高度な

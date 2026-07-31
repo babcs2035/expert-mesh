@@ -1,13 +1,63 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter27",
-  "iteration_name": "高度な集約方式（majority_vote/llm_judge）の比較実験",
-  "phase": "implement",
+  "iteration": "Iter28",
+  "iteration_name": "fallback 方策の廃止によるルーティング精度・回答品質への影響測定",
+  "phase": "investigate",
   "status": "running",
-  "current_lever": "aggregation_method",
+  "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785418252,
+  "updated_at": 1785480588,
+  "next_iteration_brief": {
+    "must_read_first": [
+      "docs/d0004_research_status_and_direction_2026-08.md",
+      ".claude/research/backlog.md (B48, B48-b)"
+    ],
+    "planned_lever": "fallback 方策の廃止（docs/d0004 §5 Y1 = d0003 X5）",
+    "note": "d0002・d0003 は Iter22 時点で凍結されており実態と乖離している．単独の根拠にしないこと．Y1 の実験では dispatch_top_k を現在の 2 から 1 へ戻すこと．"
+  },
+  "e27_results": {
+    "lever": "aggregation_method (max_confidence / majority_vote / llm_judge, dispatch_top_k=2)",
+    "top1_accuracy": 0.555625,
+    "cohens_kappa": 0.5214814814814815,
+    "ece": 0.20402063160346984,
+    "fallback_rate": 0.1325,
+    "mcnemar_discordant_pairs": 0,
+    "mcnemar_p_value": 1.0,
+    "rows_dispatched_to_2plus": 0,
+    "second_rank_confidence_max": 0.4955,
+    "answer_quality_accuracy_jmmlu": {
+      "max_confidence": 0.496,
+      "majority_vote": 0.49133333333333334,
+      "llm_judge": 0.508
+    },
+    "judgment": "invalid",
+    "note": "実験不成立（no-op）．confidence_threshold=0.5 の候補ゲートにより 2 位ノードが一度も適格にならず（2位confidenceの最大値 0.4955），dispatch_top_k=2 が発火しなかった．3 方式とも Iter25 基準線とビット単位一致．機序は docs/d0004 §3．"
+  },
+  "noise_floor_axis23": {
+    "source": "Iter25 基準線 + Iter27 の 3 実行（ルーティングは決定論的に同一，生成のランダム性のみ異なる 4 反復）",
+    "metric": "answer_quality_accuracy (JMMLU 1500 問，抽出照合)",
+    "values": [0.5086666666666667, 0.496, 0.49133333333333334, 0.508],
+    "mean": 0.501,
+    "stdev_pt": 0.87,
+    "three_sd_pt": 2.61,
+    "row_level_flip_rate": 0.239,
+    "note": "d0003 X6 に相当する測定が実質完了．暫定値 1.3pt（n=2, d0002 §6-F）を 3SD=2.6pt へ置き換え，config.yml の success_criteria に反映済み．"
+  },
+  "fallback_ablation_precomputed": {
+    "source": "results/central_iter26/（fallback 廃止相当）vs results/central_iter26b/（現行）．アーキテクチャ・分類器・データセットは同一で fallback 方策のみ異なる（B46 の副産物）",
+    "top1_accuracy": {"no_fallback": 0.585, "with_fallback": 0.5556},
+    "cohens_kappa": {"no_fallback": 0.5541, "with_fallback": 0.5215},
+    "answer_quality_jmmlu": {"no_fallback": 0.5507, "with_fallback": 0.4933},
+    "mean_duration_ms": {"no_fallback": 4234.8, "with_fallback": 4558.2},
+    "mcnemar_p_value": 1.5868484193326537e-07,
+    "fallback_rows_routing_correct": {"sent_to_general": "18/212 (8.5%)", "sent_to_argmax": "65/212 (30.7%)"},
+    "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
+  },
+  "last_slack_ts": null,
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
+  "last_commit": "32af2e0",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,
@@ -20,7 +70,7 @@
     "mean_duration_ms": 4558.229,
     "distributed_mean_duration_ms": 3626.775,
     "judgment": "adopted",
-    "note": "confidence_threshold/fallback方策を分散版と揃えた結果，ルーティング精度は完全一致（McNemar discordant=0）。中央版は分散版より25.7%遅い（SSH越しのオーバーヘッド）。仮説1支持・仮説2不支持。"
+    "note": "confidence_threshold/fallback方策を分散版と揃えた結果，ルーティング精度は完全一致（McNemar discordant=0）。中央版は分散版より25.7%遅い（SSH越しのオーバーヘッド）。仮説1支持・仮説2不支持。回答品質 -1.53pt・E2E -1.50pt は 3SD=2.6pt 未満につきノイズと確定（Iter27 で判明）。"
   },
   "e25_results": {
     "lever": "eval_dataset_compound_expansion_20_to_100",
@@ -50,10 +100,6 @@
     "judgment": "rejected",
     "note": "中央集権ルータは実装バグ（few-shot欠落）でrejected。probe速度は予測通り改善（55.7%）。"
   },
-  "last_slack_ts": null,
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
-  "last_commit": "8b0bd6c",
   "e10_results": {
     "lever": "expert_specialization=domain_lora",
     "answer_quality_accuracy": 0.5013,

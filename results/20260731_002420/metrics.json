@@ -1,0 +1,104 @@
+{
+  "total_questions": 1600,
+  "top1_accuracy": 0.555625,
+  "top1_accuracy_wilson_ci": [
+    0.5311731120622866,
+    0.5798104262550753
+  ],
+  "cohens_kappa": 0.5214814814814815,
+  "random_baseline_accuracy": 0.10625,
+  "best_single_domain_baseline": {
+    "business_economics": 0.105,
+    "computer_science": 0.105,
+    "education": 0.10625,
+    "general": 0.1025,
+    "history_culture": 0.105,
+    "legal": 0.1125,
+    "mathematics": 0.105,
+    "medical": 0.11125,
+    "natural_science": 0.105,
+    "social_science": 0.105
+  },
+  "oracle_accuracy": 1.0,
+  "misrouting_rate": 0.44437499999999996,
+  "fallback_rate": 0.1325,
+  "dispatch_failure_rate": 0.0,
+  "mean_duration_ms": 3606.853125,
+  "precision_recall_per_domain": {
+    "business_economics": {
+      "precision": 0.4678362573099415,
+      "recall": 0.47619047619047616
+    },
+    "computer_science": {
+      "precision": 0.6165413533834586,
+      "recall": 0.4880952380952381
+    },
+    "education": {
+      "precision": 0.5078125,
+      "recall": 0.38235294117647056
+    },
+    "general": {
+      "precision": 0.31343283582089554,
+      "recall": 0.6402439024390244
+    },
+    "history_culture": {
+      "precision": 0.781021897810219,
+      "recall": 0.6369047619047619
+    },
+    "legal": {
+      "precision": 0.8103448275862069,
+      "recall": 0.5222222222222223
+    },
+    "mathematics": {
+      "precision": 0.7246376811594203,
+      "recall": 0.5952380952380952
+    },
+    "medical": {
+      "precision": 0.5128205128205128,
+      "recall": 0.449438202247191
+    },
+    "natural_science": {
+      "precision": 0.559748427672956,
+      "recall": 0.5297619047619048
+    },
+    "social_science": {
+      "precision": 0.6850393700787402,
+      "recall": 0.5178571428571429
+    }
+  },
+  "single_domain_question_count": 1500,
+  "single_domain_top1_accuracy": 0.5693333333333334,
+  "compound_domain_question_count": 100,
+  "compound_domain_top1_accuracy": 0.35,
+  "compound_coverage": {
+    "compound_rows_evaluated": 100,
+    "compound_covered_domain_count": 33,
+    "compound_expected_domain_total": 200,
+    "compound_domain_set_recall": 0.165,
+    "compound_domain_coverage_ratio_mean": 0.165,
+    "compound_domain_jaccard_mean": 0.165,
+    "compound_mean_dispatched_count": 0.82,
+    "compound_coverage_available": true
+  },
+  "ece": {
+    "ece": 0.20402063160346984,
+    "n_rows": 1388
+  },
+  "brier_score": {
+    "brier_score": 0.24998540502944552,
+    "n_rows": 1388
+  },
+  "auroc": {
+    "auroc": 0.7116011965170428,
+    "n_rows": 1388
+  },
+  "tie_rate": {
+    "tie_rate": 0.0,
+    "n_rows": 1600
+  },
+  "confidence_dispersion": {
+    "mean_confidence_std": 0.23658765990631372,
+    "mean_confidence_sum": 1.0,
+    "n_rows": 1600
+  }
+}
