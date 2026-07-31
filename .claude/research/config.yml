@@ -23,7 +23,7 @@ experiment:
   results_glob: "results/*/results.jsonl"
   # metrics.py は --results 必須のため，最新の実行結果を動的に解決してから渡す．
   metrics_cmd: "uv run python metrics.py --results $(ls -1dt results/*/ | head -1)results.jsonl --json"
-  timeout_min: 150                 # Iter17: supervised_classifier で 1520 問，推計 90-120 分．余裕を見て 150 分へ引き上げ
+  timeout_min: 150                 # 1600 問（Iter25 以降）の実測は 96-101 分（Iter27 の 3 実行）．余裕を見て 150 分
   poll_interval_sec: 120
 
 # journal.md に残す直近イテレーション数．超過分は自動で journal_archive.md へ移す
@@ -36,7 +36,9 @@ journal_retention: 3
 # Iter14 の converged 判定は撤回した．理由は，評価集合が 46 問しかなく，Iter3・Iter5〜11 の
 # 「no-op / 僅差で棄却」という判定群が，実際には 1〜2 問の入れ替わり（p=0.87, n=46 で SE ±5.0pt，
 # Wilson 95% CI 幅 約20pt）に基づいており，統計的に成立していなかったためである．
-# したがって E1（評価集合の拡張）を最優先とし，これを終えるまで他のレバーの結果は判定不能とみなす．
+# したがって E1（評価集合の拡張）を最優先とした．
+# **E1 は Iter15（1520 問）・Iter25（1600 問）で完了済み**であり，この前提はもう有効ではない
+# （Iter14 以前の結果を一次情報として引用しないこと，という点だけが今も有効である）．
 #
 # 【2026-07-31 更新】**最初に docs/d0004_research_status_and_direction_2026-08.md を読むこと．**
 # d0004 は Iter27 時点の現況・優先順位（Y1〜Y5）・反復している失敗モードとその恒久対策をまとめた
@@ -74,7 +76,8 @@ journal_retention: 3
 #   answer_quality=0.508667, end_to_end=0.328125, mean_duration_ms=3626.8
 #
 # レバーごとの状態（d0002 §3 のイテレーション別結果一覧が一次情報）:
-# - E1（eval_set_size）: 採用．1520 問データセットで Wilson CI / McNemar / 3 ベースラインを整備済み．再実装不要．
+# - E1（eval_set_size）: 採用．Iter15 で 1520 問，Iter25 で 1600 問（単一 1500 + 複合 100）へ拡張．
+#   Wilson CI / McNemar / 3 ベースライン（Random 0.101 / BestSingle 0.109 / Oracle 1.0）を整備済み．再実装不要．
 # - E2（stp_sign_check）: 棄却．オフライン検証済み，再実行不要．
 # - E3（confidence_elicitation=top_k_with_probs）: **採用は取り下げ．supervised_classifier 下では
 #   コードパスに到達しない no-op（http_server.py:_estimate_probe_confidence の分岐順序，d0002 §6-B）．
@@ -84,8 +87,9 @@ journal_retention: 3
 #   return する分岐順序だったため，E4 を設定しても実際には E6（supervised_classifier）が動き続け，
 #   E4 のコードパスは 1 度も実行されなかった（これが Iter21 の無効判定の理由．backlog B38）．
 #   Iter22 でこの分岐順序を入れ替える修正が行われたが，デプロイ漏れで Iter22 自体はやはり旧分岐順序
-#   のまま実行された（journal.md 参照）．**しかし現在の HEAD（`30e3627`）にはこの分岐順序修正が
-#   実際に反映されている**．したがって，**今後この状態から config.yaml で confidence_signal_method
+#   のまま実行された（journal_archive.md の Iter22 節を参照）．**しかし Iter22 以降の HEAD には
+#   この分岐順序修正が実際に反映されている**（当時の記述は `30e3627`．現 HEAD でも有効）．
+#   したがって，**今後この状態から config.yaml で confidence_signal_method
 #   を self_consistency_semantic に変更して実験すると，Iter21/22 とは異なり今度こそ実際に E4 の
 #   コードパスが発火し，E6 の分類器分岐に到達できなくなる**（http_server.py:_estimate_probe_confidence
 #   の分岐順序，d0002 §6-D）．**つまり E4 を単純に設定するだけの実験は，単一レバー原則に反して
@@ -157,7 +161,12 @@ levers:
             全体 top1 は複合設問が 100/1600=6.25% しかなく改善をほとんど反映しないため，
             非退行の確認にのみ使う"}
 
-  # --- E1: 最優先．これ以前に他のレバーを振っても判定できない ---
+  # =====================================================================
+  # 以下 E1〜E10 は Iter15〜19 で試行済みの履歴である（順序は当時の優先度で，現在の優先度ではない）．
+  # 現在の優先順位は上記 Y1〜Y5 に従うこと．各 note の「最優先」等の記述は当時のものとして読むこと．
+  # =====================================================================
+
+  # --- E1: 【完了済み】Iter15（1520問）・Iter25（1600問）で実施 ---
   - {name: eval_set_size, values: [200, 400],
      note: "[2026-07-26 p0001 F1] data/dataset.jsonl は現状 46 問（単一ドメイン 40 = 4×10，複合 6）．
             p=0.87,n=46 の二項 SE は ±5.0pt，Wilson 95% CI は [74.3%, 93.9%]（幅 約20pt）．
