@@ -3,6 +3,81 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B52 [auto-decided 2026-07-31] Iter31 は adopted で確定．本番反映を実施．次は Y5（education 訓練データ）
+
+- 状況: Iter31（classifier_calibration=temperature，Y4）の rc-analyst 判定（adopted）を
+  rc-reflector が確定させた．
+- **判定: adopted（全面採用，確定，rc-analyst 提案を覆さず）**．d0003 X9 の成功条件（ECE≤0.150・
+  top1_accuracy 非退行・per-domain 20指標の BH 補正後悪化方向有意指標 0 件の AND 条件）を
+  platt（Iter29，ECE 絶対閾値未達で partial）・isotonic（Iter30，medical_recall の BH 補正後
+  有意悪化で partial）に続き，temperature が初めて明確に満たした．ECE 0.193358→0.071201
+  （目標に 7.88pt の余裕，3 手法中最良），top1_accuracy 0.585→0.605625（McNemar p=0.000906，
+  非退行を上回る有意改善），per-domain 20 指標の BH 補正後有意退行 0 件．Iter30 で唯一の懸念
+  だった medical_recall も有意差なし（p=0.182422）でむしろ改善方向．
+- **本番反映: 実施済み**．`models/domain_classifier.joblib`（較正前，
+  sha256=`3a5610aa88d70b9e94af4620d2747b313c52b834a9dbaa5e872ed45c3520dcb0`）を
+  `models/domain_classifier_uncalibrated_pre_iter31.joblib` へ退避し，
+  `models/domain_classifier_temperature.joblib`
+  （sha256=`04bb9ff223d5b41d94ab13897eb89b59af64524d1fd0d5ce9d598a5a3b06a2e5`）で置き換えた．
+  判断根拠: (1) 成功条件の AND 条件を明確な余裕で満たしている，(2) `config.yaml`・公開 API の
+  変更を一切伴わない可逆なファイル差し替えである（不具合が判明すれば
+  `models/domain_classifier_uncalibrated_pre_iter31.joblib` へ即座に戻せる），(3) 委譲時の指示で
+  「rc-reflector の自律判断範囲内（可逆な判断）として進めて構わない」と明示的に許可された操作
+  である．**注意**: `models/` は `.gitignore`（19行目）で除外されており，この置き換えは git
+  履歴に残らない．ロールバック手順と両ファイルの sha256 はこの記録と journal.md「考察 (Iter31)」
+  節にのみ残るため，次回このモデルに触れる際は必ず両方を参照すること．
+- **学び**: (1) isotonic の medical_recall 悪化が「OvR 方式由来のクラス固有曲線歪み」という
+  機序で説明できることが，temperature への切り替えのみで解消したという形で強く裏付けられた．
+  同一データ・同一 cv/ensemble の下で較正手法だけを変えた比較が 3 イテレーション連続で積み
+  上がったことで，単発の考察ではなく再現性のある知見になった．(2) 「表現力が高い較正手法が
+  必ず良い較正を生むとは限らない」という一般的な知見が実測で裏付けられた．ECE 改善幅は
+  temperature(0.1222) > isotonic(0.0719) > platt(0.0258) と，もっとも柔軟性の低い手法が
+  もっとも大きく改善するという事前の留保とは逆の結果になった．小標本条件下では OvR 方式の
+  クラス別自由度が held-out のノイズを拾って過学習し，かえって較正を悪化させたためと考えられる．
+  次に較正関連のレバーを検討する際は「手法の表現力の高さ＝較正の質」という前提を置かないこと．
+  (3) `models/` が gitignore 対象であるため，較正済み分類器の本番反映は git 履歴に残らない．
+  D5（backlog 未解決事項，`data/`/`models/` のバージョン管理方針）が引き続き未解決であり，
+  本番アーティファクトを差し替える判断が繰り返し発生する局面では，最低限 sha256 ハッシュの
+  マニフェストを journal/backlog に記録する運用（今回実施した方式）を今後も徹底する必要がある．
+- **Y4（分類器の較正，d0003 X9）は本イテレーションをもって完了**．config.yml の
+  `classifier_calibration` レバーは `[platt, isotonic, temperature]` の3値すべてを試し終えた．
+- **自動選択: 次イテレーション（Iter32）の単一レバーを
+  `classifier_training_data_composition=education_proxy_task_revision`（Y5，d0003 X8 の
+  スコープを絞り込んだもの）とする**．config.yml の levers 末尾（classifier_calibration の
+  直後）へ新規レバーとして追記した．`iteration_name` は「education ドメインの代理タスク妥当性
+  見直しによる訓練データ品質改善（Y5）」．
+- **根拠（Y2 に進むか，他の可逆なレバーを探すかの判断）**: d0004 §5 の優先順位は
+  Y1（完了）→Y4（完了，本イテレーション）→Y2（前提整備，要ユーザー確認）→Y3（Y2 完了後）→
+  Y5（education/legal のデータ不均衡是正）．Y2 は `config.yaml` への
+  `dispatch_candidate_threshold` 新設・`aggregator.select_dispatch_targets()` のシグネチャ変更
+  というスキーマ変更を伴い，B49・B50・B51 で繰り返し「着手前にユーザー確認が必要」と申し送られて
+  きた．rc-reflector の自律判断権限は可逆な判断（レバー選定）に限られ，スキーマ変更を伴う着手
+  そのものは今の場で自律開始できない．Y3 は Y2 完了が前提のため同様に着手不能．よって実行可能な
+  登録済みレバーは `classifier_calibration`（完了）・`fallback_policy`（完了）のみとなり，
+  `aggregation_method`（Y3）は Y2 完了までブロックされたまま実質「試せない」．これは config
+  の全levers を試し切った場合と実質同じ状況（唯一残る登録レバーが実行不能）と判断し，SKILL.md の
+  停止条件の優先順1（journal/backlog の学びから次の有望なレバーを自分で考案し config.yml へ
+  追記して継続する）に従い，Y5 を新規レバーとして追記した．
+- **Y5 のスコープを education のみへ絞り込んだ根拠**: d0003 X8 は education・legal 双方の
+  データ不均衡是正を対象としていたが，Iter31 の実測で legal は既に X8 の成功条件
+  （他ドメイン下限 business_economics 0.4533 を上回ること）を満たしていた
+  （legal_recall 0.5833）．legal の訓練データ最少77件という懸念は，較正への影響としても
+  B50・B51 で2イテレーション連続で反証済みであり，今回 recall 自体の実測でも同様の反証が
+  得られた．一方 education_recall は 0.4059（全10ドメイン中最下位）で，Iter28 基準線から
+  Iter29〜31（較正のみ変更）まで一貫して同一値のまま変化していない．education の訓練データは
+  150件で他の majority ドメインと同数のため，サンプル数不足ではなく
+  `scripts/prepare_lora_training_data.py:42` が使う代理タスク（`sociology`・
+  `high_school_psychology`・`moral_disputes`）の妥当性自体が疑わしい（d0001 §5.1 が推奨する
+  「代理タスクの写像表の明示・境界事例の別集計」という未実施の宿題に対応する）．
+- 要レビュー: (1) Y2（`confidence_threshold` の二重責務分離，スキーマ変更）着手前のユーザー確認
+  は引き続き必要（B49・B50・B51 既存項目，新規の追加事項なし）．(2) fallback 設計思想の論文上の
+  位置付け（B48）も未解決．(3) Y5（education 訓練データ）の具体的な実施方法（代理タスクの
+  置換候補選定，必要なら手作り訓練問題の追加）は次イテレーションの investigate/plan フェーズで
+  具体化する．(4) D5（`data/`/`models/` のバージョン管理方針，較正済み分類器の sha256 マニフェスト
+  運用の恒久化）は今回も未解決のまま．
+
+---
+
 ## B51 [auto-decided 2026-07-31] Iter30 は partial で確定．本番反映は見送り，次は temperature scaling を検証
 
 - 状況: Iter30（classifier_calibration=isotonic，Y4）の rc-analyst 判定（partial）を

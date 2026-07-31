@@ -1,13 +1,13 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter30",
-  "iteration_name": "分類器較正のisotonic方式によるECE目標達成の追試とドメイン別非退行の全数検証",
+  "iteration": "Iter31",
+  "iteration_name": "分類器較正のtemperature scaling方式によるargmax不変性の実証とECE目標到達可否の検証",
   "phase": "reflect",
   "status": "running",
-  "current_lever": "classifier_calibration=isotonic",
+  "current_lever": "classifier_calibration=temperature",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785499226,
+  "updated_at": 1785502428,
   "next_iteration_brief": {
     "must_read_first": [
       ".claude/research/journal.md (Iteration 30: 考察 (Iter30))",
@@ -32,17 +32,33 @@
     "flip_total": 1600,
     "per_domain_bh_corrected_20_metrics": {
       "note": "10 domains x precision/recall. recall via domain-subset McNemar, precision via Fisher exact (two-sample, unpaired), 20 p-values combined via Benjamini-Hochberg q=0.05.",
-      "bh_significant_metrics": ["education_recall (p=0.000796, improvement)", "medical_recall (p=0.000144, regression)"],
+      "bh_significant_metrics": [
+        "education_recall (p=0.000796, improvement)",
+        "medical_recall (p=0.000144, regression)"
+      ],
       "regressed_and_bh_significant_count": 1,
-      "medical_recall": {"before": 0.4831, "after": 0.3820, "p_value": 0.000144, "discordant_a_only": 19, "discordant_b_only": 1},
-      "legal_recall": {"before": 0.5833, "after": 0.5889, "note": "improved, contrary to pre-registered small-sample hypothesis"}
+      "medical_recall": {
+        "before": 0.4831,
+        "after": 0.382,
+        "p_value": 0.000144,
+        "discordant_a_only": 19,
+        "discordant_b_only": 1
+      },
+      "legal_recall": {
+        "before": 0.5833,
+        "after": 0.5889,
+        "note": "improved, contrary to pre-registered small-sample hypothesis"
+      }
     },
     "isotonic_specific_checklist": {
       "exact_0_or_1_probability_rows": "1311/1600 (non-selected classes only, 0 rows among selected/ECE-relevant confidences)",
       "uniform_fallback_rows": "0/1600",
       "tie_rows": "0/1600",
       "medical_max_calibrated_probability": 0.7062,
-      "other_domains_max_calibrated_probability_range": [0.7496, 0.8795]
+      "other_domains_max_calibrated_probability_range": [
+        0.7496,
+        0.8795
+      ]
     },
     "data_used": {
       "train_data": "data/classifier_train.jsonl (1427 rows)",
@@ -127,10 +143,10 @@
     },
     "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
   },
-  "last_slack_ts": "1785481958.859089",
-  "iteration_thread_ts": "1785493918.395989",
+  "last_slack_ts": "1785499774.203289",
+  "iteration_thread_ts": "1785500572.793649",
   "notion_toggle_created": true,
-  "last_commit": "fd9a9bc",
+  "last_commit": "35e144d",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,

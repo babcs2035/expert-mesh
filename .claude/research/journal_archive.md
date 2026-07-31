@@ -1,3 +1,453 @@
+## Iteration 28: fallback 方策の廃止によるルーティング精度・回答品質への影響測定
+
+### 計画 (Iter28)
+
+**仮説**: `confidence_threshold` を `0.5→0.0` に下げ，confidence ベースの fallback
+（general ノードの light_model への退避）を実質的に無効化すると，ルーティング精度
+（top1_accuracy・Cohen's κ）・回答品質（answer_quality_accuracy）が向上し，
+mean_duration_ms も短縮する．`results/central_iter26/`（fallback 廃止相当）vs
+`central_iter26b/`（現行）の既存比較（アーキテクチャは異なるが分類器・データセットは同一）で
+観測された差分が，分散版で config のみを変えても同じ大きさで再現されるかを検証する．
+
+**単一レバー**: `fallback_policy`（`.claude/research/config.yml` の levers 名．実体は
+`config.yaml` の `confidence_threshold`）
+
+- `confidence_threshold: 0.5 → 0.0`（唯一の実験対象レバー）
+
+**直近の最良構成へ固定するための復元（レバーではなく，Iter27 の残骸整理）**:
+
+- `dispatch_top_k: 2 → 1`（`confidence_threshold` を下げると `aggregator.py:39` の
+  dispatch 候補ゲートも同時に緩むため，`top_k=1` に固定しない限り単一レバー原則が崩れる．
+  調査フェーズの申し送りどおり）
+- `aggregation_method: llm_judge → max_confidence`（`dispatch_top_k=1` では no-op だが，
+  Iter27 で使われたまま残っている値なので整理する）
+
+**変更ファイル・キー**（他のキーは一切変更しない）:
+
+- `config.yaml:5` `confidence_threshold: 0.5` → `0.0`
+- `config.yaml:52` `dispatch_top_k: 2` → `1`
+- `config.yaml:63` `aggregation_method: llm_judge` → `max_confidence`
+
+**固定する構成（直近の最良構成，Iter25/26 と同一）**: `routing_method=supervised_classifier`，
+`confidence_signal_method=self_report`，`confidence_elicitation=top_k_with_probs`（no-op），
+`expert_model=expert-mesh-{domain}-lora`（domain_count=10），`light_model=qwen3.5:4b-q4_K_M`，
+評価データセットは Iter25 の 1600 問（変更なし）．
+
+**到達条件（コードパス確認，d0004 §4 対策A）**: `node.py:216` の `run_ask_flow()` から
+`aggregator.py:28-40` の `select_dispatch_targets()` が呼ばれ，
+`confidence >= confidence_threshold` で候補を絞ってから top-k を取る．閾値を `0.0` にすると
+`predict_proba` の出力（値域 `[0,1]`）は常にこの条件を満たすため，毎回全 probe_responses が
+適格になり，`dispatch_top_k=1` なら必ず argmax の 1 件が返る．`node.py:219` の
+`if not targets:`（fallback 発火条件）は，全ノードの probe 自体が失敗する真の異常系でしか
+成立しなくなる．`run_experiment.py:87` も同じ関数を再利用するため，1600 問バッチ実行で
+確実にこの経路を通る．`http_server.py:201` の `NodeState.confidence_threshold` は格納のみで
+参照されない未使用フィールドであり，到達を阻害しない．**到達を阻む分岐は存在しない**．
+
+**予備実行（d0004 §4 対策B，本走前に必須）**: 先頭 20 問程度を実行し，
+`results.jsonl` の全行で `dispatched_domains` の長さが 1 であること，かつ fallback 発生件数が
+0 件であることを確認する．1 件でも fallback が発生していれば `confidence_threshold` の反映漏れ
+（Iter16/20/21/22/27 と同型のデプロイ失敗）を疑い，本走前に原因を特定してから本走に進むこと．
+
+**評価方法**: 1600 問本走を 1 回実行し（`experiment.timeout_min=150` の範囲内，実測目安 約90分），
+`mise run analyze` で Iter25 基準線（`results/20260730_145356/`）との比較を行う．
+
+- 主指標: top1_accuracy・Cohen's κ の McNemar 対比較（α=0.05，Wilson 95% CI 併記．success_criteria (1)）
+- 副指標: answer_quality_accuracy・end_to_end_accuracy（3SD=2.61pt 未満はノイズと判定．success_criteria (5)）
+- mean_duration_ms（速度の変化）
+- fallback 発生件数（0/1600 になっていることの直接確認．到達条件が満たされた証拠でもある）
+- per-domain precision/recall の非退行確認（success_criteria (2)）
+
+**期待効果**（`results/central_iter26/` vs `central_iter26b/` の実測を分散版での期待値として使う．
+Iter26 で「アーキテクチャを変えてもルーティングは完全一致」が実証済みのため，同じ大きさの差が
+出ることが期待値だが，一致しないこと自体を無効判定の理由にはしない）:
+
+- top1_accuracy: 0.5556 → 0.585 相当（+2.94pt）
+- Cohen's κ: 0.5215 → 0.5541 相当（+3.26pt）
+- answer_quality_accuracy: 0.4933 → 0.5507 相当（+5.74pt，3SD=2.61pt の 2.2 倍）
+- mean_duration_ms: 4558 → 4235 相当（−323ms，速くなる）
+
+**成功条件**:
+
+1. top1_accuracy が McNemar 検定で基準線に対し有意に改善（p<0.05）し，Wilson 95% CI が
+   重ならないこと．
+2. fallback 発生件数が 0/1600 であることを直接確認できること（レバーが実際に発火した証拠）．
+3. answer_quality_accuracy の変化が 3SD=2.61pt を超えて改善方向であること（悪化していないこと）．
+4. per-domain precision/recall の CI 下限が Iter25 基準線の CI 下限を下回らないこと
+   （非退行．success_criteria (2)）．
+
+**注意点**: 観測された効果量が事前実測（central_iter26 vs 26b）と大きく異なる場合
+（符号が逆転する，効果量が半分以下になる等）は，それ自体を「分散/中央のアーキテクチャ差が
+確率境界付近の結果に影響する」という新知見として記録し，無効判定の理由にしないこと．
+`compound_domain_set_recall`（現状 0.165）は `dispatch_top_k=1` のままなので構造的上限 0.500 は
+変わらないはずであり，変化があれば fallback 廃止が複合設問ルーティングに与えた副次効果として
+別途記録する．
+
+**人間判断が必要な論点（backlog に残す，B48 の既存項目を維持）**: fallback という設計思想自体を
+撤廃するかどうかの論文上の位置付けは，本実験の結果だけでは決められない．引き続き B48 の
+要レビュー項目として残す．
+
+### 実装 (Iter28)
+
+**変更ファイル**: `config.yaml`（計画どおり3行のみ）
+
+- `confidence_threshold: 0.5 → 0.0`
+- `dispatch_top_k: 2 → 1`
+- `aggregation_method: llm_judge → max_confidence`
+
+**commit**: `d87c006`（`config.yaml` のみを含む単独コミット）．
+
+**テスト/リンタ**: `uv run pytest -q` 211 passed, 2 skipped（回帰なし）．`ruff check .` の既存
+警告2件（`scripts/prepare_lora_training_data.py`）は HEAD 時点から存在する今回変更と無関係な
+既知の問題であり，`config.yaml` は YAML のため ruff の対象外．
+
+**デプロイ確認（Iter16/20/21/22/27 のデプロイ漏れ再発防止のため実施）**: `mise run deploy` で
+実機10ノード（wafl500〜509）へ配布し `app` コンテナを再起動．`tools/smoke_check.py --check hashes`
+で全10ノードの `config.yaml` がデプロイ済みコンテナと一致することを確認．`--check probe` も正常．
+
+**予備実行（本走前の必須確認）**: 先頭20問を実行し，全20行で `dispatched_domains` の長さが1，
+`used_fallback=False` であることを確認した．**fallback が実質的に無効化されていることの
+直接証拠**．予備実行の一時ファイルは削除済み（`results/` には残していない）．
+
+→ 実験フェーズ（1600問本走）に進める状態．
+
+### 実験 (Iter28)
+
+**実験ディレクトリ**: `results/20260731_162722/`．1600問完走（16:27:22→17:58:05，実測約90.7分，
+`timeout_min=150` 範囲内）．10ノード（wafl500〜509）のコンテナログに error/traceback/OOM/killed
+該当0件，`dispatch_failed=True` の行も0/1600．
+
+**到達確認**: `dispatched_domains` の長さは全1600行で1（`Counter({1: 1600})`），
+`used_fallback=True` の行は0件．config変更（`confidence_threshold=0.0`, `dispatch_top_k=1`）が
+実データ経路に発火した直接証拠．
+
+**provenance**: `config.yaml` は現HEAD（`d87c006`）と完全一致．`git_head.txt` は `9b7f393`
+（`mise run setup` 実行時点のHEAD．config.yamlはbind mountで都度読み込まれる仕様のため矛盾ではない．
+9b7f393〜d87c006間の6コミットはconfig.yaml/journal/docsのみでアプリケーションコード変更なしを
+`git show --stat` で確認済み）．**申し送り**: `git_head.txt` は config 変更コミットを反映しない
+既知の限界があり，将来の分析で `git_head.txt` の値のみから config 内容を推測しないこと．
+`metrics.json`／`axis23_metrics.json` は生成・格納済み．
+
+### 分析 (実行) (Iter28)
+
+Iter25 基準線（`results/20260730_145356/`）との対比．
+
+| 指標 | Iter28（本走） | Iter25 基準線 |
+|---|---|---|
+| top1_accuracy | 0.585（Wilson 95% CI [0.5607, 0.6089]） | 0.555625（CI [0.5312, 0.5798]） |
+| Cohen's κ | 0.554074 | 0.521481 |
+| single_domain_top1_accuracy | 0.598667 | 0.569333 |
+| compound_domain_top1_accuracy | 0.38 | 0.35 |
+| compound_domain_set_recall | 0.19 | 0.165 |
+| answer_quality_accuracy | 0.546667 | 0.508667 |
+| end_to_end_accuracy | 0.31625 | 0.328125 |
+| mean_duration_ms | 3394.894 | 3626.775 |
+| fallback発生件数 | **0/1600** | 212/1600 |
+| dispatch_failure_rate | 0.0 | — |
+
+McNemar対比較（1600問ペア）: discordant_a_only（新側のみ正解）=62，discordant_b_only（基準線側のみ
+正解）=15，discordant_pairs=77，chi2=27.4805，**p_value=1.5868×10⁻⁷**．
+
+ドメイン別precision/recall（Wilson CI付き，全10ドメイン算出済み）: `general` ドメインのrecallのみ
+CI下限が基準線を下回った（新 90/164 CI [0.4724, 0.6230] vs 基準線 105/164 CI [0.5644, 0.7097]）．
+precisionは逆に大幅改善（新 90/138 CI [0.5696, 0.7265] vs 基準線 105/335 CI [0.2661, 0.3650]）．
+他9ドメインはCI下限が基準線以上か同程度．良否判定は次の分析(解釈)フェーズで行う．
+
+**運用上の注意**: `mise run analyze` はタイムスタンプのみを引数に取る仕様（フルパスを渡すと
+`results/results/...` の誤ネストが発生する）．実行時に一度誤り，即座に気づいて訂正・削除済み．
+実験データ自体への影響なし．
+
+### 分析 (解釈) (Iter28)
+
+成功条件（計画節）1〜4 を順に判定する．
+
+**条件1（top1_accuracy: McNemar p<0.05 かつ Wilson 95% CI 非重複）— 実質的に成立，ただし
+CI 非重複のみ字義的に僅かに未達（方法論上の注記あり）**
+
+McNemar は discordant=77（新側のみ正解62・基準線側のみ正解15），chi2=27.4805，
+**p=1.5868×10⁻⁷** で α=0.05 を大きく下回り，主基準は極めて強く成立する．
+
+一方 Wilson 95% CI は新 [0.5607, 0.6089]・基準線 [0.5312, 0.5798] で，
+再計算した重複区間は [0.5607, 0.5798]（幅 1.91pt，各CI幅約4.8〜4.9ptの4割弱）であり，
+字義どおりには「重ならない」を満たさない．
+
+この不一致は，比較対象が**同一1600問に対する対応のある（paired）2条件の正誤**であることに
+起因する方法論上の問題だと判断する．Wilson CI は2群を独立標本とみなした周辺分布の区間であり，
+paired 設計が持つ「1523/1600問（95.2%）で新旧の正誤が一致している」という強い相関情報を
+使わない．そのため独立標本前提の周辺CIは実際より広く出て重なりやすく，paired 検定である
+McNemar（一致ペアを除き不一致ペアのみで検定する）の方がこの設計には統計的に正しく，
+検出力も高い．p=1.59×10⁻⁷ という極めて小さい値は，1.91pt という僅かな周辺CI重複と矛盾しない
+（paired 相関を考慮すれば偶然の重複ではなく効果が実在する）．
+
+**判定**: 条件1の実質的な意図（有意な改善）は強く支持される．ただし計画文の字義（CI 非重複を
+必須とする書き方）は将来のpaired比較で同様の食い違いを生みうるため，次回計画時の申し送り事項として
+残す（本判定を覆す理由にはしない）．
+
+**条件2（fallback発生件数 0/1600）— 明確に成立**
+
+`used_fallback=True` の行は0件，`dispatched_domains` の長さは全1600行で1．レバーが実データ経路に
+発火した直接証拠であり，二値条件として曖昧さなく満たされている．
+
+**条件3（answer_quality_accuracy の変化が3SD=2.61ptを超えて改善方向）— 明確に成立**
+
+実測差は +3.8pt（0.508667→0.546667）で，3SD=2.61ptの約1.46倍，ノイズ床（σ=0.87pt換算で約4.4SD）を
+大きく超える改善方向の変化であり，ノイズでは説明できない．
+
+**条件4（per-domain precision/recallのCI下限が基準線を下回らない・非退行）— `general`ドメインの
+recallのみ字義上違反．ただし構造的要因によるものと判断し，独立した性能劣化とは区別する**
+
+`general`のrecallのみCI下限が基準線を下回った（新 [0.4724, 0.6230] vs 基準線 [0.5644, 0.7097]，
+下限差 約9.2pt）．他9ドメインは違反なし．以下の理由により，これを「新配置が`general`ドメインの
+識別に一般的に弱くなった」ことの証拠ではなく，**fallback 廃止という単一レバーが構造的に
+生む必然的な副作用**と判断する．
+
+1. **変化の起点は数学的に212行に限定される**．今回のレバーは `confidence_threshold` 未満だった
+   行（基準線で212/1600）の dispatch 先だけを変える．confidence≥0.5だった残り1388行は基準線・
+   新条件のいずれでも argmax dispatch のままで変化しない．したがって全10ドメインのprecision/recall
+   の変化は，数学的に必ずこの212行の部分集合内でのみ生じる（McNemar discordant=77≤212 と整合）．
+2. **`general`はfallbackの唯一の送り先であること自体が，このドメインの recall 比較を非対称にする**．
+   基準線では，真のドメインが`general`かつ低確信（212行の一部）だった問題は，argmaxの予測に
+   関わらず機械的に`general`へ送られるため，ほぼ自動的に正解として recall に計上される．
+   新条件ではこの「安全網」が外れ，同じ問題が argmax 予測に委ねられる．真のドメインが`general`の
+   低確信問題のうち argmax が`general`を指さない分だけ，recall が下がる．これは基準線側の recall が
+   fallback という機構によって`general`のみ人為的に嵩上げされていたことの反映であり，新条件側が
+   `general`の識別に劣化したことを意味しない．
+3. **同一の212行から生じたprecisionの改善が，この解釈と整合する**．`general`のprecisionは
+   0.3134→0.6522（CI下限 0.2661→0.5696）へ大幅改善しており，「確信度に関わらず`general`へ
+   誤って送られていた他ドメイン問題」が減ったことを直接裏付ける．recallの低下とprecisionの
+   大幅改善が同じ212行内で表裏一体に生じているのは，fallbackの撤廃が引き起こす構造変化として
+   一貫している．
+4. **経路変化は決定論的で，生成のサンプリング揺らぎ（3SDノイズ床）とは無関係**．ルーティングは
+   確率的分類器のargmaxで決まり，同一confidenceに対しては常に同一の出力になるため，この15行
+   （105→90）の recall 低下は再現性のある構造効果であり，測定ノイズではない．
+
+**判定**: 条件4は`general`ドメインのrecallについて字義上は違反しているが，違反の原因は
+レバー自体が意図する機構変化（fallbackという安全網の撤廃）に完全に内在しており，他9ドメインへの
+波及や独立した性能劣化の証拠はない．これは「見過ごしてよい」という意味ではなく，
+**fallback廃止のトレードオフとして明示的に記録し，人間判断（backlog B48）に委ねるべき副作用**
+として扱う．
+
+**end_to_end_accuracy（0.31625 vs 0.328125，差 −1.19pt）の判定**
+
+3SD=2.61ptの範囲内（|-1.19pt| < 2.61pt）であり，**ノイズと判定する**．軸①（top1_accuracy・κ）は
+決定論的なため3SDノイズ床の対象外だが，end_to_end_accuracyはanswer_quality同様に生成の
+確率的性質を含む軸②③指標であり，config.yml success_criteria (5) の適用対象である．
+唯一悪化していた指標だが，統計的に有意な悪化ではない．
+
+**事前実測（central_iter26 vs central_iter26b）との整合性チェック**
+
+| 指標 | 事前実測（central比較） | 実測（分散版，Iter28） | 差 |
+|---|---|---|---|
+| top1_accuracy | +2.94pt | +2.9375pt | ほぼ完全一致 |
+| Cohen's κ | +3.26pt | +3.2593pt | ほぼ完全一致 |
+| answer_quality_accuracy | +5.74pt | +3.80pt | −1.94pt（乖離） |
+| mean_duration_ms | −323ms（4558→4235，−7.09%） | −231.9ms（3626.8→3394.9，−6.39%） | 相対変化率はほぼ一致 |
+
+top1・κは事前実測とほぼ完全一致し，Iter26で確認済みの「ルーティング判定はアーキテクチャに
+依存しない」という知見をfallback廃止の効果についても裏付ける．mean_durationは絶対値では
+central版がSSHオーバーヘッド分だけ常に大きい（Iter26既知）ため単純比較できないが，相対変化率
+（-7.09% vs -6.39%）で見ればほぼ一致する．
+
+answer_qualityの乖離（実測+3.8pt が事前推定+5.74ptより1.94pt小さい）は，**3SD=2.61ptの
+ノイズ床の範囲内**である．すなわち，この乖離は「分散/中央のアーキテクチャ差が新たに効果へ
+影響した」と断定できるほど大きくなく，既知の生成サンプリング由来ノイズで説明可能な範囲に
+収まる．計画の注意点（事前実測と大きく異なる場合は新知見として記録）に該当する規模の乖離では
+ないため，新知見としては記録せず，「事前実測とおおむね整合」と結論する．
+
+**複合設問系（成功条件外の副次観察）**: `compound_domain_top1_accuracy` 0.35→0.38（+3pt），
+`compound_domain_set_recall` 0.165→0.19（+2.5pt）．計画が予告した構造的上限（`dispatch_top_k=1`
+なので0.500で不変）は変化していないが，上限内での実測値はわずかに改善方向．ただしn=100と
+小標本であり，この差だけで有意性を主張できる規模ではない．参考情報として記録するに留める．
+
+**総合判定：adopted**
+
+根拠：(1) 主基準（top1_accuracy McNemar，p=1.59×10⁻⁷）が極めて強く成立し，Wilson CIの僅かな
+周辺重複はpaired設計特有の方法論上の理由で主基準の成立を覆さない．(2) fallback発生0件を直接
+確認．(3) answer_quality改善+3.8ptはノイズ床3SD=2.61ptを明確に超える．(4) 唯一の非退行違反
+（`general`ドメインrecall）はレバー自体が意図する機構変化に内在する構造的トレードオフであり，
+同じ212行から生じたprecisionの大幅改善と表裏一体であって，独立した性能劣化ではないと判断した．
+end_to_end_accuracyの悪化（−1.19pt）はノイズ床未満で有意でない．事前実測との差分はκ・top1で
+ほぼ完全一致，answer_qualityの乖離もノイズ床の範囲内であり，事前推定を裏付ける結果である．
+
+**次フェーズ（rc-reflector）への申し送り**:
+- `general`ドメインrecallのトレードオフをbacklog B48の「fallback設計思想の論文上の位置付け」の
+  議論に統合し，「recall低下・precision大幅改善という表裏一体の副作用」として明示すること．
+- 条件1の計画文（McNemar有意 かつ Wilson CI非重複の両方を必須とする書き方）が，paired比較では
+  今回のように食い違いうるという方法論上の注記を，今後の成功条件の書き方に反映するかどうかを
+  検討すること．
+- 追加反復は不要と判断する（fallback発生0件という二値条件・McNemarのp値・answer_qualityの
+  ノイズ床超過のいずれも確信度が高く，n=1の本走で十分な統計的根拠が得られている）．
+
+### 考察 (Iter28)
+
+**単一レバーの判定: 採用（adopted）**．rc-analyst の「分析 (解釈)」節の総合判定を確定させる．
+成功条件4項目のうち，条件1（top1_accuracy の有意改善）・条件2（fallback 0/1600 の直接確認）・
+条件3（answer_quality の3SD超過改善）の3項目は疑義なく成立している．条件4（非退行）は
+`general` ドメインの recall のみ CI 下限を割ったが，同一212行内で precision が大幅改善しており
+（0.3134→0.6522），fallback という安全網の撤廃が構造的に生む必然のトレードオフであって，
+新配置が `general` の識別に一般的に劣化したという独立の証拠ではないと判断する．この判定は
+覆さない．
+
+**得られた学び（次回以降に活きる非自明な点）**:
+
+1. **paired 比較で McNemar と Wilson CI の周辺重複が食い違いうる**．今回 McNemar は
+   p=1.59×10⁻⁷ で極めて強く有意なのに，独立標本前提の Wilson 95% CI は1.91pt重なった．
+   同一問題集合に対する対応のある2条件比較では，周辺CIの重複判定は保守的すぎる（paired相関を
+   使わないため）ので，**次回以降 success_criteria の書き方を「McNemar 有意 かつ Wilson CI
+   非重複」という AND 条件で固定しない**．paired 設計だとあらかじめ分かっている実験では，
+   計画時点で「主基準は McNemar，Wilson CI は参考情報」と明記する運用に改める．
+   （config.yml success_criteria (1) の見直し候補として記録．次回 rc-planner が判断する.）
+2. **fallback は精度指標上「安全網」ではなく「識別困難なケースを低正解率の選択肢へ機械的に
+   振り替える処理」だった**（8.5% vs argmax 30.7%）．d0002 §8-3の指摘が今回初めて分散版実機で
+   統計的に裏付けられた．
+3. **fallback廃止によるドメイン別の非対称性は，fallback の送り先が単一ドメイン（general）に
+   固定されていることの必然的な帰結**であり，一般的な「新配置は non-general に強く general に
+   弱くなった」という解釈をしないこと．次に fallback関連の指標を見るときは，常に「fallback対象
+   だった行の集合」に絞って解釈する視点を保つ．
+4. **事前実測（central_iter26 vs 26b，中央集権アーキテクチャ）と実測（分散版）の整合性**:
+   top1・κはほぼ完全一致（誤差0.04pt未満），answer_qualityは-1.94ptの乖離があったがノイズ床
+   3SD=2.61pt内に収まった．Iter26の「アーキテクチャを変えてもルーティング判定は完全一致する」
+   という知見が，fallback廃止という別レバーについても再確認された．
+
+**次に振る単一レバーの選定（Y2 vs Y4）**:
+
+docs/d0004 §5 のロードマップでは，Y1（fallback廃止，完了）の後はY2（`confidence_threshold`の
+二重責務分離，Y3の前提）が自然な優先順位だが，Y4（分類器の較正，オフライン・低コスト，Y1と
+並行可能）を先に行う選択肢もある．以下の判断基準で **Y4 を次イテレーション（Iter29）の単一
+レバーとする**．
+
+- **判断基準1（自律判断の可逆性）**: Y2 は `config.yaml` に `dispatch_candidate_threshold` を
+  新設し，`aggregator.select_dispatch_targets()` の関数シグネチャを変更する，**設定ファイル
+  形式・関数シグネチャの変更**である．config.yml 自身の note（139-141行）に「着手前にユーザー
+  確認が必要」と明記されている．rc-reflector の自律判断権限は可逆な判断（レバー選定）に限られ，
+  スキーマ変更を伴う着手そのものを今この場で自律的に開始することはできない．
+- **判断基準2（コストと独立性）**: Y4（`CalibratedClassifierCV` による分類器較正）は既存の
+  訓練データ（`data/classifier_train.jsonl`，1427件）に対するオフライン処理であり，
+  d0004 が明記するとおり「Y1と並行して進めてよい」．ECEの較正前後比較は実機の1600問本走を
+  必要とせず，スキーマ変更も不要．
+- **判断基準3（Y2設計への波及）**: Y4 の結果（較正でECEがどれだけ下がるか）は，Y2で
+  `dispatch_candidate_threshold` をどの値に設定すべきかの判断材料になりうる．較正が効けば
+  2位confidenceの分布自体が変わり，Y2のデフォルト値設計が変わる可能性がある．Y4を先に行うことで
+  Y2の設計（要ユーザー確認）をより具体的な材料とともに提示できる．
+- **結論**: Iter29 の単一レバーは **classifier_calibration（Y4，d0003 X9）**とする．
+  Y2 は Y4 完了後，スキーマ変更についてユーザー確認を得てから着手する．config.yml の
+  levers 末尾に新規レバーとして追記した（backlog B49参照）．
+
+**iteration_name（Iter29）**: 「分類器の較正（CalibratedClassifierCV）によるECE改善とルーティング
+非退行の検証」
+
+**要人間判断として残す論点（backlog B48 を維持，新規追加なし）**: fallback という設計思想自体を
+撤廃するかどうかの論文上の位置付けは，今回の実験結果（recall低下・precision改善という表裏一体の
+トレードオフの実測）だけでは決められない．これは次レバー選定とは独立した，対外的な研究結論に
+関わる要人間判断事項であり，backlog に維持する．
+
+---
+
+### 調査 (Iter28)
+
+**問い**: (1) fallback 廃止の実装は「`confidence_threshold` を 0.0 へ下げる」（config-only）と
+「`node.py` の fallback 経路を明示的に無効化する」（コード変更）のどちらが単一レバー原則を保ちやすいか．
+(2) `results/central_iter26/`（fallback 廃止相当）は実際どういう仕組みで生成されたデータか，
+分散版で config だけを変えて本当に再現できる構成か．(3) confidence ベースの fallback/abstention は
+文献上どう位置付けられているか（廃止判断の傍証はあるか）．
+
+#### 分かったこと
+
+**(1) 実装方針の比較 — config-only 案（`confidence_threshold: 0.0`）を推奨する**
+
+コードを直接読んで確認した．ゲートは `aggregator.select_dispatch_targets()`
+（`aggregator.py:28-40`）1 箇所のみで，
+
+```python
+eligible = [r for r in probe_responses if r.confidence >= confidence_threshold]
+return sorted(eligible, key=lambda r: r.confidence, reverse=True)[:top_k]
+```
+
+呼び出し元は `node.py:run_ask_flow()`（216-217行，`run_experiment.py:87` もこの関数を再利用して
+`dispatched_domains` を再計算しているので **1600 問バッチ実行の実データ経路と同一**）．`confidence`
+は `predict_proba` の出力で常に `>= 0.0` なので，`confidence_threshold=0.0` にすると `eligible` は
+毎回全 probe_responses になり，`top_k=1` なら必ず argmax の 1 件が返る．`node.py:219` の
+`if not targets:` （fallback 発火条件）は，全ノードの probe 自体が失敗した真の異常系でしか
+成立しなくなり，**confidence ベースの fallback だけが選択的に消える**．これは 1 行の config 変更で
+完結し，`node.py`／`aggregator.py` のコード自体は 1 バイトも変える必要がない．
+
+`http_server.py` 側で `NodeState.confidence_threshold`（`http_server.py:201`）を grep したところ，
+格納するだけで他に参照箇所が無い（未使用フィールド）ことも確認した．つまり `confidence_threshold`
+は実質的に「fallback 経路の唯一のスイッチ」であり，二重責務（fallback ゲート／dispatch 候補ゲート）は
+`dispatch_top_k=1` に固定している限り実害が無い（top_k=1 では「1 位が閾値を超えるか」と
+「候補が 1 件以上あるか」が同じ条件に潰れるため，Y2 の分離作業を待たずに Iter28 は成立する）．
+
+対して「`node.py` の fallback 経路を明示的に無効化する」案（例: `if not targets:` 分岐を削除し
+常に dispatch する）は，`run_ask_flow` の制御フロー自体を変更するコード変更であり，(a) `_fallback_answer`
+を呼ぶ経路が実際に消えたことを別途テストで確認する必要がある，(b) 将来 probe が本当に全滅した
+異常系（ネットワーク断等）でもフォールバックしなくなり，設計書が想定する「安全網」自体を壊す，
+という 2 点で config-only 案より単一レバー原則から外れやすい．**推奨は config-only 案
+（`confidence_threshold: 0.0`）**．
+
+**(2) `central_iter26` の生成経緯（再現性の根拠）**
+
+`results/central_iter26/config.yaml` を実際に読むと `confidence_threshold: 0.5` のままであり，
+一見閾値を下げたようには見えない．`scripts/run_central_experiment.py` の該当コミット履歴とコード
+コメント（237-260行）を確認したところ，**Iter26 初回実装は `confidence_threshold` の閾値チェック自体を
+コードに書いていなかった**（常に argmax を dispatch），という経緯だった．つまり config 値ではなく
+コード側の欠落によって「fallback 廃止相当」のデータが生成されていた．現行の分散版コード
+（`node.py`/`aggregator.py`）には最初から閾値チェックが存在するため，同じ効果を得るには
+`confidence_threshold=0.0` という config 変更が対応する形になる（両者は数学的に等価: 常に argmax を
+選ぶ = 閾値 0.0 で argmax を選ぶ．`predict_proba` の値域が `[0,1]` である限り差は生じない）．
+**Iter26/Iter26b の比較が示す効果は，分散版で `confidence_threshold=0.0` を設定すれば理論上そのまま
+再現されるはずだが，「アーキテクチャが違えば実装のわずかな差異が結果に影響しないか」は Iter26 で
+初めて経験した論点（B46）でもあるため，実測による確認自体に意味がある**．
+
+**(3) 文献調査（補助）**: confidence ベースの abstention/reject-option 設計は文献上も広く使われる
+一方，直近の研究はまさに「verbalized/self-report confidence は正答率と弱くしか相関しない」ことを
+問題視している．
+- Jiang et al./関連 (arXiv:2410.13284, "Learning to Route LLMs with Confidence Tokens", 2024/2025):
+  self-report・logit ベースの信頼度は正答率との相関が弱いと明記した上で，routing/rejection の
+  下流有用性に着目すべきと主張．expert-mesh の ECE=0.204（全ドメイン過信）という実測と整合する．
+- MDPI 2025 ("An LLM-Based Multi-Path QA System with XGBoost Routing and Threshold-Based Refusal",
+  mdpi.com/2079-9292/15/9/1845): 本研究と同型の「閾値で refuse するかを決める」設計を扱い，
+  今後の課題として「閾値そのものではなく，較正・OOD検知で低確信と真に回答不能な入力を切り分けるべき」
+  と述べている．Y4（分類器較正，CalibratedClassifierCV）の方向性を支持する外部裏付けになる．
+- ACL 2025 uncertainlp workshop ("Confidence-Based Response Abstinence"): 「現実的な応用では
+  masking rate 0% は理想に過ぎず，ある程度の許容が必要」と述べており，**fallback/abstention の
+  完全撤廃が常に最適ではない**という留保も存在する．この点は backlog B48 の「論文上の位置付けは
+  人間判断」という申し送りと整合する．
+- Uncertainty-Aware Abstention with Provable Alignment Guarantees (arXiv:2607.04430,
+  CIC=confidence-interval calibration): 閾値をヒューリスティックに決めるのではなく，較正セットで
+  誤り率を統計的に制御する閾値選択を提案．Y2/Y4 で `confidence_threshold` を再設計する際の
+  参考になりうる．
+
+**総合**: 文献は「未較正の confidence で閾値ゲートすることの危うさ」を裏付けており，expert-mesh の
+実測（fallback 発動 212 問中，正解率が argmax 30.7% → fallback 8.5% へ悪化）はその具体例と整合する．
+一方で「fallback/abstention という設計思想自体を捨ててよいか」は文献でも一枚岩ではなく，
+人間判断の対象として backlog に残す価値がある（既存の B48 の要レビュー項目のままでよい）．
+
+#### rc-planner への申し送り
+
+1. **単一レバー**: `confidence_threshold: 0.5 → 0.0`（config.yaml 1 行）．
+   **同時に `dispatch_top_k: 2 → 1` へ戻すこと**（Iter27 の残骸．top_k=1 に固定しないと
+   confidence_threshold の二重責務が発火し単一レバー原則が崩れる．d0004 §5 Y1 注記のとおり）．
+   `aggregation_method` は `dispatch_top_k=1` では no-op になるため値自体は any でよいが，
+   config.yml の申し送り（69-71行）どおり `max_confidence` へ戻して Iter27 の残骸を消しておくのが
+   紛れがなく望ましい．
+2. **到達条件（d0004 §4 対策A）**: `node.py:216` → `aggregator.py:39` が読む．
+   `run_experiment.py:87` も同じ関数を再利用するため，1600 問バッチ実行で確実に発火する．
+   到達を阻む分岐は存在しない（`http_server.py` の `NodeState.confidence_threshold` は未使用の
+   格納のみで，routing_method 等による排他制御を受けない）．
+3. **予備実行（対策B）**: 本走前に先頭 20 問程度で，`fallback_answer` が 1 件も生成されないこと
+   （＝全行で `dispatched_domains` の長さが 1）を確認すること．もし発生していれば
+   `confidence_threshold` が反映されていないデプロイ漏れ（Iter16/20/21/22/27 と同型の失敗）を疑う．
+4. **成功条件の目安**: `results/central_iter26/` vs `central_iter26b/` の実測（d0004 §5 Y1 表）を
+   分散版での期待値として使ってよい．top1 +2.94pt・κ+3.26pt・answer_quality +5.74pt（3SD=2.61pt
+   の 2.2 倍）・mean_duration −323ms．Iter26 で「アーキテクチャを変えてもルーティングは完全一致」が
+   実証済みなので，同じ大きさの差が出ることが期待値だが，**一致しない場合はそれ自体が新知見**
+   （分散/中央のわずかな実装差が確率境界付近で結果に影響する可能性を示す）なので，一致しないことを
+   理由に実験を無効と判定しないこと．
+5. **人間判断が必要な論点（backlog に残す）**: fallback を完全撤廃するか，較正後に閾値だけ調整するか
+   （Y2/Y4 との関係）は文献上も一枚岩ではない．今回の調査では新たな示唆は無く，B48 の既存の
+   要レビュー項目をそのまま維持してよい．
+
+---
+
 ## Iteration 27: 高度な集約方式（majority_vote / llm_judge）の比較実験 — 実験不成立（no-op）
 
 **背景**: research_frontier 項目5（top-k dispatch の高度な集約方式）の実機比較（backlog B47）．

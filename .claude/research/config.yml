@@ -109,14 +109,28 @@ journal_retention: 3
 #
 # 【次に着手すべき優先順位（2026-07-31 改訂．詳細は docs/d0004 §5）】
 #   Y1（最優先・低コスト）: fallback 方策の廃止．**Iter28 で adopted・完了済み**（下記レバー参照）．
-#   【2026-07-31 Iter28 考察で選定・backlog B49】次イテレーション（Iter29）は Y4 を実施する．
-#   Y2 はスキーマ変更（config.yaml への `dispatch_candidate_threshold` 新設・
-#   `select_dispatch_targets()` のシグネチャ変更）を伴い着手前にユーザー確認が必要なため，
-#   確認不要でオフライン完結する Y4 を先に行う．Y4 の結果は Y2 の閾値設計の材料にもなる．
-#   Y4（低コスト・オフライン，Y1 と並行可）: 分類器の較正（CalibratedClassifierCV，d0003 X9）．**次点**
-#   Y2（前提整備・要ユーザー確認）: confidence_threshold の二重責務の分離
+#   Y4（低コスト・オフライン，Y1 と並行可）: 分類器の較正（CalibratedClassifierCV，d0003 X9）．
+#   **Iter31 で完了・adopted**．platt（Iter29，ECE絶対閾値未達でpartial）・isotonic（Iter30，
+#   medical_recallのBH補正後有意悪化でpartial）に続き，temperature（Iter31）が
+#   ECE≤0.150・top1_accuracy非退行（実際は有意改善 p=0.000906）・per-domain 20指標BH補正後
+#   有意退行0件のAND条件を初めて満たしadopted．**本番反映済み**（`models/domain_classifier.joblib`
+#   をtemperature版へ置き換え，較正前版は`models/domain_classifier_uncalibrated_pre_iter31.joblib`
+#   として退避．sha256等の詳細はjournal.md「考察 (Iter31)」節参照．`models/`はgitignore対象の
+#   ためこの置き換えはgit履歴に残らない点に注意）．
+#   Y2（前提整備・要ユーザー確認）: confidence_threshold の二重責務の分離．
+#   **`config.yaml`への`dispatch_candidate_threshold`新設・`select_dispatch_targets()`の
+#   シグネチャ変更というスキーマ変更を伴うため，Y4完了後の現時点でも着手前にユーザー確認が
+#   必要（backlog B49・B50・B51・B52で繰り返し申し送り，未解決）．rc-reflectorの自律判断権限
+#   （可逆な判断に限る）では着手を開始できないため，Iter32はY2をスキップしYに進む**．
 #   Y3: Y2 完了後に複合ドメイン評価（dispatch_top_k=2 + 集約方式）をやり直す．研究の問い③に答える唯一の実験
-#   Y5: education/legal のデータ不均衡是正（d0003 X8）
+#   Y5: education/legal のデータ不均衡是正（d0003 X8）．**【2026-07-31 Iter31考察で選定・
+#   backlog B52】Y4完了・Y2はユーザー確認待ちで自律着手不能のため，次イテレーション（Iter32）は
+#   Y5を実施する**．**Iter31時点の実測で判明**: X8の成功条件（education/legalのrecallが
+#   他ドメインの下限business_economics 0.4533を上回ること）のうち，legalは既に0.5833で
+#   クリア済み（legalの訓練データ最少77件という懸念は，B50・B51で較正への影響としても既に
+#   反証済み）．**残る唯一の未解決対象はeducationのみ**（recall 0.4059，全ドメイン中最下位，
+#   Iter28基準線からIter29〜31まで一貫して変化なし＝較正では触れない領域の問題）．次点の
+#   レバーは下記`classifier_training_data_composition`参照．
 #   着手しない: X3（E4 再設計）・X7（E5 p_true）は E6 を無効化するため Y4 の結果を見てから判断．
 #              E3 linguistic・E7 whitening は no-op 確定．E10 offtheshelf は実施不能．
 #              hidden_state は Ollama で取得不可．無線アドホック化は Phase 3（スコープ外）．
@@ -164,18 +178,62 @@ levers:
             **成功条件（d0003 X9）**: ECEが0.150以下になり，かつtop1_accuracyが非退行であること
             （Iter30以降はper-domain 20指標のBH補正後・悪化方向の有意指標0件も条件に追加，
             backlog B51）．
-            **各手法の実測実績（2026-07-31時点）**: platt（Iter29）ECE 0.19336→0.16751
+            **各手法の実測実績（2026-07-31時点，Y4完了）**: platt（Iter29）ECE 0.19336→0.16751
             （目標未達，partial）．isotonic（Iter30）ECE 0.19336→0.121424（目標達成）だが
             `medical_recall`がBH補正後も有意に悪化（0.4831→0.3820, p=0.000144，partial）．
-            temperatureは未実施（Iter31で検証予定，backlog B51）．temperatureはクラスごとの
-            個別較正器を持たず単一スカラーTでロジット全体を割る変換のため，top1_accuracy不変が
-            理論的に保証される一方，ECE改善幅はisotonic・plattより小さい可能性がある留保あり．
+            **temperature（Iter31）ECE 0.19336→0.071201（目標に7.88ptの余裕，3手法中最良）・
+            top1_accuracy McNemar p=0.000906で有意改善（非退行を上回る）・per-domain20指標BH補正後
+            有意退行0件でAND条件を初めて満たしadopted．medical_recallもisotonicの悪化
+            （p=0.000144）が再現せず改善方向（p=0.182422）．本番`models/domain_classifier.joblib`へ
+            反映済み（詳細journal.md「考察 (Iter31)」節）**．config.ymlの`values`は3値すべて
+            試し終え，Y4はこれで完了．事前の留保（temperatureは表現力が低くECE改善幅が
+            isotonic・plattより小さい可能性）は実測で反証され，逆にもっとも大きい改善幅だった
+            （小標本条件下ではOvR方式の柔軟性が過学習を招きやすいためと考察，journal参照）．
             **X3/X7との関係**: E4（semantic entropy再設計）・E5（p_true）は現行の排他的if連鎖
             の下でE6を無効化するため着手見送り中．同じ目的（confidenceの較正）をY4が桁違いに
             安く達成できるかを先に確認し，その結果を見てからX3/X7の要否を判断する．
             **Y2との関係**: 較正でconfidenceの分布が変わればdispatch候補閾値
             （`dispatch_candidate_threshold`，Y2で新設予定）の適切な値も変わりうるため，
             Y4の結果はY2の設計判断（要ユーザー確認）の材料になる．Y2着手前に実施する意義がある"}
+
+  # --- Y5: 【2026-07-31 Iter31考察で選定・backlog B52】Y4完了・Y2はユーザー確認待ちで
+  #     自律着手不能のため次点として選定．config.yaml/公開APIの変更を伴わないデータのみの
+  #     変更で着手できる（スキーマ変更なし，ユーザー確認不要） ---
+  - {name: classifier_training_data_composition, values: [education_proxy_task_revision],
+     note: "[2026-07-31 d0004 §5 Y5 / d0003 X8 / backlog B52] 【Iter31時点でスコープを絞り込み
+            済み】d0003 X8はeducation・legal双方のデータ不均衡是正を対象としていたが，Iter31の
+            実測（journal.md「考察 (Iter31)」節）でlegalは既にX8の成功条件（他ドメイン下限
+            business_economics 0.4533を上回ること）を満たしていた（legal_recall 0.5833）．
+            legalの訓練データ最少77件という懸念は，較正への影響としても2イテレーション連続で
+            反証済み（backlog B50・B51）．**したがって本レバーの対象はeducationのみに絞る**．
+            **現状**: education_recallは0.4059（全10ドメイン中最下位）で，Iter28基準線から
+            Iter29〜31（較正のみ変更）まで一貫して同一値のまま変化していない
+            （＝分類器の較正では触れられない，訓練データ・分類器そのものの問題）．
+            **原因の候補**: `education`はJMMLUに直接対応するタスクが無く，
+            `scripts/prepare_lora_training_data.py:42`で`sociology`・`high_school_psychology`・
+            `moral_disputes`の3タスクを代理として使っている（`build_dataset.py`10-27行の
+            コメントに明記済み）．`data/classifier_train.jsonl`のeducation行数は150件で他の
+            majorityドメインと同数のため，**サンプル数不足ではなく代理タスクの妥当性そのものが
+            疑わしい**（d0001 §5.1が推奨する「代理タスクの写像表を成果物として明示し，境界事例を
+            別集計する」という未実施の宿題に対応する）．
+            **手順の候補（investigate/planフェーズで具体化）**:
+            (1) 現在の3代理タスクの質問内容を実際にレビューし，`education`ドメイン
+            （学校教育行政・学習指導要領等，`router.py:39`の few-shot 例が示す領域）との
+            意味的整合性を個別に評価する．整合性が低い代理タスクがあれば除外・置換する候補を
+            JMMLU全タスク一覧から探す．(2) 除外・置換だけで解決しない場合，
+            `build_dataset.py`の手作り複合設問と同様の手法で，education固有の手作り訓練問題を
+            追加する案も検討する（人手コストが発生するため計画フェーズで規模を確定すること）．
+            **成功条件（d0003 X8）**: education_recallが他ドメインの現状下限
+            （business_economics 0.4533）を上回ること．**非退行条件**: 他9ドメインのrecall/
+            precisionがBH補正後有意に悪化しないこと（Iter30で確立した3段構成を踏襲）．
+            **注意**: これは分類器の較正（Y4）とは独立した訓練データ自体の変更であり，
+            較正手法（temperature，本番採用済み）は変更しない．較正は訓練後の後処理のため，
+            訓練データを変えた場合は再度`CalibratedClassifierCV(method='temperature')`で
+            較正し直す必要がある（単一レバー原則: 今回変えるのは訓練データ構成のみ，
+            較正手法はtemperatureのまま固定する）．
+            **コスト**: d0003 X8の見積りで1〜3日（代理タスクレビュー・置換候補の選定・
+            必要なら手作り問題の追加）．オフラインで完結し実機1600問本走はY4同様に不要
+            （分類器再訓練＋既存evaluate_classifier_calibration.pyでの再評価のみ）"}
 
   # --- Y2/Y3: Y2（コード変更・要ユーザー確認）を終えるまで Y3 に着手してはならない ---
   - {name: aggregation_method, values: [majority_vote, llm_judge],

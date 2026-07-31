@@ -17,6 +17,16 @@ beyond the type annotation). sklearn's one-vs-rest calibration
 renormalizes per-class probabilities internally so they still sum to 1
 across domains (scikit-learn.org/stable/modules/calibration.html
 #1.16.3.3) -- this module does not need to renormalize itself.
+
+As of Iter31 (journal.md "考察 (Iter31)"), the production artifact at
+models/domain_classifier.joblib is the method="temperature" calibration
+(adopted: ECE 0.193358->0.071201, top1_accuracy McNemar p=0.000906
+improvement, 0/20 per-domain metrics BH-significant regression), not the
+method="platt" or method="isotonic" variants tried in Iter29/Iter30
+(both partial, deferred). The renormalization note above still applies:
+temperature's shared-softmax output also sums to 1 across domains, just
+via a single scalar rescale of the logit vector rather than per-class
+isotonic/sigmoid calibrators.
 """
 
 import joblib

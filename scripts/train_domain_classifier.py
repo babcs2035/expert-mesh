@@ -1,8 +1,8 @@
 """E6: offline training of the supervised domain classifier (routing_method=supervised_classifier).
 
 Trains a multi-class LogisticRegression from question-embedding features
-and domain labels ONLY, then wraps it in CalibratedClassifierCV (Iter30,
-classifier_calibration=isotonic) for better-calibrated predict_proba output.
+and domain labels ONLY, then wraps it in CalibratedClassifierCV (Iter31,
+classifier_calibration=temperature) for better-calibrated predict_proba output.
 Deliberately never reads results/*/results.jsonl: Iter10's label leakage
 came from training on probe/dispatch-derived features (self_confidence,
 margin, is_top1, ...) evaluated on the same questions used for online
@@ -42,26 +42,26 @@ from expert_backend import OllamaClient
 # (see scikit-learn.org/stable/modules/calibration.html #1.16.3.3).
 _MAX_ITER = 1000
 
-# Iter30 (classifier_calibration=isotonic): method="isotonic" is used here
-# because Iter29's method="sigmoid" (Platt) improved ECE (0.19336->0.16751)
-# but did not clear the 0.150 success threshold, and config.yml's
-# classifier_calibration lever (backlog B50) designates isotonic as the
-# next value to try automatically, before any other lever. This training
-# set (1427 rows) is still far below the scale sklearn's own docs call
-# safe for isotonic ("not recommended when the number of calibration
-# samples is too low (<<1000) since it then tends to overfit" --
-# scikit-learn.org/stable/modules/calibration.html); with cv=5 and
-# ensemble=True unchanged from Iter29, each fold's held-out calibration
-# slice is still only ~30 rows/domain (~15 for legal). isotonic's
-# non-parametric fit (effectively one degree of freedom per held-out
-# point) makes it more prone to overfitting at this scale than sigmoid,
-# and its out_of_bounds="clip" behavior means legal's sparse held-out
-# data can clip extreme scores to whatever value happens to sit at the
-# edge of that fold's observed range (journal Iter30 investigation
-# findings 1/3). This run is therefore watched closely for isotonic-
-# specific failure modes (exact 0/1 probabilities, ties, uniform
-# fallback rows) alongside the usual ECE/top1_accuracy comparison.
-_CALIBRATION_METHOD = "isotonic"
+# Iter31 (classifier_calibration=temperature): method="temperature" is used
+# here because Iter30's method="isotonic" cleared the ECE success threshold
+# (0.19336->0.12142) but was judged partial -- after Benjamini-Hochberg
+# correction (q=0.05) across 20 per-domain precision/recall metrics,
+# medical_recall regressed significantly (0.4831->0.3820, p=0.000144;
+# journal Iter30 discussion, backlog B51's automatic next choice).
+# Iter31's investigation confirmed the structural reason this class-
+# specific distortion is plausible for isotonic/sigmoid but not for
+# temperature: both isotonic and Platt scaling fit one calibrator per
+# class under scikit-learn's one-vs-rest (OvR) decomposition, so each
+# class's curve can be skewed independently by its own held-out fold
+# data (e.g. legal/medical's sparser samples). Temperature scaling instead
+# fits a single scalar T that rescales the whole logit vector before a
+# shared softmax, so there is no per-class calibrator to skew -- this
+# structurally rules out the OvR-specific class distortion suspected of
+# causing medical_recall's regression. cv=5 and ensemble=True are kept
+# unchanged from Iter29/Iter30 (not re-tuned here) so that this run is a
+# controlled comparison isolating the calibration method as the only
+# variable (journal Iter31 plan, single-lever principle).
+_CALIBRATION_METHOD = "temperature"
 _CALIBRATION_CV = 5
 
 
@@ -102,13 +102,16 @@ def train_classifier(
     weaker.
 
     The base estimator is then wrapped in CalibratedClassifierCV
-    (method="isotonic", ensemble=True; see _CALIBRATION_METHOD's comment
-    above for the risk/benefit tradeoff at this data scale). isotonic's
-    piecewise-constant fit can produce tied probabilities across domains,
-    exact 0.0/1.0 outputs when a held-out score clips to an extreme
-    observed value, or (in the rare case every class calibrator returns
-    zero) a uniform-fallback row -- callers evaluating this model should
-    check for these alongside ordinary accuracy/ECE (journal Iter30).
+    (method="temperature", ensemble=True; see _CALIBRATION_METHOD's comment
+    above for why this method was chosen). Unlike isotonic/Platt (Iter29/
+    Iter30), temperature scaling fits a single scalar T applied to the
+    whole logit vector rather than one calibrator per class, so isotonic's
+    per-class failure modes (tied probabilities across domains, exact
+    0.0/1.0 outputs from held-out scores clipping to an extreme observed
+    value, or an all-zero uniform-fallback row) do not apply to this
+    implementation by construction -- callers evaluating this model still
+    check for them (journal Iter31 plan, evaluation step 7) but expect
+    zero occurrences rather than treating the check as a live risk.
     `cv` defaults to the production value (5-fold StratifiedKFold) but is
     exposed as a parameter so tests can exercise the same code path with
     a smaller fold count on toy data, rather than branching test code
