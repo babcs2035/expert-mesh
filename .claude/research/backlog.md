@@ -3,6 +3,49 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B50 [auto-decided 2026-07-31] Iter29 は partial で確定．本番反映は見送り，次は isotonic を追試
+
+- 状況: Iter29（classifier_calibration=platt，Y4）の rc-analyst 判定（partial）を rc-reflector が
+  確定させた．
+- **判定: partial（部分的採用，確定）**．d0003 X9 の成功条件は「ECE≤0.150 かつ top1_accuracy
+  非退行」の AND 条件．ECE は 0.19336→0.16751 と改善方向（-2.58pt）は決定論的な測定で確定的だが
+  絶対閾値 0.150 に未達（0.0175pt 不足）．top1_accuracy は McNemar p=0.139 で非退行（方向は
+  改善，discordant_b_only=67>discordant_a_only=50）．Iter20（E3）の partial 判定運用実績と
+  対称的なケースであり，adopted・rejected いずれの二択にも実態が合わない．
+- **本番反映: 見送り**（`models/domain_classifier.joblib` は較正前のまま，
+  `models/domain_classifier_platt.joblib` へ置き換えない）．理由は d0003 X9 の AND 条件が
+  未成立（ECE 未達）であることそのもの．**legal データ拡充（Y5）の完了を前提条件にはしない**
+  （下記の追加分析で legal 固有説が相対化されたため）．
+- **追加分析（rc-analyst 未了分を解消）**: legal・education の2ドメインのみだった per-domain CI
+  比較を全10ドメイン20指標へ拡張したところ，「CI下限が較正前を下回る」という成功条件(3)の
+  字義通りの基準では legal recall 以外に8指標（computer_science精度・recall等，訓練150件の
+  ドメイン含む）が該当した．いずれも区間は非交差ではなく重なっており統計的に有意ではない．
+  **legal は訓練データ最少（77件）だから較正の影響を受けやすい，という rc-analyst の当初仮説は
+  唯一の説明ではないと判明**．より妥当な説明は，20指標を多重比較補正なしに単純な CI下限比較で
+  判定する運用が，較正による11.0%のargmax再配分の下で偽陽性を生みやすいという統計的な
+  アーティファクト．
+- 学び: (1) per-domain CI下限の単純前後比較は，多重比較の補正なしでは非退行チェックとして
+  脆弱（20指標中9指標が該当するが全て区間重複＝有意でない）．次回以降 success_criteria (2) は
+  「CI下限比較」ではなく「区間が非交差」または「ドメイン単位のMcNemar検定」へ改める運用を
+  検討すること（Iter28の学び「paired比較でMcNemarとWilson CIの周辺重複が食い違う」と同根）．
+  (2) legal recall低下を「訓練データ最少ドメイン固有の脆弱性」と即断せず，全ドメイン同一手順の
+  分析を最初から計画に含めること（事後の穴埋めをしない）．
+- 自動選択: 次イテレーション（Iter30）の単一レバーを **classifier_calibration=isotonic**
+  （config.yml 既登録の候補，スキーマ変更なし・ユーザー確認不要）とする．`cv`（5）・`ensemble`
+  （True）は Platt と同一に固定し，較正手法のみを単一レバーとして変える．`cv=3` 感度分析は
+  isotonic の主結果次第の副次分析に留める．`iteration_name` は「分類器較正のisotonic方式による
+  ECE目標達成の追試とドメイン別非退行の全数検証」．
+- 根拠: 計画(Iter29)・調査(Iter29)の時点で「isotonic はPlattが不成功の場合のみ次イテレーションで
+  別途検証する」と明記済み．今回Plattが ECE絶対閾値未達（＝「不成功」）だったため条件成立．
+  isotonicが目標未達の場合，`method='temperature'`（top1_accuracy不変が理論保証される代替）を
+  次々点として検討する．
+- 要レビュー: (1) Y2（`confidence_threshold`の二重責務分離，スキーマ変更）着手前ユーザー確認は
+  引き続き必要（B49既存項目）．(2) fallback設計思想の論文上の位置付け（B48）も未解決．
+  (3) 較正済み分類器の本番反映可否は，isotonic等が成功条件を完全に満たした時点で改めて判断する
+  （本番ルーティング挙動を変える判断は都度検討）．
+
+---
+
 ## B49 [auto-decided 2026-07-31] Iter28 は adopted で確定．次は Y4（分類器の較正）を Y2 より先に実施
 
 - 状況: Iter28（fallback 方策の廃止，Y1）の rc-analyst 判定（adopted）を rc-reflector が確定させた．

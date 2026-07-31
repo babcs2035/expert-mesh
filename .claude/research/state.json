@@ -1,21 +1,21 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter28",
+  "iteration": "Iter29",
   "iteration_name": "分類器の較正（CalibratedClassifierCV）によるECE改善とルーティング非退行の検証",
   "phase": "reflect",
   "status": "running",
-  "current_lever": "classifier_calibration=platt/isotonic (CalibratedClassifierCV, d0004 §5 Y4 / d0003 X9, scripts/train_domain_classifier.py:train_classifier()にCalibratedClassifierCVを導入し既存訓練データ1427件をオフラインで較正)",
-  "experiment_dir": "results/20260731_162722/",
-  "experiment_deadline": 1785491724,
-  "updated_at": 1785489099,
+  "current_lever": "classifier_calibration=platt (CalibratedClassifierCV method='sigmoid', cv=5, ensemble=True; isotonicはPlattが不成功の場合のみ次回検証)",
+  "experiment_dir": null,
+  "experiment_deadline": null,
+  "updated_at": 1785492559,
   "next_iteration_brief": {
     "must_read_first": [
-      "docs/d0004_research_status_and_direction_2026-08.md (§5 Y4)",
-      ".claude/research/backlog.md (B49, B48)",
+      ".claude/research/journal.md (Iteration 29: 考察 (Iter29))",
+      ".claude/research/backlog.md (B50, B49)",
       ".claude/research/config.yml (levers: classifier_calibration)"
     ],
-    "planned_lever": "分類器の較正（docs/d0004 §5 Y4 = d0003 X9）",
-    "note": "Y2（confidence_thresholdの二重責務分離）はconfig.yamlスキーマ変更・関数シグネチャ変更を伴い着手前にユーザー確認が必要なため後回しにした．Y4はオフライン完結（実機1600問本走は不要，既存訓練データ1427件のみ）で並行実施可．成功条件はECE<=0.150かつtop1_accuracy非退行（d0003 X9）．"
+    "planned_lever": "classifier_calibration=isotonic",
+    "note": "Iter29でplattはECE 0.19336->0.16751(改善方向だが目標0.150未達)・top1非退行(McNemar p=0.139)でpartial確定．次はisotonicをcv=5/ensemble=True同一設定で追試する（config.yml既登録の候補，スキーマ変更・ユーザー確認不要）．cv=3感度分析はisotonic結果次第の副次分析に留め単一レバー原則を守ること．全10ドメインのCI比較を較正前後で最初から標準手順として実施すること（Iter29では事後に穴埋めした）．legal recall低下は訓練データ最少ドメイン固有と即断せず，Iter29追加分析（B50）の学びを踏まえること．"
   },
   "e28_results": {
     "lever": "fallback_policy=disabled (confidence_threshold: 0.5->0.0, dispatch_top_k: 2->1, aggregation_method: llm_judge->max_confidence)",
@@ -92,7 +92,7 @@
     "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
   },
   "last_slack_ts": "1785481958.859089",
-  "iteration_thread_ts": "1785481958.859089",
+  "iteration_thread_ts": "1785490381.513699",
   "notion_toggle_created": true,
   "last_commit": "4a79a76",
   "e26_results": {
@@ -187,5 +187,100 @@
     "fallback_rate": 0.131579,
     "judgment": "adopted",
     "note": "X1: 測定系修復後の基準線再取得。主基準4項目が期待値と完全に一致。"
+  },
+  "e29_results": {
+    "lever": "classifier_calibration=platt (CalibratedClassifierCV method='sigmoid', cv=5, ensemble=True)",
+    "ece_before": 0.19335755699847695,
+    "ece_after": 0.16751362802135694,
+    "ece_improvement": 0.025843928977120068,
+    "ece_success_threshold_0_150_met": false,
+    "top1_accuracy_before": 0.585,
+    "top1_accuracy_after": 0.595625,
+    "top1_accuracy_diff": 0.010624999999999996,
+    "mcnemar_discordant_a_only": 50,
+    "mcnemar_discordant_b_only": 67,
+    "mcnemar_discordant_pairs": 117,
+    "mcnemar_chi2_statistic": 2.1880341880341883,
+    "mcnemar_p_value": 0.13908672976001357,
+    "flip_rate": 0.11,
+    "flip_count": 176,
+    "flip_total": 1600,
+    "per_domain_legal": {
+      "precision_before": 0.75,
+      "precision_after": 0.8151260504201681,
+      "recall_before": 0.5833333333333334,
+      "recall_after": 0.5388888888888889,
+      "precision_ci_before": [
+        0.6722461054834166,
+        0.814400794331877
+      ],
+      "precision_ci_after": [
+        0.7359201390242527,
+        0.8746229196467938
+      ],
+      "recall_ci_before": [
+        0.510305304279413,
+        0.6528787794003181
+      ],
+      "recall_ci_after": [
+        0.4660142740943432,
+        0.6101382982895314
+      ],
+      "recall_ci_lower_bound_regressed": true
+    },
+    "per_domain_education": {
+      "precision_before": 0.4630872483221476,
+      "precision_after": 0.4632768361581921,
+      "recall_before": 0.40588235294117647,
+      "recall_after": 0.4823529411764706,
+      "precision_ci_before": [
+        0.3849579354501229,
+        0.5430720631845758
+      ],
+      "precision_ci_after": [
+        0.3913761364147671,
+        0.5367376927659099
+      ],
+      "recall_ci_before": [
+        0.33493503930374724,
+        0.48098919294164666
+      ],
+      "recall_ci_after": [
+        0.40846206851341693,
+        0.5570237250325943
+      ],
+      "recall_ci_lower_bound_regressed": false
+    },
+    "data_used": {
+      "train_data": "data/classifier_train.jsonl (1427 rows)",
+      "before_results": "results/20260731_162722/results.jsonl (Iter28 baseline, 1600 rows, not re-run)",
+      "after_results": "results/iter29_calibrated_predictions.jsonl (newly generated, 1600 rows)",
+      "eval_dataset": "data/dataset.jsonl (1600 rows, re-embedded for the calibrated side only)"
+    },
+    "execution": {
+      "live_calls": "embedding-only (nomic-embed-text) to wafl500 (192.168.15.100:11434) via existing SSH local port-forward (127.0.0.1:11435), no LLM generation/probe/dispatch traffic",
+      "train_classifier_wall_time_s": 124.09,
+      "evaluate_calibration_wall_time_s": 143.25,
+      "no_anomalies_observed": true
+    },
+    "judgment": "partial",
+    "production_rollout": "deferred (ECE threshold 0.150 not met; models/domain_classifier.joblib unchanged)",
+    "per_domain_ci_extended_analysis": {
+      "note": "Wilson CI computed for all 10 domains x precision/recall (20 metrics) using existing before/after results files, extending rc-analyst legal/education-only check.",
+      "metrics_with_ci_lower_bound_drop": [
+        "computer_science_precision",
+        "computer_science_recall",
+        "general_precision",
+        "history_culture_precision",
+        "legal_recall",
+        "mathematics_precision",
+        "medical_recall",
+        "natural_science_recall",
+        "social_science_recall"
+      ],
+      "count_regressed_by_literal_criterion": "9/20",
+      "all_regressed_cis_overlap_before_after": true,
+      "interpretation": "None of the 9 flagged metrics have disjoint CIs vs before; all consistent with noise from 11.0% argmax flip redistribution, not statistically significant regression. Undermines legal-specific small-training-data hypothesis (computer_science/mathematics have 150 training rows, same as majority, yet also flagged)."
+    }
   }
 }

@@ -9,7 +9,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV
 
 from classifier import estimate_confidence_classifier, load_domain_classifier
 from expert_backend import OllamaClient
@@ -192,7 +192,7 @@ class NodeState:
         semantic_sample_count: int = SEMANTIC_SAMPLE_COUNT,
         semantic_sample_temperature: float = SEMANTIC_SAMPLE_TEMPERATURE,
         classifier_model_path: str | None = None,
-        domain_classifier: LogisticRegression | None = None,
+        domain_classifier: CalibratedClassifierCV | None = None,
     ) -> None:
         self.node_id = node_id
         self.domain = domain
@@ -249,7 +249,7 @@ class NodeState:
         # artifact on disk at all. Tests that do exercise the classifier
         # path can instead inject an already-fitted model directly here,
         # bypassing the filesystem and lifespan.
-        self.domain_classifier: LogisticRegression | None = domain_classifier
+        self.domain_classifier: CalibratedClassifierCV | None = domain_classifier
 
     def cache_probe_confidence(self, request_id: str, confidence: float) -> None:
         """Store the confidence score from probe for later reuse in dispatch."""

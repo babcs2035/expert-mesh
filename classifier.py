@@ -7,13 +7,23 @@ and, at /probe time, reads off only its own domain's predicted probability.
 No LLM call is involved: the classifier consumes the query_embedding
 already computed by the requester (node.py's run_ask_flow), so this is a
 pure function of already-available data.
+
+Since Iter29 (classifier_calibration=platt), the persisted artifact is a
+CalibratedClassifierCV wrapping the LogisticRegression base estimator
+rather than the bare LogisticRegression itself. Both functions below rely
+only on `.classes_` and `.predict_proba()`, which CalibratedClassifierCV
+exposes with the same semantics (duck typing; no code change needed here
+beyond the type annotation). sklearn's one-vs-rest calibration
+renormalizes per-class probabilities internally so they still sum to 1
+across domains (scikit-learn.org/stable/modules/calibration.html
+#1.16.3.3) -- this module does not need to renormalize itself.
 """
 
 import joblib
-from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV
 
 
-def load_domain_classifier(model_path: str) -> LogisticRegression:
+def load_domain_classifier(model_path: str) -> CalibratedClassifierCV:
     """Load a joblib-persisted multi-class domain classifier.
 
     Raises FileNotFoundError (via joblib.load) if the path is missing
@@ -25,7 +35,7 @@ def load_domain_classifier(model_path: str) -> LogisticRegression:
 
 
 def estimate_confidence_classifier(
-    classifier: LogisticRegression, domain: str, query_embedding: list[float]
+    classifier: CalibratedClassifierCV, domain: str, query_embedding: list[float]
 ) -> float:
     """Return this node's own domain's predicted probability from the shared classifier.
 
