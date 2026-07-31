@@ -1,22 +1,35 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter32",
-  "iteration_name": "educationドメインの代理タスク妥当性見直しによる訓練データ品質改善（Y5）",
-  "phase": "reflect",
+  "iteration": "Iter33",
+  "iteration_name": null,
+  "phase": "investigate",
   "status": "running",
-  "current_lever": "classifier_training_data_composition=education_proxy_task_revision (weak-task sample_weight: high_school_psychology=2.0, moral_disputes=2.0, others=1.0)",
-  "experiment_dir": "results/iter32_calibrated_predictions.jsonl",
+  "current_lever": null,
+  "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785506592,
+  "updated_at": 1785507200,
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 32: 計画 (Iter32))",
-      ".claude/research/journal.md (Iteration 32: 調査 (Iter32))",
-      ".claude/research/backlog.md (B52)",
+      ".claude/research/journal.md (Iteration 32: 考察 (Iter32))",
+      ".claude/research/journal.md (Iteration 32: 分析(解釈) (Iter32))",
       ".claude/research/config.yml (levers: classifier_training_data_composition)"
     ],
-    "planned_lever": "classifier_training_data_composition=education_proxy_task_revision",
-    "note": "計画(Iter32)で候補(2)「弱い代理タスク(high_school_psychology/moral_disputes)への2.0倍sample_weight」を単一レバーとして選定した（候補(1)のサンプル数増量は同一タスク構成比のまま量を増やすだけで効果限定的と判断し見送り）．build_dataset.pyのbuild_classifier_training_rows()に_classifier_task_sample_weight()を追加し分類器訓練行にsample_weightフィールドを付与，scripts/train_domain_classifier.pyのtrain_classifier()でCalibratedClassifierCV.fit()にsample_weightとして渡す．較正手法はtemperatureのまま変更しない．**重要な訂正**: config.yml/backlog B52が引用する成功条件の閾値「business_economics 0.4533」はIter17-19頃の陳腐化した値で，Y1(fallback廃止)・Y4(較正導入)後の現状を反映していない．journal「実験・分析(実行)(Iter31)」の実測（temperature較正後，現行production相当）では現状下限はmedical_recall=0.5112（business_economics=0.5417）．Iter32の主基準はeducation_recallがmedical_recall(0.5112)を上回ることに更新した．Iter32自身の比較のbeforeはresults/iter31_calibrated_predictions.jsonl（education_recall=0.4588，温度較正後の現production相当）を使う．詳細・変更ファイル・成功条件はjournal.md「計画 (Iter32)」節を参照．"
+    "planned_lever": "classifier_training_data_composition=education_proxy_task_resampling",
+    "note": "Iter32（弱い代理タスクhigh_school_psychology/moral_disputesへのsample_weight=2.0）はrejected確定．主基準不成立に加えeducation_recall自体が悪化（0.4588→0.4412）し，全体top1_accuracyも有意悪化（McNemar p=0.0026）した．機序: LogisticRegression(class_weight=\"balanced\")はsample_weightに依存してクラス重みを自動再計算するため，狙った強化がclass_weight_[education]の自動低下（0.9513→0.5931）で減衰し，他9ドメインに一律+7.6%の相対優位を与えた（sklearnソースで確認済み）．次はsample_weightを使わず，build_classifier_training_rows()の抽出段階で3代理タスク（sociology・high_school_psychology・moral_disputes）の目標件数比率自体を変更する`education_proxy_task_resampling`を試す（education総行数150件は不変，class_weight結合の影響を受けない設計）．詳細はjournal.md「考察 (Iter32)」「分析(解釈) (Iter32)」節を参照．"
+  },
+  "e32_results": {
+    "lever": "classifier_training_data_composition=education_proxy_task_revision (weak-task sample_weight: high_school_psychology=2.0, moral_disputes=2.0, others=1.0)",
+    "education_recall_before": 0.4588,
+    "education_recall_after": 0.4412,
+    "education_recall_mcnemar_p": 0.248,
+    "medical_recall_threshold": 0.5112,
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.5988,
+    "top1_accuracy_mcnemar_p": 0.0026,
+    "flip_rate": 0.009375,
+    "bh_significant_regressions_18_metrics": 0,
+    "judgment": "rejected",
+    "note": "主基準（education_recall>medical_recall基準）不成立に加え，education_recall自体が悪化し全体top1_accuracyも有意悪化した．機序はLogisticRegression(class_weight=\"balanced\")がsample_weightに依存して自動再計算されるため，狙った効果が減衰し他9ドメインに相対優位を与えたこと（sklearnソースで確認済み）．非退行チェック（BH補正）は字義通り成立するが検定力不足の見かけ上の非退行と判断．models/domain_classifier.joblib（Iter31 temperature較正版）は無変更のまま．"
   },
   "e30_results": {
     "lever": "classifier_calibration=isotonic (CalibratedClassifierCV method='isotonic', cv=5, ensemble=True)",
@@ -144,10 +157,10 @@
     },
     "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
   },
-  "last_slack_ts": "1785506610.303509",
-  "iteration_thread_ts": "1785504046.611419",
-  "notion_toggle_created": true,
-  "last_commit": "2ff3b77",
+  "last_slack_ts": "1785507082.174189",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
+  "last_commit": "750cf3e",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,
