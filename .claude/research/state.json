@@ -94,7 +94,7 @@
   "last_slack_ts": "1785481958.859089",
   "iteration_thread_ts": "1785481958.859089",
   "notion_toggle_created": true,
-  "last_commit": "f1d79b9",
+  "last_commit": "4a79a76",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,
