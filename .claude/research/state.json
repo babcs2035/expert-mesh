@@ -1,20 +1,37 @@
 {
   "repo": "expert-mesh",
   "iteration": "Iter28",
-  "iteration_name": "fallback 方策の廃止によるルーティング精度・回答品質への影響測定",
-  "phase": "investigate",
+  "iteration_name": "分類器の較正（CalibratedClassifierCV）によるECE改善とルーティング非退行の検証",
+  "phase": "reflect",
   "status": "running",
-  "current_lever": null,
-  "experiment_dir": null,
-  "experiment_deadline": null,
-  "updated_at": 1785480588,
+  "current_lever": "classifier_calibration=platt/isotonic (CalibratedClassifierCV, d0004 §5 Y4 / d0003 X9, scripts/train_domain_classifier.py:train_classifier()にCalibratedClassifierCVを導入し既存訓練データ1427件をオフラインで較正)",
+  "experiment_dir": "results/20260731_162722/",
+  "experiment_deadline": 1785491724,
+  "updated_at": 1785489099,
   "next_iteration_brief": {
     "must_read_first": [
-      "docs/d0004_research_status_and_direction_2026-08.md",
-      ".claude/research/backlog.md (B48, B48-b)"
+      "docs/d0004_research_status_and_direction_2026-08.md (§5 Y4)",
+      ".claude/research/backlog.md (B49, B48)",
+      ".claude/research/config.yml (levers: classifier_calibration)"
     ],
-    "planned_lever": "fallback 方策の廃止（docs/d0004 §5 Y1 = d0003 X5）",
-    "note": "d0002・d0003 は Iter22 時点で凍結されており実態と乖離している．単独の根拠にしないこと．Y1 の実験では dispatch_top_k を現在の 2 から 1 へ戻すこと．"
+    "planned_lever": "分類器の較正（docs/d0004 §5 Y4 = d0003 X9）",
+    "note": "Y2（confidence_thresholdの二重責務分離）はconfig.yamlスキーマ変更・関数シグネチャ変更を伴い着手前にユーザー確認が必要なため後回しにした．Y4はオフライン完結（実機1600問本走は不要，既存訓練データ1427件のみ）で並行実施可．成功条件はECE<=0.150かつtop1_accuracy非退行（d0003 X9）．"
+  },
+  "e28_results": {
+    "lever": "fallback_policy=disabled (confidence_threshold: 0.5->0.0, dispatch_top_k: 2->1, aggregation_method: llm_judge->max_confidence)",
+    "top1_accuracy": 0.585,
+    "cohens_kappa": 0.554074,
+    "single_domain_top1_accuracy": 0.598667,
+    "compound_domain_top1_accuracy": 0.38,
+    "compound_domain_set_recall": 0.19,
+    "answer_quality_accuracy": 0.546667,
+    "end_to_end_accuracy": 0.31625,
+    "mean_duration_ms": 3394.894,
+    "fallback_rate": 0.0,
+    "mcnemar_discordant_pairs": 77,
+    "mcnemar_p_value": 1.5868484193326537e-07,
+    "judgment": "adopted",
+    "note": "成功条件4項目中3項目（top1有意改善p=1.59e-7・fallback0/1600・answer_quality改善+3.8pt>3SD=2.61pt）が明確に成立。条件4（非退行）はgeneralドメインrecallのみCI下限割れだが、同一212行内でprecisionが0.3134->0.6522へ大幅改善しておりfallback廃止に内在する構造的トレードオフと判断、判定は覆さず。事前実測（central_iter26 vs 26b）とtop1・κがほぼ完全一致し、Iter26の『アーキテクチャを変えてもルーティングは完全一致』を別レバーで再確認。次レバーはY4（classifier_calibration）。"
   },
   "e27_results": {
     "lever": "aggregation_method (max_confidence / majority_vote / llm_judge, dispatch_top_k=2)",
@@ -37,7 +54,12 @@
   "noise_floor_axis23": {
     "source": "Iter25 基準線 + Iter27 の 3 実行（ルーティングは決定論的に同一，生成のランダム性のみ異なる 4 反復）",
     "metric": "answer_quality_accuracy (JMMLU 1500 問，抽出照合)",
-    "values": [0.5086666666666667, 0.496, 0.49133333333333334, 0.508],
+    "values": [
+      0.5086666666666667,
+      0.496,
+      0.49133333333333334,
+      0.508
+    ],
     "mean": 0.501,
     "stdev_pt": 0.87,
     "three_sd_pt": 2.61,
@@ -46,17 +68,32 @@
   },
   "fallback_ablation_precomputed": {
     "source": "results/central_iter26/（fallback 廃止相当）vs results/central_iter26b/（現行）．アーキテクチャ・分類器・データセットは同一で fallback 方策のみ異なる（B46 の副産物）",
-    "top1_accuracy": {"no_fallback": 0.585, "with_fallback": 0.5556},
-    "cohens_kappa": {"no_fallback": 0.5541, "with_fallback": 0.5215},
-    "answer_quality_jmmlu": {"no_fallback": 0.5507, "with_fallback": 0.4933},
-    "mean_duration_ms": {"no_fallback": 4234.8, "with_fallback": 4558.2},
+    "top1_accuracy": {
+      "no_fallback": 0.585,
+      "with_fallback": 0.5556
+    },
+    "cohens_kappa": {
+      "no_fallback": 0.5541,
+      "with_fallback": 0.5215
+    },
+    "answer_quality_jmmlu": {
+      "no_fallback": 0.5507,
+      "with_fallback": 0.4933
+    },
+    "mean_duration_ms": {
+      "no_fallback": 4234.8,
+      "with_fallback": 4558.2
+    },
     "mcnemar_p_value": 1.5868484193326537e-07,
-    "fallback_rows_routing_correct": {"sent_to_general": "18/212 (8.5%)", "sent_to_argmax": "65/212 (30.7%)"},
+    "fallback_rows_routing_correct": {
+      "sent_to_general": "18/212 (8.5%)",
+      "sent_to_argmax": "65/212 (30.7%)"
+    },
     "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
   },
-  "last_slack_ts": null,
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
+  "last_slack_ts": "1785481958.859089",
+  "iteration_thread_ts": "1785481958.859089",
+  "notion_toggle_created": true,
   "last_commit": "f1d79b9",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",

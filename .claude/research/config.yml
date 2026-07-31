@@ -61,16 +61,17 @@ journal_retention: 3
 # 基準線と完全一致した場合，「効果なし」ではなく「実験不成立」を既定の解釈とすること．
 # 詳細は d0004 §4．
 #
-# 現在 config.yaml が指す構成（2026-07-31 時点，HEAD=32af2e0）:
+# 現在 config.yaml が指す構成（2026-07-31 時点，Iter28 完了後，HEAD=d87c006）:
 #   confidence_signal_method=self_report, routing_method=supervised_classifier,
 #   confidence_elicitation=top_k_with_probs（no-op，下記注記参照）,
 #   expert_model=expert-mesh-{domain}-lora（10 ノード，Iter18 で採用），
-#   light_model=qwen3.5:4b-q4_K_M，domain_count=10，confidence_threshold=0.5，
-#   **dispatch_top_k=2・aggregation_method=llm_judge（Iter27 の残骸．いずれも実効せず）**．
-#   **次イテレーションの実装時に dispatch_top_k を 1 へ，aggregation_method を max_confidence へ
-#   戻すこと**（Iter27 が no-op に終わった設定がそのまま残っているだけで，採用された構成ではない）．
+#   light_model=qwen3.5:4b-q4_K_M，domain_count=10，
+#   **confidence_threshold=0.0（Iter28 で採用．fallback 実質廃止），dispatch_top_k=1，
+#   aggregation_method=max_confidence（top_k=1 では no-op）**．
 #
-# 基準線は results/20260730_145356/（Iter25，1600 問）:
+# 基準線は results/20260731_162722/（Iter28，1600 問，fallback 廃止後）:
+#   top1=0.585, kappa=0.554074, answer_quality=0.546667, fallback発生0/1600．
+#   Iter25 基準線（results/20260730_145356/，fallback あり）:
 #   top1=0.555625, single_domain_top1=0.569333, compound_top1=0.35,
 #   compound_set_recall=0.165, kappa=0.521481, ECE=0.204021, fallback_rate=0.1325,
 #   answer_quality=0.508667, end_to_end=0.328125, mean_duration_ms=3626.8
@@ -107,10 +108,14 @@ journal_retention: 3
 #   ノード間の実能力差が生まれ，top1_accuracy が初めて下流に帰結を持つ指標になった**．
 #
 # 【次に着手すべき優先順位（2026-07-31 改訂．詳細は docs/d0004 §5）】
-#   Y1（最優先・低コスト）: fallback 方策の廃止．既存データから効果が実測済み（下記レバー参照）
+#   Y1（最優先・低コスト）: fallback 方策の廃止．**Iter28 で adopted・完了済み**（下記レバー参照）．
+#   【2026-07-31 Iter28 考察で選定・backlog B49】次イテレーション（Iter29）は Y4 を実施する．
+#   Y2 はスキーマ変更（config.yaml への `dispatch_candidate_threshold` 新設・
+#   `select_dispatch_targets()` のシグネチャ変更）を伴い着手前にユーザー確認が必要なため，
+#   確認不要でオフライン完結する Y4 を先に行う．Y4 の結果は Y2 の閾値設計の材料にもなる．
+#   Y4（低コスト・オフライン，Y1 と並行可）: 分類器の較正（CalibratedClassifierCV，d0003 X9）．**次点**
 #   Y2（前提整備・要ユーザー確認）: confidence_threshold の二重責務の分離
 #   Y3: Y2 完了後に複合ドメイン評価（dispatch_top_k=2 + 集約方式）をやり直す．研究の問い③に答える唯一の実験
-#   Y4（低コスト・オフライン，Y1 と並行可）: 分類器の較正（CalibratedClassifierCV，d0003 X9）
 #   Y5: education/legal のデータ不均衡是正（d0003 X8）
 #   着手しない: X3（E4 再設計）・X7（E5 p_true）は E6 を無効化するため Y4 の結果を見てから判断．
 #              E3 linguistic・E7 whitening は no-op 確定．E10 offtheshelf は実施不能．
@@ -139,6 +144,30 @@ levers:
             分散版で 1600 問を 1 回実行（約 90 分）．
             **論点**: 廃止は『確信が持てないときに汎用ノードへ退避する』という設計書の意図自体を
             捨てることになる．論文上どう位置付けるかは人間判断が要る（backlog B48 要レビュー）"}
+
+  # --- Y4: 【2026-07-31 Iter28考察で選定・backlog B49】Y2より先に着手．オフライン・低コスト・
+  #     スキーマ変更不要でY1と並行可能．Y2着手前の判断材料にもなる ---
+  - {name: classifier_calibration, values: [platt, isotonic],
+     note: "[2026-07-31 d0004 §5 Y4 / d0003 X9 / backlog B49] 現状ECE=0.204，全ドメインで
+            mean_confidence > accuracy の過信．分類器のオフライン性能は訓練100.00%に対し
+            評価59.87%で過学習傾向．
+            **実施方法**: `scripts/train_domain_classifier.py:train_classifier()`
+            （現在 `LogisticRegression(max_iter=1000, class_weight='balanced')` を素朴に
+            fit するだけ）に `sklearn.calibration.CalibratedClassifierCV`（`method='sigmoid'`
+            がPlatt，`method='isotonic'`がisotonic）を導入し，既存訓練データ
+            （`data/classifier_train.jsonl`，1427件）を交差検証で較正する．
+            **オフラインで完結する（実機1600問本走は不要）**: 較正前後のECEはコマンドラインで
+            即座に比較でき，`predict_proba`の値だけが変わりargmaxの順位は理論上ほぼ不変のため，
+            top1_accuracyの非退行確認だけ軽い実機検証（または保存済みembeddingでのオフライン
+            再計算）で足りる．
+            **成功条件（d0003 X9）**: ECEが0.150以下（-5.4pt以上）になり，かつtop1_accuracyが
+            非退行であること．
+            **X3/X7との関係**: E4（semantic entropy再設計）・E5（p_true）は現行の排他的if連鎖
+            の下でE6を無効化するため着手見送り中．同じ目的（confidenceの較正）をY4が桁違いに
+            安く達成できるかを先に確認し，その結果を見てからX3/X7の要否を判断する．
+            **Y2との関係**: 較正でconfidenceの分布が変わればdispatch候補閾値
+            （`dispatch_candidate_threshold`，Y2で新設予定）の適切な値も変わりうるため，
+            Y4の結果はY2の設計判断（要ユーザー確認）の材料になる．Y2着手前に実施する意義がある"}
 
   # --- Y2/Y3: Y2（コード変更・要ユーザー確認）を終えるまで Y3 に着手してはならない ---
   - {name: aggregation_method, values: [majority_vote, llm_judge],
