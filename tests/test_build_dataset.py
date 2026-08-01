@@ -31,7 +31,7 @@ _FIXTURE_ZIP = str(Path(__file__).parent / "fixtures" / "jmmlu_sample.zip")
 _FIXTURE_DOMAIN_TASK_MAP: dict[str, list[str]] = {
     "medical": ["anatomy"],
     "legal": ["international_law"],
-    "education": ["sociology"],
+    "education": ["japanese_civics"],
     "business_economics": ["marketing"],
     "computer_science": ["computer_security"],
     "natural_science": ["astronomy"],

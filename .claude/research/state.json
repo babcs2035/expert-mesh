@@ -1,23 +1,24 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter36",
-  "iteration_name": "education_recallの根本原因に対する代替アプローチの調査",
-  "phase": "investigate",
+  "iteration": "Iter37",
+  "iteration_name": "history_cultureからjapanese_civicsをeducationへ再割当による訓練データ構成変更",
+  "phase": "reflect",
   "status": "running",
-  "current_lever": null,
+  "current_lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785582000,
+  "updated_at": 1785686400,
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 35: education固有の手作り訓練問題追加による意味的ギャップ解消)",
-      ".claude/research/journal.md (Iteration 35: 分析(解釈) (Iter35))",
-      ".claude/research/journal.md (Iteration 35: 考察 (Iter35))",
-      ".claude/research/backlog.md (B56)",
+      ".claude/research/journal.md (Iteration 36: education_recallの根本原因に対する代替アプローチの調査, 考察)",
+      ".claude/research/journal.md (Iteration 35: education固有の手作り訓練問題追加による意味的ギャップ解消, 考察)",
+      ".claude/research/backlog.md (B58)",
       ".claude/research/config.yml (levers: classifier_training_data_composition)"
     ],
-    "planned_lever": null,
-    "note": "Iter35（handmade 50件）はrejected確定．education_recall 0.4118 < medical_recall基準 0.5112（9.94ptギャップ）．4連投（Iter32-35）でrejected確定．config.ymlの全leversを試し尽くした． handmade問題は既存proxyタスクの埋め込み空間と競合し，classification boundaryを混乱させた．次のイテレーション（Iter36）は調査フェーズから開始する．rc-investigatorはtavily-search等で以下の観点から調査すること: (1) educationドメインのembeddingsを改善する既存の手法（ドメイン特化埋め込み，fine-tuning等） (2) proxyタスクの置換（意味的ギャップが小さい代替タスクの探索） (3) education_recallのボトルネック分析（具体的な失敗パターンから改善方向性を見出す） (4) Y2（dispatch_candidate_threshold）の下調べ（閾値設計の指針）．"
+    "planned_lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
+    "note": "Iter36（japanese_civics置換）はrejected確定（education_recall 0.0529 < 0.5112）。train/evalタスク不一致が根本原因。次イテレーションはhistory_cultureからjapanese_civicsをeducationへ再割当。ただし、evalデータセットは旧proxyタスクベースのため、同様のtrain/eval不一致リスクがある（Iter36で確認済み）。このアプローチも失敗する可能性がある。失敗した場合: (1) education_recall基準値再検討（人間判断必要）(2) JMMLU外部からの教育固有タスク追加 (3) Y2着手前の下調べ（調査フェーズ）。"
   },
   "e32_results": {
     "lever": "classifier_training_data_composition=education_proxy_task_revision (weak-task sample_weight: high_school_psychology=2.0, moral_disputes=2.0, others=1.0)",
@@ -159,9 +160,7 @@
     },
     "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
   },
-  "last_slack_ts": "1785508468.260749",
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
+  "last_slack_ts": "1785600144.499129",
   "last_commit": "44e7c80",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",

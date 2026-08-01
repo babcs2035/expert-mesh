@@ -3,6 +3,73 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B58 [auto-decided 2026-08-02] Iter36 は rejected で確定。history_cultureからjapanese_civicsをeducationへ再割当を次レバーに
+
+- 状況: Iter36（classifier_training_data_composition=education_proxy_task_replacement, japanese_civicsへの置換）の rc-analyst 判定（rejected）を rc-reflector が検証・確定させた。
+- **判定: rejected（確定）**．主基準（education_recall > medical_recall基準 0.5112）は完全に不成立（0.0529 < 0.5112, gap=45.83pt）．education_recallは0.4588→0.0529へ崩壊（-79.6%）．top1_accuracyも有意悪化（McNemar p < 0.0001, b=134, c=54）．BH補正後有意退行0件（非退行のみ成立）．
+- **根本原因の確定**:
+  1. **train/evalタスクの不一致**: iter36分類器はjapanese_civicsで訓練、evalは旧proxyタスク（sociology 56 + high_school_psychology 48 + moral_disputes 46 = 150件）．分類器は旧proxyタスクをeducationとして認識できない（education分類確率平均: iter31=0.3056 → iter36=0.0625, -79.6%）．
+  2. **JMMLUの排他マッピング制約**: japanese_civicsは150件しか存在せず、history_cultureも24件使用．educationにjapanese_civicsを完全に割り当てるには、history_cultureから除外する必要がある．
+  3. **既存proxyタスクでの教育recallは可能**: iter31（旧proxyタスク + temperature較正）でeducation_recall 0.4588を達成．問題は「proxyタスクの意味的ギャップ」ではなく「trainとevalで同一のproxyタスクを使う必要がある」という制約．
+- **5連投のrejected（Iter32-36）は決定的**:
+  教育recallのトレンド: 0.4588 (Iter31) → 0.4412 (Iter32) → 0.4412 (Iter33) → 0.4353 (Iter34) → 0.4118 (Iter35) → **0.0529** (Iter36)．
+- **決定的な学び**:
+  1. **proxyタスクの置換はeval再生成なしでは機能しない**: japanese_civicsの意味的整合性は高いが、evalデータセットが旧proxyタスクで固定されているため、置換後の分類器はeval問題をeducationとして認識できない．
+  2. **config.ymlの全leversを試した**: `classifier_training_data_composition`の4値（revision, resampling, handmade, replacement）はすべてrejected．`classifier_calibration`の3値（platt, isotonic, temperature）はtemperatureがadopted．`fallback_policy`はadopted．`aggregation_method`はY2ブロックで試せない．
+  3. **残る代替アプローチ**:
+     - (a) **history_cultureからjapanese_civicsを除外しeducationに割り当てる**（未試行）
+     - (b) education_recallの基準値再検討（人間判断必要）
+     - (c) handmade問題の大幅増加（コスト大）
+- **自動選択: 次イテレーション（Iter37）の単一レバーを
+  `classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education`とする**．`iteration_name` は「history_cultureからjapanese_civicsをeducationへ再割当による訓練データ構成変更」．config.yml の `classifier_training_data_composition` レバーの `values` へ追記した．
+- **根拠**:
+  1. japanese_civicsをeducationの唯一のproxyタスクとし、history_cultureから除外する．
+  2. history_cultureは残り7タスクで150件をサンプリング（行数150→150不変）．
+  3. japanese_civicsの意味的整合性が高いため、education_recallが向上する可能性．
+  4. **ただし、evalデータセットは旧proxyタスクベースのままのため、同様のtrain/eval不一致リスクがある**（Iter36で確認済み）．このアプローチも失敗する可能性がある．
+- **留保**:
+  1. このレバーは `education_proxy_task_replacement` とは異なる（history_culture側のマッピングも変更するため、別レバーとして扱う）．
+  2. productionモデル（`models/domain_classifier.joblib`）は無変更．
+  3. history_culture_recallの退行チェックは必須．
+  4. **evalデータセットのtrain/eval不一致リスク**: history_cultureからjapanese_civicsをeducationへ再割当した場合、evalのeducation行は旧proxyタスクのままになるため、**同様の崩壊が再発する可能性が高い**．
+- **失敗した場合の次の一手**:
+  1. education_recallの基準値（medical_recall 0.5112）の再検討（人間判断必要）
+  2. education固有のタスクをJMMLU外部から追加（手作業コスト大）
+  3. Y2（dispatch_candidate_threshold）着手前の下調べ（調査フェーズ）
+- **要レビュー**: (1) Y2（`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認は引き続き必要（B49〜B52既存項目）．(2) fallback設計思想の論文上の位置付け（B48）も未解決．(3) D5（`data/`/`models` のバージョン管理方針）も未解決．(4) education_recallの基準値再検討は人間判断が必要．
+
+---
+
+## B57 [auto-decided 2026-08-01] Iter36 の単一レバー: education_proxy_task_replacement (japanese_civicsへの置換)
+
+- 状況: Iter35（handmade 50件追加）はrejected確定。config.ymlの全leversを試し切った。
+  rc-investigator（Iter36調査フェーズ）はjapanese_civics（公民，JMMLU固有150件）が
+  educationのproxyタスクとして最も有望と判定した。
+- **自動選択**: 単一レバーを
+  `classifier_training_data_composition=education_proxy_task_replacement`とする。
+  `iteration_name` は「education代理タスクをjapanese_civicsへ置換による訓練データ構成変更」．
+- **選定理由**:
+  1. rc-investigatorが調査した代替タスク候補の中で，japanese_civicsがeducation実務（学校教育行政）
+     との意味的整合性が最も高い（教育基本法，学校管理，教育委員会を含む可能性）
+  2. 単一レバー原則の範囲内で実装可能（2ファイルの `_DOMAIN_TASK_MAP["education"]` 値変更のみ）
+  3. 大規模な新規実装（research_frontier相当）ではない
+  4. 埋め込みモデルのファインチューニング（第二候補）はコスト中（1-2日）かつ分類器再訓練が必要
+- **history_cultureへの影響**: japanese_civicsをhistory_cultureから除外すると，
+  history_cultureは7タスク（japanese_history, high_school_european_history, prehistory,
+  japanese_idiom, japanese_geography, high_school_geography, world_history）になる。
+  各タスク150件（計約1050件）から150件をサンプリングするため，行数は150→150で不変。
+  意味的特徴の大幅な変化はないと推測されるが，history_culture_recallの退行チェックは必須。
+- **変更ファイル**:
+  1. `build_dataset.py` line 97-101: `_DOMAIN_TASK_MAP["education"]` を `["japanese_civics"]` へ
+  2. `prepare_lora_training_data.py` line 42: 同様の編集
+- **追加変更**: `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES` の更新（educationのタスクが1つになるため，
+  空辞書にするか japanese_civics のみ残す。`assert sum(...) == _DOMAIN_TARGET_SIZE` のアサーションが
+  成立することを確認）
+- **留保**: japanese_civicsの内容（実際の質問）を直接確認できていない。計画フェーズでJMMLU.zipから
+  japanese_civicsのCSVを抽出し，教育行政相关内容が含まれるか確認する必要がある。
+
+---
+
 ## B56 [auto-decided 2026-08-01] Iter35 は rejected で確定．config全levers試し切り完了，次イテレーションは調査フェーズへ
 
 - 状況: Iter35（classifier_training_data_composition=education_handmade_training_problems，
