@@ -163,7 +163,7 @@
   "last_slack_ts": "1785508468.260749",
   "iteration_thread_ts": "1785508417.686489",
   "notion_toggle_created": true,
-  "last_commit": "3cc63c2",
+  "last_commit": "c28a5ee",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,
