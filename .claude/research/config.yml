@@ -200,7 +200,7 @@ levers:
   #     自律着手不能のため次点として選定．config.yaml/公開APIの変更を伴わないデータのみの
   #     変更で着手できる（スキーマ変更なし，ユーザー確認不要） ---
   - {name: classifier_training_data_composition,
-     values: [education_proxy_task_revision, education_proxy_task_resampling],
+     values: [education_proxy_task_revision, education_proxy_task_resampling, education_handmade_training_problems],
      note: "[2026-07-31 d0004 §5 Y5 / d0003 X8 / backlog B52・B53]
             【2026-07-31 Iter32考察・backlog B53で追記】`education_proxy_task_revision`
             （弱い代理タスクhigh_school_psychology・moral_disputesへの`sample_weight=2.0`）は
@@ -237,6 +237,14 @@ levers:
             背景には，「教育ドメインの代理タスクが本質的にeducationの意味的ギャップを抱えて
             いる」という根本原因がある．抽出比率の変更という表面的な最適化ではこの根本原因に
             対処できない．案Aはconfig.yml noteでbacklog B53が既に例示済み．
+            【2026-08-01 Iter34考察・backlog B55で追記】`education_proxy_task_resampling`の
+            第二候補（案A: sociology=90/high_school_psychology=30/moral_disputes=30）は
+            **rejected（確定）**。education_recall 0.4353 < medical_recall基準 0.5112（75.59pt
+            ギャップ），McNemar p=0.0725 で top1_accuracy の有意改善なし．education_recallは
+            Iter31比で-6.47pt，Iter33比でも-0.59ptの低下．案Aはsociologyのpool cap（94）を
+            95.7%使い切るため，resampling系余地は尽きた（残り4件）．3連投（Iter32, 33, 34）で
+            resampling系レバーは尽きたと確定．次はeducation固有の手作り訓練問題の追加へ
+            切り替える．
             【Iter31時点でスコープを絞り込み
             済み】d0003 X8はeducation・legal双方のデータ不均衡是正を対象としていたが，Iter31の
             実測（journal.md「考察 (Iter31)」節）でlegalは既にX8の成功条件（他ドメイン下限
@@ -270,7 +278,17 @@ levers:
             較正手法はtemperatureのまま固定する）．
             **コスト**: d0003 X8の見積りで1〜3日（代理タスクレビュー・置換候補の選定・
             必要なら手作り問題の追加）．オフラインで完結し実機1600問本走はY4同様に不要
-            （分類器再訓練＋既存evaluate_classifier_calibration.pyでの再評価のみ）"}
+            （分類器再訓練＋既存evaluate_classifier_calibration.pyでの再評価のみ）．
+            **education_handmade_training_problems（Iter35追加）**: resampling系レバーは尽きた
+            （backlog B55）ため，education固有の手作り訓練問題を追加する．
+            **必須条件**: 4択形式（A/B/C/D）を保つこと．書式 shortcuts リスク（Iter32調査で確認）
+            により，自由記述文を追加すると分類器が「A/B/C/Dの有無」をeducationの書式手がかりと
+            学習する．手作り問題もJMMLU形式の4択にする．
+            **テーマ**: 教育行政実務（学校事故責任，生徒健康管理，アレルギー対応，懲戒処分等）．
+            `build_dataset.py`の手作り複合設問（_COMPOUND_QUESTIONS）と同様の手法で追加．
+            **初期数**: 50件（Iter35計画フェーズで確定）．
+            **成功条件**: education_recallがmedical_recall基準（0.5112）を上回ること．
+            **非退行**: 他9ドメイン18指標のBH補正後有意退行0件．"}
 
   # --- Y2/Y3: Y2（コード変更・要ユーザー確認）を終えるまで Y3 に着手してはならない ---
   - {name: aggregation_method, values: [majority_vote, llm_judge],

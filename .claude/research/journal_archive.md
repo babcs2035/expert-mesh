@@ -1,3 +1,778 @@
+## Iteration 31: 分類器較正のtemperature scaling方式によるargmax不変性の実証とECE目標到達可否の検証
+
+### 調査 (Iter31)
+
+**問い**:
+1. 本リポジトリの base estimator（`LogisticRegression(max_iter=1000, class_weight='balanced')`）に
+   対して `CalibratedClassifierCV(method='temperature')` を使うと，sklearn は
+   `decision_function`（ロジット）を経由するのか，`predict_proba` の対数近似を使うのか．
+2. `class_weight='balanced'` は temperature の「argmax 不変」という理論保証を壊す余地があるか．
+3. Iter30 で確立した非退行チェック手順（BH補正 q=0.05・recallはドメイン別McNemar・precisionは
+   Fisher正確検定・20指標）は temperature でもそのまま再利用可能か．
+4. `cv`・`ensemble` パラメータは Platt/isotonic（`cv=5, ensemble=True`）と同じ設定を踏襲すべきか．
+
+#### 分かったこと
+
+**(1) `decision_function` 経路が使われることをソースコードで直接確認 — 一次情報**
+
+本リポジトリの実行環境（`.venv/lib/python3.12/site-packages/sklearn/calibration.py`，
+`scikit-learn==1.9.0`）を `Read` で直接確認した。
+
+- `_fit_calibrator()`（687-749行）は `method == "temperature"` の分岐で
+  `calibrator = _TemperatureScaling(); calibrator.fit(predictions, y, sample_weight)` を呼ぶ。
+  この `predictions` は `CalibratedClassifierCV.fit()` 内で
+  `_get_response_values(estimator, X, response_method=["decision_function", "predict_proba"])`
+  （`decision_function` を優先するリスト順）から得られており，`LogisticRegression` は
+  `decision_function` を実装しているため，**実際に使われるのは
+  ロジット（`w^T x + b`，多クラスなので `(n_samples, n_classes)` 形状）そのものであり，
+  `predict_proba` の対数近似は使われない**。
+- `_TemperatureScaling.fit()`（1077-1181行）の docstring に「If the input appears to be
+  probabilities (i.e., values between 0 and 1 that sum to 1 across classes), it will be
+  converted to logits using `np.log(p + eps)`」と明記されている。`_convert_to_logits()`
+  （954-983行）はこの判定を行うヘルパーだが，`LogisticRegression.decision_function()`
+  の出力は確率ではなくロジットそのもの（0-1に収まらず合計も1にならない）ため，この
+  変換は発火せず，ロジットがそのまま `raw_prediction = exp(log_beta) * logits` として
+  multinomial loss（`HalfMultinomialLoss`）の最小化に使われる（`log_beta` を
+  `scipy.optimize.minimize_scalar`で`bounds=(-10.0, 10.0)`の範囲で最適化）。
+  `beta_ = exp(log_beta*)` が「逆温度」であり `T = 1/beta_`。
+
+**(2) `class_weight='balanced'` はロジット自体の値には影響するが，temperature の
+argmax 不変性を壊す経路にはならない**
+
+`class_weight='balanced'` は `LogisticRegression.fit()` 内の損失関数の重み付けにのみ影響し，
+学習後の `decision_function()` は単なる固定の線形写像 `w^T x + b` である。temperature
+scaling は，この**固定されたロジットベクトル全体**を単一スカラー `1/T` 倍してから softmax を
+取るだけの変換であり，`class_weight` がどうロジットの値そのものを決めたかとは独立に，
+「全クラスに同一の正の定数を掛けて softmax を取る操作は argmax を変えない」という数学的事実
+（`softmax` は単調変換に対して順序不変）がそのまま成立する。実測でも確認した（下記(3)）。
+
+**(3) 実測検証（`uv run python` での合成データ実験，1427件・legal 77件/他150件という
+本リポジトリの訓練データ規模を模した設定）— 新たな重要な留保を発見**
+
+`sklearn.linear_model.LogisticRegression` と `sklearn.calibration.CalibratedClassifierCV` を
+実際に合成データ（10ドメイン，legal 77件・他9ドメイン各150件，32次元の埋め込みを模した
+乱数特徴量）で fit させ，argmax の一致率を直接計測した。
+
+- **fold内（同一 `(estimator, T)` ペア）での argmax 保持は理論通り厳密に 100%**。
+  `ensemble=True` の各 fold について，その fold の base estimator 自身の
+  `decision_function` の argmax と，その fold の temperature 較正後 `predict_proba`
+  の argmax を比較したところ，5 fold 全てで一致率 1.0（0/1427 不一致）だった。
+  sklearn 公式の「T は softmax の argmax の位置に影響しない」という保証は，この
+  「単一の (estimator, T) ペア内」という意味で寸分違わず成立している。
+- **しかし `ensemble=True` では，本番推論時に使われるのは 5 つの異なる fold
+  （80% サブセットで学習した 5 つの異なる `LogisticRegression`，かつ 5 つの異なる T）の
+  予測確率の平均であり，全データで学習した単一モデルとの比較では非ゼロの flip が生じる**。
+  合成データでの実測: `method='temperature', ensemble=True` で
+  全データ学習の単一 base estimator との argmax 不一致 16/1427（1.12%）。
+  同条件で `method='sigmoid'` は 55/1427（3.85%），`method='isotonic'` は 60/1427（4.20%）。
+  **この非ゼロ flip の原因は temperature の較正曲線の歪みではなく，
+  `ensemble=True` 自体が持つバギング的な平均化効果（5 つの異なるサブセットで学習した
+  分類器の予測を平均する）であり，sigmoid/isotonic にも共通する構造である**。ただし
+  temperature は per-class の曲線歪みという追加の誤差源を持たないため，同じ
+  `ensemble=True` 条件でも isotonic/sigmoid よりこの合成データで一貫して小さい。
+- **`ensemble=False` にすると，temperature は理論通り厳密に 0% の flip（0/1427）を
+  達成した**。この設定では本番推論に使われる base estimator は全データで学習した単一
+  モデルであり（サブセット学習の平均化がない），T も CV による out-of-fold 予測から
+  1 つだけ学習されて，その単一モデルの固定ロジットに適用される。一方，同じ
+  `ensemble=False` でも `sigmoid`（2.87%不一致）・`isotonic`（5.19%不一致）は依然として
+  非ゼロだった（OvR 事後正規化由来の歪みは `ensemble` の設定と無関係に残る）。
+- sklearn 公式のリリースノート（1.8, `tavily-extract`で直接取得）が示す temperature
+  scaling の使用例は `CalibratedClassifierCV(clf, method="temperature", ensemble=False)`
+  であり，`ensemble=False` を使うサンプルコードになっている。ただし本リポジトリの
+  Iter29（Platt）・Iter30（isotonic）はいずれも `cv=5, ensemble=True` で実施済みであり，
+  config.yml のレバー note は「temperatureも同条件を踏襲する」ことを既定の想定として書いている。
+
+**(4) Iter30 の非退行チェック手順（BH補正・McNemar・Fisher）はそのまま再利用可能。
+isotonic特有チェックリストは temperature には構造的に該当しない**
+
+- BH補正付き 20 指標非退行チェック（recall=ドメイン別McNemar，precision=Fisher，
+  計 20 個の p 値へ BH q=0.05）は手法に依存しない一般的な統計手続きであり，
+  temperature でも変更なくそのまま使える。
+- Iter30 のisotonic特有チェックリスト（(a) 確率の厳密な0/1張り付き，(b) 全クラス0.1の
+  uniform fallback，(c) tie率）は，temperature の実装構造上そもそも発生しない。
+  `_CalibratedClassifier.predict_proba()`（833-843行）の `method == "temperature"` 分岐は
+  `proba = self.calibrators[0].predict(predictions)` で softmax の出力をそのまま使うため，
+  isotonic/sigmoid のような「クラスごとの計算結果を後から正規化し，分母が0ならuniform
+  fallbackする」という経路（810-832行）を一切通らない。softmax は有限のロジット入力に対し
+  厳密に0や1にはならず（`exp` の値は常に正），tie も理論上は浮動小数点の偶然の一致でしか
+  起こらない。したがって temperature ではこの3チェックは「必ず該当なし」になる見込みが高く，
+  報告項目として残す価値は低い（形だけ算出して0件であることを確認する程度で十分）。
+- Iter30 で判明した `medical_recall` 系統的圧縮（isotonic較正曲線がmedicalクラス固有に
+  確率の天井を下げていた）は，temperature が単一スカラーで全ドメイン共通の変換しかしない
+  構造上，**再現しないと理論的に予想される**が，逆に言えば temperature は medical だけを
+  選択的に補正することもできない。ある特定ドメインの較正だけがずれている場合，temperature
+  はそのドメインを狙って直すことはできず，全体の log loss を最小化する単一の T に丸め込む
+  （config.yml note の留保どおり）。
+
+**出典**:
+- ローカル実行環境の直接確認: `.venv/lib/python3.12/site-packages/sklearn/calibration.py`
+  （`_fit_calibrator`687-749行，`_CalibratedClassifier.predict_proba`781-847行，
+  `_TemperatureScaling.fit/predict`1068-1230行，`_convert_to_logits`954-983行）を
+  `Read`・`grep` で直接確認（2026-07-31実施，一次ソース）。
+- `uv run python` での合成データ実測（10ドメイン，legal 77件/他150件を模した規模，
+  32次元乱数特徴量，`method in {sigmoid, isotonic, temperature}` × `ensemble in {True, False}`
+  の argmax 一致率比較）。本セッションで実施，再現可能。
+- https://scikit-learn.org/stable/auto_examples/release_highlights/plot_release_highlights_1_8_0.html
+  （`tavily-extract`で直接取得。「Temperature scaling in CalibratedClassifierCV」節，
+  `ensemble=False`を使うサンプルコード，「particularly well suited for multiclass problems
+  because it provides (better) calibrated probabilities with a single free parameter」の原文）
+- https://scikit-learn.org/stable/whats_new/v1.8.html （`tavily-search`。
+  「Added temperature scaling method in calibration.CalibratedClassifierCV」の変更履歴，
+  Array API対応の追加も1.8で行われたことの確認）
+- https://scikit-learn.org/stable/modules/generated/sklearn.calibration.CalibratedClassifierCV.html
+  （`tavily-search`。1.9.0時点のAPIリファレンス，`.. versionchanged:: 1.8 Added option
+  'temperature'`の再確認）
+- journal.md「調査 (Iter30)」節（`method='temperature'`の存在確認・sklearn公式ドキュメントの
+  「Tはsoftmaxのargmaxの位置に影響しない」引用は既出のため本イテレーションでは再掲のみ）
+
+#### rc-planner への申し送り
+
+1. **問い1・2は確定的に解消**: `decision_function`（ロジット）経路が使われることをソースコード
+   直接確認・実測の両方で確定した。`class_weight='balanced'`はロジットの値を決めるだけで，
+   temperatureのargmax不変性の理論保証を壊す経路は存在しない。
+2. **問い4（cv/ensemble）に，計画フェーズで判断すべき新しい論点が生じた**。
+   `ensemble=True`（Iter29/30と同一設定）を維持すると，temperatureでも
+   ensemble平均化に起因する非ゼロのflip（合成データで1.12%，isotonic4.20%・sigmoid3.85%より
+   小さいが0ではない）が生じることが判明した。これは「T はsoftmaxのargmaxを変えない」という
+   sklearn公式の理論保証が，**個々の(estimator, T)ペア内では厳密に成立するが，
+   `ensemble=True`によって生成される最終的な推論モデル（5ペアの平均）全体には及ばない**
+   ことを意味する。したがって「temperatureはtop1_accuracy不変が理論的に保証される」という
+   config.yml note・backlog B51の記述は，`ensemble=True`を維持する場合は**厳密には
+   正確ではなく**，「isotonic/sigmoidより小さいが，ゼロではないflipが生じうる」と
+   修正して計画に反映すべきである。
+   - 選択肢 A（推奨）: `cv=5, ensemble=True`をIter29/30と完全に同一のまま維持する。
+     単一レバー原則を「較正手法のみ」に厳密に限定でき，Iter29/30との直接比較可能性が
+     最大になる。ただし成功条件（top1_accuracy非退行・per-domain非退行）の判定基準文言に
+     「temperatureの理論的argmax不変性は個々の fold ペア内の話であり，ensemble平均化に
+     起因する小さな非ゼロflipは想定内である」旨を明記し，isotonicのような「クラス固有の
+     曲線歪み」由来の系統的退行（medical_recallのような）とは区別して解釈する必要がある。
+   - 選択肢 B: `ensemble=False`に変更する（sklearn公式のリリースノートのサンプルコードが
+     使う設定）。この場合argmax不変性が文字通り厳密に成立する（合成データで実測0%）。
+     ただしIter29/30とは`ensemble`パラメータ自体が異なるため，較正手法とensembleの
+     2変数が同時に変わることになり，単一レバー原則の厳密な適用としては説明が要る
+     （「temperatureは1パラメータのみの学習で過学習リスクが本質的に低いため，
+     isotonic/plattで必要だったensemble平均化によるロバスト化が不要」という理屈は立つが，
+     計画書で明示的に正当化すること）。
+   いずれを選ぶにせよ，計画(Iter31)節に「今回のcv/ensemble設定と，Iter29/30との比較可能性
+   への影響」を明記すること。
+3. **非退行チェック手順はIter30のBH補正付き20指標チェック（recall=McNemar，precision=Fisher，
+   BH q=0.05）をそのまま流用してよい**。isotonic特有の3項目チェックリスト（0/1張り付き・
+   uniform fallback・tie率）はtemperatureでは構造的に該当なしと予想されるため，
+   簡略化して「該当0件であることの確認」程度に留めてよい（実験時間の節約になる）。
+4. **medical_recall問題がtemperatureで再現するかどうかは，Y4全体の結論に関わる重要な
+   観察点である**。isotonicのmedical系統的圧縮が「OvR方式のクラス固有曲線歪み」に起因する
+   という Iter30 の結論が正しければ，単一Tしか使わないtemperatureではこの種の系統的圧縮は
+   原理上起こらないはずである。もしtemperatureでも同様の非退行違反が起きた場合，
+   「OvR方式由来ではない別の根本原因（例えばmedicalクラス自体の埋め込み分離の弱さ）」を
+   疑う材料になる。
+5. **ECE改善幅がplatt（0.16751）・isotonic（0.121424）に届かない可能性は，config.yml note
+   どおり留保として残る**。単一Tでは表現力がisotonic/plattより低いため，目標0.150に届かない
+   （platt同様partial）シナリオも十分あり得る。この場合は「per-domain非退行のためには
+   OvR方式の柔軟性を犠牲にできない」という新知見が得られ，次の一手（isotonicの運用調整，
+   例えばmedicalドメインのみ較正を無効化する等）を検討する材料になる（backlog B51要レビュー
+   (1)がすでに示唆済み）。
+
+---
+
+### 計画 (Iter31)
+
+**仮説**: `scripts/train_domain_classifier.py:train_classifier()` の較正手法を `method="isotonic"`
+（Iter30，partial：ECE目標達成もmedical_recallがBH補正後有意悪化）から `method="temperature"`
+へ切り替えると，単一スカラーTでロジット全体を変換する構造上，isotonic/plattのOvR方式由来の
+クラス固有曲線歪み（medical_recall悪化の疑わしい原因，Iter30考察）が構造的に排除され，
+per-domain非退行が成立する。一方，temperatureは表現力がisotonic/plattより低いため，ECE改善幅が
+isotonic（0.121424）はもとよりplatt（0.16751，目標未達実績）にも届かず，目標0.150未達となる
+可能性が留保として残る（config.yml note・backlog B51要レビュー(1)）。
+
+**単一レバー**: `classifier_calibration`（`.claude/research/config.yml` のレバー，150行目）。
+今回試す値は `values: [platt, isotonic, temperature]` のうち **`temperature` のみ**
+（backlog B51の自動選択）。これで config.yml 登録済みの3値をすべて試したことになる。
+
+**cv/ensemble設定の決定（調査(Iter31)申し送り2の選択肢A/Bのいずれかを選ぶ）**:
+
+**選択肢A（`cv=5, ensemble=True`，Iter29/30と完全同一）を採用する**。理由:
+
+1. 単一レバー原則を「較正手法のみ」に厳密に限定できる。`cv`・`ensemble`を較正手法と同時に
+   変えると2変数が同時に動き，ECE・flip rate・per-domain結果の変化が較正手法の違い由来か
+   ensemble設定の違い由来か切り分けられなくなる。今回のY4の核心的な問いは「isotonic/plattとの
+   直接比較の下でtemperatureがmedical_recall問題を回避しつつECE目標に届くか」であり，
+   Iter29・Iter30との比較可能性の維持そのものがこのイテレーションの価値の大部分を占める。
+2. 調査(Iter31)の実測で明らかになった`ensemble=True`由来の非ゼロflip（合成データで1.12%）は，
+   5 fold間のバギング的平均化という手法非依存の一般的機序に起因し，isotonic/plattが抱える
+   「OvR方式のクラス固有曲線歪み」（medical_recall悪化の疑わしい原因）とは異なる機序である。
+   したがってこの程度のflipは，medical_recallのような系統的・ドメイン固有の退行の温床には
+   ならないと考えられ，「temperatureはOvR由来のクラス固有歪みを構造的に持たない」という
+   本イテレーションが検証したい理論的主張の意義を損なわない。
+3. sklearn公式リリースノートの`ensemble=False`サンプルコードは「temperatureの使い方の一例」に
+   過ぎず，本リポジトリがIter29・Iter30で確立した比較条件を犠牲にしてまで踏襲すべき規範とは
+   判断しない。
+4. 選択肢B（`ensemble=False`）を取らない理由: 較正手法とensembleの2変数が同時に変わり，
+   「temperatureが優れているのか，ensemble平均化を止めたことが効いたのか」を切り分けられなく
+   なる。仮にtemperatureがper-domain非退行を達成しても，isotonic/plattでも`ensemble=False`に
+   すれば同様に改善した可能性を排除できず，Y4全体の結論（較正手法としてのtemperatureの優位性）
+   が弱まる。
+
+**成功条件の解釈への反映（調査(Iter31)申し送り2が要求した文言）**: temperatureの理論的argmax
+不変性（sklearn公式が保証する「Tはsoftmaxのargmaxの位置に影響しない」）は，個々の
+`(estimator, T)` ペア内で厳密に成立する事実であり，`ensemble=True`による5fold平均化に起因する
+小さな非ゼロflip（合成データ実測1.12%，isotonic4.20%・sigmoid3.85%より小さいが0ではない）は，
+この理論保証が主張する範囲の外側にある，想定内の挙動として扱う。したがって今回の実測で
+flip_rateが完全に0%でないこと自体は失敗ではない。成功条件2・3（下記）の判定はあくまで
+統計的検定（McNemar／Fisher／BH補正）の結果で行い，「flipが0でないから理論違反」という
+短絡的な解釈はしない。
+
+**固定する構成（Iter29/30と完全に同一，`config.yaml`は一切変更しない）**:
+`routing_method=supervised_classifier`，`confidence_threshold=0.0`・`dispatch_top_k=1`・
+`aggregation_method=max_confidence`（Iter28 adopted構成），`confidence_signal_method=self_report`，
+`confidence_elicitation=top_k_with_probs`，`expert_model=expert-mesh-{domain}-lora`
+（domain_count=10），`light_model=qwen3.5:4b-q4_K_M`，`embedding_model=nomic-embed-text`，
+評価データセットはIter25以降固定の1600問（`data/dataset.jsonl`）。訓練データも
+`data/classifier_train.jsonl`（1427件，legal 77件・他9ドメイン各150件）でIter29/30と同一。
+`CalibratedClassifierCV`の`cv=5`・`ensemble=True`もIter29/30と同一（上記選択肢A）。
+**今回変更するのは`train_classifier()`内の較正手法（`_CALIBRATION_METHOD`定数の値）のみであり，
+`config.yaml`のキーは1つも変えない。**
+
+**変更ファイル・行**:
+
+1. `scripts/train_domain_classifier.py`
+   - `_CALIBRATION_METHOD = "isotonic"`（64行）→ `"temperature"`に変更。`_CALIBRATION_CV = 5`
+     （65行）は無変更。`ensemble=True`（`train_classifier()`117-120行の
+     `CalibratedClassifierCV(...)`呼び出しにハードコード）は無変更のまま維持する（上記
+     選択肢Aの実装上の反映箇所，これ自体は変更しない）。
+   - `_CALIBRATION_METHOD`直上のコメント（45-63行付近，isotonicを選んだ理由の説明）を，
+     temperatureを選ぶ理由（Iter30のisotonicがmedical_recallのBH補正後有意悪化でpartial判定・
+     backlog B51の自動選択）と，調査(Iter31)が確認した構造上の利点（単一スカラーTでロジット
+     全体を変換するためクラスごとの個別較正器を持たず，OvR方式由来のクラス固有曲線歪みを
+     構造的に排除する）に更新する。cv/ensembleを維持する理由（比較可能性優先，上記選択肢Aの
+     要約）も一言追記する。
+   - モジュール冒頭docstring（1-5行）の`Iter30, classifier_calibration=isotonic`を
+     `Iter31, classifier_calibration=temperature`に更新する。
+   - `train_classifier()`のdocstring（95-116行付近）を`method="temperature"`の説明に更新する。
+     isotonic特有の注意点（tie・0/1張り付き・uniform fallback）への言及は，調査(Iter31)
+     分かったこと(4)よりtemperatureの実装構造上「該当しない」旨に置き換える。
+   - 出力アーティファクト名は`models/domain_classifier_temperature.joblib`（isotonic版
+     `models/domain_classifier_isotonic.joblib`・platt版
+     `models/domain_classifier_platt.joblib`とは別名で新規生成，本番
+     `models/domain_classifier.joblib`は上書きしない）。
+   - `tests/test_train_domain_classifier.py`はisotonic特有のアサーションを含んでおらず
+     （確認済み，`grep`でisotonic/`_CALIBRATION_METHOD`への直接参照なし），`method`の変更が
+     `StratifiedKFold`の分割条件に影響しないため無変更で通る見込み（実装フェーズで実行して
+     確認する）。
+
+2. `scripts/evaluate_classifier_calibration.py`: **変更不要**。`probabilities`フィールド
+   （10ドメイン全ての確率）はIter30で既に追加済みであり，temperature特有チェックリスト
+   （下記手順7）にもそのまま使える。
+
+3. `metrics.py`: **変更不要**。`compute_domain_recall_mcnemar_test`・
+   `compute_domain_precision_fisher_test`・`apply_benjamini_hochberg`はIter30で実装済みで，
+   手法非依存の統計手続きのためそのまま再利用する。
+
+4. `tests/test_metrics.py`: 変更不要（Iter30で追加したテストは手法非依存のため，そのまま
+   有効）。
+
+**評価手順（Iter30の手順1-8をそのまま踏襲し，モデル名・出力ファイル名のみ変更）**:
+
+1. 新分類器の学習: `uv run python -m scripts.train_domain_classifier --train-data
+   data/classifier_train.jsonl --embedding-model nomic-embed-text --ollama-host <live node>
+   --output models/domain_classifier_temperature.joblib`（Iter29/30と同じくライブなollama
+   ノード1台へのembeddingのみ）。
+2. 「較正前」データはIter29/30と同一の`results/20260731_162722/results.jsonl`（Iter28実測，
+   fallback 0/1600）をそのまま使う。**再実行しない**（3イテレーションを同じ較正前基準で
+   揃えて比較可能にするため）。
+3. 「較正後」データは`scripts/evaluate_classifier_calibration.py`で1600問を再embeddingし，
+   `--classifier models/domain_classifier_temperature.joblib --output
+   results/iter31_calibrated_predictions.jsonl`として生成する。
+4. `metrics.py:compute_ece(n_bins=10)`を較正前・較正後の両方に同一のbin設定で適用し，ECEを
+   比較する（較正前基準0.19336はIter29/30から流用，再計算しない）。
+5. top1_accuracyを較正前・較正後で算出し，新旧の正誤ペアで`compute_mcnemar_test`（全体，
+   α=0.05）を行う（Iter29/30の手順5と同一）。
+6. **per-domain非退行チェック（Iter30で確立した3段構成をそのまま踏襲）**: 全10ドメインに
+   ついて，(a) recallは`compute_domain_recall_mcnemar_test`（計10検定），(b) precisionは
+   `compute_domain_precision_fisher_test`（計10検定）を実施し，計20個のp値を集めて
+   `apply_benjamini_hochberg(p_values, q=0.05)`を一括適用する。adjusted有意かつ方向が悪化
+   （較正後の点推定<較正前の点推定）である指標のみを「統計的に有意な退行」と判定する。
+7. **temperature特有の実装確認（調査(Iter31)申し送り3により簡略化）**: 較正後の1600行に
+   ついて，(a)確率のいずれかが厳密に`0.0`または`1.0`になっている行数，(b)10クラス全てが
+   `0.1`に近いuniform fallback行数，(c)tie率の3点を，Iter30と同じ定義で算出するが，
+   構造上いずれも「該当0件」になると予想されるため，legalドメイン個別集計などの詳細内訳は
+   省略し，3点とも「該当0件であることの確認」に留める簡易報告とする（実験時間の節約）。
+   もし予想に反して非ゼロの値が出た場合は，簡易報告に留めず詳細を追加報告すること。
+8. 新旧classifierのargmax不一致件数（flip rate）をIter29/30と同じ定義で報告し，
+   Iter29（platt，ensemble=True，11.0%）・Iter30（isotonic，ensemble=True，14.3125%）と比較する
+   （必須報告項目，判定基準ではない）。
+
+**成功条件（d0003 X9．AND条件．cv/ensemble選択に応じた解釈の但し書きを追加）**:
+
+1. ECE（手順2・4，較正前基準0.19336に対する較正後の値，`n_bins=10`）が**0.150以下**であること。
+2. top1_accuracy（手順5）が旧分類器（Iter28実測0.585）に対しMcNemar検定で有意に悪化していない
+   （p>=0.05，または新側が改善方向）こと。
+3. **per-domain非退行（手順6，Iter30と同一の3段構成）**: 20指標（10ドメイン×precision/recall）
+   のp値へBH補正（q=0.05）を適用した結果，adjusted有意かつ悪化方向の指標が**0件**であること。
+4. **【但し書き，調査(Iter31)申し送り2】** 条件2・3の判定において，`ensemble=True`に起因する
+   合成データ実測1.12%程度の非ゼロargmax flipは，それ自体を理由に条件2・3を不成立とはしない。
+   これは個々の`(estimator, T)`ペア内で厳密に成立する理論的argmax不変性が主張する範囲の外側
+   （5fold平均化という別の機序）であり，判定はあくまで統計的検定（McNemar／Fisher／BH補正）の
+   結果に基づく。もし条件2・3が実際に不成立になった場合，分析(解釈)フェーズでその原因が
+   「ensemble平均化由来の偶発的再配分」なのか「temperature特有の別の機序（単一Tへの丸め込み
+   によるドメイン固有のトレードオフ）」なのかを切り分けて報告すること。
+5. 手順7のtemperature特有チェックリスト（簡易報告）とflip rate（手順8）は，成功・失敗の
+   判定基準ではなく必須報告項目として記録する。
+
+**目標未達時の次点候補（次イテレーション向けメモ，今回の計画には含めない）**: config.ymlの
+`classifier_calibration`レバーは`platt`・`isotonic`・`temperature`の登録済み3値を今回で
+使い切ることになる。仮に3手法いずれもd0003 X9のAND条件を満たせない場合，次の一手は
+較正手法そのものの追加候補ではなく，運用的な対処（例：medicalドメインに限定して較正を
+無効化する，ドメイン別に異なる較正手法を組み合わせる等）になる可能性が高い（backlog B51
+要レビュー(1)がすでに示唆済み）。この判断は本計画の範囲外とし，次イテレーションのrc-reflector
+に委ねる。
+
+**人間判断が必要な論点**: 新規追加なし。Y2（`confidence_threshold`の二重責務分離，スキーマ
+変更）着手前のユーザー確認はbacklog B49・B50・B51の既存の申し送りのまま。較正済み分類器の
+本番反映可否も，temperatureが成功条件（本計画の1-3すべて）を満たした場合に改めてその時点で
+判断する（今回のイテレーションで本番アーティファクトを置き換える判断は行わない）。
+
+---
+
+### 実装 (Iter31)
+
+計画どおり単一レバー（`classifier_calibration=temperature`）のみを実装した．`config.yaml` は
+変更していない（`git diff --stat -- config.yaml` が空であることを確認済み）。
+
+**変更ファイル**:
+
+1. `scripts/train_domain_classifier.py`
+   - `_CALIBRATION_METHOD = "isotonic"` → `"temperature"` に変更。`_CALIBRATION_CV = 5` は無変更。
+     `ensemble=True`（`train_classifier()`内`CalibratedClassifierCV(...)`呼び出しにハードコード）
+     も計画どおり無変更で維持した（選択肢A，比較可能性優先）。
+   - `_CALIBRATION_METHOD`直上のコメントを，temperatureを選ぶ理由（Iter30のisotonicが
+     medical_recallのBH補正後有意悪化でpartial判定・backlog B51の自動選択）と，
+     調査(Iter31)が確認した構造上の利点（単一スカラーTでロジット全体を変換するため
+     クラスごとの個別較正器を持たず，isotonic/PlattのOvR方式由来のクラス固有曲線歪みを
+     構造的に排除する）に更新し，cv/ensembleを維持する理由（較正手法のみを単一レバーとして
+     切り分けるための比較可能性優先，Iter29/30と同一条件）も追記した。
+   - モジュール冒頭docstringの`Iter30, classifier_calibration=isotonic`を
+     `Iter31, classifier_calibration=temperature`に更新した。
+   - `train_classifier()`のdocstringを`method="temperature"`の説明に更新し，isotonic特有の
+     注意点（tie・0/1張り付き・uniform fallback）への言及を，「temperatureの実装構造上
+     該当しない」旨に置き換えた。呼び出し側は引き続き手順7でチェックするが，リスクとしてでは
+     なく「0件であることの確認」として扱う旨を明記した。
+   - 出力アーティファクト名（`--output`の既定値）は変更していない
+     （`models/domain_classifier.joblib`のまま）。Iter29/30と同じパターンで，実験フェーズでの
+     実行時に`--output models/domain_classifier_temperature.joblib`をCLI引数で明示指定する
+     ことで本番アーティファクトを上書きしない運用とする（スクリプト側の既定値変更は不要）。
+2. `scripts/evaluate_classifier_calibration.py`: 計画どおり変更不要と確認した。
+   `predict_calibrated_rows()`が返す`probabilities`フィールド（Iter30で追加済み，10ドメイン
+   全ての確率）はtemperatureの実装確認（手順7）にもそのまま使えることをコード読解で確認した。
+3. `metrics.py`: 計画どおり変更不要と確認した。`compute_domain_recall_mcnemar_test`
+   （282行）・`compute_domain_precision_fisher_test`（318行）・`apply_benjamini_hochberg`
+   （367行）がIter30で実装済みであることを`grep`で確認した。手法非依存の統計手続きのため
+   そのまま再利用する。
+4. `tests/test_train_domain_classifier.py`: isotonicや`_CALIBRATION_METHOD`への直接参照が
+   ないことを`grep`で確認した上で無変更のまま実行し，pass することを確認した。
+
+**テスト結果**: `uv run pytest -q` → 218 passed, 2 skipped（Iter30時点と同数，既存のスキップ
+2件は本変更と無関係）。
+
+**lint**: `uv run ruff check .` → 2件のエラー（`scripts/prepare_lora_training_data.py`のF541・
+未使用import）が残るが，これはIter29から既知の本変更と無関係な既存差分であることを
+`uv run ruff check scripts/train_domain_classifier.py`単体で"All checks passed!"となることで
+確認した（単一レバー原則に従い今回も触っていない）。
+
+**config.yaml の確認**: `git diff --stat -- config.yaml`が空であることを確認し，一切変更して
+いないことを確認した。
+
+**実験を開始してよい状態か**: はい。コード変更は完了し，テスト・lintとも整合。フェーズ4では，
+(1) `scripts/train_domain_classifier.py`で`models/domain_classifier_temperature.joblib`を
+1台のライブollamaノードへのembedding呼び出しで新規生成（本番`models/domain_classifier.joblib`
+は上書きしない），(2) `scripts/evaluate_classifier_calibration.py`で1600問を再embeddingして
+較正後の予測JSONL（`probabilities`フィールド付き）を`results/iter31_calibrated_predictions.jsonl`
+として生成，(3) `metrics.py`の既存関数群で較正前（`results/20260731_162722/results.jsonl`，
+再実行不要）と較正後を比較し，成功条件1-3（ECE≤0.150・McNemar非退行・per-domain 20指標への
+BH補正非退行）と必須報告項目（temperature特有チェックリスト・flip rate）を実測すればよい。
+
+---
+
+### 実験・分析(実行) (Iter31)
+
+計画どおり実機1600問本走は行わず，既存のSSHローカルポートフォワード（`127.0.0.1:11435 ->
+wafl500:11434`，`ssh -fNT -L 11435:localhost:11434 wafl500`，Iter29/30から起動済みのプロセスを
+そのまま流用．事前に`curl http://127.0.0.1:11435/api/tags`で疎通確認済み）経由のembedding呼び出し
+のみで較正前後の比較データを揃えた．LLM生成・probe・dispatchは一切発生していない．
+
+**手順1: 新分類器の学習**
+
+```
+uv run python -m scripts.train_domain_classifier \
+  --train-data data/classifier_train.jsonl \
+  --embedding-model nomic-embed-text \
+  --ollama-host 127.0.0.1 --ollama-port 11435 \
+  --output models/domain_classifier_temperature.joblib
+```
+
+標準出力: `[train_domain_classifier] wrote models/domain_classifier_temperature.joblib
+(n_samples=1427, classes=[...10ドメイン...])`．実行時間124.55秒（`time`実測，Iter29のPlatt
+124.09秒・Iter30のisotonic126.51秒とほぼ同水準）．`models/domain_classifier_temperature.joblib`
+を新規生成し，本番`models/domain_classifier.joblib`のタイムスタンプ（Jul 27 16:08）が今回の実行後
+も変化していないこと（＝上書きされていないこと）をファイルシステム上で確認した．
+
+**手順3: 較正後データ生成**
+
+```
+uv run python -m scripts.evaluate_classifier_calibration \
+  --dataset data/dataset.jsonl \
+  --classifier models/domain_classifier_temperature.joblib \
+  --embedding-model nomic-embed-text \
+  --ollama-host 127.0.0.1 --ollama-port 11435 \
+  --output results/iter31_calibrated_predictions.jsonl
+```
+
+標準出力: `[evaluate_classifier_calibration] wrote 1600 rows
+(classifier=models/domain_classifier_temperature.joblib)`．実行時間141.56秒．出力JSONLは
+計画どおり`probabilities`フィールド（10ドメイン全ての確率）付きで1600行生成された．
+
+**手順2**: 較正前データは計画どおり`results/20260731_162722/results.jsonl`（Iter28実測，fallback
+0/1600）を再実行せずそのまま使用．新旧2ファイルの`id`集合が完全一致することを確認済み
+（`{r["id"] for r in before} == {r["id"] for r in after}`が`True`）．
+
+**異常の有無**: なし．両スクリプトとも例外・タイムアウト・リトライなく正常終了した．実機呼び出し
+はwafl500（192.168.15.100:11434）へのembeddingのみ（`nomic-embed-text`，計3027回：1427+1600），
+LLM生成・probe・dispatchは一切発生していない．総所要時間は266.11秒（約4.4分，`timeout_min:150`
+に対し十分余裕あり）．
+
+`metrics.py`の既存関数（`compute_ece`／`compute_top1_accuracy`／`compute_mcnemar_test`／
+`compute_precision_recall_per_domain`）と既存3関数（`compute_domain_recall_mcnemar_test`／
+`compute_domain_precision_fisher_test`／`apply_benjamini_hochberg`，いずれもIter30で実装済みで
+変更なし）を呼ぶ一時スクリプト（`/tmp/iter31_analysis.py`，非永続）で較正前
+（`results/20260731_162722/results.jsonl`）と較正後（`results/iter31_calibrated_predictions.jsonl`，
+各1600行）を比較した（判定はここでは行わず，数値のみを機械的に集計する）．
+
+**手順4: ECE（`n_bins=10`で統一）**
+
+- 較正前: **0.193357556998477**（`state.json`の`e29_results.ece_before`／`e30_results.ece_before`と
+  同一値，再計算不要のところ実測でも一致することを確認）
+- 較正後: **0.07120101725284995**
+- 改善幅: 0.122157（較正前→較正後で減少，改善方向）
+- 0.150との比較: 較正後0.0712 < 0.150（platt 0.16751・isotonic 0.12142より大幅に低い．目標
+  0.150に対し余裕7.88pt，isotonicの2.86ptを大きく上回る）
+
+**手順5: top1_accuracy（1600問，`expected_domains`との一致率）**
+
+- 較正前: 0.585000（Iter28実測と同一値）
+- 較正後: 0.605625
+- 差分: +0.020625（較正後が高い，Iter29 platt +0.010625・Iter30 isotonic +0.008750より改善幅が大きい）
+
+**手順5: McNemar検定（全体，対応のある2条件比較，較正前=A・較正後=B，連続性補正あり）**
+
+- discordant_a_only（較正前のみ正解）: 30
+- discordant_b_only（較正後のみ正解）: 63
+- discordant_pairs（合計）: 93
+- chi2_statistic: 11.010752688172044
+- p_value: **0.0009058485425290641**（α=0.05で有意．較正後が正解に転じた行(63)が誤りに転じた
+  行(30)を上回り，方向は改善で統計的に有意．platt(p=0.139)・isotonic(p=0.301)はいずれも有意
+  差なしだったのに対し，今回は有意な改善という異なる結果）
+
+**手順8: flip rate（argmaxが変わった行の割合，`id`で対応付け，Iter29/30と同じ定義）**
+
+- **137/1600 = 0.085625（8.5625%）**．Iter29（platt，11.0%）・Iter30（isotonic，14.3125%）
+  いずれよりも低い．調査(Iter31)の合成データ実測（`ensemble=True`下でtemperatureは
+  isotonic/plattより小さいflipになる，1.12% vs 4.20%/3.85%）と定性的に整合する方向（実データでの
+  絶対値は合成データの規模・分離度と異なるため単純比較はできないが，3手法中もっとも低いという
+  順序は一致）．
+
+**手順6: per-domain非退行チェック（Iter30で確立した3段構成：recall=ドメイン別McNemar・
+precision=Fisher正確検定・20指標へBH補正q=0.05）**
+
+全20指標の点推定（較正前→較正後）と個別検定のp値，BH補正後の有意フラグ：
+
+| domain | metric | before | after | p_value | BH有意 | 方向 |
+|---|---|---|---|---|---|---|
+| business_economics | recall | 0.5179 | 0.5417 | 0.220671 | 否 | 改善 |
+| business_economics | precision | 0.4328 | 0.4643 | 0.546043 | 否 | 改善 |
+| computer_science | recall | 0.5417 | 0.5714 | 0.227800 | 否 | 改善 |
+| computer_science | precision | 0.5987 | 0.6234 | 0.725154 | 否 | 改善 |
+| education | recall | 0.4059 | 0.4588 | 0.015861 | 否 | 改善 |
+| education | precision | 0.4631 | 0.5306 | 0.295424 | 否 | 改善 |
+| general | recall | 0.5488 | 0.5732 | 0.220671 | 否 | 改善 |
+| general | precision | 0.6522 | 0.6528 | 1.000000 | 否 | 改善 |
+| history_culture | recall | 0.6667 | 0.6786 | 0.723674 | 否 | 改善 |
+| history_culture | precision | 0.7320 | 0.6994 | 0.535412 | 否 | 悪化 |
+| legal | recall | 0.5833 | 0.5778 | 1.000000 | 否 | 悪化 |
+| legal | precision | 0.7500 | 0.7820 | 0.569458 | 否 | 改善 |
+| mathematics | recall | 0.6190 | 0.6310 | 0.723674 | 否 | 改善 |
+| mathematics | precision | 0.7075 | 0.7020 | 1.000000 | 否 | 悪化 |
+| medical | recall | 0.4831 | 0.5112 | 0.182422 | 否 | 改善 |
+| medical | precision | 0.4725 | 0.5056 | 0.599143 | 否 | 改善 |
+| natural_science | recall | 0.5655 | 0.5833 | 0.605577 | 否 | 改善 |
+| natural_science | precision | 0.5135 | 0.5444 | 0.600359 | 否 | 改善 |
+| social_science | recall | 0.5774 | 0.5774 | 0.751830 | 否 | 改善 |
+| social_science | precision | 0.6340 | 0.6382 | 1.000000 | 否 | 改善 |
+
+BH（q=0.05）通過（adjusted有意）は20指標中**0件**．悪化方向の指標（history_culture_precision・
+legal_recall・mathematics_precision）はいずれもp値が0.53-1.00と大きく，統計的な退行の根拠はない．
+
+**medical_recallの内訳（Iter30でBH補正後有意に悪化していた指標，今回の再現有無を確認）**:
+discordant_a_only=2（較正前のみ正解）・discordant_b_only=7（較正後のみ正解）・discordant_pairs=9・
+chi2=1.7778・p=0.182422．**Iter30（isotonic，discordant_a_only=19・discordant_b_only=1・
+p=0.000144・有意に悪化）とは対照的に，temperatureではmedical_recallはむしろ改善方向
+（0.4831→0.5112）であり，統計的に有意な変化もない**．調査(Iter31)の理論的予想（単一Tはクラス
+固有のOvR曲線歪みを構造的に持たないため，isotonicのmedical系統的圧縮は再現しないはず）と実測が
+一致した．
+
+**手順7: temperature特有の実装確認チェックリスト（`probabilities`フィールドを使用，1600行対象，
+調査(Iter31)申し送り3により簡易報告）**
+
+- (a) 確率のいずれかが厳密に`0.0`または`1.0`になっている行数: **0/1600**
+- (b) 10クラス全てが`0.1`に近い（`math.isclose(p, 0.1, abs_tol=1e-9)`）uniform fallback行数:
+  **0/1600**
+- (c) 選択ドメインのconfidenceと同一の値を持つ他ドメインが存在する行の割合（tie率，厳密な
+  浮動小数点一致で判定）: **0/1600（0.0000%）**
+
+3点とも予想どおり該当0件だった．softmaxの出力は有限のロジット入力に対し厳密に0や1にはならず，
+tieも理論上は浮動小数点の偶然の一致でしか起こらないという調査(Iter31)の実装読解（分かったこと(4)）
+と実測が一致した．非ゼロの値は観測されなかったため詳細報告は不要と判断した．
+
+**使用データ**:
+
+- 訓練データ: `data/classifier_train.jsonl`（1427件，legal 77件・他9ドメイン各150件，
+  Iter29/30と同一）
+- 評価データセット（再embedding対象）: `data/dataset.jsonl`（1600件）
+- 較正前の実行結果: `results/20260731_162722/results.jsonl`（Iter28実測，1600行，再実行なし）
+- 較正後の実行結果（新規生成）: `results/iter31_calibrated_predictions.jsonl`（1600行，
+  `probabilities`フィールド付き）
+- 新規モデルアーティファクト: `models/domain_classifier_temperature.joblib`（本番
+  `models/domain_classifier.joblib`は無変更のまま，タイムスタンプで確認済み）
+
+**実行時間・実機呼び出しの有無**:
+
+- `train_domain_classifier.py`: 124.55秒（1427回のembedding呼び出し）
+- `evaluate_classifier_calibration.py`: 141.56秒（1600回のembedding呼び出し）
+- 実機呼び出しはwafl500（192.168.15.100:11434）へのembeddingのみ（`nomic-embed-text`），
+  計3027回．LLM生成・probe・dispatchは一切発生していない．
+- 接続経路はIter29/30と同一の既存SSHローカルポートフォワード（`127.0.0.1:11435` ←
+  `wafl500:11434`）をそのまま流用．新規に張り直す必要はなく，実行中のログ・エラーに異常なし
+  （例外・タイムアウト・リトライなし，両スクリプトとも正常終了メッセージを出力）．
+
+**state.json更新**: `status: waiting_experiment`（開始時，`experiment_dir:
+results/iter31_calibrated_predictions.jsonl`・`experiment_deadline`設定）→`running`（完了時，
+`experiment_dir`/`experiment_deadline`を`null`に戻した）．`e31_results`への数値記録・`judgment`
+確定はフェーズ5b（rc-analyst）に委ねる（本フェーズでは数値の良否判定は行わない）．
+
+---
+
+### 分析(解釈) (Iter31)
+
+**成功条件（d0003 X9，計画(Iter31)節，AND条件）との照合**
+
+1. **ECE ≤ 0.150**: 明確に成立。較正後 0.071201 は較正前 0.193358 から −12.22pt（相対63.2%減）
+   であり，3手法中もっとも大きい改善幅である。目標0.150に対する余裕は 7.88pt（isotonicの
+   2.86pt・plattの未達）を大きく上回り，platt・isotonicいずれと比べても大きな差で目標を
+   上回っている。ルーティングは決定論的（config.yml success_criteria (5)）であり，同一1600問・
+   同一embeddingモデルに対し較正手法のみを変えた比較のため，この差分はノイズではなく較正手法の
+   変更そのものが生んだ実測値と判断してよい（Iter29・Iter30と同じ根拠）。
+2. **top1_accuracy 非退行**: 成立するだけでなく，**成功条件が想定した「非退行」の範囲を
+   超えて有意な改善**である。計画(Iter31)の条件2は「p>=0.05，または改善方向」を非退行の
+   基準としていたが，実測はMcNemar p=0.000906（α=0.05で有意）かつdiscordant_b_only
+   （較正後のみ正解，63）がdiscordant_a_only（較正前のみ正解，30）を倍以上上回る改善方向
+   であり，**統計的に有意な改善**と言うべき水準にある。top1_accuracyの絶対値も0.585→0.605625
+   （+2.06pt）と3手法中もっとも大きい伸びであり，platt（p=0.139，非退行だが有意差なし）・
+   isotonic（p=0.301，同）とは質的に異なる結果である。較正が単に「悪化していない」だけでなく
+   ルーティング精度そのものを引き上げた可能性を示している。
+3. **per-domain 20指標のBH補正後・悪化方向有意指標0件**: 成立。20指標（10ドメイン×
+   precision/recall）のうちBH（q=0.05）通過は**0件**であり，isotonicの`medical_recall`
+   （p=0.000144，通過1件）やIter29 platt（字義通り基準で9件該当，事後分析で全て非有意と
+   判明）と異なり，最初から厳格な多重比較補正の下で悪化方向の有意指標が皆無だった。悪化方向
+   の3指標（history_culture_precision, legal_recall, mathematics_precision）もp値は
+   0.53〜1.00と大きく，統計的な退行の根拠はない。3手法のうちこの条件を単独で満たしたのは
+   temperatureのみである。
+4. **【但し書き，調査(Iter31)申し送り2・計画(Iter31)条件4】ensemble由来の非ゼロflip
+   （8.5625%＝137/1600）の解釈**: この値は理論保証（sklearn公式の「Tはsoftmaxのargmaxの
+   位置に影響しない」）が主張する範囲の**外側**（個々の(estimator, T)ペア内ではなく，
+   `ensemble=True`による5fold平均化という別の機序）で生じており，それ自体を理由に条件2・3を
+   不成立とはしない，という計画(Iter31)の事前合意どおりに扱った。実際，条件2・3の判定は
+   統計的検定（McNemar・Fisher・BH補正）の結果のみに基づいており，flip率が非ゼロであること
+   自体はここまでの分析で不利に働いていない。むしろ8.5625%はisotonic（14.3125%）・
+   platt（11.0%）より低く，調査(Iter31)の合成データ実測（temperatureのensemble由来flipは
+   isotonic/plattより一貫して小さい）と実データでも順序が一致した。この事実は，「ensemble
+   平均化由来の偶発的再配分」以上の何かがtop1_accuracyを押し上げているという解釈（条件2）
+   を弱めるものではなく，むしろ較正手法自体が生む再配分の総量が少ないままaccuracyが伸びた
+   ことを示しており，isotonic/plattのような「大きな再配分の副産物として一部ドメインが
+   犠牲になる」構造とは異なる結果である。
+
+**isotonic（Iter30）との対比 — medical_recall問題の再現有無**
+
+Iter30ではmedical_recallがBH補正後も有意に悪化（0.4831→0.3820, p=0.000144，
+discordant a_only=19:b_only=1）し，較正後の最大確率0.7062が他9ドメイン（0.7496〜0.8795）
+を全て下回るという，isotonic較正曲線のmedicalクラス固有の系統的圧縮が疑われていた。
+今回のtemperatureでは，同じmedical_recallがdiscordant a_only=2:b_only=7・p=0.182422
+（有意差なし）で，**点推定はむしろ改善方向（0.4831→0.5112）**である。
+
+これは調査(Iter31)の理論的予想——「temperatureは単一スカラーTでロジット全体を変換する
+構造上，クラスごとの個別較正器を持たず，isotonic/PlattのOvR方式由来のクラス固有曲線歪みを
+構造的に持たない」——を**強く支持する証拠**と評価してよい。理由は次の3点である。
+
+1. 同一の訓練データ（`data/classifier_train.jsonl`，medical 150件）・同一の評価データ
+   （1600問）・同一のbase estimator（`LogisticRegression(class_weight='balanced')`）・
+   同一の`cv=5, ensemble=True`という条件下で，較正手法だけを変えた比較になっている。
+   単一レバー原則が厳密に保たれているため，medical_recallの挙動の違いは較正手法の構造差に
+   帰責してよい。
+2. isotonicのときに観測された「medicalだけ較正後の最大確率が体系的に低い」という現象は，
+   OvR方式（各クラスを独立に二値較正してから正規化する）に固有の自由度の高さ（区分定数
+   フィットが特定クラスのheld-outデータで不安定に歪みうる）に起因すると解釈されていた。
+   temperatureは全クラスに同一の逆温度を掛けるだけで，どのクラスかによらず変換が対称的
+   であるため，「特定の1クラスだけ確率の天井が下がる」という現象が構造的に起こり得ない。
+   今回の実測（medical・legal含め全10ドメインで悪化方向の有意指標が0件）はこの構造的な
+   予測と整合する。
+3. ただし，これは「1回の実験（n=1）による整合」であることに留意が必要である。medical
+   クラスの埋め込み分離が本来弱いという可能性自体を否定する証拠ではなく，あくまで
+   「OvR方式由来の較正曲線歪みという機序」が今回不在だったことを示すに留まる。それでも
+   Iter30が示した唯一の懸念（medical_recall）が，理論から予想された通りの手法変更
+   （temperatureへの切り替え）だけで解消したことは，偶然の一致にしては機序の説明が具体的
+   （単一スカラー変換とOvR個別較正器という明確な構造差）であり，強い状況証拠と判断する。
+
+**platt/isotonicとの比較でtemperatureが3手法中もっとも成功条件を満たしている理由の考察**
+
+事前の留保（config.yml note・backlog B51・調査(Iter31)分かったこと(4)）は「temperatureは
+表現力が低いためECE改善幅がisotonic・plattより小さくなる可能性」を懸念していたが，実測は
+その逆で，ECE改善幅は temperature(0.1222) > isotonic(0.0719) > platt(0.0258) という
+**もっとも深い**結果になった（数値は較正前0.193358からの絶対改善幅）。この逆転は次のように
+解釈できる。
+
+- 較正の訓練データは1427件を10クラスに分割し（medical/legal以外は各150件，legalのみ77件），
+  `cv=5`ではさらに1foldあたり数十件規模まで細分される。isotonic・plattはこの少量データ上で
+  **クラスごとに個別の較正関数**を学習するため，held-outデータのノイズに対して過学習しやすい
+  （isotonicは特に自由度が高い区分定数フィットで，Iter30のmedical系統的圧縮はこの過学習の
+  症状と整合する）。temperatureは全クラス共通の**単一スカラーパラメータ**しか学習しないため，
+  1427件全体（実質的に多クラスのmultinomial loss全体）から1つのTを推定でき，個々のクラスの
+  小標本性に脆弱ではない。つまり，このデータ規模では「表現力の低さ」がむしろ分散を抑え，
+  過学習を防いだと考えられる——古典的なバイアス・分散トレードオフで，パラメータ数が少ない
+  ほうが小標本の較正タスクでは汎化しやすかった，という説明である。
+- もう一つの見立ては，このLogisticRegression分類器の較正誤差が，そもそも「クラスごとに
+  異なる歪み方をする」構造ではなく，「全クラス一律に過信（over-confident）している」という
+  **大域的な過信バイアス**が支配的だった可能性である。もしそうであれば，単一Tによる大域的
+  スケーリングだけで大部分の誤差を解消でき，OvR方式のクラス固有補正は，本来存在しない
+  クラス間の歪みの違いを学習データのノイズから読み取ってしまい，かえって較正を悪化させる
+  （isotonicのmedical系統的圧縮，plattのECE絶対閾値未達）方向に作用したと考えられる。
+- 前者・後者いずれの説明も「表現力が高い手法が必ず良い較正を生むとは限らない」という一般的な
+  較正手法選択の知見（少数クラス・小標本条件下での過学習リスク）と整合しており，本リポジトリ
+  の訓練データ規模（1427件・10クラス）が，isotonic/plattの柔軟性を活かすには小さすぎた
+  可能性を示唆する。ECE改善幅の逆転という結果自体は今回のn=1測定だが，isotonic（Iter30）で
+  観測された系統的圧縮という具体的な機序と符合しており，単なる偶然の逆転とは考えにくい。
+
+**本番反映（`models/domain_classifier.joblib`をtemperature版に置き換えるか）についての見解
+（提案，確定はrc-reflector）**
+
+**採用（adopted）し，本番反映を進めることを提案する**。判断基準:
+
+- 成功条件1〜3のAND条件をすべて満たした較正手法は，platt・isotonic・temperatureの3手法中
+  temperatureのみである。isotonic（Iter30）はmedical_recall悪化で条件3不成立，
+  platt（Iter29）はECE絶対閾値未達で条件1不成立と，いずれもpartialで確定している。
+  temperatureはこの2つの懸念をいずれも回避しており，「AND条件を字義通り満たす」という
+  意味で今回初めて明確なadopted相当の結果が得られている。
+- 条件2（top1_accuracy）は非退行を超えて有意な改善（p=0.000906）であり，条件1（ECE）も
+  目標に対し7.88ptの余裕がある。isotonic・plattのように「AND条件の一部だけ危うい」形では
+  なく，3条件のいずれにも明確な余裕がある。
+- 可逆性の観点でも問題は小さい。`models/domain_classifier_temperature.joblib`は既に
+  別名で生成済みであり，本番`models/domain_classifier.joblib`との入れ替えはファイルの
+  差し替えのみで完結し，何らかの不具合が判明した場合は較正前のjoblibへ即座に戻せる
+  （config.yaml自体は一切変更していないため，ロールバックにコード変更は不要）。
+- 一方で，確信度を完全な最終確定ではなく「提案」に留めるべき留保点が2つある。(a) 本判定は
+  n=1（ルーティングは決定論的だが，1600問という単一の評価セット・単一の訓練データ分割に
+  基づく）測定であり，Iter28・Iter29・Iter30と同じ制約を共有している。(b) isotonic
+  （Iter30）のmedical_recall悪化が「OvR由来の機序」の実例として片付けられるかどうかは，
+  今回の1イテレーションの整合的な結果からの推論であり，直接に反証実験を行ったわけではない
+  （例えば，temperatureをさらに複数回・複数の訓練データ分割で再現するような追加検証は
+  今回行っていない）。判断の主要な数値（ECE・McNemar・BH補正）自体は確定的であり追加反復を
+  要するとは考えないが，「なぜtemperatureがisotonic/plattより優れていたか」という機序の
+  説明は今回の考察であり，本番反映後もECE・per-domain指標の定期的なモニタリングを継続する
+  ことを勧める。
+
+**確信度と追加反復の要否**: 成功条件1〜3の判定そのものの確信度は高い（決定論的ルーティング・
+BH補正済み・3手法全てで同一手順を適用した比較のため）。追加反復（同一実験の再実行）は
+不要と考える——ルーティングが決定論的である以上，再実行しても数値は変わらない。ただし
+上記のとおり「temperatureが優れていた理由」の機序面の説明はn=1の考察に留まるため，
+本番反映後の運用モニタリング（例えば次に大きな訓練データ更新が入った際にECE・per-domain
+指標を再確認する）は推奨事項として申し送る。
+
+**総合判断（rc-analyst提案）: adopted（全面採用）**。config.ymlの`classifier_calibration`
+レバーは`[platt, isotonic, temperature]`の3値を全て試し終えており，platt=partial・
+isotonic=partial・temperature=今回の提案どおりadoptedとなれば，Y4（分類器の較正）は
+temperatureの採用をもって完了とすることを提案する。最終的な採否確定と，
+`models/domain_classifier.joblib`の実際の置き換え作業はrc-reflectorに委ねる。
+
+---
+
+### 考察 (Iter31)
+
+**判定: adopted（全面採用，rc-analyst提案を覆さず確定）**。d0003 X9 の成功条件（ECE≤0.150・
+top1_accuracy非退行・per-domain 20指標のBH補正後悪化方向有意指標0件のAND条件）を，`platt`
+（Iter29，ECE絶対閾値未達でpartial）・`isotonic`（Iter30，medical_recallのBH補正後有意悪化で
+partial）に続き3手法目の`temperature`が初めて明確に満たした。ECEは0.193358→0.071201（目標に
+7.88ptの余裕，3手法中もっとも大きい改善幅），top1_accuracyは0.585→0.605625でMcNemar
+p=0.000906の**有意な改善**（非退行を上回る），per-domain 20指標のBH補正後有意指標は0件。
+Iter30で唯一の懸念だったmedical_recallも，temperatureでは有意差なし（p=0.182422）でむしろ
+改善方向（0.4831→0.5112）と，isotonicの系統的圧縮が再現しなかった。rc-analystの分析（機序：
+temperatureは単一スカラーTでロジット全体を変換するためisotonic/plattのOvR方式由来のクラス
+固有曲線歪みを構造的に持たない）は，同一訓練データ・同一評価データ・同一cv/ensemble設定という
+単一レバー原則が厳密に保たれた比較の下で得られた結果であり，覆す理由を見いだせなかったため
+確定させる。
+
+**本番反映: 実施済み**。`models/domain_classifier.joblib`（旧・較正なし，
+sha256=`3a5610a...`）を`models/domain_classifier_uncalibrated_pre_iter31.joblib`へ退避のうえ，
+`models/domain_classifier_temperature.joblib`（sha256=`04bb9ff...`）で置き換えた。判断根拠:
+(1) 成功条件のAND条件を明確な余裕（ECE 7.88pt・top1有意改善・BH補正後有意退行0件）で満たして
+いる，(2) `config.yaml`・公開APIの変更を一切伴わない可逆なファイル差し替えである（不具合が
+判明すれば`models/domain_classifier_uncalibrated_pre_iter31.joblib`へ即座に戻せる），
+(3) これは委譲時の指示で明示的に「rc-reflectorの自律判断範囲内（可逆な判断）として進めて
+構わない」とされた操作である。**注意**: `models/`はリポジトリの`.gitignore`（19行目）で除外
+されており，この置き換えはgit管理下にない。ロールバック手順と両ファイルのsha256はこの節と
+上記に記録した以外に残らないため，次回このモデルに触れる際は本節を参照すること。
+
+**学び**:
+
+1. **isotonicのmedical_recall悪化は「OvR方式由来のクラス固有曲線歪み」という機序で
+   説明できることが，temperatureへの切り替えのみで解消したという形で強く裏付けられた**。
+   同一データ・同一cv/ensembleの下で較正手法だけを変えた比較が3イテレーション連続で
+   積み上がったことで，この機序の特定は単発の考察ではなく再現性のある知見になった。
+2. **「表現力が高い較正手法が必ず良い較正を生むとは限らない」という一般的な較正手法選択の
+   知見が，本リポジトリの訓練データ規模（1427件・10クラス，legalのみ77件）で実測として
+   裏付けられた**。ECE改善幅はtemperature(0.1222) > isotonic(0.0719) > platt(0.0258)と，
+   もっとも柔軟性の低い手法がもっとも大きく改善するという事前の留保（config.yml note・
+   backlog B51）とは逆の結果になった。小標本条件下ではOvR方式のクラス別自由度がheld-outの
+   ノイズを拾って過学習し，かえって較正を悪化させるためと考えられる。次に較正関連のレバーを
+   検討する際は，「手法の表現力の高さ＝較正の質」という前提を置かないこと。
+3. **`ensemble=True`由来の非ゼロflip（合成データ実測1.12%，実データ8.5625%）は，
+   sklearn公式の「Tはsoftmaxのargmaxを変えない」という理論保証の範囲外（個々の
+   (estimator, T)ペア内の話であり，5fold平均化という別の機構）であるという整理は，
+   今後isotonic/platt/temperatureいずれについても「flipが非ゼロ＝理論違反」という
+   短絡的解釈を避けるために有効だった。次回較正手法を検討する際も踏襲すること。
+4. **`models/`がgitignore対象であるため，較正済み分類器の本番反映はgit履歴に残らない**。
+   D5（backlog未解決事項，`data/`/`models/`のバージョン管理方針）が引き続き未解決であり，
+   今回のように本番アーティファクトを差し替える判断が何度も発生する局面では，最低限
+   sha256ハッシュのマニフェストをjournal/backlogに記録する運用（今回実施した方式）を
+   今後も徹底する必要がある。
+
+**Y4（分類器の較正，d0003 X9）は本イテレーションをもって完了**。config.ymlの
+`classifier_calibration`レバーは`[platt, isotonic, temperature]`の3値すべてを試し終えた。
+
+**次イテレーション（Iter32）の単一レバー決定**: d0004 §5の優先順位はY1（完了）→Y4（完了，
+本イテレーション）→Y2（前提整備，スキーマ変更を伴い着手前にユーザー確認が必要）→Y3（Y2完了後）
+→Y5（education/legalのデータ不均衡是正）である。Y2は`config.yaml`への
+`dispatch_candidate_threshold`新設・`aggregator.select_dispatch_targets()`のシグネチャ変更を
+伴い，backlog B49・B50・B51で繰り返し「着手前にユーザー確認が必要」と申し送られてきた
+不可逆側の判断であり，rc-reflectorの自律判断権限（可逆な判断に限る）では着手を開始できない。
+一方，Y3はY2完了が前提のため同様に着手不能。したがって実行可能な登録済みレバーは
+`classifier_calibration`（完了）・`fallback_policy`（完了）のみとなり，`aggregation_method`
+（Y3）はY2完了までブロックされたまま実質「試せない」状態にある。
+
+これは「config の全 levers を試し切った」場合と実質的に同じ状況（唯一残る登録レバーが
+ブロックされていて実行不能）と判断し，SKILL.mdが定める停止条件の優先順1（journal/backlogの
+学びから次の有望なレバーを自分で考案し，config.ymlのlevers末尾へ追記して継続する）に従い，
+**Y5（education/legalのデータ不均衡是正，d0003 X8）を新規レバーとしてconfig.ymlへ追記し，
+Iter32の単一レバーとする**。理由と選定過程はbacklog.md B52に記録する（下記参照）。Y2は
+自律着手不能なままのため，backlogの「要レビュー」として引き続き申し送る（新規の追加事項はない）。
+
+---
+
 ## Iteration 30: 分類器較正のisotonic方式によるECE目標達成の追試とドメイン別非退行の全数検証
 
 ### 調査 (Iter30)

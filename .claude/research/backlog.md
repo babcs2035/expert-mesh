@@ -3,6 +3,57 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B55 [auto-decided 2026-08-01] Iter34 は rejected で確定．resampling系レバー尽き，education固有の手作り訓練問題追加へ
+
+- 状況: Iter34（classifier_training_data_composition=education_proxy_task_resampling，案A:
+  sociology=90/high_school_psychology=30/moral_disputes=30）の rc-analyst 判定（rejected）を
+  rc-reflector が検証・確定させた．
+- **判定: rejected（確定）**．主基準（education_recallがmedical_recall基準0.5112を上回ること）が
+  不成立（0.4353 < 0.5112，75.59ptギャップ）．McNemar p=0.0725 で top1_accuracy の有意改善なし．
+  education_recallはIter31比で-6.47pt，Iter33比でも-0.59ptの低下．
+  非退行条件（BH補正後有意退行0件）は成立するが，主基準が通らないため採用不可．
+- **3連投のrejected（Iter32 sample_weight, Iter33 案C, Iter34 案A）は決定的**．
+  resampling系レバーは尽きた．sociology pool cap 94に対し90件使用（95.7%）で，
+  残り4件の余裕は実質的に意味をなさない．
+- **学び**:
+  1. education_recallの低下トレンド（Iter31: 0.5000 → Iter34: 0.4353）は懸念．
+     案Aで弱い2タスクの訓練露出を-45%に削ったことが，計画フェーズで指摘された
+     「学習信号喪失リスク」を実際に発現させた可能性が高い．
+  2. 「代理タスクの意味的ギャップ」という根本原因は，抽出比率の変更では解消できない．
+     これはIter32の調査で確認済み（sociology(0.625)・high_school_psychology(0.438)・
+     moral_disputes(0.435)のいずれも，educationの実務（学校教育行政・学習指導要領等）
+     とは主題が明確に異なる）．
+  3. 次はeducation固有の手作り訓練問題の追加へ切り替える．
+     手作り問題は4択形式（A/B/C/D）を保つ必要がある（書式 shortcuts リスク，
+     Iter32調査で確認済み）．教育行政実務に即した問題（学校事故責任，生徒健康管理，
+     アレルギー対応，懲戒処分等）を作成する．
+- **自動選択: 次イテレーション（Iter35）の単一レバーを
+  `classifier_training_data_composition=education_handmade_training_problems`とする**．
+  `iteration_name` は「education固有の手作り訓練問題追加による意味的ギャップ解消」．
+  config.yml の `classifier_training_data_composition` レバーの `values` へ
+  `education_handmade_training_problems` を追記した（`[education_proxy_task_revision,
+  education_proxy_task_resampling]` → `[education_proxy_task_revision,
+  education_proxy_task_resampling, education_handmade_training_problems]`）．
+- **根拠**:
+  1. config.yml の levers note で既に「案Aも不成立なら，education固有の手作り訓練問題の追加
+     へ切り替える」と指示済み（B54）．
+  2. resampling系レバーは尽きた（pool cap 94を使い切った）．次の一手は handmade problem
+     追加のみ．
+  3. handmade problem追加は config.yml note で見積もられた「1〜3日，オフライン完結」の
+     コストで，実機1600問本走は不要．
+  4. Y2（スキーマ変更）は着手不能のため，実行可能な登録済みレバーは Y5（education）のみ．
+     これは config の全levers を試し切った場合の「停止条件の優先順1」に従う．
+- **留保**: handmade problemsの数は50件から始める予定（Iter35計画フェーズで確定）．
+  数が少なすぎれば教育recallへの信号が弱く，多すぎればlabel leakageリスクが高まる．
+  計画フェーズで適切な数を確定すること．また，手作り問題のドメインラベル付けが
+  誤って行われるとlabel leakageになるため，`exclude_queries` の仕組みが適切に
+  機能しているか必ず確認すること．
+- **要レビュー**: (1) Y2（`confidence_threshold`の二重責務分離，スキーマ変更）着手前の
+  ユーザー確認は引き続き必要（B49〜B52既存項目）．(2) fallback設計思想の論文上の
+  位置付け（B48）も未解決．(3) D5（`data/`/`models/` のバージョン管理方針）も未解決．
+
+---
+
 ## B54 [auto-decided 2026-08-01] Iter33 は rejected で確定．次は案A（90/30/30）を1回試す
 
 - 状況: Iter33（classifier_training_data_composition=education_proxy_task_resampling，案C:

@@ -165,17 +165,14 @@ _DOMAIN_TASK_MAP: dict[str, list[str]] = {
 _CLASSIFIER_TASK_SAMPLE_WEIGHTS: dict[str, float] = {}
 _DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT = 1.0
 
-# Iter33 (classifier_training_data_composition=education_proxy_task_resampling, Y5):
-# Iter32のsample_weight方式はrejected（class_weight="balanced"との数式結合で逆効果，
-# backlog B53）。sample_weightを使わず，抽出段階でのタスク別目標件数を変えることで
-# 同じ着想（sociology優位の反映）を実現する。合計は_DOMAIN_TARGET_SIZE(150)のまま不変
-# ＝class_weight_[education]はIter31以前と同じ値を保つ。配分は案C（journal Iter33計画）:
-# sociology(recall 0.625,相対的に良好)を最も厚く，high_school_psychology(0.438)・
-# moral_disputes(0.435)を均等に薄くする中庸案。
+# Iter34 (classifier_training_data_composition=education_proxy_task_resampling, Y5):
+# 案C（70/40/40）はrejected（education_recall 0.4412 < medical_recall基準 0.5112）。
+# 変化幅を約2倍に拡大した案A（90/30/30）を試す。sociologyのpool cap（94）を
+# 95.7%使い切るため，案Aが不成立の場合のresampling系余地は尽きる。
 _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES: dict[str, int] = {
-    "sociology": 70,
-    "high_school_psychology": 40,
-    "moral_disputes": 40,
+    "sociology": 90,
+    "high_school_psychology": 30,
+    "moral_disputes": 30,
 }
 assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE
 
@@ -800,8 +797,8 @@ def build_classifier_training_rows(
 
     Iter33 education override: the `education` domain is sampled separately
     from other domains, using task-specific target sizes defined by
-    _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES (sociology=70,
-    high_school_psychology=40, moral_disputes=40). This avoids the
+    _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES (sociology=90,
+    high_school_psychology=30, moral_disputes=30). This avoids the
     `sample_weight` mechanism that was rejected in Iter32 due to its
     interaction with `class_weight="balanced"`. All other domains continue
     to use the standard pooled sampling via _build_jmmlu_backed_groups().
