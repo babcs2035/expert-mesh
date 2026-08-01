@@ -1,24 +1,24 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter38",
-  "iteration_name": "education_classificationのLabel Leakage回避策の調査とhybrid proxy approachの実装計画",
-  "phase": "plan",
+  "iteration": "Iter39",
+  "iteration_name": null,
+  "phase": "investigate",
   "status": "running",
   "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785608610,
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
+  "updated_at": 1785613418,
+  "iteration_thread_ts": "1785609994.179419",
+  "notion_toggle_created": true,
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 37: history_cultureからjapanese_civicsをeducationへ再割当による訓練データ構成変更, 考察)",
-      ".claude/research/journal.md (Iteration 36: education代理タスクをjapanese_civicsへ置換による訓練データ構成変更, 考察)",
+      ".claude/research/journal.md (Iteration 38: hybrid proxy approach, rejected)",
+      ".claude/research/journal.md (Iteration 37: history_cultureからjapanese_civics再割当, invalid)",
       ".claude/research/backlog.md (B59)",
-      ".claude/research/backlog.md (B58)"
+      ".claude/research/backlog.md (B60)"
     ],
     "planned_lever": null,
-    "note": "Iter37はinvalid確定（Label Leakage）。classifier_training_data_compositionの全値を試し切り。次イテレーションは調査フェーズから開始。rc-investigatorは(Label Leakage回避策を重点調査：japanese_civicsをeducation訓練データとして使用するが、evalのeducation行を旧proxyタスクに戻すhybrid approachの実装計画)を立てること。代替アプローチ(JMMLU外部からの教育固有タスク追加)も調査すること。"
+    "note": "Iter38（hybrid approach）はrejected確定。classifier_training_data_compositionの全値（6値）を試し切り。次イテレーションは調査フェーズから開始。rc-investigatorは Tavily search で (1) class_weight=None + 手動sample_weightのfeasibility, (2) JMMLU/MMLU外部の教育固有タスク（再調査）, (3) education_recall基準値の材料収集, (4) embedding modelのeducationドメイン適応 を重点調査すること。"
   },
   "e37_results": {
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
@@ -511,8 +511,8 @@
     },
     "note": "Iter28（Y1）の事前根拠。分散版での再確認が Iter28 の目的。"
   },
-  "last_slack_ts": "1785602477.232869",
-  "last_commit": "4bfd1d8",
+  "last_slack_ts": "1785610684.035399",
+  "last_commit": "88336d6",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,
@@ -603,5 +603,88 @@
     "fallback_rate": 0.131579,
     "judgment": "adopted",
     "note": "X1: 測定系修復後の基準線再取得。主基準4項目が期待値と完全に一致。"
+  },
+  "e38_results": {
+    "lever": "classifier_training_data_composition=education_hybrid_proxy_and_civics",
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.5887,
+    "top1_accuracy_diff": -0.0169,
+    "mcnemar_top1": {
+      "discordant_a_only": 120,
+      "discordant_b_only": 93,
+      "chi2": 3.1737,
+      "p_value": 0.074832
+    },
+    "education_recall_before": 0.4588,
+    "education_recall_after": 0.4,
+    "education_recall_diff": -0.0588,
+    "education_recall_mcnemar": {
+      "p_value": 0.1227
+    },
+    "medical_recall_before": 0.5112,
+    "medical_recall_after": 0.4551,
+    "medical_recall_diff": -0.0562,
+    "medical_recall_mcnemar": {
+      "p_value": 0.0518
+    },
+    "ece_before": 0.071201,
+    "ece_after": 0.086218,
+    "ece_diff": 0.015017,
+    "flip_rate": 0.2044,
+    "bh_significant_regressions_20_metrics": 1,
+    "bh_significant_regressions_details": [
+      "education_precision: p=0.023840, q=0.476791 (regression, delta=-0.1306)"
+    ],
+    "bh_significant_improvements_20_metrics": 0,
+    "per_domain_recall_ci": {
+      "education": {
+        "before": [
+          0.3857,
+          0.5338
+        ],
+        "after": [
+          0.3294,
+          0.4751
+        ]
+      },
+      "medical": {
+        "before": [
+          0.4383,
+          0.5837
+        ],
+        "after": [
+          0.3836,
+          0.5284
+        ]
+      }
+    },
+    "per_domain_recall_ci_lower_drop": [
+      "education",
+      "medical"
+    ],
+    "ci_lower_drop_note": "education CI lower: 0.3857->0.3294 (-0.0563). medical CI lower: 0.4383->0.3836 (-0.0547). Both degraded.",
+    "judgment": "rejected",
+    "data_used": {
+      "train_data": "data/classifier_train_iter38_hybrid.jsonl (1627 rows, education=350: japanese_civics 150 + sociology 50 + high_school_psychology 50 + moral_disputes 50 + handmade 50)",
+      "before_results": "results/iter31_calibrated_predictions.jsonl (1600 rows, temperature calibrated)",
+      "after_results": "results/iter38_hybrid_calibrated_predictions.jsonl (1600 rows, newly generated)",
+      "classifier_model": "models/domain_classifier_iter38_hybrid.joblib (n_samples=1627, temperature calibration)"
+    },
+    "label_leakage_risk": {
+      "education_eval_pure_rows": 150,
+      "education_eval_compound_rows": 20,
+      "education_eval_total": 170,
+      "japanese_civics_training_pool": 150,
+      "overlap_estimate": "0/150 = 0% (eval uses old proxy tasks, japanese_civics=0 in eval)",
+      "note": "Single-lever verification: ALL 7 checks PASSED. No label leakage."
+    },
+    "single_lever_violation": {
+      "note": "Argmax flip rate 20.44% exceeds the <15% threshold. Education training data doubled (150->350), causing substantial changes to the embedding space and decision boundaries. class_weight balanced recalculation also affected other domains.",
+      "flip_rate": 0.2044,
+      "education_training_increase": "150 -> 350",
+      "education_recall_delta": "-0.0588 (0.4588 -> 0.4000)",
+      "medical_recall_delta": "-0.0562 (0.5112 -> 0.4551)"
+    },
+    "note": "hybrid approach (japanese_civics + old proxy tasks) REJECTED. education_recall 0.4588->0.4000 (-0.0588) instead of improving. education_precision significantly degraded (0.5306->0.4000, p=0.0238). top1_accuracy showed no significant improvement (p=0.0748). ECE slightly worsened (0.0712->0.0862). Flip rate 20.44% indicates substantial classifier changes beyond single-lever scope. Root cause: japanese_civics addition did not improve education recall; class_weight recalculation likely contributed to degradation. Next steps: (A) class_weight=None + manual sample_weight, (B) japanese_civics-only with leakage avoidance, (C)大幅增加 handmade education problems, (D) re-evaluate education_recall baseline."
   }
 }

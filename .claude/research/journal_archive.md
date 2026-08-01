@@ -1,5 +1,235 @@
 ## Iteration 34: education代理タスク抽出比率の再配分（案A）による訓練データ構成変更
 
+### 仮説
+
+**仮説**: `education`の3代理タスク（sociology・high_school_psychology・moral_disputes）の
+抽出比率を，案C（70/40/40）から案A（90/30/30）へ変更すれば，`education_recall`がmedical_recall
+基準（0.5112）を上回る。
+
+**根拠**:
+1. 案C（70/40/40）は現状比（41/55/54）からsociologyを+29pt，他2タスクを-15ptずつ変更した。
+   変化幅では教育recallへの信号がノイズ（SE~3.8pt）に埋もれた（education_recall 0.4412
+   < medical_recall基準 0.5112，70ptギャップ）。
+2. 案A（90/30/30）は変化幅が案Cの約2倍（sociology +49pt，他2タスク -25pt）。
+   効果量が約2倍になれば，有意検出の可能性が実測レベルで高まる（n=170でSE~3.8pt，
+   5pt以上の効果量が有意検出の目安）。
+3. sociologyのrecall（0.625）が最も高く，high_school_psychology（0.438）と
+   moral_disputes（0.435）がeducation_recall全体を押し下げる主因であるという
+   confusion matrix分析（Iter32）に基づき，sociologyの寄与を最大限に高める配分。
+4. sociologyのpool cap（94）に対し90件は95.7%で，残り4件の余裕は確保される。
+
+### 単一レバー
+
+**変更するレバー**: `classifier_training_data_composition`（config.yml Y5レバー）の値，
+具体的には`build_dataset.py`の定数`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`を
+`{"sociology": 90, "high_school_psychology": 30, "moral_disputes": 30}`へ変更する。
+
+**変更しないレバー**: 上記定数以外のコード・設定ファイルは全て変更しない。
+`_CLASSIFIER_TASK_SAMPLE_WEIGHTS`は空辞書のまま（Iter33でrevert済み），
+`_sample_domain_questions()`の`task_target_sizes`分岐，
+`build_classifier_training_rows()`のeducation特別扱いはIter33実装のまま。
+
+### 変更ファイル一覧
+
+**変更対象ファイル（2箇所のみ）**:
+
+1. **`build_dataset.py:168-179`**（定数定義前コメント + 定数値）
+   - 168-174行目のコメントを案Cから案Aへ更新
+   - 175-179行目の`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`の値を案Aへ変更
+   
+   ```python
+   # 変更前（168-174行目コメント）:
+   # Iter33 (classifier_training_data_composition=education_proxy_task_resampling, Y5):
+   # ...配分は案C（journal Iter33計画）:
+   # sociology(recall 0.625,相対的に良好)を最も厚く，high_school_psychology(0.438)・
+   # moral_disputes(0.435)を均等に薄くする中庸案。
+   # Iter34 (classifier_training_data_composition=education_proxy_task_resampling, Y5):
+   # 案C（70/40/40）はrejected（education_recall 0.4412 < medical_recall基準 0.5112）。
+   # 変化幅を約2倍に拡大した案A（90/30/30）を試す。 sociologyのpool cap（94）を
+   # 95.7%使い切るため，案Aが不成立の場合のresampling系余地は尽きる。
+   
+   # 変更前（175-179行目値）:
+   _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES: dict[str, int] = {
+       "sociology": 70,
+       "high_school_psychology": 40,
+       "moral_disputes": 40,
+   }
+   # 変更後:
+   _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES: dict[str, int] = {
+       "sociology": 90,
+       "high_school_psychology": 30,
+       "moral_disputes": 30,
+   }
+   ```
+
+2. **`build_dataset.py:803`**（関数docstring）
+   - 803-804行目の`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`の値記述を更新
+   
+   ```python
+   # 変更前:
+   # _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES (sociology=70,
+   # high_school_psychology=40, moral_disputes=40)
+   # 変更後:
+   # _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES (sociology=90,
+   # high_school_psychology=30, moral_disputes=30)
+   ```
+
+**変更しないファイル**:
+- `scripts/train_domain_classifier.py`: 変更不要
+- `tests/test_build_dataset.py`: 変更不要（静的整合性テストは`sum()==150`と
+  `keys==_DOMAIN_TASK_MAP["education"]`のみを検証するため，案Aでもpass）
+- `config.yaml`: 変更不要
+- `data/dataset.jsonl`（evalデータセット）: 不変（sha256一致を確認）
+
+### 固定する構成（Iter33 adoptedのまま，一切変更しない）
+
+`routing_method=supervised_classifier`，`confidence_threshold=0.0`・`dispatch_top_k=1`・
+`aggregation_method=max_confidence`，`confidence_signal_method=self_report`，
+`confidence_elicitation=top_k_with_probs`，`expert_model=expert-mesh-{domain}-lora`
+（domain_count=10），`light_model=qwen3.5:4b-q4_K_M`，`embedding_model=nomic-embed-text`，
+評価データセット`data/dataset.jsonl`（1600問，不変）。分類器較正手法は
+`scripts/train_domain_classifier.py`の`_CALIBRATION_METHOD="temperature"`・
+`_CALIBRATION_CV=5`・`ensemble=True`（すべて無変更，訓練データを変えたため再較正は必須だが
+手法自体は固定）。`config.yaml`は一切変更しない。
+eval sha256: `485a85f5...`（Iter33と同じ値で，変更不要）。
+
+### データ生成・学習・評価手順
+
+Iter33で確立された手順をそのまま踏襲する:
+
+1. **訓練データ生成**:
+   ```
+   uv run python build_dataset.py --output /tmp/iter34_dataset_verify.jsonl        --jmmlu-zip <cached JMMLU.zip>        --classifier-train-output data/classifier_train_iter34_resampled.jsonl
+   ```
+
+2. **単一レバー検証（必須）**:
+   - (a) `/tmp/iter34_dataset_verify.jsonl`が`data/dataset.jsonl`とsha256一致すること
+   - (b) 新規ファイルの`sample_weight`列が全1427行で1.0であること
+   - (c) educationドメイン150行の内訳: sociology=90, high_school_psychology=30, moral_disputes=30
+   - (d) education以外の9ドメイン1277行が既存`data/classifier_train.jsonl`と一致
+
+3. **分類器学習**:
+   ```
+   uv run python -m scripts.train_domain_classifier        --train-data data/classifier_train_iter34_resampled.jsonl        --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435        --output models/domain_classifier_iter34_resampled.joblib
+   ```
+   （本番`models/domain_classifier.joblib`は上書きしない）
+
+4. **較正後データ生成**:
+   ```
+   uv run python -m scripts.evaluate_classifier_calibration        --dataset data/dataset.jsonl        --classifier models/domain_classifier_iter34_resampled.joblib        --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435        --output results/iter34_calibrated_predictions.jsonl
+   ```
+
+5. **before**: `results/iter31_calibrated_predictions.jsonl`（再生成しない）
+
+### 成功条件
+
+1. **主基準**: `education_recall`（Iter34）> `medical_recall`基準（0.5112，Iter31 production実測）。
+2. **非退行**: 他9ドメイン18指標（precision/recall）のBH補正後有意退行が0件。
+3. **McNemar**: top1_accuracyの有意改善（p<0.05）を報告（gatingではないが必須報告）。
+4. **flip rate**: Iter31→Iter34のargmax不一致率を記録。
+
+### 単一レバー検証手順
+
+1. **eval sha256一致**: `/tmp/iter34_dataset_verify.jsonl` vs `data/dataset.jsonl`
+2. **sample_weight全行1.0**: 全1427行で1.0であることを確認
+3. **education内訳**: sociology=90, high_school_psychology=30, moral_disputes=30
+4. **education外9ドメイン1277行**: 既存`data/classifier_train.jsonl`と完全一致
+
+### 到達コードパスの確認
+
+この変更は定数値のみの変更であるため，コードパスの到達確認は容易:
+
+1. `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`は`build_classifier_training_rows()`（line 837）
+   で`task_target_sizes`引数として`_sample_domain_questions()`へ渡される。
+2. `_sample_domain_questions()`（line 623-681）内で`task_target_sizes is not None`の分岐が
+   発火し，各タスク別に独立サンプリングする。
+3. 3つのタスク（sociology, high_school_psychology, moral_disputes）の値がそれぞれ90, 30, 30に
+   変更される。
+
+**到達確認の具体的方法**: 手順2(c)でeducation内訳を直接実測確認すれば，
+定数値が実際にコードに読み込まれていることを裏付けられる。
+
+### 固定する構成（詳細）
+
+- `build_dataset.py`の`_CLASSIFIER_TASK_SAMPLE_WEIGHTS={}`（空辞書，no-op）: 無変更
+- `_sample_domain_questions()`の`task_target_sizes`引数: 既存の分岐ロジックを無変更
+- `build_classifier_training_rows()`のeducation特別扱い: 既存の`task_target_sizes`渡しも無変更
+- `train_domain_classifier.py`の較正処理: `CalibratedClassifierCV(method='temperature')`無変更
+- `config.yaml`: 一切変更しない
+
+### 学習信号喪失リスクの受容
+
+案Aでは，high_school_psychologyとmoral_disputesの訓練露出が案Cから-45%（40→30）に削減される。
+Iter32のconfusion matrix分析で，これら2タスクの誤分類は`medical`・`social_science`・`legal`
+との学術的近接が主因と判明している。この2タスクの訓練露出をさらに減らすと，分類器が
+`medical`/`social_science`/`legal`との決定境界を学習する信号が弱まり，他ドメインのrecallが
+低下するリスクがある。このトレードオフをrc-experimenter・rc-analystは承知の上で実験に
+臨むものとする。
+
+### 案A不成立時の次の一手
+
+案Aが不成立の場合，sociologyのpool cap（94）を95.7%使い切るため，resamplingでsociologyを
+さらに増やす余地は残4件だけ。resampling系レバーの余地は完全に尽きる。次の一手は，
+調査(Iter33)計画で示された「education固有の手作り訓練問題の追加」（d0003 X8の根本原因
+「代理タスクの意味的ギャップ」に直接アプローチ）へ切り替える。
+
+### 調査 (Iter34)
+
+**問い**: 案A（sociology=90/high_school_psychology=30/moral_disputes=30）の計画フェーズが具体化できるよう，(1)Iter33実装の現状と案Aへの変更範囲の特定，(2)案Aの feasibility 確認（pool cap 94 内），(3)新しいリスクの特定，(4)rc-implementer への具体的な変更指示，を確認する．
+
+#### 分かったこと
+
+**(1) Iter33実装は既に完了しており，案Aへの変更は定数値のみ**
+
+`build_dataset.py`を直接確認したところ，Iter33計画で申し送った全実装が既に完了していることを確認した:
+- `_CLASSIFIER_TASK_SAMPLE_WEIGHTS = {}`（line 165）: 空辞書へrevert済み．sample_weight全行1.0の仕組みは機能している．
+- `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`（line 175-179）: 現在案C（70/40/40）が設定されている．これが案A（90/30/30）への変更対象．
+- `_sample_domain_questions()`（line 623-681）: `task_target_sizes`パラメータが既に実装済み．`task_target_sizes is None`の分岐で既存の「1プール乱択」ロジックが維持され，`task_target_sizes`指定時はタスク別独立サンプリングへ切り替わる．
+- `build_classifier_training_rows()`（line 801-838）: education特別扱い（_build_jmmlu_backed_groupsでeducation除外→個別に_sample_domain_questionsをtask_target_sizes付きで呼ぶ）が実装済み．
+- `tests/test_build_dataset.py`: 全16テストがpass．案Cの値に対する静的整合性テスト（line 330-338）は`sum()==150`と`keys==_DOMAIN_TASK_MAP["education"]`のみを検証しており，案Aの値（90/30/30）でも両条件を満たす．
+
+**したがってIter34の実装変更は，`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`の値を案Cから案Aへ変更すること，および関連するdocstringの更新のみ**．コード構造の変更は不要．
+
+**(2) 案Aのfeasibility — sociology=90はpool cap 94内**
+
+Iter33調査で確認済みのプールサイズ:
+- sociology: 150総数 - 56(eval予約) = **94**（訓練利用可能）
+- high_school_psychology: 150総数 - 48(eval予約) = **102**
+- moral_disputes: 148総数 - 46(eval予約) = **102**
+
+案Aの目標: sociology=90, high_school_psychology=30, moral_disputes=30
+- sociology: 90 <= 94 -- **OK**（余裕4件）
+- high_school_psychology: 30 <= 102 -- **OK**
+- moral_disputes: 30 <= 102 -- **OK**
+
+実装側のロジック（`build_dataset.py:667`）: `sample_size = min(task_target, len(task_pool))`．task_poolは`exclude_queries`適用後のサイズなので，sociologyの場合len(task_pool)=94，sample_size=min(90, 94)=90．問題ない．
+
+**案Aも不成立の場合，sociologyのpoolをこれ以上増やせない（残り4件）ため，resampling系レバーの余地は完全に尽きる**．
+
+**(3) 新しいリスク — 弱い2タスクの削減幅が案Cからさらに拡大**
+
+案C（40/40）から案A（30/30）への変更で，high_school_psychologyとmoral_disputesの訓練露出が-45%（55→30, 54→30）となる．Iter32のconfusion matrix分析で，これら2タスクの誤分類は`medical`・`social_science`・`legal`との学術的近接が主因と判明している．この2タスクの訓練露出をさらに減らすと，分類器が`medical`/`social_science`/`legal`との決定境界を学習する信号が弱まり，**逆効果で他ドメインのrecallが低下するリスク**がある．これはIter32とは異なる機序の副作用．
+
+ただし，`_sample_domain_questions()`の新しい分岐では，各タスクのプールから独立にサンプリングするため，「 sociologyがpoolを圧迫してweak taskが不足する」という問題は生じない（案Cでも同様のリスクは存在）．
+
+**(4) 変更範囲の最小性 — 定数値1箇所＋docstring**
+
+`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`の値変更以外に必要なのは:
+- `build_dataset.py:803`のdocstring（`sociology=70, high_school_psychology=40, moral_disputes=40`の記述）
+- `build_dataset.py:168-174`の定数定義前のコメント（`配分は案C`の記述）
+
+これら2箇所を更新すれば，テストは全て通る（静的整合性テストは値をハードコードせず`_DOMAIN_TASK_MAP`と`_DOMAIN_TARGET_SIZE`から動的に検証しているため）．
+
+#### 次の計画フェーズ（rc-planner）への申し送り
+
+1. **Iter34の実装は定数値の変更のみ**: `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`を`{"sociology": 90, "high_school_psychology": 30, "moral_disputes": 30}`へ変更．コード構造の変更は不要．
+2. **docstringの更新も必須**: `build_dataset.py:803`のdocstring（`sociology=70, high_school_psychology=40, moral_disputes=40`）と，定数定義前のコメント（line 168-174の`案C`の記述）を更新すること．これらを忘れると，再生成後のデータが案Aであることをドキュメントが誤って示す．
+3. **テスト変更は不要**: 静的整合性テスト（`test_education_proxy_task_train_target_sizes_static_integrity`）は値をハードコードせず動的に検証しているため，案Aでもpassする．
+4. **案Aが不成立の場合の次の一手は唯一**: sociologyのpool cap（94）を95.7%使い切るため，resamplingで sociologyをさらに増やす余地は残4件だけ．案Aがrejectedの場合，education固有の手作り訓練問題追加へ直ちに切り替える．
+5. **学習信号喪失リスクの受容**: 弱い2タスクの削減幅（-45%）は案Cより大きく，他ドメインとの境界学習が弱まる可能性がある．これはrc-plannerが受容すべきトレードオフとして明記すること．
+
+## Iteration 34: education代理タスク抽出比率の再配分（案A）による訓練データ構成変更
+
 ### 計画 (Iter34)
 
 **変更ファイル**: `build_dataset.py`のみ（2箇所）．

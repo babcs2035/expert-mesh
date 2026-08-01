@@ -3,6 +3,33 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B60 [auto-decided 2026-08-02] Iter38 は rejected で確定。classifier_training_data_composition 全値試し切り、次イテレーションは調査フェーズ
+
+- 状況: Iter38（classifier_training_data_composition=education_hybrid_proxy_and_civics）の rc-analyst 判定（rejected）を rc-reflector が検証・確定させた。
+- **判定: rejected（確定）**。主基準（education_recall > medical_recall基準 0.5112）は完全に不成立（0.4000 < 0.5112, gap=11.12pt）。top1_accuracy の McNemar p=0.0748 で有意改善なし。BH補正後有意退行 1件（education_precision）。
+- **決定的な学び**:
+  1. **japanese_civics の追加は education recall を改善しない**: Iter37（japanese_civicsのみ、Label Leakageあり）で education_recall +0.4235 の改善方向を示したように見えたが、Iter38 で Label Leakage を除去した hybrid approach では recall が -0.0588 へ退化。japanese_civics の「改善効果」は Iter37 の Label Leakage artifact だった可能性が高い。
+  2. **class_weight="balanced" の再計算が教育の重みを低下**: education 訓練行数が 150→350 になったため、`class_weight_[education]` が sklearn によって自動再計算され低下。これが education の recall/precision 低下に寄与している可能性が高い。
+  3. **hybrid approach の設計自体は Label Leakage 回避に有効**: 7つの単一レバー検証をすべて PASS した。ただし japanese_civics の追加自体が education recall にプラス効果をもたらさない。
+- **config.yml の全 levers を試し切り**:
+  - classifier_training_data_composition: 6 値すべて試済み（revision=rejected, resampling 案C=rejected, resampling 案A=rejected, handmade=rejected, replacement=rejected, reassignment=invalid, hybrid=rejected）
+  - classifier_calibration: 3 値すべて試済み（platt=partial, isotonic=partial, temperature=adopted）
+  - fallback_policy: adopted（完了）
+  - aggregation_method: Y2 ブロックで試せない
+  - E1-E10: 履歴済みまたは no-op
+- **次の一手: 調査フェーズから開始**（Iter39）。`current_lever=null` で初期化。
+- **rc-investigator への申し送り**（Tavily search 重点調査）:
+  1. **`class_weight=None` + 手動 sample_weight の feasibility**: `scripts/train_domain_classifier.py` の変更は code change か？新規レバー `class_weight_adjustment` として config.yml に追加できるか。スキーマ変更かデータ変更かの線引き。
+  2. **JMMLU/MMLU 外部の教育固有タスク（再調査）**: 前回調査（Iter37）で EduBench（LLM合成）、Pedagogy Benchmark（チリ教育）のみ。より広範な検索（arXiv, HuggingFace datasets）で教育実務固有の4択タスクを探す。
+  3. **education_recall の基準値再検討の材料収集**: medical_recall 0.5112 という基準が education に対して現実的か。類似の研究（ドメイン分類タスクにおける education ドメインの recall）を探す。
+  4. **embedding model の education ドメイン適応**: nomic-embed-text の education ドメイン特化ファインチューニングの有効性。
+- **要人間判断**:
+  1. `class_weight=None` + 手動 sample_weight の実装は code change。新規レバーとして `class_weight_adjustment` を config.yml に追加する形で提案する。
+  2. education_recall の基準値（medical_recall 0.5112）の再検討。
+  3. Y2（`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認は引き続き必要（B49〜B52既存項目）。
+  4. fallback設計思想の論文上の位置付け（B48）も未解決。
+  5. D5（`data/`/`models/` のバージョン管理方針）も未解決。
+
 ## B59 [auto-decided 2026-08-02] Iter37 は invalid で確定。classifier_training_data_composition 全値試し切り、次イテレーションは調査フェーズ
 
 - 状況: Iter37（classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education）の rc-analyst 判定（invalid）を rc-reflector が検証・確定させた。

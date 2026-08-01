@@ -200,7 +200,7 @@ levers:
   #     自律着手不能のため次点として選定．config.yaml/公開APIの変更を伴わないデータのみの
   #     変更で着手できる（スキーマ変更なし，ユーザー確認不要） ---
   - {name: classifier_training_data_composition,
-     values: [education_proxy_task_revision, education_proxy_task_resampling, education_handmade_training_problems, education_proxy_task_replacement, history_culture_japanese_civics_reassignment_to_education],
+     values: [education_proxy_task_revision, education_proxy_task_resampling, education_handmade_training_problems, education_proxy_task_replacement, history_culture_japanese_civics_reassignment_to_education, education_hybrid_proxy_and_civics],
      note: "[2026-07-31 d0004 §5 Y5 / d0003 X8 / backlog B52・B53]
             【2026-07-31 Iter32考察・backlog B53で追記】`education_proxy_task_revision`
             （弱い代理タスクhigh_school_psychology・moral_disputesへの`sample_weight=2.0`）は
