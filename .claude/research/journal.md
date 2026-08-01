@@ -1366,3 +1366,96 @@ Iter18 Phase C（domain LoRA 採用）の `top1_accuracy` は **0.5651** であ�
 
 ---
 
+## Iteration 40: SetFitによるnomic-embed-textのeducationドメイン適応
+
+### 計画 (2026-08-02)
+
+**仮説**: SetFit contrastive learningでeducation埋め込み空間を再調整し、education_recall > medical_recall基準(0.5112)を達成。
+
+**単一レバー**: `scripts/fine_tune_embedding.py` 新規作成 + 既存スクリプト3箇所をfine-tunedモデル対応。
+
+**コスト**: 中（~1-2時間、オフライン完結）。
+
+### 実験 (Iter40) — rc-experimenter
+
+**日時**: 2026-08-02
+
+**手順**:
+1. パッケージインストール: `uv sync --extra research` (setfit 1.1.3, sentence-transformers 5.6.1)
+2. `scripts/fine_tune_embedding.py` 新規作成 (SentenceTransformer 5.x API + TripletLoss)
+3. 埋め込みファインチューニング: CPU実行、3 epochs, batch_size=16, lr=2e-5, 5m48s
+4. `train_domain_classifier.py` に `--fine-tuned-embed-model` 引数追加
+5. `evaluate_classifier_calibration.py` に同引数追加
+6. 分類器再訓練: `models/domain_classifier_iter40.joblib` (1427行, 10クラス)
+7. 較正後予測生成: `results/iter40_calibrated_predictions.jsonl` (1600行)
+
+**主要指標比較 (Iter31 vs Iter40)**:
+
+| 指標 | Iter31 | Iter40 | Delta |
+|------|--------|--------|-------|
+| top1_accuracy | 0.6056 | 0.4894 | -0.1162 |
+| education_recall | 0.4588 | 0.6529 | +0.1941 |
+| medical_recall | 0.5112 | 0.3090 | -0.2022 |
+| ECE | 0.071201 | 0.033546 | -0.037655 |
+| argmax_flip_rate | — | 52.56% | — |
+
+**成功条件判定**:
+1. 主基準（education_recall > medical_recall基準 0.5112）: education_recall=0.6529は基準超えだがmedical_recall=0.3090の崩壊を伴う
+2. 非退行（BH補正後有意退行0件）: **重大逸脱**。13/20指標が有意退行
+3. McNemar有意改善（p<0.05）: **有意悪化**（chi2=60.46, p<0.0001）
+4. 単一レバー検証（argmax flip rate <15%）: **重大逸脱**。52.56%（閾値の3.5倍）
+
+**判定: rejected**
+
+### 分析 (Iter40) — rc-analyst
+
+**数値検証**: experimenter報告の数値は全て独立計算で確認済み。
+
+**統計的有意性**:
+- top1_accuracy有意悪化: McNemar chi2=60.46, p<0.0001（不一致ペア a_only=373, b_only=187）
+- education_recall有意改善: McNemar chi2=18.46, p=1.74e-05（47件が正解に転換）
+- medical_recall有意悪化: McNemar chi2=15.68, p=7.50e-05（40件中14件が直接educationに切り替わった）
+- BH補正後: recall退行6件、precision退行7件（計13/20指標）
+
+**解釈**: 全パラメータfine-tuningは全埋め込み空間を再配置するため、education_recall改善はmedical_recall崩壊の裏返し。ゼロサム的再配分。
+
+### 考察 (Iter40) — rc-reflector 判定
+
+**判定: rejected（確定）**
+
+**数値検証**: 全指標を独立計算で確認。analyst報告と一致。
+
+**成功条件判定**:
+1. 主基準: education_recall=0.6529は基準超えだが、medical_recall=0.3090の崩壊を伴うゼロサム的再配分
+2. 非退行: **重大逸脱**。13/20指標がBH補正後有意退行
+3. McNemar有意改善: **有意悪化**（chi2=60.46, p<0.0001）
+4. 単一レバー検証: **重大逸脱**。52.56%（閾値の3.5倍）
+
+**決定的な学び**:
+1. **SetFit/SentenceTransformerの全パラメータfine-tuningは単一レバー原則と両立しない**: contrastive learningにより全ドメインの埋め込み空間を再配置するため、これはハイパラチューニングで回避できない構造的制約。
+2. **education_recallの+0.1941改善は裏返し**: medical_recallの-0.2022崩壊の裏返し。iter31で正解だった医療質問40件のうち14件（35%）が直接educationに切り替わった。
+3. **先行研究との違い**: SDJC/JCSEは検索タスクで埋め込み空間の全体変化が許容されたが、分類器ベースのルーティングでは決定境界の直接変化に帰結するため単一レバー原則を維持できない。
+4. **単一レバーでembedding適応を実現するには**: LoRA/adapterのような低ランク更新のみ、または埋め込み出力への線形変換のみが必須。
+
+**config の全 levers を試し切り**:
+- fallback_policy: adopted（完了）
+- classifier_calibration: 3値すべて試済み（platt=partial, isotonic=partial, temperature=adopted）
+- classifier_training_data_composition: 6値すべて試済み（全rejected/invalid）
+- class_weight_adjustment: 1値試済み（rejected）
+- embedding_adaptation: 1値試済み（setfit_education_finetune=rejected）
+- aggregation_method: Y2ブロックで試せない
+- E1-E10: 履歴済みまたはno-op
+
+**次の一手の判断**:
+`embedding_adaptation` レバーの単一値（setfit_education_finetune）は尽きた。しかし、**embeddingレベルのadapter-only fine-tuning（LoRAスタイル）**は全パラメータfine-tuningとは異なるアプローチであり、単一レバー原則を満たす可能性がある。既存のWAFL-PEFTインフラ（domain_lora, Iter18 adopted）のLoRAフックが参考になる。
+
+config.yml の levers 末尾へ `embedding_adapter_only_lora` を追記済み。Iter41は計画フェーズから開始する。
+
+**要人間判断**:
+1. education_recall の基準値（medical_recall 0.5112）の再検討（長期未解決）
+2. Y2（`confidence_threshold`の二重責務分離、スキーマ変更）着手前のユーザー確認（長期未解決）
+
+### イテレーション完了
+- 判定: **rejected（確定）**。本番モデル無変更（`models/domain_classifier.joblib` 無変更）。
+- コミット: `643b5ae`
+- 次イテレーション（Iter41）: `embedding_adaptation=embedding_adapter_only_lora`。計画フェーズ（rc-planner）でLoRAフックの詳細設計を確定。

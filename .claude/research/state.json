@@ -1,14 +1,14 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter40",
+  "iteration": "Iter41",
   "iteration_name": "embedding_adaptationの調査とSetFitによる教育ドメイン埋め込み適応の実装計画",
-  "phase": "experiment",
+  "phase": "investigate",
   "status": "running",
-  "current_lever": "embedding_adaptation=setfit_education_finetune",
+  "current_lever": null,
   "experiment_deadline": null,
-  "updated_at": 1785620769,
-  "iteration_thread_ts": "1785618318.788499",
-  "notion_toggle_created": true,
+  "updated_at": 1785622470,
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
   "next_iteration_brief": {
     "must_read_first": [
       ".claude/research/journal.md (Iteration 40: SetFit full-parameter fine-tune, rejected)",
@@ -731,7 +731,7 @@
     "judgment": "rejected",
     "note": "manual sample_weight reproduction of class_weight balanced REJECTED as a hypothesis for improving education_recall. Key findings: (1) education_recall unchanged: 0.4588->0.4588 (identical). (2) medical_recall unchanged: 0.5112->0.5112 (identical). (3) top1_accuracy +0.0100 (0.6056->0.6156) but McNemar p=0.0848, not significant at alpha=0.05. (4) 75/1600 rows (4.7%) changed predictions, concentrated in history_culture (+10.12pt recall) and minor shifts elsewhere. (5) ECE slightly worsened (0.0712->0.0807). (6) Brier score slightly improved (0.6068->0.6000). (7) No BH-significant regressions or improvements in 20 per-domain metrics. Root cause: manual sample_weight with class_weight=None produces functionally equivalent effective weights to class_weight=balanced (both yield domain_weight = n_samples/(n_classes*n_domain_samples)). The 75 changed predictions are numerical noise from the solver, not a systematic improvement. The hypothesis that removing class_weight=balanced would improve education_recall is not supported by this experiment. Next steps: (A) investigate why education_recall is stuck at 0.4588 despite balanced weighting, (B) consider fundamentally different education proxy tasks or handmade education problems beyond what Iter35 tested, (C) re-evaluate whether education_recall 0.5112 is the right benchmark."
   },
-  "experiment_dir": "models/sentence-transformer-edu/",
+  "experiment_dir": null,
   "e40_results": {
     "lever": "embedding_adaptation=setfit_education_finetune",
     "top1_accuracy_before": 0.6056,
