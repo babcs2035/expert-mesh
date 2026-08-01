@@ -298,6 +298,11 @@ config.yml の登録レバーはすべて試し切り済み。新しい実行可
 1. education_recall の基準値（medical_recall 0.5112）の再検討。
 2. Y2（dispatch_candidate_threshold）着手前のユーザー確認は引き続き必要。
 
+### イテレーション完了
+- 判定: **rejected**。本番モデル無変更。
+- コミット: `edf793a`
+- 次イテレーション（Iter40）: 調査フェーズから開始（embedding_adaptationのfeasibility調査）
+
 ---
 
 ## Iteration 38: education_classificationのLabel Leakage回避策の調査とhybrid proxy approachの実装計画
