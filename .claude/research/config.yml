@@ -305,6 +305,53 @@ levers:
             (1) education_recallの基準値再検討（人間判断必要）(2) JMMLU外部からの教育固有タスク追加
             (3) Y2着手前の下調べ（調査フェーズ）。"}
 
+  # --- class_weight_adjustment: 【2026-08-02 Iter39追加】class_weight="balanced" の代わりに
+  #     手動sample_weightで同じeffective weightingを再現。Iter32で判明した
+  #     sample_weight *= class_weight_ 乗算バグを回避する。スキーマ変更なし。 ---
+  #     Iter39でrejected確定（education_recall=0.4588で不変）。
+  # --- embedding_adaptation: 【2026-08-02 Iter39追加】nomic-embed-textのSetFit fine-tuning
+  #     によりeducationドメインの埋め込み空間を改善。根本原因（embedding分離不足）に直接対処。 ---
+  - {name: embedding_adaptation,
+     values: [setfit_education_finetune],
+     note: "[2026-08-02 Iter39 / backlog B61] `class_weight_adjustment` はrejected確定。
+            education_recall=0.4588で不変だった。根本原因はembedding空間の分離不足。
+            **SetFit**（HuggingFace 2023）はSentence Transformersのfew-shot fine-tuning。
+            contrastive learningにより少量のラベル付きデータ（education 150件）で
+            埋め込み空間を再調整可能。
+            **先行研究**: SDJC（Chen et al. 2025）は日本語ドメイン適応でJACSTS rho=0.84達成。
+            JCSE（Chen et al. 2023）もEduドメインでSTS rho=0.8243達成。
+            **実施方法**: `sentence-transformers` + `setfit` パッケージのインストール +
+            `SetFitTrainer` によるcontrastive fine-tuning。
+            **訓練データ**: 既存の `data/classifier_train.jsonl` のeducation行（150件）を
+            使用。positive pairはeducation行同士、negative pairは他ドメイン行からサンプリング。
+            **コスト**: 中（数日〜1週間）。embeddingの再訓練が必要で、実機実行（1600問本走）も必要。
+            **成功条件**: education_recall > medical_recall基準(0.5112)、
+            他9ドメイン18指標のBH補正後有意退行0件、top1_accuracyのMcNemar有意改善"}
+
+  - {name: class_weight_adjustment,
+     values: [none_manual_sample_weight],
+     note: "[2026-08-02 Iter39 / backlog B60] `class_weight='balanced'` の代わりに
+            `class_weight=None` + 手動 `sample_weight` で同じeffective weightingを再現。
+            **Iter32の失敗機序**: `LogisticRegression(class_weight='balanced')` は
+            `sample_weight` を受け取ると `class_weight_` と乗算する（sklearn公式:
+            'these weights will be multiplied with sample_weight'）。education用
+            `sample_weight` 増加で `class_weight_[education]` が 0.9513→0.5931 へ低下し、
+            狙った重み付けが得られなかった。
+            **`class_weight=None` の効果**: sklearnの `class_weight_` 計算を完全にスキップ。
+            `sample_weight` の値がそのまま有効重みになる。
+            **ドメイン別balanced重み**（sklearn `compute_class_weight('balanced')` で実測）:
+            - 150行ドメイン（education, general, medical等9ドメイン）: 0.9513
+            - 77行ドメイン（legal）: 1.8532
+            - 全ドメインの有効重み: 0.9513×150 = 142.70, 1.8532×77 = 142.70（完全一致）
+            **変更ファイル**: `scripts/train_domain_classifier.py` line 144
+            `class_weight='balanced'` → `class_weight=None` +
+            `_extract_sample_weights()` の計算ロジック変更
+            **成功条件**: education_recall > medical_recall基準(0.5112)、
+            他9ドメイン18指標のBH補正後有意退行0件、top1_accuracyのMcNemar有意改善
+            **注意**: investigatorの提案（全行sample_weight=1.0）はlegalの有効重みを
+            142.70→77へ-46%低下させるためlegal_recall退行のリスクが高い。
+            本計画ではドメイン別balanced重みを再現するsample_weightを使用。"}
+
   # --- Y2/Y3: Y2（コード変更・要ユーザー確認）を終えるまで Y3 に着手してはならない ---
   - {name: aggregation_method, values: [majority_vote, llm_judge],
      note: "[2026-07-31 d0004 §3・§5 Y3 / backlog B48] **Iter27 で実験不成立（no-op）．

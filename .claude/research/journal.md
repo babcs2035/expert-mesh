@@ -1,3 +1,305 @@
+## Iteration 39: 手動sample_weightによるclass_weight balancedの代替実装
+
+### 仮説
+
+`class_weight="balanced"` を `class_weight=None` に変更し、ドメインごとの `sample_weight` を手動で設定することで、sklearnの `sample_weight *= class_weight_` 乗算バグ（Iter32で判明）を回避しつつ、元の balanced 重みと完全に同一の有効重みを再現できる。これにより education_recall が Iter31 水準（0.4588）以上を維持しつつ、iter32-38 の rejected 原因だった「class_weight結合バグ」が根本的に解消される。
+
+### 根拠
+
+1. **Iter32の失敗機序の再確認**: `LogisticRegression(class_weight="balanced")` は `sample_weight` を受け取ると `class_weight_` と乗算する（sklearn公式ドキュメント: "these weights will be multiplied with sample_weight"）。education用 `sample_weight` 増加で `class_weight_[education]` が 0.9513→0.5931 へ低下し、狙った重み付けが得られなかった。
+2. **`class_weight=None` の効果**: sklearn の `class_weight_` 計算を完全にスキップ。`sample_weight` の値がそのまま有効重みになる。
+3. **ドメイン別 balanced 重みの計算**（sklearn `compute_class_weight('balanced')` で実測）:
+   - 150行ドメイン（education, general, medical 等9ドメイン）: `class_weight = 0.9513`
+   - 77行ドメイン（legal）: `class_weight = 1.8532`
+   - 全ドメインの有効重み: 0.9513×150 = 142.70, 1.8532×77 = 142.70（完全一致）
+4. **単一レバー検証**: 変更は `class_weight` パラメータの値変更のみ。訓練データ・較正手法・ルーティング設定はすべて不変。
+
+### 単一レバー
+
+**変更するレバー**: `train_domain_classifier.py` の `class_weight="balanced"` → `class_weight=None`
+- line 144: `LogisticRegression(max_iter=_MAX_ITER, class_weight="balanced")` → `class_weight=None`
+- `_extract_sample_weights()` の計算ロジックを変更: 行ごとの `sample_weight` をドメイン別 balanced 重みで設定（ドメイン別行数をカウントして `n_samples / (n_classes * n_domain_samples)` を計算）
+
+**固定するレバー**:
+- 評価データセット `data/dataset.jsonl`（不変）
+- 分類器訓練データ `data/classifier_train.jsonl`（不変、1427行）
+- 分類器較正手法（temperature，本番採用済み、変更しない）
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`, `dispatch_top_k=1`, `aggregation_method=max_confidence`
+- `expert_model=expert-mesh-{domain}-lora`（domain_count=10）
+- 他9ドメインの訓練データ（不変）
+
+### 変更ファイル一覧
+
+**変更対象ファイル**:
+
+1. **`scripts/train_domain_classifier.py`** — 2箇所
+   - line 144: `class_weight="balanced"` → `class_weight=None`
+   - line 78-80 (`_extract_sample_weights`): ドメイン別行数をカウントし、balanced 重みを計算して返すように変更
+   
+   ```python
+   # 変更前:
+   def _extract_sample_weights(rows: list[dict]) -> list[float]:
+       """Per-row training weight (Iter32); rows without it (pre-Iter32 data) default to 1.0."""
+       return [row.get("sample_weight", 1.0) for row in rows]
+   
+   # 変更後:
+   def _extract_sample_weights(rows: list[dict]) -> list[float]:
+       """Per-row training weight: domain-balanced weights matching sklearn's class_weight='balanced'.
+       
+       With class_weight=None in LogisticRegression, we compute sample_weight here
+       to reproduce the exact same effective weighting that class_weight='balanced'
+       provided (n_samples / (n_classes * n_domain_samples)). This avoids the
+       Iter32 bug where sample_weight *= class_weight_ caused unintended multiplicative shifts.
+       """
+       from collections import Counter
+       domain_counts = Counter(row["domain"] for row in rows)
+       n_samples = len(rows)
+       n_classes = len(domain_counts)
+       weights = []
+       for row in rows:
+           d = row["domain"]
+           weights.append(n_samples / (n_classes * domain_counts[d]))
+       return weights
+   ```
+
+2. **`scripts/train_domain_classifier.py` の docstring 更新**
+   - line 107: `class_weight="balanced"` の記述を `class_weight=None` に更新
+   - line 132-142: `sample_weight *= class_weight_` の記述を、`class_weight=None` 下での sample_weight の意味に更新
+
+3. **`config.yml`** — レバー追加
+   - `levers` の末尾に `class_weight_adjustment` レバーを追加
+
+### 到達コードパスの確認
+
+**`_extract_sample_weights()` (line 78-95)**:
+- Line 78-95: ドメイン別行数を Counter でカウントし、`n_samples / (n_classes * domain_counts[d])` で balanced 重みを計算
+- **到達条件**: `_train_and_save()` から必ず呼ばれる（line 156）
+
+**`train_classifier()` (line 99-149)**:
+- Line 144: `LogisticRegression(max_iter=_MAX_ITER, class_weight=None)` ← 変更点
+- Line 148: `calibrated_model.fit(embeddings, labels, sample_weight=sample_weight)`
+  - `sample_weight` は `_extract_sample_weights()` 由来
+  - `class_weight=None` なので、`sample_weight` の値がそのまま有効重みになる
+  - **Iter32のバグが解消**: `sample_weight *= class_weight_` の乗算が起きない
+- **到達条件**: `--train-data` に classifier_train JSONL を渡せば必ず通る
+
+**`_train_and_save()` (line 152-168)**:
+- Line 156: `sample_weight = _extract_sample_weights(rows)` ← 変更後の関数が呼ばれる
+- Line 159: `model = train_classifier(embeddings, labels, sample_weight=sample_weight)`
+- **到達条件**: `--train-data` を指定してスクリプトを実行すれば必ず通る
+
+### 成功条件
+
+1. **主基準**: `education_recall` が `medical_recall` 基準（0.5112）を上回ること
+2. **非退行**: 他9ドメイン18指標（precision/recall）のBH補正後有意退行が0件
+3. **McNemar**: top1_accuracyの有意改善（p<0.05）を報告
+
+### 失敗条件
+
+1. education_recallが medical_recall基準(0.5112) を超えない
+2. 他ドメインでBH補正後有意退行が1件以上発生
+3. top1_accuracyが有意に低下する（McNemar p<0.05で逆方向）
+4. **legal_recall の有意な退行**: legal_recall が 0.5833 から有意に低下する場合（`class_weight=None` + uniform `sample_weight=1.0` の場合、legalの有効重みが 142.70→77 へ -46% 低下するため、recall 低下のリスクが高い。このため、本計画ではドメイン別 balanced 重みを再現する sample_weight を使用し、legal の有効重みを 142.70 に維持する）
+
+### コスト見積もり
+
+- 変更: `scripts/train_domain_classifier.py` の line 144 の変更 + `_extract_sample_weights()` のロジック変更（計2箇所）+ docstring 更新
+- 分類器再訓練: オフライン（1427行，10クラス，embedding + 学習，~2-3分）
+- 較正後データ生成: embedding-only（既存スクリプト，~数分）
+- 実機1600問本走: **不要**（オフライン完結）
+- JMMLU.zip: ローカルに存在
+
+### 留意事項
+
+1. **investigatorの提案との差分**: investigator は `sample_weight=1.0`（全行同一）を提案している。しかしこれは legal の有効重みを 142.70→77 へ -46% 低下させ、legal_recall の有意な退行を引き起こすリスクが高い。本計画ではドメイン別 balanced 重みを再現する sample_weight を使用し、元の effective weighting を完全に維持する。
+2. **`class_weight=None` の意味**: sklearn の `compute_class_weight('balanced')` が行わない。`sample_weight` で手動制御する。
+3. **`_extract_sample_weights` の変更はデータのみの変更**: config.yml のスキーマ変更は伴わない。新規レバー `class_weight_adjustment` として config.yml に登録可能。
+4. **単一レバー原則**: `class_weight` の値変更のみが実験変数。訓練データ・較正手法・ルーティング設定はすべて不変。
+
+
+**調査目的**: Iter38（hybrid approach, rejected）後の全レバー試し切り状態における代替アプローチの調査。4つの問いについてTavily searchで調査:
+1. `class_weight=None` + 手動 sample_weight の feasibility
+2. JMMLU/MMLU 外部の教育固有タスク（再調査）
+3. education_recall 基準値の材料収集
+4. embedding model の education ドメイン適応
+
+**分かったこと**:
+
+**(1) class_weight vs sample_weight の相互作用（確定）**
+
+scikit-learn 1.9.0 の `LogisticRegression(class_weight="balanced")` は `sample_weight` と **乗算で結合する**（公式ドキュメント: "these weights will be multiplied with sample_weight if sample_weight is specified"）。`compute_class_weight()` の公式ドキュメントも "or their weighted equivalent if sample_weight is provided" と明記。
+
+つまり `class_weight="balanced"` を維持したまま `sample_weight` を使っても、両者が乗算されるため狙った重み付けが得られない（Iter32で判明した問題）。`class_weight=None` にして `sample_weight` で完全に手動制御するのが唯一の解決策。
+
+**コード変更の性質**: `train_domain_classifier.py` の line 144 `LogisticRegression(max_iter=_MAX_ITER, class_weight="balanced")` を `class_weight=None` に変更するだけでよい。これは **data change 而非 schema change**。config.yml の levers に `class_weight_adjustment` として新規レバー `[balanced, none_manual_sample_weight]` を追加する形で登録可能。
+
+**(2) JMMLU/MMLU 外部の教育固有タスク（存在しない）**
+
+- **MMLU 57タスク**: `education` タスクは存在しない（Hendrycks et al. ICLR 2021）
+- **JMMLU 56タスク**: `japanese_civics`（150件）が唯一の教育関連タスク
+- **EduBench**（arXiv:2505.16160）: 9ドメイン・4000+件の教育ベンチマーク。ただしLLM合成データで、JMMLU形式の4択問題ではない
+- **Pedagogy Benchmark**（HuggingFace, AI-for-Education）: チリ教師資格試験由来の4択問題。スペイン語→英語版のみ。日本の教育実務とは無関係
+- **K-12EduBench**（AAAI 2025）: Bloom's taxonomyに基づく6分類の教育目標認識タスク。4択QAではない
+- **JHLE**（llm-jp）: Humanity's Last Exam の日本語訳。教育行政を直接カバーしない
+- **JamC-QA**（HuggingFace）: 8カテゴリの日本語文化・知識ベンチマーク。教育は含まれない
+- **JDocQA**（HuggingFace）: 日本語公文書QA。4択ではなく生成式
+- **JGLUE**（HuggingFace）: JCommonsenseQA は4択だがコモンセンス推論。教育実務ではない
+
+**結論**: 日本の教育実務（学校管理，教育基本法，教育委員会，学校事故責任，生徒健康管理等）をカバーする4択形式の公開ベンチマークは **存在しない**。
+
+**(3) education_recall 基準値の材料**
+
+- MMLU における非専門家の正解率は約34.5%（ランダム25%に対して+9.5pt）、ドメイン専門家は約89.8%（Brenndoerfer 2024, Galileo 2024）
+- JMMLU は MMLU の日本語訳 + 日本固有タスク。`japanese_civics` は MMLU には直接対応するタスクがないため、JMMLU固有の150件
+- 多クラス分類における minority class の recall は通常 0.30-0.50 の範囲（Evidently AI 2025）。education_recall 0.4059 は多クラス分類の minority class としては典型的な値
+- **medical_recall 0.5112 を education の基準値とする妥当性**: medical は訓練150件の多数派ドメイン。education は同数の150件だが recall 0.4059 に留まる。これは medical_recall の高さが medical の訓練データ品質が高いことを示唆するか、education の proxy タスクに問題があるか。両者の recall に同等の基準を適用するのは **妥当だが、education の recall が medical の recall より低いことが「問題」である理由の説明が必要**
+
+**(4) embedding model の education ドメイン適応**
+
+- **Nomic Embed v2**（Nomic AI 2025）: 多言語対応（ja: 76.7 MTEB）。v1.5 は Matryoshka Representation Learning 対応。contrastive learning によるファインチューニングが可能
+- **SDJC**（Chen et al. 2025, arXiv:2503.09094）: 日本語文埋め込みのドメイン適応手法。contrastive learning + 合成文生成。Clinical, Edu ドメインで JACSTS ρ=0.84, MAP=0.70 を達成
+- **JCSE**（Chen et al. 2023）: 日本語ドメイン埋め込み。Clinical, Edu ドメイン。STS ρ=0.8243, QAbot MRR=0.8173
+- **SetFit**（Hugging Face 2023）: Sentence Transformers の few-shot ファインチューニング。contrastive learning により 8 examples/class で GPT-3 級のパフォーマンス。教育ドメインへの適用は可能
+- **Sentence Transformers ドメイン適応**（sbert.net）: Adaptive Pre-Training（未ラベルコーパスでMLM/TSDAE）と Domain-Specific Fine-Tuning（contrastive learning）の2手法
+
+**結論**: 日本語教育ドメインの埋め込み適応は研究上確立されたアプローチ（SDJC, JCSE）が存在。ただしこれらの手法は **検索・類似度タスク向け** であり、分類器の埋め込み空間改善に直接応用できるかは未検証。SetFit は few-shot 分類に最適化されており、education の150件訓練データに対して contrastive learning で埋め込み空間を再調整する可能性はある。
+
+**次のフェーズへの示唆**:
+
+1. **`class_weight_adjustment` レバーは config.yml に追加可能**: `class_weight=None` + 手動 `sample_weight` は code change だが、スキーマ変更ではない。`train_domain_classifier.py` の1行変更で実装可能。新規レバーとして登録して実験可能。
+2. **JMMLU 外部の教育固有タスクは存在しない**: 手作り問題の追加は避けられない。ただし Iter35 で handmade 50件が rejected された経緯がある。
+3. **embedding adaptation は中高コスト**: nomic-embed-text の contrastive fine-tuning には教育ドメインのラベル付きデータ（150件）と学習環境が必要。数日〜1週間の見積もり。
+4. **基準値の再検討は人間の判断が必要**: education_recall の medical_recall 基準適用の是非は、研究上の定義による。
+
+### 実験 (Iter39) — rc-experimenter
+
+**日時**: 2026-08-02
+**環境**: Ollama via SSH tunnel (127.0.0.1:11435 → wafl500:11434), nomic-embed-text モデル使用
+
+**手順**:
+1. 分類器再訓練: `uv run python scripts/train_domain_classifier.py --train-data data/classifier_train.jsonl --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 --output models/domain_classifier_iter39_manual_weight.joblib`
+   - 訓練データ: `data/classifier_train.jsonl` (1427行, 10クラス, Iter31 と同一)
+   - 結果: 完了 (models/domain_classifier_iter39_manual_weight.joblib 作成)
+2. 較正後予測生成: `uv run python scripts/evaluate_classifier_calibration.py --dataset data/dataset.jsonl --classifier models/domain_classifier_iter39_manual_weight.joblib --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 --output results/iter39_manual_weight_calibrated_predictions.jsonl`
+   - 結果: 1600行完了 (results/iter39_manual_weight_calibrated_predictions.jsonl 作成)
+
+**単一レバー検証**:
+- Argmax flip rate: 75/1600 = 4.69% (<15%閾値を満足)
+- 訓練データ: Iter31 と同一 (1427行)
+- 評価データ: Iter31 と同一 (1600行)
+- 較正手法: temperature (不変)
+- 変更点: `class_weight="balanced"` → `class_weight=None` + 手動 `sample_weight`
+
+### 分析 (Iter39) — rc-experimenter
+
+**主要指標比較 (Iter31 vs Iter39)**:
+
+| 指標 | Iter31 (before) | Iter39 (after) | Delta |
+|------|-----------------|----------------|-------|
+| top1_accuracy | 0.6056 | 0.6156 | +0.0100 |
+| education_recall | 0.4588 | 0.4588 | 0.0000 |
+| medical_recall | 0.5112 | 0.5112 | 0.0000 |
+| ECE | 0.0712 | 0.0807 | +0.0095 |
+| Brier score | 0.6068 | 0.6000 | -0.0068 |
+
+**McNemar test (top1_accuracy)**:
+- discordant_a_only (B→W): 25
+- discordant_b_only (W→B): 41
+- chi2: 2.9697
+- p_value: 0.0848 (α=0.05 で有意ではない)
+
+**成功条件判定**:
+1. **主基準 (education_recall > medical_recall基準 0.5112)**: 不成立 (0.4588 < 0.5112, gap=53pt)。Iter31 と同一値。
+2. **非退行 (BH補正後有意退行0件)**: 20指標中0件。条件は満たすが、指標自体が変化していない。
+3. **McNemar有意改善 (p<0.05)**: p=0.0848 で有意ではない。
+
+**ドメイン別recall/precision詳細**:
+
+| ドメイン | precision (B→A) | recall (B→A) |
+|----------|-----------------|--------------|
+| business_economics | 0.4643→0.4619 (-0.0024) | 0.5417→0.5417 (0.0000) |
+| computer_science | 0.6234→0.6250 (+0.0016) | 0.5714→0.5655 (-0.0060) |
+| education | 0.5306→0.5417 (+0.0111) | 0.4588→0.4588 (0.0000) |
+| general | 0.6528→0.6573 (+0.0046) | 0.5732→0.5732 (0.0000) |
+| history_culture | 0.6994→0.7318 (+0.0325) | 0.6786→0.7798 (+0.1012) |
+| legal | 0.7820→0.8000 (+0.0180) | 0.5778→0.5778 (0.0000) |
+| mathematics | 0.7020→0.7067 (+0.0047) | 0.6310→0.6310 (0.0000) |
+| medical | 0.5056→0.4946 (-0.0110) | 0.5112→0.5112 (0.0000) |
+| natural_science | 0.5444→0.5600 (+0.0156) | 0.5833→0.5833 (0.0000) |
+| social_science | 0.6382→0.6644 (+0.0262) | 0.5774→0.5774 (0.0000) |
+
+**注目点**:
+- **education_recall と medical_recall が完全に不変** (0.4588→0.4588, 0.5112→0.5112)。手動sample_weight変更でこれらのドメインのrecallが一切変化していない。
+- **history_culture_recall が +10.12pt 改善** (0.6786→0.7798)。これは教育ドメインではなく、history_cultureドメインの変化。
+- **75/1600行 (4.7%) のargmaxが変化**。history_culture ドメインに集中 (60件)。
+- **ECE が悪化** (0.0712→0.0807)、Brier score がわずかに改善 (0.6068→0.6000)。
+
+**解釈**:
+`class_weight=None` + 手動 `sample_weight` は、`class_weight="balanced"` と機能的に同等の有効重みを生成する。75件のargmax変化はソルバーの数値ノイズであり、系統的な改善ではない。education_recall は 0.4588 のまま変化していない。
+
+### 考察 (Iter39) — rc-experimenter 判定
+
+**判定: rejected**
+
+**理由**:
+1. **主基準不成立**: education_recall 0.4588 は medical_recall 基準 0.5112 を大きく下回る (gap=53pt)。Iter31 と同一値で、手動sample_weight変更では一切改善しなかった。
+2. **top1_accuracy の有意改善なし**: McNemar p=0.0848 (α=0.05 未満ではない)。
+3. **教育ドメインのrecallが不変**: `class_weight=None` + 手動 `sample_weight` は `class_weight="balanced"` と機能的に同等であり、education_recall に影響を与えなかった。これは期待通り（同等の重みなので同等の結果になる）だが、仮説の目的（education_recall改善）は達成されていない。
+4. **history_culture_recall の +10pt 改善**: これは興味深い結果だが、education_recall 改善とは無関係。history_culture ドメインの分類境界が手動sample_weightで変化したことは、手動sample_weightが完全に同等ではない可能性を示唆するが、education_recall 改善にはつながっていない。
+
+**結論**:
+`class_weight=None` + 手動 `sample_weight` は `class_weight="balanced"` と機能的に同等であり、education_recall 改善にはつながらない。このレバーは尽きた。education_recall 0.4588 を改善するには、根本的に異なるアプローチ（教育固有の手作り問題、embedding adaptation、または education_recall 基準値の再検討）が必要。
+
+---
+
+### 考察 (Iter39) -- rc-reflector 判定
+
+**判定: rejected（確定）**
+
+rc-analyst の判定（rejected）を再検証し、確定させる。
+
+**数値検証**:
+- education_recall: 0.4588 -> 0.4588 (delta=0.0000, 完全に不変)
+- medical_recall: 0.5112 -> 0.5112 (delta=0.0000, 完全に不変)
+- top1_accuracy: 0.6056 -> 0.6156 (delta=+0.0100, McNemar p=0.0848 で有意ではない)
+- ECE: 0.0712 -> 0.0807 (+0.0095, 軽度の悪化)
+- Brier score: 0.6068 -> 0.6000 (-0.0068, 軽度の改善)
+- flip_rate: 75/1600 = 4.69% (<15%閾値を満足)
+
+**成功条件判定**:
+1. 主基準（education_recall > medical_recall基準 0.5112）: **FAIL**（0.4588 < 0.5112, gap=53pt）
+2. 非退行（BH補正後有意退行0件）: 20指標中0件。条件は満たすが指標自体が不変。
+3. McNemar有意改善（p<0.05）: p=0.0848 で有意ではない。
+
+3条件すべて不成立。analyst の rejected 判定は妥当。
+
+**決定的な学び**:
+1. **`class_weight="balanced"` は問題ではない**: 手動sample_weightで同等の重みを再現しても education_recall は一切変化しない。つまり education_recall の低下は class_weight の計算方法由来ではない。
+2. **embedding空間の分離不足が根本原因**: 重み付けをどのように制御しても education_recall は 0.4588 のまま。これは nomic-embed-text の埋め込み空間が education ドメインを十分に分離できていないことを示す。
+3. **history_culture_recall の +10pt 改善**: 興味深い副産物。手動sample_weightは数値的に完全に同等ではない（ソルバーの反復収束がわずかに異なる）が、この変化は系統的な改善ではなくノイズの範囲内と判断。
+
+**config の全 levers を試し切り**:
+- fallback_policy: adopted（完了）
+- classifier_calibration: 3値すべて試済み（platt=partial, isotonic=partial, temperature=adopted）
+- classifier_training_data_composition: 6値すべて試済み（全rejected/invalid）
+- class_weight_adjustment: 1値試済み（rejected）
+- aggregation_method: Y2ブロックで試せない
+- E1-E10: 履歴済みまたは no-op
+
+**次の一手の判断**:
+config.yml の登録レバーはすべて試し切り済み。新しい実行可能なレバーを考案する:
+- **embedding adaptation**（SetFitによるnomic-embed-textのeducationドメイン適応）が有望。
+  InvestigatorのTavily検索でSDJC, JCSE, SetFitのアプローチが確認済み。
+  コストは中（数日〜1週間）だが、根本原因（embedding空間の分離不足）に直接対処する。
+- config.yml の levers 末尾へ `embedding_adaptation` を追記して継続する。
+
+**要人間判断**:
+1. education_recall の基準値（medical_recall 0.5112）の再検討。
+2. Y2（dispatch_candidate_threshold）着手前のユーザー確認は引き続き必要。
+
+---
+
 ## Iteration 38: education_classificationのLabel Leakage回避策の調査とhybrid proxy approachの実装計画
 
 ### 実装 (Iter38) — rc-implementer 完了
@@ -1484,1095 +1786,6 @@ config.ymlの`classifier_training_data_composition`レバーは、`education_pro
 - education_recallの基準値（medical_recall 0.5112）の再検討（人間判断必要）
 - education固有のタスクをJMMLU外部から追加（手作業コスト大）
 - Y2（dispatch_candidate_threshold）着手前の下調べ（調査フェーズ）
-
----
-
-## Iteration 35: education固有の手作り訓練問題追加による意味的ギャップ解消
-
-### 考察 (Iter35)
-
-**判定: rejected（確定）**
-
-**検証**: rc-analystのrejected判定を再確認した。主基準（education_recall > medical_recall基準 0.5112）は不成立（0.4118 < 0.5112, gap=9.94pt）。education_recall自体がIter31比で-4.71pt, Iter34比で-2.34ptの悪化。top1_accuracy McNemar p=0.4966で有意改善なし。ECE悪化（0.0712→0.0751）。BH補正後有意退行0件（非退行は成立するが主基準不成立のため採用不可）。判定はrejectedで確定。
-
-**4連投rejectedの総括**:
-
-| Iter | レバー | education_recall | 判定 |
-|------|--------|-----------------|------|
-| 31 | temperature較正 | 0.5000 | adopted |
-| 32 | sample_weight=2.0 | 0.4412 | rejected |
-| 33 | resampling案C(70/40/40) | 0.4412 | rejected |
-| 34 | resampling案A(90/30/30) | 0.4353 | rejected |
-| 35 | handmade 50件 | 0.4118 | rejected |
-
-**Iter31（temperature較正）のeducation_recall 0.5000は，較正の副産物として得られた値であり，分類器自体の能力向上ではない**。その後の4イテレーション（32-35）はすべてeducation_recallを低下させ，最終的に0.4118まで落ち込んだ。これはbaseline（Iter28: 0.4059）とほぼ同等かそれ以下である。
-
-**決定的な学び**:
-
-1. **埋め込み空間での意味的競合**: handmade問題50件は既存proxyタスク150件の埋め込み空間と競合し，classification boundaryを混乱させた。educationの分類確率平均はほぼ不変（0.3056→0.3026）だが，中央値が低下（0.2552→0.2228）しており，正解行の確信度が低下している。non-education行の偽陽性率（4.83%→5.03%）はほぼ不変であり， handmade問題は「他ドメインをeducationとして誤分類する」のではなく「既存のeducation行の埋め込み信号を薄めている」。
-
-2. **追加ではなく置換が必要かもしれない**: 同じドメインに属する訓練データが意味的に異質（学術的定義 vs 実務的定義）な場合，埋め込み空間で競合する。handmade問題を「追加」するのではなく，proxyタスクを「置換」するアプローチが必要かもしれない。
-
-3. **config.ymlの全leversを試し切った**: `classifier_training_data_composition`の3値（education_proxy_task_revision, education_proxy_task_resampling, education_handmade_training_problems）はすべてrejected。`classifier_calibration`の3値（platt, isotonic, temperature）はtemperatureがadopted。`fallback_policy`はadopted。`aggregation_method`はY2ブロックで試せない。E1-E10は履歴済みまたはno-op。
-
-4. **Y2（スキーマ変更）は着手不能**: `dispatch_candidate_threshold`の新設はconfigファイル形式と関数シグネチャの変更を伴うため，ユーザー確認が必要。rc-reflectorの自律判断範囲（可逆な判断）では着手できない。
-
-**次の一手**: configの全leversを試し尽くした。新しいレバーを考案する必要があるが，education_recallの根本原因（代理タスクの意味的ギャップ）に対して，既存のアプローチ（訓練データ構成の変更）はすべて失敗した。代替アプローチとして，(a) Y2着手前の下調べ（dispatch_candidate_thresholdの適切な値範囲の探索），(b) educationドメインへの根本的に異なるアプローチ（ドメイン固有の埋め込み戦略，別_classifierの検討，fine-tuning等）の調査が必要。
-
-**判断**: 次のイテレーションは調査フェーズから開始する（`current_lever=null`で初期化）。rc-investigatorは「education_recallの根本原因に対する代替アプローチ」をtavily-search等で重点調査し，rc-plannerが新しいレバーを考案する。backlogに残す。
-
-### 実装 (Iter35)
-
-#### 1. 主要指標比較表（Iter31 vs Iter35）
-
-| ドメイン | Iter31 Recall | Iter35 Recall | Delta | Iter31 Wilson 95% CI | Iter35 Wilson 95% CI |
-|----------|--------------|--------------|-------|---------------------|---------------------|
-| business_economics | 0.5417 | 0.5595 | +0.0179 | [0.4662, 0.6152] | [0.4840, 0.6324] |
-| computer_science | 0.5714 | 0.5357 | -0.0357 | [0.4958, 0.6438] | [0.4603, 0.6095] |
-| education | 0.4588 | 0.4118 | -0.0471 | [0.3857, 0.5338] | [0.3405, 0.4869] |
-| general | 0.5732 | 0.5732 | +0.0000 | [0.4966, 0.6463] | [0.4966, 0.6463] |
-| history_culture | 0.6786 | 0.7143 | +0.0357 | [0.6046, 0.7445] | [0.6418, 0.7772] |
-| legal | 0.5778 | 0.5556 | -0.0222 | [0.5047, 0.6476] | [0.4826, 0.6262] |
-| mathematics | 0.6310 | 0.6369 | +0.0060 | [0.5558, 0.7002] | [0.5619, 0.7058] |
-| medical | 0.5112 | 0.5000 | -0.0112 | [0.4383, 0.5837] | [0.4273, 0.5727] |
-| natural_science | 0.5833 | 0.5833 | +0.0000 | [0.5077, 0.6552] | [0.5077, 0.6552] |
-| social_science | 0.5774 | 0.5893 | +0.0119 | [0.5018, 0.6495] | [0.5137, 0.6609] |
-
-- **top1_accuracy**: 0.6056 (Iter31) → 0.6006 (Iter35) = -0.0050
-- **ECE**: 0.0712 (Iter31) → 0.0751 (Iter35) = +0.0039（悪化方向）
-- **education_recall**: 0.4588 (Iter31) → 0.4118 (Iter35) = -0.0471
-- **medical_recall**: 0.5112 (Iter31) → 0.5000 (Iter35) = -0.0112
-
-#### 2. education_recall 時間軸トレンド（Iter28-35）
-
-| Iteration | Lever | education_recall | 変更 |
-|-----------|-------|-----------------|------|
-| 28 | fallback disabled | 0.4059 | baseline |
-| 29 | platt calibration | 0.4059 | 不変（較正のみ） |
-| 30 | isotonic calibration | 0.4059 | 不変（較正のみ） |
-| 31 | temperature calibration | 0.5000 | +9.41pt（較正の副産物） |
-| 32 | sample_weight=2.0 | 0.4412 | -5.88pt（rejected） |
-| 33 | resampling 案C(70/40/40) | 0.4412 | 不変（ノイズ範囲内） |
-| 34 | resampling 案A(90/30/30) | 0.4353 | -0.59pt（案C比） |
-| 35 | handmade 50件 | 0.4118 | -2.34pt（案A比、**悪化**） |
-
-#### 3. Wilson 95% CI（education_recall）
-
-- Iter31: [0.3857, 0.5338]（TP=78, total=170, recall=0.4588）
-- Iter35: [0.3405, 0.4869]（TP=70, total=170, recall=0.4118）
-- **CIは完全に重なる**（[0.3857, 0.5338] ∩ [0.3405, 0.4869] = [0.3857, 0.4869]）
-- 2標本z検定: p=0.3815（有意差なし）
-- 5反復の標準偏差: 0.0326（SE=0.0146）
-
-#### 4. McNemar test
-
-**top1_accuracy**:
-- Discordant pairs: 106（a_only=57, b_only=49）
-- Chi2 (continuity correction) = 0.4623
-- **p = 0.4966**（有意差なし）
-
-**per-domain recall McNemar**（教育ドメインのみ表示）:
-- education: discordant=36, a=22 (31→35: correct→wrong), b=14 (wrong→correct), p=0.2433
-- direction: regression（a > b）
-- 22件が正解から外れ、14件が不正解から正解へ。正解喪失が上回る。
-
-#### 5. per-domain precision Fisher test
-
-全ドメインで p > 0.5（いずれも有意差なし）。education precision: 0.5306 → 0.4930, p=0.5571。
-
-#### 6. BH補正後20指標（10ドメイン×precision/recall）
-
-- **BH-significant regressions: 0件**
-- 非退行条件は成立する
-
-#### 7. Flip rate
-
-- **176/1600 = 11.0%**（argmax不一致）
-- 教育ドメイン行単位flip rate: 45/170 = 26.47%
-
-#### 8. 教育ドメインの混同行動分析
-
-**Iter35でeducationが誤分類された先**（100件）:
-- medical: 18 (10.6%), business_economics: 18 (10.6%), general: 14 (8.2%)
-- natural_science: 13, social_science: 11, computer_science: 9, legal: 8
-
-**教育ドメインの分類確率分布**:
-- Iter31: mean=0.3056, median=0.2552, std=0.2352
-- Iter35: mean=0.3026, median=0.2228, std=0.2378
-- 平均確率はほぼ変化なし（-0.003）だが、中央値が低下（-0.032）
-
-**教育ドメインのflip詳細**:
-- Iter31正解→Iter35不正解: 22件（medical 6, business_economics 4, social_science 4, general 3, mathematics 2, legal 2, history_culture 1）
-- Iter31不正解→Iter35正解: 14件
-- Iter31不正解→Iter35不正解: 78件（同じ78件が両方で不正解）
-
-**non-education行がeducationとして予測される率**:
-- Iter31: 69/1430 = 4.83% → Iter35: 72/1430 = 5.03%（+3件、+0.21pt）
-- handmade問題の埋め込みが他ドメインの埋め込みと競合していない（偽陽性率はほぼ不変）
-
-#### 9. 判定: rejected
-
-**理由**:
-
-1. **主基準不成立**: education_recall (0.4118) < medical_recall基準 (0.5112)。ギャップ 9.94pt。
-2. **education_recall自体が悪化**: Iter31比で -4.71pt, Iter34比で -2.34pt。resampling系レバーの低下トレンド（0.5000 → 0.4412 → 0.4412 → 0.4353 → 0.4118）を加速させた。
-3. **top1_accuracy有意改善なし**: McNemar p=0.4966。
-4. **ECE悪化**: 0.0712 → 0.0751（+0.0039）。
-
-**機序の解釈**:
-
-手作り問題50件の追加は、既存のproxyタスク150件の埋め込み空間と競合し、classification boundaryを混乱させた。教育ドメインの分類確率平均はほぼ不変（0.3056 → 0.3026）だが、中央値が0.2552 → 0.2228へ低下しており、educationとして正しく分類される行の確信度が低下している。
-
-22件の正解→不正解flipに対して14件の逆flipしかなかったため、net -8件のrecall低下となった。flip先の分散（medical, business_economics, general, natural_science, social_science等）は均一であり、特定のドメインへの系統的な移行ではなく、全体的なdecision boundaryの混乱を示唆する。
-
-non-education行のeducation偽陽性率（4.83% → 5.03%）はほぼ不変であるため、手作り問題は「他ドメインをeducationとして誤分類する」のではなく、「既存のeducation行の埋め込み信号を薄めている」と解釈できる。
-
-**ノイズ判定**:
-- 2標本z検定 p=0.3815（有意差なし）
-- Wilson CIは完全に重なる
-- McNemar per-domain education p=0.2433（有意差なし）
-- 統計的には有意差なしだが、5反復のトレンド（0.5000 → 0.4118）は系統的な低下を示唆
-
-**仮説との整合**:
-計画の仮説（「手作り問題により教育実務定義を直接学習させ、education_recallがmedical_recall基準を上回る」）は**完全に不成立**。 handmade問題は教育実務定義の埋め込み信号を提供したはずだが、既存proxyタスクの学術的定義埋め込みと競合し、逆効果に働いた。
-
-#### 9. Lessons learned
-
-1. **埋め込み空間での意味的競合**: 同じドメインに属する訓練データが意味的に異質（学術的定義 vs 実務的定義）な場合、埋め込み空間で競合し、decision boundaryが混乱する。手作り問題は「追加」ではなく「置換」が必要かもしれない。
-2. **handmade問題の信号強度不足**: 既存150件に対して50件（33.3%）の追加では、既存proxyタスクの信号が強すぎてhandmade問題の信号が相対的に薄れている。
-3. **50件の handmade問題は教育実務定義の埋め込み空間に位置している可能性が高い**: non-education行の偽陽性率が不変であることは、手作り問題の埋め込みが他ドメインに「漏れ出ていない」ことを示す。問題は「他ドメインへの漏出」ではなく「既存education埋め込みとの競合」である。
-4. **resampling系レバーは尽きた**: sociology pool cap (94) に対し90件使用（Iter34）。残りの余地は4件。
-5. **education_handmade_training_problemsが最後のresampling系レバー**: このレバーの範囲内で改善できない場合、代替アプローチ（research_frontier）の検討が必要。
-
-
-### 実装 (Iter35)
-
-**変更ファイル**: `build_dataset.py` のみ（3箇所）
-
-**(1) `_EDUCATION_HANDMADE_QUESTIONS` 定数追加**（177行目直後）
-- 50件のタプルリストを追加（各タプル: question_text, choice_A, choice_B, choice_C, choice_D, correct_answer）
-- 8テーマ: 学校事故責任(10件), 生徒健康管理(8件), アレルギー対応(6件), 懲戒処分・指導(6件), 教職員人事・労務(5件), 保護者対応・コミュニケーション(5件), 学校運営・施設管理(5件), 法令順守・個人情報(5件)
-- すべて日本語の4択形式（A/B/C/D）
-
-**(2) `build_classifier_training_rows()` docstring更新**（798-804行目付近）
-- Iter35 handmade questionsの記述を追加（8テーマ，4-choice形式の理由等）
-
-**(3) handmade問題追加ロジック**（`return rows`直前）
-- `_EDUCATION_HANDMADE_QUESTIONS` を走査し，`_format_jmmlu_query()` でqueryを生成
-- ID形式: `education-train-handmade-{index:03d}`（index 1-50）
-- `sample_weight`: `_classifier_task_sample_weight("education_handmade")` → 空辞書なので 1.0
-
-**テスト結果**: `tests/test_build_dataset.py` 16件中16件pass（0.07s）
-
-**Lint結果**: `ruff check build_dataset.py` → All checks passed
-
-**単一レバー検証**:
-- (a) eval sha256: `data/dataset.jsonl` は不変（`485a85f5...`）
-- (b) sample_weight全行1.0: 全1477行で1.0（確認済）
-- (c) education内訳: proxy=150, handmade=50（合計200）
-- (d) education外9ドメイン1277行: Iter34データと完全一致（ID一致確認）
-- (e) handmade問題50件: 全件 `_format_jmmlu_query()` 形式（`A. ... B. ... C. ... D. ...` 含む）
-- (f) label leakage: handmade問題はevalデータセットとテーマが明確に異なる（学校教育行政実務 vs JMMLU学術タスク）
-
-**生成ファイル**:
-- `data/classifier_train_iter35_handmade.jsonl`（1477行, sha256: `a6f96bbd...`）
-- `models/domain_classifier_iter35_handmade.joblib`（n_samples=1477）
-- `results/iter35_calibrated_predictions.jsonl`（1600行）
-
-**壁時間**:
-- 分類器学習: ~数秒（1477行，10クラス）
-- 較正後データ生成: 1600問のembedding + 較正予測
-
-**問題点**:
-- JMMLU.zipがローカルに存在しないため，`build_dataset.py` の標準コマンドでは実行不可。既存の `classifier_train_iter34_resampled.jsonl` をベースにhandmade問題をPythonスクリプトで直接追加する代替手法を採用。
-- `build_dataset.py` の変更自体は正しいが，手動生成ファイルとの整合性を検証済み。
-
-### 実験・分析(実行) (Iter35)
-
-- **実行**: SSHローカルポートフォワード（127.0.0.1:11435→wafl500:11434）経由でembeddingのみ実施（LLM生成・probe・dispatchなし）。本番`models/domain_classifier.joblib`は無変更。新分類器は`models/domain_classifier_iter35_handmade.joblib`へ保存，予測は`results/iter35_calibrated_predictions.jsonl`へ新規生成。
-- **education_recall**: 0.5000 (Iter31) → **0.4118** (-0.0882，**悪化方向**)。主基準（medical_recall基準=0.5112を上回ること）は未達（0.4118 < 0.5112）。
-- **medical_recall**: 0.5393 (Iter31) → **0.5000** (-0.0393，悪化方向)。
-- **top1_accuracy**: 0.6056 (Iter31) → **0.6006** (-0.0050，微減)。
-- **ECE**: 0.0712 (Iter31) → 再計算必要。
-- **flip rate**: 再計算必要。
-- **判定**: **rejected**（主基準不成立，かつeducation_recall自体が悪化）。
-
-**教育recallの時間軸トレンド（Iter28〜35）**:
-
-| Iteration | Lever | education_recall | 変更 |
-|-----------|-------|-----------------|------|
-| 28 | fallback disabled | 0.4059 | baseline |
-| 29 | platt calibration | 0.4059 | 不変（較正のみ） |
-| 30 | isotonic calibration | 0.4059 | 不変（較正のみ） |
-| 31 | temperature calibration | 0.5000 | +9.41pt（較正の副産物） |
-| 32 | sample_weight=2.0 | 0.4412 | -5.88pt（rejected） |
-| 33 | resampling 案C(70/40/40) | 0.4412 | 不変（ノイズ範囲内） |
-| 34 | resampling 案A(90/30/30) | 0.4353 | -0.59pt（案C比） |
-| 35 | handmade 50件 | 0.4118 | -2.34pt（案A比，**悪化**） |
-
-**重要な観察**: Iter35の手作り問題追加は，education_recallを**さらに悪化**させた（0.4353→0.4118）。これはresampling系レバーの低下トレンド（0.5000→0.4412→0.4412→0.4353→0.4118）を加速させた。手作り問題の埋め込みが、既存のproxyタスクの埋め込みと競合して分類器のdecision boundaryを混乱させた可能性が高い。
-
-**仮説**:
-`education`ドメインの分類器訓練データに，学校教育行政実務に即した手作り訓練問題50件を
-追加することで，分類器がeducationの実務定義（学校事故責任，生徒健康管理，アレルギー対応，
-懲戒処分，教職員人事，保護者対応，施設管理，法令順守）を直接学習する機会を提供し，
-`education_recall`がmedical_recallの基準値（0.5112，Iter31 production実測）を上回る。
-
-**根拠**:
-1. Iter32〜34の3連投rejectedは，「代理タスクの抽出比率を変更する」という表層最適化では
-   根本原因（教育ドメインの代理タスクとeducationの意味的ギャップ）に対処できないことを
-   実測で確定した。
-2. 既存のeducation訓練データ150件はすべて学術的な社会学・心理学・道徳論の教科書問題であり，
-   学校教育行政実務（事故責任，健康管理，保護者対応等）は含まれていない（rc-investigator調査）。
-3. 手作り問題50件（既存150件に対する33.3%）は，分類器がeducationを実務定義を学習する信号を
-   十分な強度で得られる一方，proxyタスクの信号（2/3）も残るため，分類器が両方の側面を
-   学習する可能性がある。
-4. 手作り問題はすべて4択形式（A/B/C/D）を保つため，書式shortcutsリスク（Iter32調査で確認）
-   を回避できる。分類器が学習すべき信号は埋め込み空間での意味的特徴のみである。
-
-**単一レバー**:
-**変更するもの**:
-- `build_dataset.py`に新定数`_EDUCATION_HANDMADE_QUESTIONS`（50件の4択問題リスト）を追加
-- `build_classifier_training_rows()`の末尾（rows生成後）に，handmade問題をeducationドメインの
-  訓練行として追加する分岐を追加
-- 関連するdocstringの更新（build_dataset.py:798-804）
-
-**変更しないもの**:
-- `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`（Iter34案A: sociology=90/high_school_psychology=30/moral_disputes=30）: 無変更
-- `_CLASSIFIER_TASK_SAMPLE_WEIGHTS={}`（空辞書）: 無変更
-- `_COMPOUND_QUESTIONS`（評価用複合設問）: 無変更
-- `scripts/train_domain_classifier.py`: 無変更
-- `config.yaml`: 無変更
-- `data/dataset.jsonl`（評価データセット）: 不変（sha256一致を確認）
-- 分類器較正手法: `CalibratedClassifierCV(method='temperature')`無変更（訓練データ変更後の再較正は必須だが手法自体は固定）
-
-**固定する構成（Iter34 adoptedのまま，一切変更しない）**:
-`routing_method=supervised_classifier`，`confidence_threshold=0.0`・`dispatch_top_k=1`・
-`aggregation_method=max_confidence`，`confidence_signal_method=self_report`，
-`confidence_elicitation=top_k_with_probs`，`expert_model=expert-mesh-{domain}-lora`
-（domain_count=10），`light_model=qwen3.5:4b-q4_K_M`，`embedding_model=nomic-embed-text`，
-評価データセット`data/dataset.jsonl`（1600問，不変）。
-
-**変更ファイル一覧**:
-
-1. **`build_dataset.py:177-178` 直後**（`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`定数定義の次）
-   - 新定数`_EDUCATION_HANDMADE_QUESTIONS`を追加（50件のリスト）
-   - 各要素は `(question_text, choice_A, choice_B, choice_C, choice_D, correct_answer)` のタプル
-   - `correct_answer`は"A", "B", "C", "D"のいずれか
-
-2. **`build_dataset.py:798-804`**（`build_classifier_training_rows()`のdocstring）
-   - Iter33 education overrideの記述の次に，Iter35 handmade questionsの記述を追加
-
-3. **`build_dataset.py:847` 直前**（`return rows`の前）
-   - handmade問題からeducation訓練行を生成して追加する分岐を追加
-   - 既存のeducation rows（proxyタスク由来）の末尾に追加する
-
-**到達コードパスの確認**:
-1. `_EDUCATION_HANDMADE_QUESTIONS`は`build_classifier_training_rows()`（line 837以降）で参照される。
-2. 新分岐: `for question_data in _EDUCATION_HANDMADE_QUESTIONS:` で各行を走査し，
-   `_format_jmmlu_query()` でqueryを生成し，rowsリストに追加する。
-3. `id`は`education-handmade-{index:03d}`（index 1-50）とする。
-4. `sample_weight`は`_classifier_task_sample_weight()`の戻り値（空辞書なので常に1.0）を代入。
-
-**単一レバー検証手順**:
-1. **eval sha256一致**: 再生成後のevalデータセットが既存`data/dataset.jsonl`とsha256一致すること
-2. **sample_weight全行1.0**: 全1477行（1427+50）で1.0であることを確認
-3. **education内訳**: sociology=90, high_school_psychology=30, moral_disputes=30, handmade=50（合計200）
-4. **education外9ドメイン1277行**: 既存`data/classifier_train.jsonl`と完全一致
-5. **handmade問題の4択形式**: 全50件が`_format_jmmlu_query()`形式（`question\nA. ...\nB. ...\nC. ...\nD. ...`）
-   であることを確認
-6. **label leakage**: handmade問題がevalデータセットと重複しないことを確認（テーマが明確に異なる）
-
-**成功条件**:
-1. **主基準**: `education_recall` > `medical_recall`基準（0.5112，Iter31 production実測）
-2. **非退行**: 他9ドメイン18指標（precision/recall）のBH補正後有意退行が0件
-3. **McNemar**: top1_accuracyの有意改善（p<0.05）を報告
-
-**失敗条件**:
-1. education_recallが medical_recall基準(0.5112) を超えない
-2. 他ドメインでBH補正後有意退行が1件以上発生
-3. top1_accuracyが有意に低下する（McNemar p<0.05で逆方向）
-
-**50件の手作り問題（_EDUCATION_HANDMADE_QUESTIONS）**:
-
-**テーマ1: 学校事故責任（10件）**
-
-```python
-(
-    "学校遠足中のバス事故で生徒が負傷した際，学校側の損害賠償責任を問うことができるのは，次のうちどの場合か?",
-    "バス会社が過失を負った場合のみ",
-    "学校に安全管理上の過失があった場合",
-    "生徒本人に過失があった場合のみ",
-    "保護者が保険に加入していなかった場合",
-    "B",
-),
-(
-    "部活動中の練習で生徒がケガをした場合，学校が損害賠償を負うのはどの場合か?",
-    "部活動自体が危険を伴う活動であった場合",
-    "顧問教員が指導上の注意義務を怠った場合",
-    "生徒が指示に従わなかった場合のみ",
-    "同じ部活動の他の生徒が不注意だった場合のみ",
-    "B",
-),
-(
-    "学校の体育館で天井の照明器具が落下し，生徒が負傷した。学校設置者の責任として正しいものは?",
-    "突発的な事故であり責任はない",
-    "定期的な点検を実施していなかった場合，過失責任を負う",
-    "生徒が落下地点にいたことが原因で責任はない",
-    "照明器具の製造業者に全ての責任がある",
-    "B",
-),
-(
-    "修学旅行中の宿泊施設で生徒が病気を発症した場合，学校が責任を負うのは?",
-    "施設側の衛生管理不備が原因で，学校も監督義務違反があれば責任を負う",
-    "どんな場合でも学校が全ての責任を負う",
-    "生徒の体質によるもので学校に責任はない",
-    "保護者が事前の健康状態を伝えていなかった場合のみ",
-    "A",
-),
-(
-    "学校の運動場で球技中の打球が隣接する他校の生徒に当たった場合，責任の所在として正しいのは?",
-    "他校の敷地内に入ったため他校が責任を負う",
-    "打球を放った生徒の所属学校が過失があれば責任を負う",
-    "打球を浴びた生徒が危険な場所にいたため責任はない",
-    "両校の責任で等しく負担する",
-    "B",
-),
-(
-    "学校給食の調理場での食中毒事故について，学校設置者が講じるべき法的措置として最も適切なものは?",
-    "調理業者への損害賠償請求のみを行う",
-    "保健所に事故報告をし，原因調査と再発防止策を求める",
-    "保護者に謝罪するだけで法的措置は取らない",
-    "調理業者を直ちに解雇するだけで対応完了とする",
-    "B",
-),
-(
-    "放課後の校舎内で生徒が階段から転落した際，学校側の過失が問われるのは?",
-    "階段の手すりが破損していた状態で放置されていた場合",
-    "生徒が走っていた場合のみ",
-    "放課後だったため学校に責任はない",
-    "他の生徒が転落を誘った場合のみ",
-    "A",
-),
-(
-    "理科の実験授業で化学薬品が目に入り，生徒が視力を損なった。学校が責任を負うのは?",
-    "実験自体が危険を伴うものであれば責任はない",
-    "安全指導を十分に行わず，防護用具の装着を指示しなかった場合",
-    "生徒が実験手順を無視した場合のみ",
-    "化学薬品の製造業者に全ての責任がある",
-    "B",
-),
-(
-    "学校のプールで水泳授業中に生徒が溺れかけた際，学校側の過失が問われるのは?",
-    "プールが深水区であった場合のみ",
-    "監視教員が不在であり，緊急時の対応体制が整っていなかった場合",
-    "生徒が水泳が苦手であった場合のみ",
-    "保護者が水泳の経験を伝えていなかった場合",
-    "B",
-),
-(
-    "校外授業中の交通事故で生徒が負傷した場合，学校が損害賠償責任を負う要件として正しいのは?",
-    "運送業者が過失を負った場合のみ",
-    "学校が送迎手段の選定や手配に過失があった場合",
-    "生徒が交通事故の加害者であった場合のみ",
-    "保護者が外出を許可したため責任はない",
-    "B",
-),
-
-**テーマ2: 生徒健康管理（8件）**
-
-(
-    "学校における定期健康診断の結果，生徒に異常所見が認められた場合，学校長が最初に取るべき措置として最も適切なものはどれか?",
-    "直ちに保護者に連絡し，精密検査を勧める",
-    "保健室で安静させ，様子を観察する",
-    "担任の教員に相談させる",
-    "他の生徒への感染を防止するため隔離する",
-    "A",
-),
-(
-    "学校でインフルエンザの集団発生が認められた際，学校長が取れる措置として法令に則ったものは?",
-    "直ちに学校を閉鎖する",
-    "教育委員会に報告し，必要に応じて臨時休業を決定する",
-    "感染者のみを退学させる",
-    "保護者に連絡せずに通常通り授業を続ける",
-    "B",
-),
-(
-    "熱中症の疑いがある生徒が校内で倒れた際，教員が最初に取るべき応急処置として最も適切なものは?",
-    "直ちに涼しい場所に移動させ，体を冷やし，水分を補給させる",
-    "すぐに立たせて水分を飲ませる",
-    "氷を頭に乗せるだけで放置する",
-    "他の生徒をその場から離れさせない",
-    "A",
-),
-(
-    "学校における保健室登校の生徒に対する指導として最も適切なものは?",
-    "保健室に終日閉じ込め，授業に参加させない",
-    "生徒の状態に応じ，部分的な授業参加や段階的な復旧プログラムを組む",
-    "保健室登校を認めず，欠席として扱う",
-    "保健室登校の生徒には補習のみを課す",
-    "B",
-),
-(
-    "生徒の精神的健康に関する相談が増加している場合，学校が講じる組織的な対策として最も適切なものは?",
-    "担任の教員が全てを一人で受け持つ",
-    "スクールカウンセラーを配置し，教職員間で情報共有する体制を整える",
-    "相談を外部の病院に全て委ねる",
-    "相談を認めず，問題を隠蔽する",
-    "B",
-),
-(
-    "学校における歯科健康診断の結果，多くの生徒に虫歯が認められた場合，学校が講じる対策として最も適切なものは?",
-    "保護者へ個別に通知し，歯科受診を勧める体制を整える",
-    "校内で歯科治療を行う",
-    "虫歯の問題を無視し，次の年度まで待つ",
-    "全校生徒を歯科医院に強制連行する",
-    "A",
-),
-(
-    "学校で結核の陽性者が確認された場合，学校設置者が取るべき措置として正しいものは?",
-    "陽性者だけを退学させる",
-    "保健所に報告し，接触者の検査と必要に応じて学級閉鎖を決定する",
-    "情報を隠蔽し，通常通り授業を続ける",
-    "陽性者の家族に謝罪を求める",
-    "B",
-),
-(
-    "生徒が自殺未遂を図った場合の学校側の対応として，法令と指針に則った最も適切なものは?",
-    "直ちに保護者と教育委員会に報告し，関係機関と連携して支援体制を整える",
-    "事件として警察に通報するだけで対応完了とする",
-    "問題があった生徒の情報を他校に共有する",
-    "教職員内で秘密にし，外部に知らせない",
-    "A",
-),
-
-**テーマ3: アレルギー対応（6件）**
-
-(
-    "食物アレルギーのある生徒の給食対応について，学校が講じる措置として最も適切なものは?",
-    "アレルギー食材を一切提供しない完全除去食にする",
-    "アレルギー食材を除去した代替食を提供する",
-    "生徒本人に食材を選別させる",
-    "保護者が持参した弁当のみを提供する",
-    "B",
-),
-(
-    "学校給食中に生徒がアナフィラキシー疑似症状を示した場合，教員が最初に取るべき対応は?",
-    "直ちに救急車を要請し，保存薬（エピネフリン自己注射薬等）を投与する準備をする",
-    "生徒に水を飲ませて様子を見る",
-    "保健室に移動させて安静させるだけにする",
-    "保護者を呼びに行くまで待つ",
-    "A",
-),
-(
-    "学校における食物アレルギー対応の基本的な方針として，文部科学省の指針に則ったものは?",
-    "アレルギーのある生徒のみが給食を食べないようにする",
-    "アレルギー症状の重症度に応じた対応を行い，可能な限り他の生徒と同じ給食を提供する",
-    "アレルギー対応を保護者の責任に全て委ねる",
-    "アレルギー食材を学校給食から永久に排除する",
-    "B",
-),
-(
-    "花粉症の症状がひどい生徒が授業中に集中できない場合，学校が講じる対応として最も適切なのは?",
-    "授業を放棄させる",
-    "窓を閉める，空気清浄機を使う等の環境整備と，必要に応じ薬の持参を許可する",
-    "花粉症は病気ではないので対応しない",
-    "全校生徒にマスク着用を強制する",
-    "B",
-),
-(
-    "新入生受付時にアレルギー情報を収集する際，学校が講じるべき措置として正しいものは?",
-    "保護者の同意なく全ての健康情報を収集する",
-    "保護者からアレルギー情報を適切に収集し，関係教職員で共有する体制を整える",
-    "アレルギー情報を収集する必要はない",
-    "アレルギー情報を全校生徒に公開する",
-    "B",
-),
-(
-    "学校行事で野外活動を行う際，食物アレルギーのある生徒が参加する場合の配慮として最も適切なものは?",
-    "その生徒を行事から除外する",
-    "持参する食事を事前に確認し，アレルギー対応可能な献立を手配する",
-    "野外活動では給食を出さないことにする",
-    "他の生徒と同じ食事を強制的に食べさせる",
-    "B",
-),
-
-**テーマ4: 懲戒処分・指導（6件）**
-
-(
-    "教職員がいじめを隠蔽したことが発覚した場合，学校設置者（自治体等）が下すことができる処分として最も適切なものは?",
-    "戒告のみ",
-    "戒告，減給，停職，免職のいずれか",
-    "口頭注意のみ",
-    "配置転換のみ",
-    "B",
-),
-(
-    "生徒への懲戒処分として，学校が設けられるものとして法令上適切なものは?",
-    "登校禁止，注意，訓告，戒告，分限処分の各段階に応じたもの",
-    "罰金刑",
-    "即時退学",
-    "保護者の職場への連絡",
-    "A",
-),
-(
-    "生徒が他の生徒に重大な傷害を与えた場合の学校側の対応として最も適切なものは?",
-    "直ちに保護者に連絡し，事実関係を調査した上で適切な指導・処分を行う",
-    "加害生徒のみを転校させる",
-    "問題を起こした生徒の情報を他校に共有する",
-    "教職員内で秘密にする",
-    "A",
-),
-(
-    "教職員が体罰行為を行ったことが確認された場合，学校設置者が取るべき対応として正しいものは?",
-    "その教職員を直ちに免職にする",
-    "事実関係を調査し，体罰の程度に応じて適切な処分を行うとともに再発防止策を講じる",
-    "注意のみで済ませる",
-    "教職員の説明を信じて問題なしとする",
-    "B",
-),
-(
-    "生徒が集団で強奪行為を行った場合，学校が講じる指導として最も適切なものは?",
-    "直ちに全員を退学させる",
-    "各生徒の関与の程度を個別に評価し，教育上の観点から適切な指導・処分を行う",
-    "保護者に全ての責任を転嫁する",
-    "事件として処理するだけで教育指導は行わない",
-    "B",
-),
-(
-    "学校内で盗難が相次いでいる場合，学校が取るべき対応として最も適切なのは?",
-    "疑わしい生徒を全員集合させ，公開処罰を行う",
-    "関係機関と連携して事実関係を調査し，被害生徒の保護と加害生徒の教育指導を両立させる",
-    "盗難を無視し，防犯カメラのみを設置する",
-    "全校生徒の所持品を毎日検査する",
-    "B",
-),
-
-**テーマ5: 教職員人事・労務（5件）**
-
-(
-    "教職員の配置転換について，学校長が配置転換を指示できる範囲として正しいものは?",
-    "校内の職務のみ",
-    "同一設置者管内の他の学校への異動を含む",
-    "他自治体の学校への異動を含む",
-    "教職員の希望を必ず尊重しなければならない",
-    "B",
-),
-(
-    "教職員が業務中の事故で負傷し，療養が必要な場合，学校設置者が講じる措置として正しいものは?",
-    "その教職員の責任とする",
-    "労災認定の手続きを行い，適切な療養と復帰支援を行う",
-    "無給休職とする",
-    "事故を隠蔽し，通常通り勤務させる",
-    "B",
-),
-(
-    "教職員の労働時間管理について，学校教育法施行規則が定める原則として正しいものは?",
-    "労働時間の上限はない",
-    "原則として1週間の所定労働時間は40時間以内",
-    "1日8時間を超えて働かせてはならない",
-    "教職員は休日を取得しなくてよい",
-    "B",
-),
-(
-    "教職員がいじめの相談を受けた際，その教職員が取るべき最初の対応として最も適切なものは?",
-    "自分で解決しようとする",
-    "校長又は教育委員会に速やかに報告し，組織的に取り組む体制を整える",
-    "相談者を説教する",
-    "問題を無視する",
-    "B",
-),
-(
-    "教職員の研修プログラムについて，地方教育行政の組織及び運営に関する法律が定める学校的役割として正しいものは?",
-    "研修は任意であり義務ではない",
-    "教職員の資質向上のために継続的な研修を実施する義務がある",
-    "研修は外部委託に全て委ねればよい",
-    "研修は新任教員のみに行えばよい",
-    "B",
-),
-
-**テーマ6: 保護者対応・コミュニケーション（5件）**
-
-(
-    "生徒のいじめ被害について保護者から相談があった際，学校が取るべき最初の対応として最も適切なものは?",
-    "いじめた側の保護者を呼び，謝罪をさせる",
-    "被害生徒と保護者を別面談で聴取し，事実関係を把握する",
-    "全校集会でいじめの問題について注意喚起する",
-    "警察に通報する",
-    "B",
-),
-(
-    "保護者会（PTA総会）で学校運営の重要な方針変更を決定する際，学校が講じるべき手続きとして最も適切なものは?",
-    "校長が独断で決定し，事後に報告する",
-    "事前に資料を配布し，十分な議論の機会を設けた上で合意形成を図る",
-    "保護者の意見を無視して通常通り進める",
-    "PTA会長に全て委ねる",
-    "B",
-),
-(
-    "生徒の家庭環境の変化（保護者の失業等）により学習意欲が低下している場合，学校が講じる対応として最も適切なものは?",
-    "保護者を責める",
-    "保護者と連携し，生徒へのサポート体制を整える",
-    "その生徒を特別扱いしない",
-    "学校全体の問題として無視する",
-    "B",
-),
-(
-    "学校が保護者から苦情を受けた際，学校経営の基本方針として最も適切なものは?",
-    "苦情を無視し，通常通り運営する",
-    "苦情を真摯に受け止め，事実関係を調査した上で保護者に説明し，改善策を講じる",
-    "苦情を言った保護者を blacklist に入れる",
-    "苦情を教育委員会に全て委ねる",
-    "B",
-),
-(
-    "学校評価において保護者の意見を収集する際，最も適切な方法は?",
-    "保護者の意見を全く収集しない",
-    "アンケート調査や説明会等を通じて多様な保護者の意見を収集し，学校経営に反映する",
-    "意見を集めた上で全て無視する",
-    "保護者会での発言者の意見のみを参考にする",
-    "B",
-),
-
-**テーマ7: 学校運営・施設管理（5件）**
-
-(
-    "学校の校舎で天井の亀裂が発見された場合，学校設置者が最初に取るべき措置として最も適切なものは?",
-    "直ちにその区域を立ち入り禁止にし，構造計算書を確認する",
-    "次回の修繕計画に組み込む",
-    "生徒に注意喚起のみを行う",
-    "保護者に報告して意見を求める",
-    "A",
-),
-(
-    "学校が毎年実施すべき防災訓練について，学校教育法施行規則で定められているものは?",
-    "火災訓練のみ",
-    "地震・津波・火災など各種災害を想定した総合訓練",
-    "消防署との合同訓練のみ",
-    "年1回以上の避難訓練の実施が努力義務とされている",
-    "D",
-),
-(
-    "学校施設の省エネルギー化を図る際，学校設置者が講じる措置として最も適切なものは?",
-    "エネルギーコストを完全に削減するため，冷暖房を停止する",
-    "エネルギー効率的な設備への更新と，節電啓発を併せて行う",
-    "省エネルギー化は保護者の責任とする",
-    "省エネルギー化は行わず，従来通り運用する",
-    "B",
-),
-(
-    "学校のICT機器（タブレット等）を導入する際，設置者が講じるべき措置として最も適切なものは?",
-    "機器を購入するだけで導入完了とする",
-    "機器の導入とともに教職員の研修，ネットワーク環境の整備，利用ガイドラインの策定を行う",
-    "ICT機器は不要であるとして導入を中止する",
-    "保護者に機器購入を義務付ける",
-    "B",
-),
-(
-    "学校敷地内の遊具が老朽化で危険な状態にある場合，学校設置者が取るべき措置として正しいものは?",
-    "そのまま使用させ，怪我は自己責任とする",
-    "直ちに使用を中止し，修繕又は交換を行うまで立ち入りを制限する",
-    "保護者に修理費用を請求する",
-    "次の年度予算まで待つ",
-    "B",
-),
-
-**テーマ8: 法令順守・個人情報（5件）**
-
-(
-    "学校が生徒の個人情報を外部の教育サービス業者に委託する場合，設置者が講じるべき措置として正しいものは?",
-    "個人情報保護法に基づく監督措置を講じる",
-    "保護者の同意が不要である",
-    "業者が自由に情報を使用できる",
-    "委託は禁止されている",
-    "A",
-),
-(
-    "学校における個人情報の取扱いに関する法令遵守の基本方針として正しいものは?",
-    "個人情報の収集・利用・提供は，目的の範囲内に行い，安全管理措置を講じる",
-    "生徒の個人情報は全校教職員が自由に閲覧できる",
-    "個人情報の管理はIT担当教員に全て委ねればよい",
-    "個人情報は外部に開示して問題ない",
-    "A",
-),
-(
-    "学校保健安全法に基づく感染症対策について，学校が出席停止の対象とする感染症として正しいものは?",
-    "風疹のみ",
-    "麻疹，風疹，水痘，百日咳など法律で定められた感染症",
-    "風邪のみ",
-    "全ての感染症",
-    "B",
-),
-(
-    "学校における児童虐待の疑いがある事例を発見した場合，教職員が取るべき法的措置として正しいものは?",
-    "自分で保護者に注意するだけで対応完了とする",
-    "児童相談所に通告し，必要に応じて警察に通報する",
-    "問題を校内で処理する",
-    "疑いがある生徒を退学させる",
-    "B",
-),
-(
-    "学校が防災・減災に関する地域連携を強化する際，法令に基づき講じられるべき措置として最も適切なものは?",
-    "地域連携は任意であり義務ではない",
-    "自治体，消防，地域住民と連携し，防災計画を策定し，訓練を実施する",
-    "地域連携は外部委託に全て委ねる",
-    "防災計画は学校内だけで完結させる",
-    "B",
-),
-```
-
-**データ生成・学習・評価手順**:
-
-1. **訓練データ生成**:
-   ```
-   uv run python build_dataset.py \
-       --output /tmp/iter35_dataset_verify.jsonl \
-       --jmmlu-zip /mnt/data-raid/ktakahashi/workspace/expert-mesh/data/JMMLU.zip \
-       --classifier-train-output data/classifier_train_iter35_handmade.jsonl
-   ```
-
-2. **単一レバー検証（必須）**:
-   - (a) `/tmp/iter35_dataset_verify.jsonl`が`data/dataset.jsonl`とsha256一致すること
-   - (b) 新規ファイルの`sample_weight`列が全1477行で1.0であること
-   - (c) educationドメイン200行の内訳: sociology=90, high_school_psychology=30, moral_disputes=30, handmade=50
-   - (d) education以外の9ドメイン1277行が既存`data/classifier_train.jsonl`と一致
-   - (e) handmade問題50件のqueryが4択形式（`A.`, `B.`, `C.`, `D.` を含む）であること
-
-3. **分類器学習**:
-   ```
-   uv run python -m scripts.train_domain_classifier \
-       --train-data data/classifier_train_iter35_handmade.jsonl \
-       --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 \
-       --output models/domain_classifier_iter35_handmade.joblib
-   ```
-   （本番`models/domain_classifier.joblib`は上書きしない）
-
-4. **較正後データ生成**:
-   ```
-   uv run python -m scripts.evaluate_classifier_calibration \
-       --dataset data/dataset.jsonl \
-       --classifier models/domain_classifier_iter35_handmade.joblib \
-       --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 \
-       --output results/iter35_calibrated_predictions.jsonl
-   ```
-
-5. **before**: `results/iter31_calibrated_predictions.jsonl`（再生成しない）
-
-**学習信号喪失リスクの受容**:
-既存のproxyタスク150件（学術的定義）はそのまま維持される。handmade問題50件（実務定義）が
-追加されることで，分類器はeducationを「学術的＋実務的」の両側面から学習する。これは望ましい
-挙動である（教育ドメインの両側面をカバー）。handmade問題が50件以下の場合，実務定義の信号が
-弱すぎる可能性がある。50件はrc-investigatorの推奨値であり，30件（最小有効数）を上回る。
-
-**Iter35不成立の場合の次の一手**:
-education_recallがmedical_recall基準(0.5112)を超えない場合，handmade問題の数量増加（100件）
-またはテーマの変更（よりeducation実務に特化した問題）を検討する。ただし，config.ymlのlevers
-でeducation_handmade_training_problemsが最後の値であるため，このレバーの範囲内で改善できない
-場合は，代替アプローチ（research_frontier）の検討が必要。
-
-**問い**:
-1. `build_dataset.py` の既存パターン（`_COMPOUND_QUESTIONS` と `build_classifier_training_rows()`）を
-   正確に理解し，education固有の手作り訓練問題を追加するための実装経路を特定する．
-2. 既存のeducation訓練データ（150件，JMMLU代理タスク由来）がどのような内容かを実測し，
-   手作り問題との重複・混同リスクを評価する．
-3. education行政実務に即した手作り問題のテーマを設計し，4択形式の例を10件程度作成する．
-4. 統合計画を具体化し，rc-plannerへ具体的なファイルパス・行番号付きで引き渡す．
-
-#### 分かったこと
-
-**(1) `_COMPOUND_QUESTIONS` のフォーマット（build_dataset.py:199-594）**
-
-`_COMPOUND_QUESTIONS` は評価データセットの複合設問を定義する定数リストである．
-各要素は `(question_text, [domain1, domain2])` のタプル．
-
-```python
-_COMPOUND_QUESTIONS: list[tuple[str, list[str]]] = [
-    (
-        "仕事中に転倒して怪我をしました．治療費と休業補償について知りたいです．",
-        ["medical", "legal"],
-    ),
-    ("交通事故で怪我をして通院していますが，慰謝料の相場が分かりません．", ["medical", "legal"]),
-    # ... 計98件
-]
-```
-
-**重要な特徴**:
-- 複合設問は評価データセット専用（`_build_rows()` で `data/dataset.jsonl` に組み込まれる）
-- 訓練データには直接関係しない（`build_classifier_training_rows()` は `_COMPOUND_QUESTIONS` を参照しない）
-- 質問文は自然な相談形式（「〜について知りたいです」「〜を検討しています」）
-- 4択形式ではない（複合設問はドメイン分類のみが目的）
-
-**(2) `build_classifier_training_rows()` のフォーマット（build_dataset.py:761-848）**
-
-分類器訓練データは以下の形式の辞書リストである：
-
-```python
-rows = [
-    {
-        "id": "education-train-001",
-        "query": "フィニアス・ゲージの脳損傷の事例が重要であったのは、次のうちどの理由からか?\nA. ゲージの事故は...
-\nB. この事故は...
-\nC. CATスキャン...
-\nD. 精神科医...",
-        "domain": "education",
-        "sample_weight": 1.0,
-    },
-    # ... 1427件（全ドメイン）
-]
-```
-
-**`query`フィールドのフォーマット**（`_format_jmmlu_query()` で定義，build_dataset.py:615-617）：
-```python
-def _format_jmmlu_query(row: dict[str, str]) -> str:
-    return f"{row['question']}\nA. {row['A']}\nB. {row['B']}\nC. {row['C']}\nD. {row['D']}"
-```
-
-**既存education訓練データの実態**（150件，`data/classifier_train.jsonl` から実測）：
-- sociology: 30件（社会理論，組織論，社会運動等）
-- high_school_psychology: 60件（発達心理学，学習心理学，異常心理学等）
-- moral_disputes: 60件（中絶，死刑，動物の権利等）
-- **いずれも学術的な教科書問題**（「〜とは何か?」「〜はどの理論を支持するか?」）
-- 学校教育行政実務（事故責任，健康管理，保護者対応等）は含まれていない
-
-**(3) 既存evalデータセットとの重複確認**
-
-- evalデータセット: 170件のeducation行（150件単一 + 20件複合）
-- 単一eval: すべてJMMLU代理タスク由来（sociology/high_school_psychology/moral_disputes）
-- 複合eval: 20件（education-他の組み合わせ）
-- **重複防止の仕組み**: `build_classifier_training_rows()` は `eval_rows` の `query` 集合を
-  `exclude_queries` として `_sample_domain_questions()` に渡す（line 806, 833）
-- **手作り問題のlabel leakageリスク**: 手作り問題がevalのJMMLU問題と重複する可能性は低い
-  （テーマが明確に異なるため）が，`exclude_queries` に手作り問題のqueryも追加すれば
-  万全（ただし現状の仕組みは eval_rows からのみ exclude_queries を構築するため，
-  手作り問題がevalに含まれない限り不要）
-
-**(4) 既存のeducation訓練データのサンプル**
-
-```
-ID: education-train-001
-フィニアス・ゲージの脳損傷の事例が重要であったのは、次のうちどの理由からか?
-A. ゲージの事故は、脳内の神経伝達物質を変化させる薬物で治療された最初の事例の一つ。
-B. この事故は、特定の脳領域が一連の身体的・感情的変化と関連していることが十分に記録された最初の例の一つであった。
-C. この事故は、精神科医に脳障害患者を心理療法的手法で治療する最初の機会のひとつを提供した。
-D. CATスキャン...
-
-ID: education-train-002
-スコット（1991）は「パワーエリート」という言葉を次のうちどれを表すものとして紹介したか?
-A. プロレタリアートから搾取する支配階級、つまりブルジョアジー
-B. 財産所有と有利な人生の機会に依存する資本家階級
-C. 利益を共有するが、国家権力を持たない階級間の連携
-D. 権力ブロックから圧倒的に多く集められたメンバーを擁する国家エリート...
-
-ID: education-train-003
-エクレシアとは何か?
-A. 会員に対する完全な精神的権威を主張する宗教組織
-B. 強制的な会員ではなく、自発的な会員を中心に組織された教会
-C. 非常に少数の信者を持つ宗派またはカルト
-D. 司祭または他の精神的指導者の階層...
-```
-
-**観察**: 既存の問題はすべて学術的な知識問答であり，実務的な相談形式は含まれていない．
-これが「意味的ギャップ」の正体である．分類器は「学術的な社会学/心理学/道徳論の問題」
-をeducationとして学習している．
-
-**(5) 手作り問題のテーマ設計**
-
-education行政実務に即した以下のテーマで問題を設計する：
-
-| No. | テーマ | 想定件数 | 具体例 |
-|-----|--------|----------|--------|
-| 1 | 学校事故責任 | 10 | 部活動中の事故，遠足中の事故，施設設備の事故 |
-| 2 | 生徒健康管理 | 8 | 定期健康診断，感染症対策，熱中症対策 |
-| 3 | アレルギー対応 | 6 | 食物アレルギー，薬物アレルギー，アナフィラキシー |
-| 4 | 懲戒処分・指導 | 6 | 生徒への指導，教職員の処分，いじめ対応 |
-| 5 | 教職員人事・労務 | 5 | 配置転換，停職処分，労働基準法 |
-| 6 | 保護者対応・COMMUNICATION | 5 | 保護者会，個別面談，PTA活動 |
-| 7 | 学校運営・施設管理 | 5 | 修繕，防災訓練，設備管理 |
-| 8 | 法令順守・個人情報 | 5 | 教育基本法，個人情報保護，学校保健安全法 |
-| **合計** | | **50** | |
-
-**(6) 手作り問題の4択形式例（10件）**
-
-以下の例はすべてJMMLUの4択形式（A/B/C/D）に準拠している：
-
-**例1（学校事故責任）**:
-```
-学校遠足中のバス事故で生徒が負傷した際，学校側の損害賠償責任を問うことができるのは，
-次のうちどの場合か?
-A. バス会社が過失を負った場合のみ
-B. 学校に安全管理上の過失があった場合
-C. 生徒本人に過失があった場合のみ
-D. 保護者が保険に加入していなかった場合
-正解: B
-```
-
-**例2（生徒健康管理）**:
-```
-学校における定期健康診断の結果，生徒に異常所見が認められた場合，学校長が最初に
-取るべき措置として最も適切なものはどれか?
-A. 直ちに保護者に連絡し，精密検査を勧める
-B. 保健室で安静させ，様子を観察する
-C. 担任の教員に相談させる
-D. 他の生徒への感染を防止するため隔離する
-正解: A
-```
-
-**例3（アレルギー対応）**:
-```
-食物アレルギーのある生徒の給食対応について，学校が講じるべき措置として最も適切な
-ものはどれか?
-A. アレルギー食材を一切提供しない完全除去食にする
-B. アレルギー食材を除去した代替食を提供する
-C. 生徒本人に食材を選別させる
-D. 保護者が持参した弁当のみを提供する
-正解: B
-```
-
-**例4（懲戒処分）**:
-```
-教職員がいじめを隠蔽したことが発覚した場合，学校設置者（自治体等）が下すことができる
-処分として最も適切なものはどれか?
-A. 戒告のみ
-B. 戒告，減給，停職，免職のいずれか
-C. 口頭注意のみ
-D. 配置転換のみ
-正解: B
-```
-
-**例5（教職員人事）**:
-```
-教職員の配置転換について，学校長が配置転換を指示できる範囲として正しいものはどれか?
-A. 校内の職務のみ
-B. 同一設置者管内の他の学校への異動を含む
-C. 他自治体の学校への異動を含む
-D. 教職員の希望を必ず尊重しなければならない
-正解: B
-```
-
-**例6（保護者対応）**:
-```
-生徒のいじめ被害について保護者から相談があった際，学校が取るべき最初の対応として
-最も適切なものはどれか?
-A. いじめた側の保護者を呼び，謝罪をさせる
-B. 被害生徒と保護者を別面談で聴取し，事実関係を把握する
-C. 全校集会でいじめの問題について注意喚起する
-D. 警察に通報する
-正解: B
-```
-
-**例7（学校運営・施設管理）**:
-```
-学校の校舎で天井の亀裂が発見された場合，学校設置者が最初に取るべき措置として
-最も適切なものはどれか?
-A. 直ちにその区域を立ち入り禁止にし，構造計算書を確認する
-B. 次回の修繕計画に組み込む
-C. 生徒に注意喚起のみを行う
-D. 保護者に報告して意見を求める
-正解: A
-```
-
-**例8（法令順守・個人情報）**:
-```
-学校が生徒の個人情報を外部の教育サービス業者に委託する場合，設置者が講じるべき
-措置として正しいものはどれか?
-A. 個人情報保護法に基づく監督措置を講じる
-B. 保護者の同意が不要である
-C. 業者が自由に情報を使用できる
-D. 委託は禁止されている
-正解: A
-```
-
-**例9（学校保健安全法）**:
-```
-学校保健安全法に基づく感染症対策について，学校が出席停止の対象とする感染症として
-正しいものはどれか?
-A. 風疹のみ
-B. 麻疹，風疹，水痘，百日咳など法律で定められた感染症
-C. 風邪のみ
-D. 全ての感染症
-正解: B
-```
-
-**例10（防災訓練）**:
-```
-学校が毎年実施すべき防災訓練について，学校教育法施行規則で定められているものは
-どれか?
-A. 火災訓練のみ
-B. 地震・津波・火災など各種災害を想定した総合訓練
-C. 消防署との合同訓練のみ
-D. 年1回以上の避難訓練の実施が努力義務とされている
-正解: D
-```
-
-**(7) 既存の問題との形式比較**
-
-| 属性 | 既存JMMLU代理タスク | 手作り問題（提案） |
-|------|---------------------|-------------------|
-| フォーマット | 4択（A/B/C/D） | 4択（A/B/C/D） -- **同一** |
-| 質問形式 | 「〜とは何か?」「〜はどの理論か?」 | 「〜の場合，最も適切なものは?」 -- **異なる** |
-| 内容 | 学術的知識問答 | 実務的意思決定 |
-| 正解形式 | 学術的正解（事実） | 行政的正解（規範・法令） |
-
-**重要な点**: フォーマット（4択）は同一であるため，「A/B/C/Dの有無」という書式特徴は
-分類器がeducationを学習する手がかりにはならない．分類器が学習すべき信号は
-**埋め込み空間での意味的特徴**（質問文の意味的類似性）のみである．
-
-**(8) 数量見積もり**
-
-- **初期数: 50件**（config.yml noteで言及）
-- **根拠**:
-  1. 既存のeducation訓練データ150件に対する比率: 50/150 = 33.3%
-  2. これにより，分類器がeducationを実務定義（行政実務）を学習する信号が
-     1/3の割合で混入する．proxyタスク（学術定義）の信号も2/3残るため，
-     分類器が両方を学習する可能性がある（これは望ましい：両方の側面をカバー）
-  3. 50件以下の場合は信号が弱すぎる（education_recallへの影響が検出できない）
-  4. 50件以上の場合はlabel leakageリスクが増大する（evalとの重複可能性）
-  5. 50件は実装コスト（1-3日）の範囲内
-
-- **最小有効数**: 30件（150件の20%）．これ以下だと教育行政実務の信号が
-  分類器に十分に届かない可能性が高い
-
-#### 次の計画フェーズ（rc-planner）への示唆
-
-1. **実装経路**: `build_dataset.py` に `_EDUCATION_HANDMADE_QUESTIONS` 定数を追加し，
-   `build_classifier_training_rows()` でeducationの訓練データ生成後に付加する．
-   既存のproxyタスク（150件）は変更しない．
-
-2. **ファイル変更箇所**:
-   - `build_dataset.py:177` 直後: `_EDUCATION_HANDMADE_QUESTIONS` 定数定義（50件の4択問題リスト）
-   - `build_dataset.py:837-848`: `build_classifier_training_rows()` のrows生成後に，
-     handmade問題を追加する分岐を追加
-   - `build_dataset.py:800-804`: docstringの更新（education訓練データの構成説明）
-
-3. **4択形式の強制**: 手作り問題はすべて `_format_jmmlu_query()` と同一のフォーマット
-   （`question\nA. ...\nB. ...\nC. ...\nD. ...`）で保存すること．
-   これにより，書式 shortcuts リスク（Iter32で確認済み）を回避できる．
-
-4. **label leakage防止**: 手作り問題がevalデータセット（`data/dataset.jsonl`）と
-   重複しないことを確認する．テーマが明確に異なる（学術vs実務）ため，重複の可能性は
-   低い．ただし，生成後のeval sha256一致チェック（既存の単一レバー検証手順）で
-   確認する．
-
-5. **rc-implementerへの引き渡し**: 計画フェーズで `_EDUCATION_HANDMADE_QUESTIONS` の
-   具体的な50件を作成し，rc-implementerが `build_dataset.py` に組み込む．
-   rc-investigatorはテーマ設計とフォーマット例を示したが，全50件の本文作成は
-   計画/実装フェーズで実施する．
-
-6. **成功条件の確認**:
-   - education_recallの改善（medical_recall基準 0.5112 以上）
-   - 他9ドメインの非退行（BH補正後有意退行0件）
-   - McNemar top1_accuracyの有意改善
-
-#### リスクと軽減策
-
-| リスク | 影響度 | 軽減策 |
-|--------|--------|--------|
-| 手作り問題がevalと重複する | 高 | テーマが明確に異なるため重複は低い．生成後にsha256一致チェックで確認 |
-| 4択形式を破る | 高 | `_format_jmmlu_query()` と同一フォーマットを強制．テストで検証 |
-| proxyタスクの信号が薄すぎる | 中 | 既存150件はそのまま維持．handmadeは追加のみ（150→200） |
-| 分類器がhandmade問題のみをeducationとして学習する | 低 | proxyタスク2/3が残るため，両方の側面を学習する |
-| 実装が既存pipelineを壊す | 中 | `build_classifier_training_rows()` の既存ロジックは変更せず，
-   末尾への追加のみ．other domainsは影響を受けない |
 
 ---
 

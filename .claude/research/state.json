@@ -1,24 +1,24 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter39",
-  "iteration_name": null,
+  "iteration": "Iter40",
+  "iteration_name": "embedding_adaptationの調査とSetFitによる教育ドメイン埋め込み適応の実装計画",
   "phase": "investigate",
   "status": "running",
   "current_lever": null,
-  "experiment_dir": null,
-  "experiment_deadline": null,
-  "updated_at": 1785614024,
+  "experiment_deadline": 1785625382,
+  "updated_at": 1785617270,
   "iteration_thread_ts": "1785609994.179419",
   "notion_toggle_created": true,
   "next_iteration_brief": {
     "must_read_first": [
+      ".claude/research/journal.md (Iteration 39: 手動sample_weight, rejected)",
       ".claude/research/journal.md (Iteration 38: hybrid proxy approach, rejected)",
       ".claude/research/journal.md (Iteration 37: history_cultureからjapanese_civics再割当, invalid)",
-      ".claude/research/backlog.md (B59)",
-      ".claude/research/backlog.md (B60)"
+      ".claude/research/backlog.md (B60)",
+      ".claude/research/backlog.md (B61)"
     ],
     "planned_lever": null,
-    "note": "Iter38（hybrid approach）はrejected確定。classifier_training_data_compositionの全値（6値）を試し切り。次イテレーションは調査フェーズから開始。rc-investigatorは Tavily search で (1) class_weight=None + 手動sample_weightのfeasibility, (2) JMMLU/MMLU外部の教育固有タスク（再調査）, (3) education_recall基準値の材料収集, (4) embedding modelのeducationドメイン適応 を重点調査すること。"
+    "note": "Iter39（class_weight_adjustment=none_manual_sample_weight）はrejected確定。education_recall=0.4588で不変。config.ymlの全leversを試し切り済み。next lever: `embedding_adaptation`を新規追加（Iter39 reflectorが自律判断で追記）。Iter40は調査フェーズから開始。rc-investigatorは Tavily search で (1) SetFitによるnomic-embed-textのeducationドメイン適応のfeasibility, (2) SDJC/JCSE等の日本語ドメイン適応手法の詳細, (3) education_recallの根本原因（embedding空間の分離不足）の定量評価, (4) JMMLU外部の教育固有タスク（再調査） を重点調査すること。"
   },
   "e37_results": {
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
@@ -686,5 +686,50 @@
       "medical_recall_delta": "-0.0562 (0.5112 -> 0.4551)"
     },
     "note": "hybrid approach (japanese_civics + old proxy tasks) REJECTED. education_recall 0.4588->0.4000 (-0.0588) instead of improving. education_precision significantly degraded (0.5306->0.4000, p=0.0238). top1_accuracy showed no significant improvement (p=0.0748). ECE slightly worsened (0.0712->0.0862). Flip rate 20.44% indicates substantial classifier changes beyond single-lever scope. Root cause: japanese_civics addition did not improve education recall; class_weight recalculation likely contributed to degradation. Next steps: (A) class_weight=None + manual sample_weight, (B) japanese_civics-only with leakage avoidance, (C)大幅增加 handmade education problems, (D) re-evaluate education_recall baseline."
+  },
+  "e39_results": {
+    "lever": "classifier_training_data_composition=class_weight_adjustment (none_manual_sample_weight)",
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.6156,
+    "top1_accuracy_diff": 0.01,
+    "mcnemar_top1": {
+      "discordant_a_only": 25,
+      "discordant_b_only": 41,
+      "chi2": 2.9697,
+      "p_value": 0.084838
+    },
+    "education_recall_before": 0.4588,
+    "education_recall_after": 0.4588,
+    "education_recall_diff": 0.0,
+    "medical_recall_before": 0.5112,
+    "medical_recall_after": 0.5112,
+    "medical_recall_diff": 0.0,
+    "ece_before": 0.071201,
+    "ece_after": 0.0807,
+    "ece_diff": 0.0095,
+    "brier_before": 0.6068,
+    "brier_after": 0.6,
+    "brier_diff": -0.0068,
+    "flip_rate": 0.046875,
+    "flip_count": 75,
+    "flip_total": 1600,
+    "bh_significant_regressions_20_metrics": 0,
+    "bh_significant_regressions_details": [],
+    "bh_significant_improvements_20_metrics": 0,
+    "bh_significant_improvements_details": [],
+    "per_domain_recall_ci": {},
+    "per_domain_recall_ci_lower_drop": [],
+    "data_used": {
+      "train_data": "data/classifier_train.jsonl (1427 rows, same as Iter31)",
+      "before_results": "results/iter31_calibrated_predictions.jsonl (1600 rows, temperature calibrated)",
+      "after_results": "results/iter39_manual_weight_calibrated_predictions.jsonl (1600 rows, newly generated)",
+      "classifier_model": "models/domain_classifier_iter39_manual_weight.joblib (trained with class_weight=None + manual sample_weight)"
+    },
+    "single_lever_violation": {
+      "note": "Argmax flip rate 4.69% (75/1600) is below the <15% threshold. Single-lever principle satisfied. Same training data, same eval dataset, same temperature calibration. The only difference is class_weight=None + manual sample_weight vs class_weight=balanced.",
+      "flip_rate": 0.046875
+    },
+    "judgment": "rejected",
+    "note": "manual sample_weight reproduction of class_weight balanced REJECTED as a hypothesis for improving education_recall. Key findings: (1) education_recall unchanged: 0.4588->0.4588 (identical). (2) medical_recall unchanged: 0.5112->0.5112 (identical). (3) top1_accuracy +0.0100 (0.6056->0.6156) but McNemar p=0.0848, not significant at alpha=0.05. (4) 75/1600 rows (4.7%) changed predictions, concentrated in history_culture (+10.12pt recall) and minor shifts elsewhere. (5) ECE slightly worsened (0.0712->0.0807). (6) Brier score slightly improved (0.6068->0.6000). (7) No BH-significant regressions or improvements in 20 per-domain metrics. Root cause: manual sample_weight with class_weight=None produces functionally equivalent effective weights to class_weight=balanced (both yield domain_weight = n_samples/(n_classes*n_domain_samples)). The 75 changed predictions are numerical noise from the solver, not a systematic improvement. The hypothesis that removing class_weight=balanced would improve education_recall is not supported by this experiment. Next steps: (A) investigate why education_recall is stuck at 0.4588 despite balanced weighting, (B) consider fundamentally different education proxy tasks or handmade education problems beyond what Iter35 tested, (C) re-evaluate whether education_recall 0.5112 is the right benchmark."
   }
 }

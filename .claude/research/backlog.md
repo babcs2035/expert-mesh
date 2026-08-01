@@ -3,6 +3,57 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B62 [auto-decided 2026-08-02] Iter40: 調査フェーズから開始，次レバー=embedding_adaptation
+
+- **自動選択**: 次イテレーション（Iter40）を調査フェーズから開始。`current_lever=null`。
+  次レバーとして `embedding_adaptation=setfit_education_finetune` を config.yml に追記済み。
+  `iteration_name` は「embedding_adaptationの調査とSetFitによる教育ドメイン埋め込み適応の実装計画」。
+- **選定理由**:
+  1. config.yml の全 levers を試し切り（fallback_policy=adopted, classifier_calibration=adopted,
+     classifier_training_data_composition=全6値rejected, class_weight_adjustment=rejected）
+  2. education_recall=0.4588 で不変だった原因は class_weight ではなく embedding 空間の分離不足
+  3. rc-investigator (Iter39) の Tavily 検索で SetFit/SDJC/JCSE の存在を確認済み
+  4. SetFit は few-shot contrastive learning により少量データ（education 150件）で
+     埋め込み空間を再調整可能。根本原因に直接対処する唯一の実行可能なレバー。
+  5. コストは中（数日〜1週間）だが、スキーマ変更は伴わない（data change）
+- **Iter40の調査項目**:
+  1. SetFitによるnomic-embed-textのeducationドメイン適応のfeasibility
+  2. SDJC/JCSE等の日本語ドメイン適応手法の詳細
+  3. education_recallの根本原因（embedding空間の分離不足）の定量評価
+  4. JMMLU外部の教育固有タスク（再調査）
+- **要人間判断**: embedding_adaptationの実装コスト見積もり（数日〜1週間）の承認。
+
+---
+
+## B61 [auto-decided 2026-08-02] Iter39 の単一レバー: class_weight_adjustment (class_weight=None + 手動sample_weight)
+
+- **自動選択**: 単一レバーを
+  `class_weight_adjustment=none_manual_sample_weight` とする。
+  `iteration_name` は「手動sample_weightによるclass_weight balancedの代替実装」．
+- **選定理由**:
+  1. rc-investigator（Iter39調査フェーズ）は `class_weight=None` + 手動sample_weight が
+     Iter32の失敗（sample_weight *= class_weight_ 乗算バグ）を根本的に解消すると判定
+  2. 単一レバー原則の範囲内で実装可能（`train_domain_classifier.py` の code change 2箇所）
+  3. config.yml の levers への新規追加はスキーマ変更ではない（data change）
+  4. 大規模な新規実装（research_frontier相当）ではない
+  5. オフライン完結（実機本走不要）
+- **変更ファイル**:
+  1. `train_domain_classifier.py` line 144: `class_weight="balanced"` → `class_weight=None`
+  2. `train_domain_classifier.py` line 78-80: `_extract_sample_weights()` をドメイン別balanced重み計算に変更
+- **ドメイン別balanced重み**（sklearn実測）:
+  - 150行ドメイン（education, general, medical等9ドメイン）: 0.9513
+  - 77行ドメイン（legal）: 1.8532
+  - 全ドメインの有効重み: 142.70（完全一致）
+- **investigator提案との差分**: investigatorは全行sample_weight=1.0を提案。
+  しかしこれだとlegalの有効重みが142.70→77へ-46%低下し、
+  legal_recall退行のリスクが高い（legalは現在0.5833で唯一の基準クリアドメイン）。
+  本計画ではドメイン別balanced重みを再現するsample_weightを使用。
+- **成功条件**: education_recall > medical_recall基準(0.5112)、
+  他9ドメイン18指標のBH補正後有意退行0件、top1_accuracyのMcNemar有意改善
+- **コスト**: オフライン完結（~2-3分の分類器再訓練 + 数分の較正後データ生成）
+
+---
+
 ## B60 [auto-decided 2026-08-02] Iter38 は rejected で確定。classifier_training_data_composition 全値試し切り、次イテレーションは調査フェーズ
 
 - 状況: Iter38（classifier_training_data_composition=education_hybrid_proxy_and_civics）の rc-analyst 判定（rejected）を rc-reflector が検証・確定させた。
