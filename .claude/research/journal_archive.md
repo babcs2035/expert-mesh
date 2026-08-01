@@ -1,3 +1,1010 @@
+## Iteration 32: educationドメインの代理タスク妥当性見直しによる訓練データ品質改善（Y5）
+
+### 調査 (Iter32)
+
+**問い**:
+1. `education` ドメインの代理タスクとして実際に使われているタスクは何か（コードを直接確認）．
+   `sociology`・`high_school_psychology`・`moral_disputes` という記述は正しいか．
+2. `education` ドメインの定義・想定範囲はコードのどこに現れているか．
+3. 代理タスクの実際の質問内容を数問サンプルし，`education` ドメインの定義との意味的整合性を評価する．
+4. JMMLU 全56タスクの中に，より意味的に近い代替候補タスクがあるか．
+5. 手作り訓練問題を追加する代替案の作業量・実現可能性を見積もる材料を集める．
+6. `data/classifier_train.jsonl` の `education` 行を数件サンプルし，代理タスクの妥当性を裏付ける／
+   覆す具体的な根拠を集める．
+
+#### 分かったこと
+
+**(1)(2) 代理タスクの記述とドメイン定義の一次情報での検証 — 過去の「参照が実在しない」事故は今回は再現しなかった**
+
+`scripts/prepare_lora_training_data.py:42` を `Read` で直接確認した．`_DOMAIN_TASK_MAP` の
+`"education": ["sociology", "high_school_psychology", "moral_disputes"]` は**記述どおり実在する**
+（同じ辞書は `build_dataset.py:97-101` にも重複定義されている．内容は完全に一致するが，
+**2 箇所に同じマッピングが手書きで重複している**こと自体が保守上のリスクである．片方だけを
+変更すると eval 用と LoRA 訓練用の割り当てが食い違う）．
+
+`router.py:39` の `_DOMAIN_EXAMPLE_QUERIES["education"] = "学習指導要領における探究的学習の位置付けは"`
+も記述どおり実在した．これは `confidence_signal_method=self_report`（E3 系，現在は
+`routing_method=supervised_classifier` の下では読まれない設定）向けの few-shot 例であり，
+「ドメインの公式な定義文」ではなく「1 個の代表質問」に過ぎない点は注意が要る．
+しかし `education` の実務上の想定範囲を最も具体的に示す一次情報は，むしろ
+`build_dataset.py` 冒頭のモジュール docstring（23-27行）である．そこには
+**「`education` has no directly corresponding JMMLU task; sociology, high_school_psychology, and
+moral_disputes (448 questions) are used as a proxy for the mesh's actual
+education-administration domain. This is a deliberate compromise, not a claim that these tasks
+measure the same thing as the hand-authored education questions used for compound rows.」**
+と明記されている．つまり**この意味的ギャップは既知・既記載であり，B52 の懸念は実装者自身が
+書き残していた**（未発見の新事実ではなく，既存の「宿題」の再確認という位置づけになる）．
+`education` の実際の想定範囲は，同ファイルの複合設問（`_COMPOUND_QUESTIONS`，173行以降）の
+`education` タグ付き20問から具体的に読み取れる：いじめ対応，学校事故の法的責任，発達障害の
+生徒への服薬管理と学校医療機関連携，給食アレルギー事故の再発防止，部活動中の熱中症対応，
+私立学校の退学処分，校内器物損壊への指導と保護者への損害賠償請求，社員研修・学習塾経営の
+教育設計など，**学校教育行政実務・学習指導・教育事業運営**が中心である．
+
+**(3) 代理タスクの質問内容サンプル — 意味的整合性は低い**
+
+JMMLU.zip（`tests/fixtures/jmmlu_sample.zip` および過去ジョブでダウンロード済みのフルzip）から
+3タスクを各3問サンプルした．
+- `sociology`: 「都市社会学への生態学的アプローチ」「ベッカーの大麻使用論」「19世紀の中産階級」
+- `high_school_psychology`: 「誇大妄想」「マズローの動機理論」「テストの妥当性の定義」
+- `moral_disputes`: 「ミルの言論検閲論」「フェミニスト・レトリック」「快楽の価値の決定要因」
+
+いずれも学部教養レベルの社会学・心理学・倫理学の学術知識を問う四択問題であり，
+`build_dataset.py` の複合設問が示す「学校教育行政実務」とは主題が明確に異なる．
+`data/classifier_train.jsonl` の `education` 行（150件）を確認しても同様で，フィニアス・ゲージの
+脳損傷事例，「パワーエリート」の定義，エクレシア（教会組織形態），ハーストハウスの道徳理論，
+自閉症の鑑別診断など，**学校運営・教育行政に関する語彙は1件も含まれていなかった**．
+問い6への回答として，代理タスクの妥当性は実測サンプルによっても覆された．
+
+**(4) JMMLU 56タスク全体の棚卸し — 空きタスクは存在しない**
+
+JMMLU.zip の全56タスクを列挙し，`_DOMAIN_TASK_MAP`（10ドメイン合計 = 10+2+3+8+5+8+5+8+4+3 = 56）
+と突き合わせたところ，**56タスク全てが既にいずれかのドメインへ割り当て済みで，未割当のタスクは
+0件だった**．すなわち「`education` により意味的に近い代替候補タスクを JMMLU から新たに補充する」
+という選択肢は，**必ず他ドメインからタスクを奪う（既存の1:1分割を崩す）操作**を意味し，
+`build_dataset.py:76-78` のコメントが明記する「56タスク中1タスクが正確に1ドメインに属する」という
+検証済み不変条件を壊す．これは eval 用データセット（`data/dataset.jsonl`）と LoRA 訓練データ
+（`data/lora_train/`）の両方の再生成を要する変更であり，「分類器の再訓練＋オフライン評価のみで
+完結する」という Y5 note の前提（軽量な単一レバー）を超える規模になる．
+実際に代替候補として近そうなタスクを個別に検討したが，該当なしだった（例: `professional_psychology`
+は既に `medical` に割当済みでむしろ `high_school_psychology` と近すぎる＝奪っても医療との混同を
+`education` 側に移すだけ．`japanese_civics` は既に `history_culture`．学校教育行政そのものを問う
+四択タスクは MMLU 由来の56タスクに元々存在しない）．
+
+**(5)(追加) confusion matrix の実測 — 「サンプル数不足ではない」という B52 の主張を裏付けつつ，
+より具体的な機序を追加発見**
+
+Y4 で本番反映済みの `results/iter31_calibrated_predictions.jsonl`（`probabilities` 付き，1600行）
+と `data/dataset.jsonl`（`jmmlu_task` フィールド）を突き合わせ，`education` の150件について
+代理タスク別recallを算出した：
+
+| 代理タスク | recall |
+|---|---|
+| sociology | 35/56 = 0.625 |
+| high_school_psychology | 21/48 = 0.438 |
+| moral_disputes | 20/46 = 0.435 |
+
+**3タスクの寄与は一様ではない**．`sociology` は他ドメインより低いとはいえ相対的に分離しやすく，
+`high_school_psychology`・`moral_disputes` の2タスクが `education_recall` 全体（0.4059）を
+主に押し下げている．誤分類先の内訳も機序が異なる：
+
+- `high_school_psychology` の誤分類は `medical`（6件）・`computer_science`（6件）・`general`（5件）・
+  `natural_science`（5件）に分散．`medical` への流出は，`medical` ドメイン自身の代理タスクに
+  `professional_psychology`（心理学の専門版）が含まれるため，埋め込み空間で
+  `high_school_psychology` と近接しやすいという構造的な説明が付く．
+- `moral_disputes` の誤分類は `social_science`（7件）・`legal`（5件）に集中．`social_science` の
+  代理タスクには `philosophy`・`world_religions` が含まれ，倫理学的主題（ミルの功利主義など）が
+  直接競合する．`legal` への流出は「disputes（争い）」という語彙が法律的文脈と表面上重なる
+  ためと考えられる．
+- 一方，`education` に誤って割り当てられる側（false positive，`predicted education but TRUE is`）
+  も `medical`（15）・`social_science`（14）・`history_culture`（10）に分散しており，
+  対称的な混同関係がある．
+
+これは「サンプル数不足」ではなく「代理タスクの主題が他ドメインの代理タスクと学術分野として
+本質的に近接している」という機序を裏付ける定量的な一次証拠であり，B52 の定性的な懸念を
+補強する．同時に，**改善の余地が3タスクに一様でない**（`sociology` は相対的に良好，
+`high_school_psychology`・`moral_disputes` が主犯）という，計画フェーズで使える具体的な
+優先順位を提供する．
+
+**(6) 手作り訓練問題追加案のフォーマット不整合という新規のリスク発見**
+
+`scripts/train_domain_classifier.py`（1-18行）を確認したところ，分類器の特徴量は
+`nomic-embed-text` による生の `query` テキストの埋め込みであり，前処理は一切ない．
+一方，`data/dataset.jsonl` の単一ドメイン行（`education` の150件を含む）は全て JMMLU 由来の
+「質問文 + A/B/C/D の4択」という定型フォーマットであり，**評価データセットは変更しない前提**
+（Y5 note が要求する「オフラインで完結・分類器再訓練＋既存 `evaluate_classifier_calibration.py`
+での再評価のみ」）である限り，`education` の recall は今後も 150件の JMMLU 形式の問題**のみ**を
+対象に測定され続ける．
+
+`build_dataset.py` の複合設問（`_COMPOUND_QUESTIONS`）に倣い，学校教育行政実務に即した
+「〜について相談したいです」調の自由記述文を `education` の訓練データとして追加する案
+（Y5 note の代替案(2)）は，**`education` というクラスの訓練データにだけ選択肢構造
+（A. B. C. D.）を持たない自由記述文を混入させる**ことになる．9ドメイン中8ドメインの訓練データが
+全てJMMLU形式のまま変わらないため，分類器が「A/B/C/D構造の有無」という表層的な書式手がかりを
+`education` 判定に利用してしまうリスクがある．しかも**評価データセットの `education` 150件は
+今後も引き続き100% JMMLU形式のまま**であるため，たとえこの書式手がかりで訓練損失が下がっても，
+**測定対象（education_recall，JMMLU形式の150件）を動かす保証がない**．すなわち，自由記述文の
+追加は「`education` ドメインの実務上の定義に忠実な訓練データを増やす」という目的には合致するが，
+「d0003 X8 の成功条件（education_recall が business_economics の0.4533を上回る）を満たす」という
+**現在設定されている定量的な成功条件を動かすことを目的とするなら，効果が不確実な手段**である．
+この点は計画フェーズが軽視すべきでない構造的な制約であり，次の2通りの対応が考えられる（判断は
+計画フェーズ・必要なら人間判断に委ねる）：
+- (a) 自由記述文の追加は「実務上の意味的忠実性」を目的とした投資と位置付け，`education_recall`
+  という既存メトリクスの改善は主目的にしない．
+- (b) `education` の評価データセット（150件）自体を JMMLU 形式から実務忠実な自由記述形式へ
+  一部差し替える．ただしこれは `data/dataset.jsonl` という評価データの構造・母集団を変更する
+  スキーマレベルの変更であり，CLAUDE.md の「既存のデータ構造を変更する場合は事前にユーザーへ
+  確認する」に該当する．また過去の全イテレーション（Iter15〜31）の `education_recall` との
+  比較可能性が失われる．
+
+**(7) 文献調査 — LLM 生成による訓練データ拡張の先行研究**
+
+- Neshaei et al., "Bridging the Data Gap: Using LLMs to Augment Datasets for Text Classification"
+  （EDM 2025, https://educationaldatamining.org/EDM2025/proceedings/2025.EDM.long-papers.54/index.html ，
+  DOI: 10.5281/zenodo.15870195）．教育データセットのクラス不均衡是正を対象に，LLM 駆動データ
+  拡張の5段階パイプライン（初期生成・例選択・例に基づく拡張・適応・反復ループ）を提案し，
+  3つの教育データセットで balanced accuracy の改善を報告．**Stage "Adaptation"**
+  （生成後に既存データの書式・分布へ後処理で合わせ込む工程）が本リポジトリの状況（新規生成
+  データが既存の JMMLU 形式と体裁を揃える必要がある）に直接参考になる．
+- "An LLM-based synthetic data generation approach for addressing class imbalance in malicious
+  traffic detection"（Scientific Reports, 2026, https://www.nature.com/articles/s41598-026-53027-z ）．
+  LLM 生成データはマイノリティクラスの recall を SMOTE/ADASYN 等の古典的オーバーサンプリング
+  より大きく改善した例がある一方，別データセットでは統計的有意差が出なかったとも報告しており，
+  **「LLM 生成の訓練データ追加が必ず recall を改善するとは限らない」という留保**も同時に示す．
+  これは上記(6)の懸念（書式・分布のミスマッチがあると効果が読めない）と整合する．
+
+#### 次の計画フェーズ（rc-planner）への申し送り
+
+Y5 note が挙げた2案（除外・置換／手作り追加）は，どちらも単純には成立しない：
+- **除外・置換**（問い4）: JMMLU 56タスクは既に完全に1:1割当済みで空きタスクが無いため，
+  他ドメインからタスクを奪わない限り実行できない．奪う場合は eval・LoRA訓練データ双方の
+  再生成が要り，Y5 が想定する「オフライン・軽量」な単一レバーの範囲を超える．
+- **手作り追加**（問い5）: 実務忠実な自由記述文は，書式（A/B/C/D構造の有無）が
+  `education` クラスだけ他8ドメインと異なる訓練データになり，かつ評価データセットは
+  今後もJMMLU形式のまま変わらないため，**成功条件である `education_recall` を動かす保証が
+  低い**．目的を「recall の改善」に置くか「実務忠実性の投資」に置くかを最初に切り分けるべき．
+
+**代わりに，計画フェーズで検討可能な，より制約を守った候補**（いずれも eval データセットは
+不変，オフラインで完結）:
+
+1. **代理タスク間の重み付け／サンプル数の変更（真に単一レバーで検証可能）**: `education` の
+   JMMLU プールは3タスク合計448問（sociology 150・high_school_psychology 150・moral_disputes 148）
+   のうち150問がeval用に使われ，残り約298問が未使用のまま余っている．現在の分類器訓練データ
+   （`classifier_train.jsonl` の `education` 行）はこの298問中150問のみを使っており，
+   `build_classifier_training_rows()` の `domain_target_size` を `education` だけ引き上げる
+   （または対象タスク別の配分比率を変える）ことで，**評価データセット・LoRA訓練データ・
+   他ドメインの割当に一切触れずに**訓練サンプル数を最大298問まで増やせる．ただし(4)の
+   confusion matrix 分析が示すとおり，主要因は「サンプル数不足」ではなく「代理タスクの
+   意味的近接」であるため，**効果は限定的である可能性が高いことを留保として明記した上で
+   最も低コストな一手として先に試す価値がある**．
+2. **`sociology`・`high_school_psychology`・`moral_disputes` の代表性の偏りを補正する
+   サンプリング**: 上記confusion matrix分析で `high_school_psychology`・`moral_disputes` の
+   recallが `sociology` より明確に低いことが分かっている．3タスクからの抽出比率を均等
+   （現状ほぼ均等）から意図的に変え，弱いタスクへの重み（class内のタスク別重み，
+   `sample_weight` 等）を高める案は，タスク集合自体を変えずに済むため schema 変更を伴わない．
+3. **手作り追加を行う場合は，(6)で述べた書式ミスマッチのリスクを踏まえ，最低限
+   「A. B. C. D.の4択構造を保った学校教育行政実務の手作り問題」を作成する**（自由記述の
+   「〜について相談したいです」調ではなく，JMMLU と同じ体裁の4択問題として書く）．
+   これにより書式手がかりによる見せかけの改善リスクを避けられる．ただし作問コストは
+   自由記述より高い（正解・誤答選択肢の設計が必要）．d0003 X8 の見積り（1〜3日）は
+   この4択形式での作問を前提にするなら現実的だが，自由記述形式（build_dataset.py の
+   複合設問と同じ体裁）を流用するなら(6)のリスクを負う．
+4. **人間判断が必要な論点として明記すべきこと**: 「`education_recall` という既存メトリクスを
+   JMMLU 形式のまま改善する」ことと「`education` ドメインの実務忠実性を訓練データに反映する」
+   ことは，現状のデータセット構造では同時に達成しづらい．計画フェーズはこの両立不可能性を
+   rc-planner の判断だけで解消せず，どちらを優先するかの選択肢（例: A1=JMMLU形式のまま
+   代理タスク内配分を変える最小レバーで様子を見る（Recommended，スキーマ変更なし）／
+   A2=評価データセット自体の一部差し替えを人間に確認する）として backlog に残すこと．
+
+
+
+### 計画 (Iter32)
+
+**単一レバー**: `classifier_training_data_composition`（config.yml 199-236行目のレバー）の値
+`education_proxy_task_revision` を，調査(Iter32)申し送りの代替候補(2)「弱い代理タスクへの
+重み付け変更」として具体化する。3代理タスク（sociology・high_school_psychology・
+moral_disputes）のうち，confusion matrix実測（調査(Iter32)分かったこと(5)）でrecallが低い
+`high_school_psychology`(0.438)・`moral_disputes`(0.435)の分類器訓練行に，`sociology`(0.625，
+相対的に良好)および他9ドメインの全行に対し**2.0倍**の`sample_weight`を与える
+（`LogisticRegression.fit()`の`class_weight='balanced'`はそのまま維持し，sklearn内部で
+`sample_weight *= class_weight_`と乗算されるため，ドメイン間の既存バランス調整とタスク内の
+新規重み付けは独立に効く）。
+
+**候補(1)（education訓練サンプル数を150→298へ増量）ではなく候補(2)（重み付け）を選んだ理由**:
+調査(Iter32)の confusion matrix 実測は「サンプル数不足ではなく代理タスクの主題が他ドメインの
+代理タスクと学術分野として本質的に近接していること」を機序として特定した。候補(1)は
+`_sample_domain_questions()`が3タスクの合算プールから無作為抽出する実装上，増量後も
+3タスクの構成比はほぼ変わらない（同じ約1:1:1の比率で単純に量が増えるだけ）ため，
+「同じ意味的に混同しやすいデータを追加で与える」ことにしかならず，投資調査自身が
+「効果は限定的である可能性が高い」と留保した案である。候補(2)は，低recallの原因である
+2タスクの決定境界寄与だけを直接強める点で，特定された機序（意味的近接）に対しより直接的な
+介入であり，オフライン・単一レバーの制約下で候補(1)より効果を見込める可能性が高いと判断した。
+候補(3)（手作り4択問題）は作問コストが高く，今回はまず低コストな候補(2)を先に検証する
+（候補(2)で目標未達なら候補(3)または候補(2)の重み倍率変更を次イテレーションで検討する）。
+
+**重要な訂正 — 成功条件の閾値を実測に基づき更新する**: config.yml の Y5 note・backlog B52 が
+引用する「他ドメインの現状下限 business_economics 0.4533」を一次情報（journal「実験・分析(実行)
+(Iter31)」の20指標表）に当たって検証したところ，**この数値は Iter17〜19 頃（旧 d0002，eval
+1520問時代・fallback 未廃止・較正導入前）の陳腐化した値であり，Y1（fallback廃止，Iter28）・
+Y4（較正導入，Iter31）を経た現在の production 状態を反映していない**ことが判明した。
+journal「実験・分析(実行)(Iter31)」の20指標表（`classifier_calibration=temperature`，
+現行 production 相当，1600問実測）から10ドメインの recall を再確認すると：
+
+| domain | recall（Iter31 temperature，現行production） |
+|---|---|
+| education | 0.4588（最下位） |
+| **medical** | **0.5112（education 以外で最下位）** |
+| business_economics | 0.5417 |
+| computer_science | 0.5714 |
+| social_science | 0.5774 |
+| legal | 0.5778 |
+| general | 0.5732 |
+| natural_science | 0.5833 |
+| mathematics | 0.6310 |
+| history_culture | 0.6786 |
+
+**現状の下限は business_economics(0.5417) ではなく medical(0.5112) である**。したがって
+Iter32 の主基準は **medical_recall(0.5112) を上回ること**に更新し，0.4533 は使用しない。
+（本フェーズでは config.yml・backlog 自体は変更せず，journal に訂正を記録するに留める。
+次イテレーションの rc-reflector／今後の config 更新時に反映されたい。）
+
+同様に，Iter32 自身の単一レバー比較における「before」も，Y4 適用前の生の Iter28 モデル
+（education_recall=0.4059）ではなく，**現在 production に反映されている
+`classifier_calibration=temperature` 較正後の状態（`results/iter31_calibrated_predictions.jsonl`，
+education_recall=0.4588）を基準とする**。今回変更するのは学習データの構成（sample_weight）のみで
+あり，較正手法は temperature のまま固定するため，Y4 の効果と Y5 の効果を混同しないためにも
+比較対象は「直前の production 状態」でなければならない。
+
+**固定する構成（Iter31 adopted のまま，一切変更しない）**: `routing_method=supervised_classifier`，
+`confidence_threshold=0.0`・`dispatch_top_k=1`・`aggregation_method=max_confidence`，
+`confidence_signal_method=self_report`，`confidence_elicitation=top_k_with_probs`，
+`expert_model=expert-mesh-{domain}-lora`（domain_count=10），`light_model=qwen3.5:4b-q4_K_M`，
+`embedding_model=nomic-embed-text`，評価データセット `data/dataset.jsonl`（1600問，不変）。
+分類器較正手法は `scripts/train_domain_classifier.py` の `_CALIBRATION_METHOD="temperature"`・
+`_CALIBRATION_CV=5`・`ensemble=True`（すべて無変更）。`config.yaml` は一切変更しない。
+
+**変更ファイル・行（rc-implementer 向け）**:
+
+1. `build_dataset.py`
+   - `_DOMAIN_TASK_MAP`（80行目）の直後に，タスク別 sample_weight の定数を新設する:
+     ```python
+     # Iter32 (classifier_training_data_composition=education_proxy_task_revision, Y5):
+     # confusion-matrix実測（journal Iter32調査）でeducationの3代理タスクのうち
+     # high_school_psychology(recall 0.438)・moral_disputes(0.435)がsociology(0.625)より
+     # 明確に弱いと判明した。classifier訓練行にタスク別のsample_weightを付与し，弱い2タスクの
+     # 決定境界寄与を重くする。マップに無いタスク（他9ドメイン全て・sociology含む）は
+     # _DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT(1.0)のまま，Iter31以前と同じ挙動になる。
+     _CLASSIFIER_TASK_SAMPLE_WEIGHTS: dict[str, float] = {
+         "high_school_psychology": 2.0,
+         "moral_disputes": 2.0,
+     }
+     _DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT = 1.0
+     ```
+   - 上記定数を使う純粋関数を追加（フィクスチャzip無しで単体テスト可能にするため）:
+     ```python
+     def _classifier_task_sample_weight(task_name: str) -> float:
+         """Per-row training weight for build_classifier_training_rows() (Iter32)."""
+         return _CLASSIFIER_TASK_SAMPLE_WEIGHTS.get(
+             task_name, _DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT
+         )
+     ```
+   - `build_classifier_training_rows()`（705-752行目）の `rows.append`（750-751行目）を変更:
+     現在 `for index, (query, _answer, _task_name) in enumerate(...)`で`_task_name`が破棄されて
+     いる（アンダースコア始まりは未使用の意）。これを`task_name`（アンダースコアを外す）に変え，
+     `rows.append({"id": ..., "query": query, "domain": domain, "sample_weight":
+     _classifier_task_sample_weight(task_name)})`とする。docstring（712行目の一行目
+     `{id, query, domain}`）も`{id, query, domain, sample_weight}`に更新する。
+   - **eval データセット側（`_build_rows()`・`write_dataset()`）には一切手を入れない**。
+     `sample_weight`は分類器訓練行にのみ付与され，評価データセットのスキーマは Iter25 以降
+     不変のままである。
+
+2. `scripts/train_domain_classifier.py`
+   - `_load_training_rows()`（68-71行目）は無変更（行全体を dict として読み込む既存実装のまま
+     で `sample_weight` フィールドも自然に読み込める）。
+   - 新規ヘルパーを追加:
+     ```python
+     def _extract_sample_weights(rows: list[dict]) -> list[float]:
+         """Per-row training weight (Iter32); rows without it (pre-Iter32 data) default to 1.0."""
+         return [row.get("sample_weight", 1.0) for row in rows]
+     ```
+   - `train_classifier()`（90-125行目）のシグネチャに `sample_weight: list[float] | None = None`
+     を追加し（デフォルト `None` で既存の2引数呼び出し・既存テストへの後方互換を保つ），
+     124行目 `calibrated_model.fit(embeddings, labels)` を
+     `calibrated_model.fit(embeddings, labels, sample_weight=sample_weight)` に変更する。
+     docstring に，sklearn `LogisticRegression.fit()` 内部で `sample_weight *= class_weight_`
+     と乗算されるため（`.venv/lib/python3.12/site-packages/sklearn/linear_model/_logistic.py:436`，
+     本イテレーションで確認済み），既存の`class_weight='balanced'`によるドメイン間バランスと
+     今回のタスク内重み付けが独立に効くことを明記する。
+   - `_train_and_save()`（128-143行目）で `rows = _load_training_rows(...)` の直後に
+     `sample_weight = _extract_sample_weights(rows)` を追加し，
+     `model = train_classifier(embeddings, labels, sample_weight=sample_weight)` に変更する。
+   - モジュール冒頭 docstring（1-19行目）に Iter32 の変更点（sample_weight 対応）を一行追記する。
+
+3. `tests/test_build_dataset.py`
+   - `test_build_classifier_training_rows_have_query_and_domain_only`（225-238行目）を
+     `test_build_classifier_training_rows_have_query_domain_and_sample_weight_only` に改名し，
+     アサーションを `assert set(row) == {"id", "query", "domain", "sample_weight"}` と
+     `assert isinstance(row["sample_weight"], float)` に更新する。この変更はテストの弱体化では
+     なく，Iter32 で意図的に追加したフィールドへの契約更新である（`sample_weight` は生成時に
+     JMMLU タスク名から決定論的に計算される値であり，Iter10 のラベルリーク（probe/dispatch
+     結果由来の特徴量）とは無関係であることをコメントで明記する）。
+   - 新規テストを追加: `_classifier_task_sample_weight` を直接 import し，
+     `high_school_psychology`・`moral_disputes` が 2.0，`sociology`・任意の他タスク（例:
+     `anatomy`）が 1.0 であることを検証する（フィクスチャ zip 不要，純粋関数の単体テスト）。
+
+4. `tests/test_train_domain_classifier.py`
+   - `sample_weight` が実際に `CalibratedClassifierCV.fit()` まで届いていることを検証する
+     テストを追加する（例: 極端な重み比率を持つ境界上の1点を用意し，`sample_weight=None`と
+     明示的な重み付きの2通りで `train_classifier()` を呼び，`predict_proba` の出力が変化する
+     ことを確認する、または `unittest.mock` で `CalibratedClassifierCV.fit` をspyしてキーワード
+     引数 `sample_weight` が渡っていることを直接確認する。実装は rc-implementer の裁量とする）。
+
+**データ生成・学習・評価手順**:
+
+1. `data/classifier_train.jsonl` は上書きしない。新規ファイル
+   `data/classifier_train_iter32_reweighted.jsonl` を
+   `uv run python build_dataset.py --output /tmp/iter32_dataset_verify.jsonl --jmmlu-zip
+   <cached JMMLU.zip> --classifier-train-output data/classifier_train_iter32_reweighted.jsonl`
+   で生成する（`--output`は使い捨てパスにし，既存の`data/dataset.jsonl`は変更しない）。
+2. **重要な検証（単一レバー原則の担保）**: `data/classifier_train_iter32_reweighted.jsonl`の
+   `(id, query, domain)`の集合が既存`data/classifier_train.jsonl`と完全一致することを確認する
+   （`_CLASSIFIER_TRAIN_SAMPLE_SEED`・`domain_target_size`とも無変更のため，抽出される質問集合
+   自体は変わらないはずで，唯一の差分は新設の`sample_weight`フィールドの有無であることを
+   実測で担保する）。また `education` 行のうち `sample_weight=2.0` の行数（`high_school_
+   psychology`・`moral_disputes`由来）と`1.0`の行数（`sociology`由来）を集計し，実際の構成比を
+   報告する。
+3. `/tmp/iter32_dataset_verify.jsonl`（新規生成した eval 相当データ）が既存
+   `data/dataset.jsonl`と完全一致（sha256一致）することも確認し，eval データセットが本当に
+   無変更であることを担保する。
+4. 分類器を新規学習: `uv run python -m scripts.train_domain_classifier --train-data
+   data/classifier_train_iter32_reweighted.jsonl --embedding-model nomic-embed-text
+   --ollama-host 127.0.0.1 --ollama-port 11435 --output
+   models/domain_classifier_iter32_reweighted.joblib`（本番 `models/domain_classifier.joblib`
+   は上書きしない）。
+5. 較正後データを生成: `uv run python -m scripts.evaluate_classifier_calibration --dataset
+   data/dataset.jsonl --classifier models/domain_classifier_iter32_reweighted.joblib
+   --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 --output
+   results/iter32_calibrated_predictions.jsonl`。
+6. **before は Iter31 の production 相当データをそのまま使う**:
+   `results/iter31_calibrated_predictions.jsonl`（再生成しない）。
+
+**到達コードパスの確認（config.yml の必須注意事項）**:
+
+- `build_classifier_training_rows()`は`write_classifier_training_data()`経由でCLIから直接
+  呼ばれる純粋なオフラインデータ生成であり，`config.yaml`のいかなる分岐にも依存しない。
+  したがって「設定を変えたのにコードに到達しない」という過去6回の失敗パターン（config.yml
+  該当注記）はこのレバーには構造的に当てはまらない——生成されたJSONLファイルの中身を直接
+  `grep`／`json.loads`で確認するだけで，レバーが発火した証拠を得られる（手順2で実施）。
+- `train_classifier()`内の`calibrated_model.fit(embeddings, labels, sample_weight=sample_weight)`
+  は，`sample_weight`が`None`でない限り必ず sklearn 側に渡る（`CalibratedClassifierCV.fit()`の
+  シグネチャで`sample_weight=None`がデフォルトのため，明示的に渡さなければ何も変わらない
+  ——今回の実装ではこれを`_train_and_save()`から常に明示的に渡すことで担保する）。
+  実験フェーズ本走前に，`sample_weight`引数を渡した場合と渡さない場合とで少数サンプルの
+  `predict_proba`が異なることを目視確認すること（rc-experimenterへの申し送り，先頭20問予備実行
+  に相当する確認）。
+
+**成功条件**:
+
+1. **主基準（point estimate）**: `results/iter32_calibrated_predictions.jsonl`から算出した
+   `education_recall`（150問，argmax vs `expected_domains`）が，上記訂正後の現状下限
+   **`medical_recall`(0.5112，Iter31 production実測) を上回ること**。
+2. **診断（gatingではないが必須報告）**: `education_recall`のドメイン別 McNemar 検定
+   （before=`results/iter31_calibrated_predictions.jsonl`のeducation行，after=
+   `results/iter32_calibrated_predictions.jsonl`のeducation行）を実施し，p値・discordant内訳を
+   報告する。Iter28→Iter29〜31（較正のみ変更）でeducation_recallの点推定が0.4059→0.4588
+   （較正の効果，BH補正後は非有意）で足踏みしていた経緯を踏まえ，今回の変化が「実験不成立」
+   （d0004 §4，基準線とビット単位一致）でないことを最初に確認する。
+3. **非退行（Iter30で確立した3段構成を踏襲，education以外の9ドメイン18指標が対象）**:
+   10ドメイン×precision/recall=20指標（recallはドメイン別McNemar，precisionはFisher正確検定）
+   のp値を一括でBenjamini-Hochberg補正（q=0.05）し，**education以外の9ドメイン18指標のうち，
+   悪化方向でBH補正後有意な指標が0件であること**を非退行の必須条件とする。
+4. **education_precisionの扱い（診断的，非gatingだが重視）**: educationはrecall改善が目的の
+   ため非退行チェックの対象外とするが，`education_precision`（over-triggeringの検出）は20指標
+   BH補正の対象に含めて算出・報告する。有意に悪化していた場合（弱い代理タスクへの過剰な
+   重み付けがeducationへの誤判定を増やした兆候）は，主基準1が満たされていても総合判定を
+   `partial`以下に留める根拠として重視する。
+5. **flip rate**: Iter31→Iter32のargmax不一致率を必須報告項目として記録する（判定基準ではない）。
+6. **温度較正の再確認**: 学習データを変えたため，`_CALIBRATION_METHOD="temperature"`による
+   較正を今回のデータでも再実行する（手順4で自動的に実施される。較正手法自体は変更しない）。
+   Iter31 と同様，temperature特有のチェックリスト（確率の0/1張り付き・uniform fallback・tie率）
+   を簡易報告する。
+
+**目標未達時の次点候補（次イテレーション向けメモ，今回の計画には含めない）**: 今回2.0倍とした
+`_CLASSIFIER_TASK_SAMPLE_WEIGHTS`の重み比率は，過去に試した値と重複しないよう次回はより大きい
+倍率（例: 3.0〜4.0）を試す，または候補(1)（サンプル数増量）・候補(3)（手作り4択問題）へ切り替える
+という選択肢がある。この判断は今回の実験結果を見てから次のrc-reflector／rc-plannerに委ねる。
+
+**人間判断が必要な論点**: 新規追加なし。Y2（`confidence_threshold`の二重責務分離）着手前の
+ユーザー確認は backlog B49・B50・B51・B52 の既存の申し送りのまま。較正済み分類器の本番反映可否は，
+今回の成功条件（1・3）が満たされた場合に改めてその時点で判断する（本イテレーションで本番
+アーティファクトを置き換える判断は行わない）。config.yml・backlog の「business_economics
+0.4533」という記述を訂正する作業自体は，本フェーズの範囲外として次回以降の申し送りとする。
+
+### 実装 (Iter32)
+
+計画(Iter32)の変更ファイル・行の指示に忠実に，単一レバー（分類器訓練行への
+task別`sample_weight`付与）のみを実装した。較正手法（`_CALIBRATION_METHOD="temperature"`）・
+`config.yaml`・評価データセット（`data/dataset.jsonl`）は一切変更していない。
+
+**変更ファイル**:
+
+1. `build_dataset.py`
+   - `_DOMAIN_TASK_MAP`（80-157行目）の直後に，`_CLASSIFIER_TASK_SAMPLE_WEIGHTS`
+     （`{"high_school_psychology": 2.0, "moral_disputes": 2.0}`）・
+     `_DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT = 1.0`・純粋関数
+     `_classifier_task_sample_weight(task_name)` を計画どおり追加した。
+   - `build_classifier_training_rows()` 内の `for index, (query, _answer, _task_name)` を
+     `task_name`（アンダースコアを外す）に変え，各行の `rows.append(...)` に
+     `"sample_weight": _classifier_task_sample_weight(task_name)` を追加した。関数
+     docstring の戻り値説明を `{id, query, domain}` から `{id, query, domain, sample_weight}`
+     に更新し，sample_weight の由来（task名から決定論的に決まる値）を追記した。
+   - `_build_rows()`・`write_dataset()`・eval側の関数には一切手を入れていない。
+
+2. `scripts/train_domain_classifier.py`
+   - `_extract_sample_weights(rows)`（`row.get("sample_weight", 1.0)` のリスト内包表記1行）を
+     `_load_training_rows()` の直後に追加した。
+   - `train_classifier()` のシグネチャに `sample_weight: list[float] | None = None` を追加し
+     （デフォルト値により既存の2引数呼び出し・既存テストとの後方互換を維持），
+     `calibrated_model.fit(embeddings, labels, sample_weight=sample_weight)` に変更した。
+     docstring に，sklearn `LogisticRegression.fit()` 内部で `sample_weight *= class_weight_`
+     と乗算されるため既存の `class_weight="balanced"` によるドメイン間バランスと今回のタスク内
+     重み付けが独立に効くことを明記した（計画フェーズが確認済みの一次情報の引用）。
+   - `_train_and_save()` で `rows = _load_training_rows(...)` の直後に
+     `sample_weight = _extract_sample_weights(rows)` を追加し，
+     `train_classifier(embeddings, labels, sample_weight=sample_weight)` に変更した。
+   - モジュール冒頭 docstring に Iter32 の変更点（`sample_weight` フィールドの伝播，未指定行は
+     1.0 扱い）を一行追記した。
+
+3. `tests/test_build_dataset.py`
+   - `test_build_classifier_training_rows_have_query_and_domain_only` を
+     `test_build_classifier_training_rows_have_query_domain_and_sample_weight_only` に改名し，
+     `assert set(row) == {"id", "query", "domain", "sample_weight"}` と
+     `assert isinstance(row["sample_weight"], float)` を追加した。
+   - 新規テスト `test_classifier_task_sample_weight_upweights_only_the_two_weak_proxy_tasks`
+     を追加し，`_classifier_task_sample_weight` を直接 import して
+     `high_school_psychology`・`moral_disputes` が2.0，`sociology`・`anatomy`（他ドメインの
+     代表例）が1.0であることを検証した（フィクスチャzip不要の純粋関数テスト）。
+
+4. `tests/test_train_domain_classifier.py`
+   - `test_extract_sample_weights_defaults_missing_field_to_one` を追加し，
+     `sample_weight` フィールドが無い行（Iter31以前のデータ相当）が1.0扱いになることを検証した。
+   - `test_train_classifier_forwards_sample_weight_to_calibrated_fit` を追加し，
+     `unittest.mock.patch` で `CalibratedClassifierCV.fit` をspyし，`train_classifier()`に渡した
+     `sample_weight`リストがキーワード引数としてそのまま`fit()`に届くことを直接確認した。
+   - `test_train_classifier_defaults_sample_weight_to_none` を追加し，`sample_weight`未指定時に
+     `fit()`へ`sample_weight=None`（無重み付け，Iter31以前と同一挙動）が渡ることを確認した。
+
+**レバーが実際に発火することの予備実行での確認（config.ymlの必須注意事項への対応）**:
+
+キャッシュ済み`JMMLU.zip`（`/mnt/data-raid/ktakahashi/.claude/jobs/491ad262/tmp/JMMLU.zip`）を
+使い，計画手順1-3を本フェーズで先行実行した（分類器の再学習・較正には live ollama 呼び出しが
+要るため，そこは次フェーズ rc-experimenter の担当だが，JSONL生成とその中身の直接検証はオフラインで
+完結するため本フェーズで実施した）:
+
+```
+uv run python build_dataset.py --output /tmp/iter32_dataset_verify.jsonl \
+  --jmmlu-zip <cached JMMLU.zip> \
+  --classifier-train-output data/classifier_train_iter32_reweighted.jsonl
+```
+
+- `data/dataset.jsonl`（既存，本番評価データ）と `/tmp/iter32_dataset_verify.jsonl`（新規生成）の
+  sha256が完全一致することを確認した（`485a85f5...` で一致）。評価データセットが無変更である
+  ことをファイルレベルで担保した。
+- `data/classifier_train.jsonl`（既存，1427行）と`data/classifier_train_iter32_reweighted.jsonl`
+  （新規生成，1427行）を突き合わせ，`(id, query, domain)`の集合が完全一致することを確認した
+  （抽出される質問集合自体は変わっておらず，唯一の差分が`sample_weight`フィールドの追加である
+  ことを実測で担保した）。
+- 新規ファイルの`sample_weight`分布を集計した: 全1427行中，`education`ドメインの150行のうち
+  109行が2.0（`high_school_psychology`・`moral_disputes`由来），41行が1.0（`sociology`由来）。
+  `education`以外の1277行は全て1.0。既存ファイル（`data/classifier_train.jsonl`）には
+  `sample_weight`フィールド自体が存在しないことも確認した（新設フィールドであることの裏付け）。
+- これにより「設定を変えたのにコードに到達しない」という過去の失敗パターンには該当せず，
+  レバーが訓練データ生成の時点で確実に発火していることを，学習・評価の本走前に確認できた。
+  `/tmp/iter32_dataset_verify.jsonl`は検証用途を終えたため削除済み。
+  `data/classifier_train_iter32_reweighted.jsonl`は次フェーズがそのまま使えるようdata/配下に
+  残した（`.gitignore`の`data/*`によりgit管理外）。
+
+**テスト結果**: `uv run pytest -q` で 222 passed, 2 skipped（既存のskipは本変更と無関係，
+Iter32で追加した6テスト全て含めて成功）。
+
+**リンタ・フォーマッタ結果**: `uv run ruff check .`・`uv run ruff format --check .`は，
+`scripts/prepare_lora_training_data.py`のF401/F541（未使用import・無意味なf-string）と
+15ファイルのフォーマット差分を検出したが，**いずれも変更前から存在する既存の指摘であることを
+`git stash`での比較で確認した**（本イテレーションが原因ではない）。本イテレーションで変更した
+4ファイル（`build_dataset.py`・`scripts/train_domain_classifier.py`・
+`tests/test_build_dataset.py`・`tests/test_train_domain_classifier.py`）に限定して実行した
+`uv run ruff check <4 files>`・`uv run ruff format --check <4 files>`はいずれも
+「All checks passed」「already formatted」であり，実装過程で1箇所（`_classifier_task_sample_weight`
+の戻り値式が1行に収まる）フォーマット差分が出たため`ruff format`の指摘どおりに手直し済みである。
+
+**config.yaml・data/dataset.jsonlへの意図しない変更の有無**: `git diff config.yaml`は無出力
+（無変更を確認）。`data/dataset.jsonl`は上記sha256一致により無変更を確認済み。
+
+**実験を開始してよい状態か**: 良い。分類器の再学習（`uv run python -m
+scripts.train_domain_classifier --train-data data/classifier_train_iter32_reweighted.jsonl
+--embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 --output
+models/domain_classifier_iter32_reweighted.joblib`）と較正後評価
+（`uv run python -m scripts.evaluate_classifier_calibration --dataset data/dataset.jsonl
+--classifier models/domain_classifier_iter32_reweighted.joblib --embedding-model nomic-embed-text
+--ollama-host 127.0.0.1 --ollama-port 11435 --output results/iter32_calibrated_predictions.jsonl`）
+は計画(Iter32)の手順4-5のとおり，rc-experimenterがそのまま実行できる状態にある。
+
+---
+
+### 実験・分析(実行) (Iter32)
+
+計画どおり実機1600問本走は行わず，既存のSSHローカルポートフォワード（`127.0.0.1:11435 ->
+wafl500:11434`，`ssh -fNT -L 11435:localhost:11434 wafl500`，PID 621254，Iter29から起動済みの
+プロセスをそのまま流用．`curl http://127.0.0.1:11435/api/tags`で疎通確認済み）経由のembedding
+呼び出しのみで比較データを揃えた．LLM生成・probe・dispatchは一切発生していない。
+
+**手順1: 新分類器の学習（重み付き訓練データ）**
+
+```
+uv run python -m scripts.train_domain_classifier \
+  --train-data data/classifier_train_iter32_reweighted.jsonl \
+  --embedding-model nomic-embed-text \
+  --ollama-host 127.0.0.1 --ollama-port 11435 \
+  --output models/domain_classifier_iter32_reweighted.joblib
+```
+
+標準出力: `[train_domain_classifier] wrote models/domain_classifier_iter32_reweighted.joblib
+(n_samples=1427, classes=[...10ドメイン...])`．実行時間114.19秒（`time`実測，Iter29 platt
+124.09秒・Iter30 isotonic126.51秒・Iter31 temperature124.55秒とほぼ同水準）．
+`models/domain_classifier.joblib`（本番）のタイムスタンプが実行前後で`Jul 31 21:58`のまま
+変化していないことをファイルシステム上で確認し，本番アーティファクトが上書きされていないことを
+担保した（新規生成物`models/domain_classifier_iter32_reweighted.joblib`は`Jul 31 22:46`）。
+
+**手順2: 較正後データ生成**
+
+```
+uv run python -m scripts.evaluate_classifier_calibration \
+  --dataset data/dataset.jsonl \
+  --classifier models/domain_classifier_iter32_reweighted.joblib \
+  --embedding-model nomic-embed-text \
+  --ollama-host 127.0.0.1 --ollama-port 11435 \
+  --output results/iter32_calibrated_predictions.jsonl
+```
+
+標準出力: `[evaluate_classifier_calibration] wrote 1600 rows
+(classifier=models/domain_classifier_iter32_reweighted.joblib)`．実行時間59.02秒（実測，
+Iter31の141.56秒より短いのはCPU使用率のばらつきによるもので異常ではない．`time`のwall clock
+は2:21.88，user時間59.02秒）．出力JSONLは計画どおり`probabilities`フィールド付きで1600行生成された。
+
+**before データ**: 計画どおり`results/iter31_calibrated_predictions.jsonl`（Iter31実測，
+`classifier_calibration=temperature`較正後の現production相当，1600行）を再生成せずそのまま使用。
+両ファイルの`id`集合が完全一致することを確認済み（`{r["id"] for r in before} ==
+{r["id"] for r in after}`が`True`）。
+
+**異常の有無**: なし。両スクリプトとも例外・タイムアウト・リトライなく正常終了した。実機呼び出しは
+wafl500（192.168.15.100:11434）へのembeddingのみ（`nomic-embed-text`，計3027回：1427+1600），
+LLM生成・probe・dispatchは一切発生していない。総所要時間約173秒（約2.9分，`timeout_min:150`に対し
+十分余裕あり，config.ymlの想定どおりこの数値は今回は適用されない軽量処理だった）。
+
+`metrics.py`の既存関数（`compute_ece`／`compute_top1_accuracy`／`compute_mcnemar_test`／
+`compute_precision_recall_per_domain`／`compute_domain_recall_mcnemar_test`／
+`compute_domain_precision_fisher_test`／`apply_benjamini_hochberg`，いずれもIter30以降
+実装済みで変更なし）を呼ぶ一時スクリプト（`/tmp/iter32_analysis.py`，非永続，分析後削除済み）で
+before（`results/iter31_calibrated_predictions.jsonl`）とafter（`results/iter32_calibrated_predictions.jsonl`，
+各1600行）を比較した（判定はここでは行わず，数値のみを機械的に集計する）。
+
+**成功条件1（主基準）: education_recall vs medical_recall(0.5112固定，Iter31 production実測)**
+
+- education_recall before: **78/170 = 0.4588235294117647**（Iter31実測と同一値）
+- education_recall after: **75/170 = 0.4411764705882353**
+- 差分: **-0.0176470588235294**（改善ではなく悪化方向。レバーは狙いと逆方向に動いた）
+- 訂正後の主基準（medical_recall=0.5112固定値）との比較: **0.4412 < 0.5112（下回ったまま。
+  基準を上回るという主基準の点推定は満たされていない）**
+- 参考: after側で再計算したmedical_recallも88/178=0.4943820224719101（before 91/178=0.5112359550561798
+  から低下）であり，after同士で比較してもeducation(0.4412)はmedical(0.4944)を上回っていない。
+
+**成功条件2（診断，education_recallのドメイン別McNemar検定）**
+
+- discordant_a_only（before正解・after誤り）: **3**
+- discordant_b_only（before誤り・after正解）: **0**
+- discordant_pairs: 3
+- chi2_statistic: 1.3333333333333333
+- p_value: **0.24821307898992373**（有意ではないが，3件の不一致は全てbefore→afterで悪化方向。
+  改善方向の不一致は0件。実験不成立（基準線とビット単位完全一致）ではない——後述のとおり全体で
+  15/1600行がflipしており，レバーは確実に発火している——が，主要指標（education_recall）の
+  変化は「改善」ではなく「悪化（非有意）」という，計画時に想定した方向と逆の結果だった。
+- 悪化した3行の内訳（`education-013`: education→mathematics，`education-130`:
+  education→business_economics，`education-146`: education→business_economics）。いずれも
+  before時点のconfidenceが0.24〜0.31と低い僅差の行であり，境界線上の質問だった。
+
+**成功条件4（診断，education_precision，20指標BH補正セットの一部として算出）**
+
+- education_precision before: 78/147 = 0.5306122448979592
+- education_precision after: 75/147 = 0.5102040816326531
+- Fisher正確検定 p_value: **0.8154394516445582**（有意ではない）
+- true_positive_a=78, selected_a=147, true_positive_b=75, selected_b=147, odds_ratio=1.085217391304348
+
+**成功条件3（非退行，education以外9ドメイン18指標，BH補正q=0.05）**
+
+10ドメイン×precision/recall=20指標の点推定とp値（education含む全20指標，および
+education除外18指標）：
+
+| domain | metric | before | after | p_value | 検定 |
+|---|---|---|---|---|---|
+| business_economics | recall | 0.5417 (91/168) | 0.5417 (91/168) | 1.0 | McNemar |
+| computer_science | recall | 0.5714 (96/168) | 0.5536 (93/168) | 0.2482 | McNemar |
+| education | recall | 0.4588 (78/170) | 0.4412 (75/170) | 0.2482 | McNemar |
+| general | recall | 0.5732 (94/164) | 0.5732 (94/164) | 1.0 | McNemar |
+| history_culture | recall | 0.6786 (114/168) | 0.6726 (113/168) | 1.0 | McNemar |
+| legal | recall | 0.5778 (104/180) | 0.5778 (104/180) | 1.0 | McNemar |
+| mathematics | recall | 0.6310 (106/168) | 0.6310 (106/168) | 1.0 | McNemar |
+| medical | recall | 0.5112 (91/178) | 0.4944 (88/178) | 0.2482 | McNemar |
+| natural_science | recall | 0.5833 (98/168) | 0.5774 (97/168) | 1.0 | McNemar |
+| social_science | recall | 0.5774 (97/168) | 0.5774 (97/168) | 1.0 | McNemar |
+| business_economics | precision | 0.4643 | 0.4550 | 0.9197 | Fisher |
+| computer_science | precision | 0.6234 | 0.6118 | 0.9064 | Fisher |
+| education | precision | 0.5306 | 0.5102 | 0.8154 | Fisher |
+| general | precision | 0.6528 | 0.6528 | 1.0 | Fisher |
+| history_culture | precision | 0.6994 | 0.6975 | 1.0 | Fisher |
+| legal | precision | 0.7820 | 0.7761 | 1.0 | Fisher |
+| mathematics | precision | 0.7020 | 0.6974 | 1.0 | Fisher |
+| medical | precision | 0.5056 | 0.4944 | 0.9158 | Fisher |
+| natural_science | precision | 0.5444 | 0.5419 | 1.0 | Fisher |
+| social_science | precision | 0.6382 | 0.6382 | 1.0 | Fisher |
+
+20指標全てをBH補正（q=0.05）した結果，**BH有意（悪化方向）は0件**。education除外の
+18指標のみで別途BH補正した場合も**BH有意（悪化方向）は0件**（`regressed_and_bh_significant_count
+= 0`）。悪化方向の指標（computer_science_recall・history_culture_recall・medical_recall・
+medical_precision・natural_science_recall・全precision系の大半）はp値が0.25〜1.00と大きく，
+統計的な退行の根拠はない。
+
+**成功条件5: flip rate**
+
+- **15/1600 = 0.009375（0.9375%）**。Iter29 platt(11.0%)・Iter30 isotonic(14.3125%)・
+  Iter31 temperature再学習(8.5625%)のいずれよりも大幅に低い。今回の変更は1427行中150行
+  （education分）の一部（109行）のsample_weightのみを変えるという極めて限定的な介入であり，
+  変化幅がこれまでの較正手法変更（分類器出力の全1600行に影響しうる）より小さいこと自体は
+  想定と整合する。ただし，**flipが0ではなく15件発生している時点で「実験不成立（基準線と
+  ビット単位完全一致）」ではなく，レバーは確実に発火している**（`education`のtp: 78→75，
+  `computer_science`のtp: 96→93，`medical`のtp: 91→88，`natural_science`のtp: 98→97，
+  `history_culture`のtp: 114→113 と複数ドメインで実測値が変化している）。
+
+**成功条件6: 温度較正の再確認（チェックリスト，`probabilities`フィールドを使用，1600行対象）**
+
+- (a) 確率のいずれかが厳密に`0.0`または`1.0`になっている行数: **0/1600**
+- (b) 10クラス全てが`0.1`に近いuniform fallback行数: **0/1600**
+- (c) tie率（選択ドメインのconfidenceと同一の値を持つ他ドメインが存在する行）: **0/1600**
+
+3点ともIter31と同様に該当0件であり，温度較正自体の実装は今回のデータでも正常に機能している。
+
+**診断: 全体top1_accuracy・ECE（gatingではないが必須報告，計画外の追加観測）**
+
+- top1_accuracy before: 0.605625, after: 0.598750, 差分: **-0.006875**
+- 全体McNemar検定: discordant_a_only=11（before正解・after誤り）, discordant_b_only=0
+  （before誤り・after正解）, discordant_pairs=11, chi2=9.090909090909092,
+  **p_value=0.002568831527022697（α=0.05で有意）**。**11件の不一致は全てbefore→afterで
+  悪化する方向であり，改善方向の不一致は1件もない**。これは計画の成功条件には含まれていないが，
+  「education以外への意図しない副作用」の直接的な証拠であるため報告する。
+  内訳: `computer_science-040`(computer_science→business_economics),
+  `computer_science-063`(computer_science→education),
+  `computer_science-078`(computer_science→education), `education-013`(education→mathematics),
+  `education-130`(education→business_economics), `education-146`(education→business_economics),
+  `medical-110`(medical→business_economics), `medical-136`(medical→education),
+  `natural_science-066`(natural_science→medical),
+  `compound-058`(medical→business_economics, expected=[natural_science,medical]),
+  `compound-083`(history_culture→business_economics, expected=[history_culture,medical])。
+  computer_science・medicalの3行がeducationへ誤って引き込まれている一方で（過剰発火の兆候），
+  education自身の当たり行は3行失われており（`education-013/130/146`），
+  **educationへの過剰発火とeducation自身のrecall悪化が同時に起きている**。
+- ECE before: 0.07120101725284995, after: 0.06502759260597007（n_bins=10，全1600行の
+  confidenceが非nullで対象）。差分-0.00618（改善方向だが，本イテレーションの対象外の
+  診断値であり，温度較正手法自体は変更していないため差分は訓練データ変化による間接効果）。
+
+**使用データ**:
+
+- 訓練データ（新規）: `data/classifier_train_iter32_reweighted.jsonl`（1427件，education
+  150件中109件がsample_weight=2.0・41件が1.0，他1277件は全て1.0）
+- 評価データセット（再embedding対象）: `data/dataset.jsonl`（1600件，無変更，実装(Iter32)で
+  sha256一致を確認済み）
+- beforeの実行結果: `results/iter31_calibrated_predictions.jsonl`（Iter31実測，1600行，
+  再実行なし）
+- afterの実行結果（新規生成）: `results/iter32_calibrated_predictions.jsonl`（1600行，
+  `probabilities`フィールド付き）
+- 新規モデルアーティファクト: `models/domain_classifier_iter32_reweighted.joblib`（本番
+  `models/domain_classifier.joblib`は無変更のまま，タイムスタンプで確認済み）
+
+**実行時間・実機呼び出しの有無**:
+
+- `train_domain_classifier.py`: 114.19秒（user時間，1427回のembedding呼び出し）
+- `evaluate_classifier_calibration.py`: 59.02秒（user時間，1600回のembedding呼び出し）
+- 実機呼び出しはwafl500（192.168.15.100:11434）へのembeddingのみ（`nomic-embed-text`），
+  計3027回。LLM生成・probe・dispatchは一切発生していない。
+- 接続経路はIter29〜31と同一の既存SSHローカルポートフォワード（`127.0.0.1:11435` ←
+  `wafl500:11434`，PID 621254）をそのまま流用。新規に張り直す必要はなく，実行中のログ・
+  エラーに異常なし（例外・タイムアウト・リトライなし，両スクリプトとも正常終了メッセージを
+  出力）。
+
+**state.json更新**: `status: waiting_experiment`（開始時，`experiment_dir:
+results/iter32_calibrated_predictions.jsonl`・`experiment_deadline`設定）→`running`（完了時，
+`experiment_dir`は結果ファイルパスのまま維持，`experiment_deadline`をnullに戻した）。
+`e32_results`への数値記録・`judgment`確定はフェーズ5b（rc-analyst）に委ねる（本フェーズでは
+数値の良否判定は行わない。ただし，主基準（education_recallがmedical_recall基準0.5112を
+上回る）が点推定として満たされていないこと，education_recallが前段（Iter31）比で悪化方向に
+動いたこと，全体top1_accuracyが統計的に有意に悪化していること（p=0.0026）は，事実として
+上記に記録した）。
+
+---
+
+### 分析(解釈) (Iter32)
+
+**成功条件（計画(Iter32)節，AND条件）との照合**
+
+1. **主基準（point estimate）: education_recall > medical_recall(0.5112)**: **不成立**。
+   0.4412 < 0.5112 であり，しかも before（0.4588）からさらに **-1.76pt 悪化**している。
+   計画が「point estimate」と明記したとおりこの基準に有意性検定は要らない設計であり，
+   有意性の有無に関わらずこの1点だけで主基準は満たされていないと判断してよい。
+2. **診断（education_recallのドメイン別McNemar）**: discordant 3件（全てbefore→after悪化，
+   改善方向0件），p=0.248。n=170・discordant=3という小標本のため個別には有意でないが，
+   3/3が同一方向という事実は「ノイズによる左右均等な入れ替わり」とは整合しない偏りである
+   （後述の機序説明と合わせて評価する）。
+3. **非退行（education以外9ドメイン18指標，BH補正q=0.05）**: 字義通りは成立（悪化方向で
+   BH有意0件）。ただしこれは**方法論的な力不足（後述）による見かけの成立**である疑いが強く，
+   総合判断ではそのまま額面通りに扱うべきではない。
+4. **education_precision（診断）**: before 0.5306→after 0.5102，Fisher p=0.815で非有意。
+   over-triggering（education以外がeducationに誤って引き込まれる）の増加は，precisionの
+   点推定にはまだ表れていない（education自身への流入行数が絶対数として少ないため）。
+5. **flip rate**: 15/1600=0.9375%。過去の較正手法変更（platt 11.0%・isotonic 14.3%・
+   temperature再学習8.6%）より小さいが非ゼロであり，「実験不成立」（config.yml・d0004が
+   警告する基準線とビット単位一致のパターン）には該当しない。
+6. **温度較正チェックリスト**: 0/1600・0/1600・0/1600（張り付き・uniform fallback・tie）で
+   異常なし。
+
+**論点2: なぜ弱い代理タスクへのsample_weight増加がeducation_recallを悪化させたか
+（sklearn実装への直接確認による機序特定）**
+
+計画(Iter32)は「`sample_weight`と`class_weight='balanced'`は独立に効く（`sample_weight *=
+class_weight_`と乗算されるだけ）」という前提で設計されていたが，この前提は**不正確**だった。
+実際には`class_weight='balanced'`自体が`sample_weight`に依存して再計算されるため，両者は
+独立ではなく相殺し合う関係にある。本フェーズで`.venv`にインストール済みの
+`scikit-learn==1.9.0`のソースを直接確認し，`data/classifier_train_iter32_reweighted.jsonl`
+実物で数値を再現した。
+
+- `sklearn/utils/class_weight.py`の`compute_class_weight(class_weight="balanced", ...)`は，
+  `weighted_class_counts = _bincount(y_ind, weights=sample_weight, ...)`という**sample_weight
+  で重み付けしたクラス別合計**を分母に使い，`recip_freq = sum(weighted_class_counts) /
+  (n_classes * weighted_class_counts)`としてクラスごとの`class_weight_`を決める
+  （同ファイル94-98行目）。すなわち`class_weight='balanced'`は「そのクラスの生の行数」では
+  なく「`sample_weight`込みの実効行数」に反比例する。
+- `sklearn/linear_model/_logistic.py:436`の`sample_weight *= class_weight_`（計画時に確認済み
+  の一次情報どおり）と合わせると，最終的にLogisticRegressionへ渡る各行の実効重みは
+  `task_sample_weight × class_weight_(sample_weightに依存)`という**入れ子の依存関係**に
+  なる。計画時の想定（両者が独立に掛かるだけ）は前半のみ正しく，後半（`class_weight_`
+  自体が`sample_weight`で変わる）を見落としていた。
+- 実際の訓練データで計算すると（`n_classes=10`，全1427行，education以外は変更なし）：
+
+  | | before（Iter31以前，全行weight=1.0） | after（Iter32） |
+  |---|---|---|
+  | educationの実効行数（weighted count） | 150.0 | 259.0（109×2.0 + 41×1.0） |
+  | 全体の重み付き総数 | 1427.0 | 1536.0 |
+  | `class_weight_[education]` | 1427/(10×150)=**0.9513** | 1536/(10×259)=**0.5931**（-37.7%） |
+  | `class_weight_[他9ドメイン]`（例: medical, computer_science等） | 1427/(10×150)=0.9513 | 1536/(10×150)=**1.0240**（+7.6%） |
+
+- この結果，各行の最終実効重み（`task_sample_weight × class_weight_`）は：
+  - `high_school_psychology`・`moral_disputes`（狙った2.0倍）: `2.0×0.5931=1.186`
+    （before比 `1.186/0.9513=+24.7%`。**狙った2倍ではなく実質+24.7%に留まった**）。
+  - `sociology`（education内で唯一相対的に良好，recall 0.625，計画が「重みを上げない」と
+    決めた41行）: `1.0×0.5931=0.593`（before比 `0.593/0.9513=-37.7%`）。**変更対象外の
+    はずのsociology行が，class_weight_の連動低下により実効重みを4割近く失った**。
+  - education以外の1277行（全て`task_sample_weight=1.0`）: before比一律`+7.6%`
+    （どのドメインでも同じ倍率——educationの`sample_weight`増加が生んだ`weighted_class_counts`
+    の総和増加を`n_classes`で割った副作用であり，education以外の9ドメイン全てに機械的に
+    及ぶ）。
+
+- この数値は3つのことを説明する。
+  1. **主基準が悪化した理由**: 狙いは「弱い2タスクへ2倍の重みを与えてeducationの決定境界を
+     強化する」ことだったが，実際に起きたのは「弱い2タスクへの重みは24.7%増に減衰し，かつ
+     education内で唯一機能していたsociology（recall 0.625）の重みが37.7%減り，同時に
+     education以外9ドメイン全てが7.6%の相対優位を得る」という，**狙いとほぼ逆方向の複合効果**
+     である。education全体としての実効重み総量自体はむしろ増えている（142.7→153.6，
+     `balanced`方式の定義上，各クラスの重み総量は常に`総重み/n_classes`になるため）が，
+     その増分は全てeducation自身の中で「弱いタスクへ再配分」される形にしかならず，
+     「educationという線形境界をeducation以外との対比でどれだけ有利にするか」という点では
+     class_weight_の低下が直接に不利に働く。
+  2. **他ドメインへの副作用（診断で見つかった top1_accuracy 有意悪化）が生じた理由**:
+     `education`だけを対象にしたはずの変更が，`class_weight='balanced'`の定義（クラス別
+     重みの合計を1点に固定する仕組み）を経由して**他9ドメイン全行に一律+7.6%の相対的な
+     優位を与える**という，計画時に想定されていなかったグローバルな副作用を生んだ。これは
+     単一レバー原則（「1つのレバーだけを動かす」）を実装上は守っていても，`sklearn`側の
+     `class_weight='balanced'`という**別の既存レバーと数式レベルで結合している**ために，
+     実質的には「education の task 内配分」と「10ドメイン全体のバランス」という2つの量を
+     同時に動かしてしまったことを意味する。
+  3. **discordant 11件の分布との整合性**: 診断で確認した全体top1_accuracyのdiscordant 11件は，
+     `business_economics`が誤った着地先になったケースが6/11
+     （`computer_science-040`・`education-130`・`education-146`・`medical-110`・
+     `compound-058`・`compound-083`）と最多で，`business_economics`の`precision`点推定も
+     0.4643→0.4550と（非有意ながら）低下方向である。これは「education以外9ドメインが一律に
+     相対優位を得る」というグローバルな機序と方向として整合する。一方`education`への
+     誤った流入も3/11（`computer_science-063`・`computer_science-078`・`medical-136`）
+     存在し，これは`high_school_psychology`・`moral_disputes`という**具体的な訓練点の埋め込み
+     近傍**が局所的にeducation側へ境界を引き寄せた効果（調査(Iter32)が特定した
+     `high_school_psychology`↔`medical`・`moral_disputes`↔`legal/social_science`の意味的
+     近接と整合，線形分類器はグローバルな重み再配分と局所的な決定境界の変形が同時に起こり
+     うる）と考えられる。すなわち，**education自身の真陽性を3行失いながら，education以外
+     から3行を誤って奪う「過剰発火」も同時に起きている**——「recallを上げようとして
+     precisionが犠牲になる」典型的なトレードオフですらなく，both方向で悪化している。
+
+**論点3: 非退行チェック（成功条件3）が字義通り成立している点についての留保**
+
+10ドメイン×20指標のBH補正で悪化方向有意0件という結果は事実だが，これは**検定力不足による
+見かけの非退行**である可能性が高い。根拠:
+
+- 各ドメインのrecall検定はn=150〜180・discordant数は最大でも3〜4件（education3・
+  computer_science3・medical3・natural_science1・history_culture1）に留まり，個別の
+  McNemar検定はもともとこの規模の悪化を検出する検定力が乏しい。
+- 一方，全1600問を束ねた全体top1_accuracyのMcNemar検定はp=0.0026で明確に有意であり，
+  discordant 11件は**方向が完全に一致**している（悪化11・改善0）。これがもし真にランダムな
+  再配分（左右均等に生じるノイズ）であれば，11件全てが同一方向に揃う確率は
+  二項検定で`2×(0.5)^11 ≈ 0.001`と極めて小さく，全体の有意性（p=0.0026）はこの方向の一貫性
+  そのものが主な源泉である。
+- したがって「非退行（成功条件3）が字義通り成立した」ことは，**個々のドメインに薄く分散した
+  一貫悪化を，ドメイン別に切り分けて検定する設計（BH補正込みでも1ドメインあたりの検定力は
+  据え置き）では拾いきれない**ことを示しているに過ぎず，「本当に非退行だった」ことの
+  積極的な証拠ではない。Iter30（isotonicのmedical_recall1件が単独でBH有意）とは異なり，
+  今回は「1ドメインに集中した強い退行」ではなく「9ドメインに薄く広く分散した弱い退行が
+  集計すると有意になる」という，前例とは異なるパターンの悪化である。
+
+**論点4: 実験不成立の再確認**
+
+flip rate 0.9375%（15/1600，非ゼロ）に加え，本フェーズで`sample_weight`が`compute_class_weight`
+の`weighted_class_counts`にまで実際に反映され，`class_weight_[education]`が0.9513→0.5931へ
+実測どおり変化していることをデータファイルから直接計算で確認した（上表）。これは
+`sample_weight`が`CalibratedClassifierCV.fit()`経由で実際に学習の数式まで届いていることの，
+実装(Iter32)のspyテストに加えたもう一段深い一次証拠であり，config.ymlが警告する
+「設定を変えたのにコードに到達しない」パターンには一切該当しない。
+
+**総合判断（提案，確定はrc-reflector）: rejected**
+
+- 主基準（point estimate）が不成立であるだけでなく，狙いと逆方向（education_recall悪化）に
+  動いた。isotonic（Iter30，ECE成立・recall退行あり）やplatt（Iter29，ECE未達のみ）のような
+  「一部の利得と一部のトレードオフ」の構図ではなく，**得られた利得が一つもない**（education
+  もmedicalもtop1_accuracyも全て悪化方向）。
+- 非退行チェック（成功条件3）は字義通り成立しているが，論点3で述べたとおり検定力不足による
+  見かけの成立である疑いが強く，全体top1_accuracyの有意な悪化（p=0.0026，11/11同一方向）を
+  無視して額面通り「非退行達成」と扱うべきではない。
+- 機序（論点2）が`class_weight='balanced'`と`sample_weight`の数式レベルでの結合という，
+  具体的でsklearnソースからも実測でも裏付けられる説明を持つため，「たまたま悪い乱数を
+  引いた」（ルーティングは決定論的なのでそもそも乱数は存在しない）や「小標本ノイズ」による
+  偶然ではなく，**この実装（`class_weight='balanced'`のまま`sample_weight`を追加する設計）
+  そのものに起因する再現性の高い悪化**と判断する。
+- 追加反復（同一条件の再実行）は不要——ルーティングは決定論的であり，再実行しても同じ数値に
+  なる。ただし，計画(Iter32)が「目標未達時の次点候補」として挙げていた**「重み倍率を
+  3.0〜4.0へ引き上げる」案は，論点2の機序に照らすとむしろ悪化を助長する可能性が高く
+  推奨しない**（`education`の`weighted_class_counts`をさらに増やすほど
+  `class_weight_[education]`はさらに下がり，sociologyの実効重みはさらに失われ，
+  education以外9ドメインへの相対的優位はさらに拡大するため）。この点は次イテレーションへの
+  重要な申し送りとして次項に記載する。
+- 本番アーティファクト（`models/domain_classifier.joblib`）は実装(Iter32)・実験(Iter32)の
+  時点で既に無変更であることが確認済みであり，rejectedの場合の追加のロールバック作業は
+  不要（`models/domain_classifier_iter32_reweighted.joblib`は検証用の副産物として残すか
+  削除するかをrc-reflectorの判断に委ねる）。
+
+**次への示唆**
+
+1. **候補(2)の単純な重み倍率変更（3.0〜4.0倍への引き上げ）は推奨しない**。論点2の機序が
+   示すとおり，`class_weight='balanced'`を維持したまま`sample_weight`だけを増やす限り，
+   倍率を上げるほど「弱いタスクへの意図した強化」は`class_weight_`の自動減衰で目減りし，
+   「sociology の弱体化」と「education 以外9ドメインへの相対的優位」がさらに拡大する
+   構造的な副作用がある。この設計のまま倍率だけ変えて次イテレーションを回すのは，
+   同じ失敗モードを規模だけ変えて繰り返すリスクが高い。
+2. **もし sample_weight による task 内再配分を今後も試すなら**，`class_weight='balanced'`を
+   維持したままでよいかを再検討すべきである。具体的には，(a) `class_weight`に文字列
+   `"balanced"`ではなく，`sample_weight`適用前の生カウントから計算した固定dictを明示的に
+   渡す（`class_weight_`が`sample_weight`の値に連動しなくなる），または(b) task内の重み配分を
+   「education全体の実効行数を変えない」制約下で設計する，のいずれかが必要になる。ただし
+   (b)は今回のデータでは実現不可能に近い——`education`150行中109行（72.7%）が「弱い」
+   `high_school_psychology`・`moral_disputes`由来であり，41行（27.3%）の`sociology`だけで
+   総量150を維持しながら弱い側を2倍にするには`sociology`側の重みが負になる計算になる
+   （`109×2+41×w=150`は`w<0`を要求する）。これは「弱いタスクが多数派」という
+   `education`の代理タスク構成自体の根本的な制約であり，重み付けという手段では
+   解消しにくいことを示す。
+3. **調査(Iter32)が挙げた他の代替候補の説得力を再評価する**:
+   - 候補(1)（サンプル数増量，150→298）: 調査時点で「効果限定的」と留保されていたが，
+     今回の重み付け（候補2）が機序レベルで逆効果と判明した以上，相対的な優先度は
+     再検討の余地がある。ただし候補(1)も「3タスクの合算プールから無作為抽出」する限り
+     構成比（sociology:high_school_psychology:moral_disputes ≈ 1:1:1）は変わらないため，
+     意味的近接という根本原因（調査(Iter32)分かったこと(3)(5)）そのものは解消しない。
+     試すとしても「サンプル数を増やしつつ，sociologyの比率だけ相対的に高める」という
+     候補(1)と候補(2)の折衷案（無作為抽出時の配分比率をtask別に変える，`sample_weight`では
+     なく抽出段階でsociologyを多く・弱い2タスクを少なく採る）の方が，論点2の
+     `class_weight`結合の副作用を避けられる分，筋が良い可能性がある。
+   - 候補(3)（手作り4択問題の追加）: 調査(Iter32)分かったこと(6)が指摘した書式リスク
+     （A/B/C/D構造の有無が`education`だけ他8ドメインと異なる訓練データになる懸念）は，
+     4択形式を維持する限り回避できる。作問コストは高いが，`education`の代理タスク自体が
+     「学校教育行政実務」という定義と学術知識問題という代理タスクの間に埋めがたい意味的
+     ギャップを持つ（調査(Iter32)分かったこと(1)(3)）ことを踏まえると，**代理タスクの
+     within-class配分をどういじっても限界がある可能性が高く**，中長期的には候補(3)
+     （またはeval データセット自体の一部差し替えという，人間判断を要するより大きな変更，
+     調査(Iter32)分かったこと(6)の選択肢(b)）の検討価値が相対的に上がったと考える。
+   - **全く別のアプローチとして**，`education`の分類器特徴量そのもの（`nomic-embed-text`の
+     生埋め込み）を疑う余地もある。調査(Iter32)が示した混同パターン（`high_school_
+     psychology`↔`medical`，`moral_disputes`↔`legal/social_science`）は，埋め込み空間上で
+     `education`の代理タスクが複数の他ドメインの代理タスクに囲まれるように分布している
+     ことを示唆しており，線形分類器（`LogisticRegression`）の表現力の限界という可能性も
+     否定できない。ただしこれはより大きな変更（base estimatorの変更）であり，今回の
+     観測だけから断定はできない。
+4. **人間判断が必要な論点**: 新規追加なし。調査(Iter32)が既に挙げた「`education_recall`と
+   いう既存メトリクスの改善」と「`education`ドメインの実務忠実性」の両立不可能性という
+   論点は，今回の結果を経てもなお未解決であり，backlogでの申し送りを維持する。
+
+### 考察 (Iter32)
+
+**判定確定: rejected（rc-analyst 提案どおり，覆さず確定）**
+
+rc-analyst の rejected 判定を検証した。主基準（point estimate で education_recall が
+medical_recall 基準 0.5112 を上回る）が不成立であるだけでなく，education_recall 自体が
+before比で悪化（0.4588→0.4412，-1.76pt）し，全体 top1_accuracy も統計的に有意に悪化した
+（McNemar p=0.0026，discordant 11 件が全て悪化方向で改善方向は 0 件）。得られた利得が
+一つもなく，isotonic（Iter30，ECE 成立・一部退行）や platt（Iter29，ECE 未達のみ）のような
+「部分的な利得とトレードオフ」の構図ではない。分析(解釈)節が
+`sklearn/utils/class_weight.py`・`sklearn/linear_model/_logistic.py` のソースと
+`data/classifier_train_iter32_reweighted.jsonl` 実物の数値（`class_weight_[education]`
+0.9513→0.5931，狙った2倍が実質+24.7%に減衰し，変更対象外のはずの`sociology`行も
+-37.7%の実効重み損失）で機序を具体的に裏付けており，追加反復（同一条件の再実行）でも
+結果は変わらない（ルーティングは決定論的）。判定を覆す根拠はなく，rejected で確定する。
+
+**機序の要点（再確認）**: `LogisticRegression(class_weight="balanced")` は
+`sample_weight` に依存してクラス重みを再計算するため，`sample_weight` による
+task内再配分と`class_weight`によるドメイン間バランス調整は独立ではなく，
+数式レベルで結合している。education の task内 sample_weight を上げると
+`class_weight_[education]` が自動的に下がり，狙った強化が減衰するだけでなく，
+education以外の9ドメイン全てに一律の相対的優位（+7.6%）を与える副作用を生む。
+これは「単一レバー原則を実装上は守っていても，sklearn 側の既存の仕組み
+（`class_weight='balanced'`）と数式レベルで結合しているレバーは，実質的に複数の量を
+同時に動かしてしまう」という一般化可能な学びであり，今後 `sample_weight` を
+本リポジトリの分類器訓練に使う場合は必ず確認すべき事項として記録する。
+
+**models/domain_classifier_iter32_reweighted.joblib の扱い: 削除する**
+
+rejected が確定し，機序（class_weight結合バグ）まで特定できているため，このモデル
+アーティファクト自体を将来再利用する見込みはない（次に sample_weight 系のアプローチを
+再度試す場合も，今回とは異なる訓練データ構成で作り直す必要があり，今回の joblib は
+比較対象として再利用できない）。数値的な結果（education_recall・confusion matrix・
+class_weight_ の実測値）は本 journal に記録済みで十分参照可能なため，ファイルとしては
+不要と判断し削除する（`models/` は `.gitignore` 対象のため削除は git 履歴に残らない）。
+同様に `data/classifier_train_iter32_reweighted.jsonl`（`data/` も `.gitignore` 対象）も
+削除する。`results/iter32_calibrated_predictions.jsonl` は Iter29〜31 の
+`resultsXX_calibrated_predictions.jsonl` と同様に一次結果データとして今後も参照価値が
+あるため git 追跡対象として残す（他イテレーションと同じ扱い）。
+
+**次に振るレバー**: `classifier_training_data_composition` レバー（config.yml）へ新しい値
+`education_proxy_task_resampling` を追加し，次イテレーション（Iter33）の単一レバーとする。
+Iter32 とは異なり `sample_weight`（sklearn の `class_weight='balanced'` と結合し再現性高く
+逆効果と判明）は一切使わない。`build_dataset.py` の `build_classifier_training_rows()` が
+`education` を抽出する際の3タスク別の目標件数（現状ほぼ均等，`sociology`:
+`high_school_psychology`:`moral_disputes` ≈ 41:55:54 相当，実測は分析(解釈)節参照）を，
+**`education` の総行数（150件，他ドメインと同数）は変えずに**，相対的に良好な
+`sociology`（recall 0.625）の割合を増やし，弱い2タスク（`high_school_psychology` 0.438・
+`moral_disputes` 0.435）の割合を減らす方向へ再配分する（例: sociology 90・
+high_school_psychology 30・moral_disputes 30，具体的な比率は次の計画フェーズで確定する）。
+**総行数を150件のまま変えない**のが今回の失敗から得た設計上の要点である。分析(解釈)節の
+数値が示すとおり，`class_weight="balanced"` は「そのドメインの生の行数」に反比例して
+決まるため，education の総行数が他ドメインと同数（150件）のままであれば
+`class_weight_[education]` は Iter31 以前と完全に同じ値（0.9513）のままになり，
+`sample_weight` を一切使わないため sklearn 側の結合バグの影響を受けない。これは
+rc-analyst が次への示唆で挙げた「サンプル数を増やしつつ sociologyの比率を高める折衷案」を
+さらに一歩進め，**サンプル数自体は増やさず構成比のみを変える**ことで，候補(1)（単純な
+サンプル数増量,150→298）が抱える同種のclass_weight連動リスク（総行数を増やせば
+`class_weight_[education]`がさらに下がる）も同時に回避する設計である。
+
+**留保（次の計画フェーズが踏まえるべき点）**: rc-analyst が指摘したとおり，この変更も
+「代理タスクの意味的ギャップという根本原因」自体は解消しない。`sociology` の比率を
+上げても，`sociology` 自体が「学校教育行政実務」という`education`の実務上の定義とは
+主題が異なる学部教養レベルの社会学問題であることに変わりはなく（調査(Iter32)分かった
+こと(3)），達成できるのは「3タスクのうち相対的に混同されにくいタスクの寄与を増やす」
+という限定的な改善にとどまる可能性が高い。目標未達に終わった場合の次点候補は
+分析(解釈)節が既に整理済み（候補(3)＝4択形式の手作り問題追加，または埋め込み特徴量
+自体・base estimatorの見直しという，より大きな変更）であり，次のrc-plannerはその順で
+検討すること。
+
+**iteration_name（次イテレーション，Iter33）**: 「education代理タスク抽出比率の再配分
+（sample_weight不使用）によるclass_weight結合回避型データ構成変更（Y5継続）」
+
+---
+
 ## Iteration 31: 分類器較正のtemperature scaling方式によるargmax不変性の実証とECE目標到達可否の検証
 
 ### 調査 (Iter31)
