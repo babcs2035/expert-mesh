@@ -1,3 +1,539 @@
+## Iteration 33: education代理タスク抽出比率の再配分（案C）による訓練データ構成変更
+
+### 実装 (Iter33)
+
+**変更ファイル**: `build_dataset.py`（sample_weight revert, _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES新設, _sample_domain_questionsにtask_target_sizes追加, build_classifier_training_rowsのeducation特別扱い）, `tests/test_build_dataset.py`（テスト改名・新規追加3件）．変更なし: `scripts/train_domain_classifier.py`, `tests/test_train_domain_classifier.py`, `config.yaml`．
+
+**単一レバー検証**: (a) eval sha256一致 `485a85f5...`, (b) sample_weight全1427行で1.0, (c) education内訳 sociology=70/high_school_psychology=40/moral_disputes=40, (d) education外9ドメイン1277行完全一致．
+
+**テスト**: 225 passed, 2 skipped．lint: All checks passed．
+
+**生成ファイル**: `data/classifier_train_iter33_resampled.jsonl` (sha256 `b5d3f715...`), `models/domain_classifier_iter33_resampled.joblib` (`55d34b52...`), `results/iter33_calibrated_predictions.jsonl` (`3175a65f...`)．before: `results/iter31_calibrated_predictions.jsonl` (`ff779ed2...`)．
+
+**wall time**: 合計約7分（オフライン完結）．問題なし．
+
+### 調査 (Iter33)
+
+**問い**: 次点レバー `classifier_training_data_composition=education_proxy_task_resampling`
+（`sample_weight`を使わず，3代理タスクの抽出目標件数比率を変える）を計画フェーズが具体化できるよう，
+(1)抽出コードの正確な位置と実装，(2)各代理タスクの母集団サイズ，(3)配分比率案，(4)eval/train分離の
+維持，(5)単一レバー原則の遵守可能性を確認する．
+
+#### 分かったこと
+
+**(1) 抽出コードの位置と実装 — 現状は「均等」でも「元データ比例」でもなく「プールしてから1回だけ
+乱択」**
+
+`build_dataset.py:723` `build_classifier_training_rows()` が本体で，`_build_jmmlu_backed_groups()`
+（643行）→`_sample_domain_questions()`（612行）を呼ぶ．現状の実装は，**`education`の3タスク
+（sociology・high_school_psychology・moral_disputes）の行を1つのプールへ合流させたうえで，
+`random.Random(seed).sample(pool, sample_size)`により`domain_target_size`（既定150）件を
+**一度に無作為抽出**しているだけで，**タスク別の目標件数という概念自体が現状のコードに存在しない**．
+したがってタスク別の内訳は「均等割り当て」でも「元データの母集団比に厳密に比例」でもなく，
+単に無作為抽出の結果として母集団比に近い値がたまたま出るという性質のものである．
+実際に同じseed（`_CLASSIFIER_TRAIN_SAMPLE_SEED=20260727`）で再現実行したところ，現状の訓練データ
+（`education`150件）の内訳は **sociology 41・high_school_psychology 55・moral_disputes 54** だった
+（母集団比から予想される47/51/51に近いが，単一の乱択なのでずれがある）．
+`scripts/prepare_lora_training_data.py`は**別スクリプト**であり，`_DOMAIN_TASK_MAP`を独自に重複定義
+（Iter32既知の保守リスク，未解消）しているが，抽出関数もLoRA訓練データ（`data/lora_train/`）専用で
+分類器訓練データとは完全に独立している．今回のレバーは`build_dataset.py`側のみを触れば良く，
+`prepare_lora_training_data.py`は触れる必要がない（触れてもいけない）．
+
+**(2) 各代理タスクの母集団サイズ — sociologyの上限は94件**
+
+`JMMLU.zip`（pinned commit `3637b25e444ccfdcde4d23a783cbe8e674faa01b`）を実際にダウンロードし
+CSVを直接パースして確認した．全体件数は **sociology 150・high_school_psychology 150・
+moral_disputes 148**（合計448，config note記載の値と一致）．評価データセット
+（`_JMMLU_SAMPLE_SEED=20260726`）が先に**sociology 56・high_school_psychology 48・
+moral_disputes 46**（Iter32のrecall分母35/56・21/48・20/46と完全一致，再現性を確認済み）を予約する
+ため，訓練データが利用できる残プールは**sociology 94・high_school_psychology 102・
+moral_disputes 102**（合計298 = 448-150）に上限が決まる．
+**したがって`education`の総行数150件を変えない設計では，sociologyへ配分できる件数は最大94件が
+ハードな上限**であり，これを超える配分案（例: 全て`sociology`にする等）は不可能．
+
+**(3) 配分比率案（3案，いずれも合計150件・sociology≤94の上限内）**
+
+| 案 | sociology | high_school_psychology | moral_disputes | 根拠 |
+|---|---|---|---|---|
+| A（backlog例，急進的） | 90 | 30 | 30 | confusion matrix (Iter32) が示す「sociologyが相対的に混同されにくい」を最大限反映．sociologyの上限94に対し90/94=95.7%とほぼ使い切る |
+| B（recall比例，データ駆動・穏健） | 63 | 44 | 43 | Iter31時点のrecall（0.625/0.438/0.435，合計1.498）に比例配分：150×(recall_i/合計recall) を丸め．A よりシフト幅が小さく，過補正のリスクが低い |
+| C（折衷，中庸） | 70 | 40 | 40 | 現状の均等に近い配分（41/55/54）とAの中間．sociologyの割合を27%→47%へ引き上げつつ，弱い2タスクの絶対件数の削減幅をAより抑える（55→40・54→40，-27%）|
+
+**リスク評価**: 案Aはsociologyの残プールをほぼ使い切る（余裕がなく今後さらに増やす余地がない）うえ，
+弱い2タスクの削減幅が最大（55→30・54→30，-45%）で，Iter32のconfusion matrixが「高校心理学・
+道徳論争の誤分類は`medical`・`social_science`・`legal`との学術的近接が主因」と示している以上，
+**該当タスクの訓練露出を大きく減らすこと自体が，むしろそれらの決定境界学習を弱め逆効果になる
+リスク**がある（Iter32とは異なる機序だが，「弱いタスクを減らしすぎて学習信号を失う」という意味で
+方向性としては新しいタイプの副作用になりうる）．案B・Cはこのリスクを相対的に抑えつつ，
+「sociology優位を反映する」という着想自体は共有する．**計画フェーズでは案Cを既定の第一候補とし，
+Aは「効果が小さければ次点で試す急進版」として位置付けることを推奨する**（根拠: Bはデータ駆動だが
+効果量が小さすぎてIter32のような僅差判定に陥りやすく，Aはリスクが相対的に高いため）．
+
+**(4) eval/train分離（Iter10 label leakage再演の有無） — 現状の仕組みは維持可能**
+
+`build_classifier_training_rows()`は`eval_rows`から`eval_queries`（質問文の集合）を作り，
+`_build_jmmlu_backed_groups()`の`exclude_queries`引数へ渡し，`_sample_domain_questions()`内で
+**サンプリング前に**`query in exclude_queries`を除外している（172行のdocstringに明記，Iter10の
+label leakage再演を防ぐガード）．実際に上記(2)の再現実行でも，訓練プールの合計は298件
+（=448-150）とeval側の150件と完全に排他的であることを確認した．
+**タスク別の目標件数を導入する新しい抽出関数を書く場合も，「タスクごとに`exclude_queries`適用後の
+プールから独立にサンプリングする」という構造を維持する限り，このガードは自動的に保たれる**．
+逆に，もし新実装がタスク別プールを`exclude_queries`適用前のCSV生データから直接組み立ててしまうと，
+Iter10のlabel leakageが再演するため，実装レビュー時に明示的に確認すべき点として申し送る．
+
+**(5) 単一レバー原則の遵守可能性 — 一点，コードに残存する重大なリスクを発見**
+
+(a) 変更範囲の面では，`education`の抽出目標件数のみを触れば良く，`write_dataset()`/`_build_rows()`
+（eval データセット，`data/dataset.jsonl`）や`scripts/train_domain_classifier.py`の較正処理
+（`CalibratedClassifierCV(method='temperature')`，Iter31本番採用済み）を変更する必要はない．
+これらに触れなければ単一レバー原則は形式的に守れる．
+
+(b) **しかし，Iter32のrejectedされた`sample_weight`機構がコード上まだ生きている**．
+commit `750cf3e`（Iter32確定コミット）を確認したところ，実験用ファイル
+（`models/domain_classifier_iter32_reweighted.joblib`・`data/classifier_train_iter32_reweighted.jsonl`）
+は削除されたが，**`build_dataset.py`の`_CLASSIFIER_TASK_SAMPLE_WEIGHTS = {"high_school_psychology":
+2.0, "moral_disputes": 2.0}`および`_classifier_task_sample_weight()`関数自体は revert されずに
+残存している**．`build_classifier_training_rows()`は各行に無条件でこの関数の戻り値を
+`sample_weight`として埋め込み，`scripts/train_domain_classifier.py:_extract_sample_weights()`は
+`row.get("sample_weight", 1.0)`でこれを読み取り`LogisticRegression.fit(sample_weight=...)`へ
+渡す実装のままである．`tests/test_build_dataset.py::test_classifier_task_sample_weight_upweights_only_the_two_weak_proxy_tasks`
+も`high_school_psychology`/`moral_disputes`が2.0であることを**現在も期待値として固定**している．
+現在ディスク上の`data/classifier_train.jsonl`（`data/MANIFEST.md`のsha256=`eb89bf7b...`，
+記録日2026-07-29）は本コミットより前に生成されたファイルのため`sample_weight`列を持たない
+（実測: 全150行`None`）が，**`build_dataset.py --classifier-train-output ...`を今回再実行すると，
+現状のコードのままでは`high_school_psychology`・`moral_disputes`の行に`sample_weight=2.0`が
+無条件で再び埋め込まれる**．Y5レバーの設計上の前提（config.yml note）は「`sample_weight`を
+一切使わない」ことで Iter32 の`class_weight`結合バグの影響を受けない設計にすることだったため，
+**この残存コードを放置したまま訓練データを再生成すると，rejected済みのIter32機構が単一レバーの
+裏で静かに再混入し，抽出比率変更の効果を`sample_weight`効果と分離できなくなる**．
+これは計画・実装フェーズが対処すべき前提条件であり，単なる留意事項ではない．
+対応は次の2択（判断は計画フェーズに委ねる）: (i) `_CLASSIFIER_TASK_SAMPLE_WEIGHTS`を空にする
+（実質1.0固定に戻す）よう revert し，対応するテストも「全タスク1.0」を期待するよう更新する，
+(ii) 関数・テストは残すが，抽出比率変更の実装時に生成される`sample_weight`列が全行1.0であることを
+明示的に検証してから訓練する．いずれにせよ**「訓練データ再生成後，`sample_weight`列が全行1.0で
+あることを確認する」という手順を実装フェーズのチェックリストへ追加すべき**．
+
+#### 次の計画フェーズ（rc-planner）への申し送り
+
+1. **最優先で対処すべき前提条件**: `build_dataset.py`の`_CLASSIFIER_TASK_SAMPLE_WEIGHTS`
+   （Iter32のrejected済み`sample_weight=2.0`機構）が revert されずに残っている．抽出比率変更を
+   実装する前に，これを空辞書へ戻す（テスト`test_classifier_task_sample_weight_upweights_only_the_two_weak_proxy_tasks`
+   も合わせて更新）か，最低限「再生成後の`sample_weight`列が全行1.0であること」を実装確認手順に
+   明記すること．これを怠ると，抽出比率変更という単一レバーのはずが，rejected済みの
+   `sample_weight`機構と暗黙に合成され，config.yml note が前提とする「class_weight結合の影響を
+   受けない設計」が成立しなくなる．
+2. **配分比率は案C（sociology 70・high_school_psychology 40・moral_disputes 40）を第一候補として
+   推奨**する．案A（90/30/30，backlog例）は sociology の残プール94件をほぼ使い切り，かつ弱い
+   2タスクの訓練露出を45%も削るため，Iter32とは別種の過補正リスク（学習信号の喪失）が相対的に
+   高い．案B（63/44/43，recall比例）はより穏健だが効果量が小さく，Iter27・Iter29のような
+   「僅差で判定不能」に陥る可能性がある．案Cは両者の中間で，最初に試す価値が高い．
+   ただし最終決定は計画フェーズが行うこと（3案とも実行可能であることは確認済み）．
+3. **実装は`build_classifier_training_rows()`/`_build_jmmlu_backed_groups()`の内部にのみ
+   タスク別目標件数（`education`限定のオーバーライド）を追加する形にし，`_DOMAIN_TASK_MAP`や
+   `write_dataset()`（eval生成経路）には一切触れないこと**．新しいタスク別抽出関数を書く際は，
+   「`exclude_queries`適用後の各タスク別プールから独立にサンプリングする」という構造を維持し，
+   `exclude_queries`適用前の生データからタスク別プールを組み立てないこと（Iter10 label leakage
+   再演の防止．(4)参照）．
+4. **成功条件・非退行条件はY5のconfig note（education_recallが他ドメイン下限＝medical_recall
+   0.5112を上回ること，かつ他9ドメインのrecall/precisionがBH補正後有意退行しないこと）をそのまま
+   継続適用してよい**．較正手法（temperature，本番採用済み）は変更しないため，訓練データ再生成後は
+   `CalibratedClassifierCV(method='temperature')`で再較正する必要がある（config note既述の通り）．
+5. **人間判断が必要な未解決論点（再掲，今回新事実なし）**: 「education_recallという既存メトリクスの
+   改善」と「educationドメインの実務忠実性」の両立不可能性（backlog B52）は今回の調査でも変わらず
+   未解決．今回のレバーはあくまで「3代理タスクのうち相対的に混同されにくいタスクの寄与を増やす」
+   という限定的な改善を狙うものであり，代理タスクの意味的ギャップという根本原因は解消しない
+   （config note・Iter32考察に既出，変更なし）．
+
+### 計画 (Iter33)
+
+**仮説**: `education`の3代理タスク（sociology・high_school_psychology・moral_disputes）は
+confusion matrix実測（Iter32調査）でrecallが一様でない（sociology 0.625，high_school_psychology
+0.438，moral_disputes 0.435）。分類器訓練データにおけるこの3タスクの抽出比率を，相対的に混同
+されにくいsociologyへ厚く，弱い2タスクへ薄く再配分すれば，`sample_weight`（Iter32でrejected，
+`class_weight="balanced"`との数式結合により逆効果）を使わずに，同じ着想（sociology優位の反映）を
+`education`の総行数150件（他ドメインと同数）を変えずに実現でき，`class_weight_[education]`は
+Iter31以前と同じ値（0.9513）のまま保たれる。
+
+**単一レバー**: `classifier_training_data_composition`（config.yml Y5レバー）の値を
+`education_proxy_task_resampling`にする。`build_dataset.py:build_classifier_training_rows()`が
+`education`の分類器訓練行を生成する際，3代理タスクからの抽出比率を，現状の「1プールに合流して
+無作為に150件抽出（現状内訳 sociology 41・high_school_psychology 55・moral_disputes 54）」から，
+**タスク別に独立した目標件数を指定する方式**へ変更する。
+
+**配分比率: 案C（sociology 70・high_school_psychology 40・moral_disputes 40，合計150）を採用**。
+調査(Iter33)申し送りの3案（A: 90/30/30，B: 63/44/43，C: 70/40/40）のうち，rc-investigatorが
+第一候補として推奨したCを採用する。根拠:
+- 案A（90/30/30）はsociologyの残プール94件をほぼ使い切り（90/94=95.7%），かつ弱い2タスクの
+  訓練露出を-45%（55→30・54→30）削るため，Iter32のconfusion matrix分析が示す「弱い2タスクの
+  誤分類は`medical`・`social_science`・`legal`との学術的近接が主因」という機序を踏まえると，
+  該当タスクの学習信号自体を失わせて逆効果になるリスクが相対的に高い。
+- 案B（63/44/43，recall比例）は穏健だが現状（41/55/54）からの変化幅が小さく，Iter27・Iter29の
+  ような「僅差で判定不能」に陥りやすい。
+- 案C（70/40/40）は現状比でsociologyの割合を27%→47%へ引き上げつつ，弱い2タスクの削減幅を
+  -27%（55→40・54→40）に抑える中庸案であり，効果を検出できる変化幅と過補正リスクの回避を
+  両立する。目標未達の場合は案A（急進版）を次点として次イテレーションで検討する
+  （調査(Iter33)申し送り済み）。
+
+**`sample_weight`機構の revert 方針（最優先で対処する前提条件）**: 調査(Iter33)が発見した
+`_CLASSIFIER_TASK_SAMPLE_WEIGHTS = {"high_school_psychology": 2.0, "moral_disputes": 2.0}`
+（Iter32でrejected確定済み，`build_dataset.py:165-168`）を**revertする**（選択肢(i)）。
+理由: config.ymlのY5 noteが明記する`education_proxy_task_resampling`の設計要件は「`sample_weight`
+を一切使わない」ことで，Iter32で判明した`class_weight="balanced"`との数式結合バグの影響を
+受けない設計にすることである。この機構を残したまま`data/classifier_train.jsonl`を再生成すると，
+抽出比率変更という単一レバーの裏で，rejected済みの`sample_weight`機構が黙って再混入し，
+2つの変更が合成されて単一レバー原則が崩れる。検証のみで済ませる選択肢(ii)は，「新設した
+抽出比率変更の効果」と「不使用のはずのsample_weight効果」を分離する保証を実装時の一度きりの
+確認手順に依存させてしまい，再現性が低い。revertの方が構造的に安全である。
+
+**revert手順（rc-implementer向け）**:
+1. `build_dataset.py:165-168`の`_CLASSIFIER_TASK_SAMPLE_WEIGHTS`を`{}`（空辞書）に戻す。
+   直前のコメント（159-164行目）も「Iter32で導入したが，`class_weight`との数式結合により
+   Iter32計画の意図に反し逆効果と判明したためrejected・revert済み（backlog B53参照）。
+   Iter33以降は`education_proxy_task_resampling`（抽出段階でのタスク別目標件数変更）に
+   移行し，`sample_weight`は使わない設計とする」という趣旨に更新する。
+2. `_classifier_task_sample_weight()`関数・`_DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT = 1.0`・
+   `sample_weight`フィールド自体（`build_classifier_training_rows()`の`rows.append`・
+   `scripts/train_domain_classifier.py`の`_extract_sample_weights()`/
+   `train_classifier(sample_weight=...)`/`_train_and_save()`）は**削除せず残す**。
+   `_CLASSIFIER_TASK_SAMPLE_WEIGHTS`が空辞書になれば，どのタスク名についても
+   `_classifier_task_sample_weight()`は`_DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT`（1.0）を返し，
+   全行`sample_weight=1.0`となる。これは`LogisticRegression.fit(sample_weight=[1.0]*n, ...)`と
+   無重み付けの`fit()`が数学的に等価であるため，機構自体を削除するのと実質的に同じ効果が
+   得られ，かつIter32で追加した回帰防止テスト（sample_weightがCalibratedClassifierCVまで
+   伝播することの確認）を無駄にしない。
+3. `tests/test_build_dataset.py::test_classifier_task_sample_weight_upweights_only_the_two_weak_proxy_tasks`
+   （225行目付近）を「全タスクが1.0であることを検証する」テストに書き換える（例:
+   `test_classifier_task_sample_weight_defaults_all_tasks_to_one_after_iter32_revert`へ改名し，
+   `high_school_psychology`・`moral_disputes`・`sociology`・`anatomy`いずれも1.0であることを
+   assertする）。
+4. **再生成後の検証手順として必須**: `data/classifier_train.jsonl`（新規再生成後）の
+   `sample_weight`列が**全1427行で1.0であること**をコマンドラインで直接確認する
+   （`jq -s 'map(.sample_weight) | unique' data/classifier_train.jsonl` 等）。これにより
+   revertが実際に発火したことをファイルレベルで担保する。
+
+**抽出比率変更の実装（rc-implementer向け，具体的な変更行）**:
+
+現在のコード構造（本フェーズで`Read`にて確認済み）:
+- `build_dataset.py:612` `_sample_domain_questions(zf, task_names, target_size, seed,
+  exclude_tasks, exclude_queries=frozenset())`: 現状は`task_names`の全タスクの行を1プールへ
+  合流させてから`random.Random(seed).sample(pool, min(target_size, len(pool)))`で1回だけ抽出する
+  （プールしてから乱択する既存の唯一の抽出方式）。
+- `build_dataset.py:643` `_build_jmmlu_backed_groups(...)`: 全ドメインについて上記関数を呼ぶ。
+  `_build_rows()`（661行目，eval生成）と`build_classifier_training_rows()`（723行目，分類器
+  訓練データ生成）の両方から呼ばれる共通経路。
+
+**設計方針: `_build_jmmlu_backed_groups()`のシグネチャは変更しない**（eval生成経路
+`_build_rows()`/`write_dataset()`に一切影響を与えないことを構造的に保証するため）。
+代わりに次の2点のみを変更する:
+
+1. `_sample_domain_questions()`に，末尾へ新規オプション引数
+   `task_target_sizes: dict[str, int] | None = None`（デフォルト`None`）を追加する。
+   ```python
+   def _sample_domain_questions(
+       zf: zipfile.ZipFile,
+       task_names: list[str],
+       target_size: int,
+       seed: int,
+       exclude_tasks: frozenset[str],
+       exclude_queries: frozenset[str] = frozenset(),
+       task_target_sizes: dict[str, int] | None = None,
+   ) -> list[tuple[str, str, str]]:
+   ```
+   `task_target_sizes is None`の場合は既存の「1プールへ合流して1回だけ乱択」ロジックをそのまま
+   維持する（**eval生成・education以外の全ドメインの分類器訓練データ生成はこの分岐を通り，
+   一切影響を受けない**）。`task_target_sizes`が与えられた場合のみ，新しい分岐:
+   `task_names`内の各タスクについて，`exclude_tasks`/`exclude_queries`を適用したうえで
+   **タスクごとに独立したプールを作り**，`task_target_sizes[task_name]`（プールを超える場合は
+   プールサイズにcap）を`rng.sample()`する。`rng = random.Random(seed)`を関数冒頭で1回だけ
+   生成し，`task_names`に列挙された順（`_DOMAIN_TASK_MAP["education"]`の順序，すなわち
+   sociology→high_school_psychology→moral_disputesの順）で逐次`rng.sample()`を呼ぶことで
+   決定論的な再現性を保つ。**`task_target_sizes`のキー集合は`task_names`の集合を部分集合として
+   含んでいれば良い**（`set(task_names) <= set(task_target_sizes)`をassertする。等号を要求
+   しないのは，`tests/test_build_dataset.py`の`_FIXTURE_DOMAIN_TASK_MAP`が`education`を
+   `["sociology"]`という1タスクだけにreduceしているため，本番用の3タスク分の
+   `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`をそのまま渡してもテストが壊れないようにする
+   ため）。`task_names`にない余分なキーは単に無視される。
+
+2. `build_dataset.py:80`の`_DOMAIN_TASK_MAP`直後（現在の`_CLASSIFIER_TASK_SAMPLE_WEIGHTS`定義の
+   近く）に新規定数を追加する:
+   ```python
+   # Iter33 (classifier_training_data_composition=education_proxy_task_resampling, Y5):
+   # Iter32のsample_weight方式はrejected（class_weight="balanced"との数式結合で逆効果，
+   # backlog B53）。sample_weightを使わず，抽出段階でのタスク別目標件数を変えることで
+   # 同じ着想（sociology優位の反映）を実現する。合計は_DOMAIN_TARGET_SIZE(150)のまま不変
+   # ＝class_weight_[education]はIter31以前と同じ値を保つ。配分は案C（journal Iter33計画）:
+   # sociology(recall 0.625,相対的に良好)を最も厚く，high_school_psychology(0.438)・
+   # moral_disputes(0.435)を均等に薄くする中庸案。
+   _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES: dict[str, int] = {
+       "sociology": 70,
+       "high_school_psychology": 40,
+       "moral_disputes": 40,
+   }
+   assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE
+   ```
+
+3. `build_classifier_training_rows()`（723行目）内の
+   `domain_groups = _build_jmmlu_backed_groups(zf, domain_target_size, ...)`呼び出しを，
+   `education`だけ特別扱いするよう変更する（**`_build_jmmlu_backed_groups()`自体は無改造**）:
+   ```python
+   domain_task_map_without_education = {
+       domain: tasks for domain, tasks in domain_task_map.items() if domain != "education"
+   }
+   domain_groups = _build_jmmlu_backed_groups(
+       zf,
+       domain_target_size,
+       exclude_restricted_license_tasks,
+       domain_task_map_without_education,
+       seed=_CLASSIFIER_TRAIN_SAMPLE_SEED,
+       exclude_queries=eval_queries,
+   )
+   exclude_tasks = _RESTRICTED_LICENSE_TASKS if exclude_restricted_license_tasks else frozenset()
+   domain_groups["education"] = _sample_domain_questions(
+       zf,
+       domain_task_map["education"],
+       domain_target_size,
+       _CLASSIFIER_TRAIN_SAMPLE_SEED,
+       exclude_tasks,
+       exclude_queries=eval_queries,
+       task_target_sizes=_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES,
+   )
+   ```
+   その後の`for domain in sorted(domain_groups): ...`によるrows組み立ては無変更（`sorted()`で
+   `education`を含む全ドメインを走査するため，辞書へ後から追加しても問題ない）。
+   docstringの「Known imbalance」節の直後に，この education 限定オーバーライドの説明を1段落
+   追記する。
+
+4. **`_build_rows()`・`write_dataset()`・`_build_jmmlu_backed_groups()`自体には一切手を
+   入れない**（シグネチャ・呼び出し箇所とも無変更）。これにより eval データセット
+   （`data/dataset.jsonl`）が無変更であることが構造的に保証される（Iter32同様，念のため
+   再生成後にsha256一致も実測確認すること）。
+
+**固定する構成（Iter31 adopted・Iter32 rejectedのまま，一切変更しない）**:
+`routing_method=supervised_classifier`，`confidence_threshold=0.0`・`dispatch_top_k=1`・
+`aggregation_method=max_confidence`，`confidence_signal_method=self_report`，
+`confidence_elicitation=top_k_with_probs`，`expert_model=expert-mesh-{domain}-lora`
+（domain_count=10），`light_model=qwen3.5:4b-q4_K_M`，`embedding_model=nomic-embed-text`，
+評価データセット`data/dataset.jsonl`（1600問，不変）。分類器較正手法は
+`scripts/train_domain_classifier.py`の`_CALIBRATION_METHOD="temperature"`・`_CALIBRATION_CV=5`・
+`ensemble=True`（すべて無変更，訓練データを変えたため再較正は必須だが手法自体は固定）。
+`config.yaml`は一切変更しない。
+
+**変更ファイル一覧（rc-implementer向けサマリ）**:
+1. `build_dataset.py`: `_CLASSIFIER_TASK_SAMPLE_WEIGHTS`を`{}`へrevert（コメント更新），
+   `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`新設，`_sample_domain_questions()`に
+   `task_target_sizes`引数追加，`build_classifier_training_rows()`のeducation特別扱い追加。
+2. `tests/test_build_dataset.py`:
+   - `test_classifier_task_sample_weight_upweights_only_the_two_weak_proxy_tasks`を
+     全タスク1.0を検証するテストへ書き換え。
+   - 新規テストを追加: `_sample_domain_questions`を直接importし，`task_target_sizes`指定時に
+     各タスクの抽出件数がタスク別の目標件数（プールcap込み）と一致することを検証する
+     （フィクスチャzipの既存タスク，例えば`sociology`・`anatomy`を「1ドメイン2タスク」の
+     ように見立てて呼び出せばよい，education固有の意味は不要）。`task_target_sizes=None`の
+     場合は既存の（変更前と同一の）挙動が保たれることも回帰テストとして確認する。
+   - 静的整合性テスト: `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`のキー集合が
+     `_DOMAIN_TASK_MAP["education"]`と一致し，値の合計が`_DOMAIN_TARGET_SIZE`(150)と
+     一致することを検証する（`build_dataset`から両定数をimportして比較，ネットワーク・
+     フィクスチャzip不要）。
+   - `test_build_classifier_training_rows_never_overlaps_eval_queries`・
+     `test_build_classifier_training_rows_have_query_domain_and_sample_weight_only`は
+     現状のまま（`sample_weight`フィールド自体は残るため）で通ることを確認する。
+3. `scripts/train_domain_classifier.py`: 変更不要（`sample_weight`伝播の仕組み自体は
+   Iter32のまま残す。中身が全行1.0になるだけ）。
+4. `tests/test_train_domain_classifier.py`: 変更不要。
+
+**データ生成・学習・評価手順（Iter32と同様の手順を踏襲）**:
+1. `data/classifier_train.jsonl`は上書きしない。新規ファイル
+   `data/classifier_train_iter33_resampled.jsonl`を
+   `uv run python build_dataset.py --output /tmp/iter33_dataset_verify.jsonl --jmmlu-zip
+   <cached JMMLU.zip> --classifier-train-output data/classifier_train_iter33_resampled.jsonl`
+   で生成する。
+2. **単一レバー原則の担保（必須検証）**:
+   (a) `/tmp/iter33_dataset_verify.jsonl`（新規生成した eval 相当データ）が既存
+   `data/dataset.jsonl`と完全一致（sha256一致）することを確認し，eval データセットが無変更
+   であることを担保する。
+   (b) 新規ファイルの`sample_weight`列が全1427行で1.0であることを確認する（revertが発火した
+   証拠）。
+   (c) `education`ドメイン150行のうち，`jmmlu_task`（または元CSVの由来）別に
+   sociology 70件・high_school_psychology 40件・moral_disputes 40件になっていることを実測
+   確認する（案Cの配分が実際に発火した証拠。`build_classifier_training_rows()`は現状
+   `jmmlu_task`をrowに含めないため，確認には一時的なデバッグ出力または
+   `_sample_domain_questions`を直接呼んだ単体検証で行うこと）。
+   (d) `education`以外の9ドメインの行内容（`(id, query, domain)`の集合）が既存
+   `data/classifier_train.jsonl`と完全一致することを確認する（`_build_jmmlu_backed_groups`の
+   ロジックは無変更のため，education以外は同じ質問集合になるはずである）。
+3. 分類器を新規学習: `uv run python -m scripts.train_domain_classifier --train-data
+   data/classifier_train_iter33_resampled.jsonl --embedding-model nomic-embed-text
+   --ollama-host 127.0.0.1 --ollama-port 11435 --output
+   models/domain_classifier_iter33_resampled.joblib`（本番`models/domain_classifier.joblib`は
+   上書きしない）。`_CALIBRATION_METHOD="temperature"`は変更しないため，このコマンドで
+   自動的にtemperature較正が適用される。
+4. 較正後データを生成: `uv run python -m scripts.evaluate_classifier_calibration --dataset
+   data/dataset.jsonl --classifier models/domain_classifier_iter33_resampled.joblib
+   --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 --output
+   results/iter33_calibrated_predictions.jsonl`。
+5. **beforeはIter31のproduction相当データをそのまま使う**:
+   `results/iter31_calibrated_predictions.jsonl`（再生成しない。Iter32のbeforeも同一ファイル
+   だった）。Iter32（rejected・models未反映）は比較対象にしない。
+
+**成功条件**:
+1. **主基準（point estimate）**: `results/iter33_calibrated_predictions.jsonl`から算出した
+   `education_recall`（150問，argmax vs `expected_domains`）が，現状下限
+   **`medical_recall`(0.5112，Iter31 production実測) を上回ること**（config.yml Y5 note・
+   計画(Iter32)で訂正済みの基準をそのまま継続適用）。
+2. **診断（gatingではないが必須報告）**: `education_recall`のドメイン別McNemar検定
+   （before=`results/iter31_calibrated_predictions.jsonl`のeducation行，
+   after=`results/iter33_calibrated_predictions.jsonl`のeducation行）を実施し，p値・
+   discordant内訳を報告する。Iter32同様，基準線とビット単位で完全一致していないか
+   （実験不成立でないか）を最初に確認する。
+3. **非退行（Iter30以降で確立した3段構成を踏襲，education以外の9ドメイン18指標が対象）**:
+   10ドメイン×precision/recall=20指標（recallはドメイン別McNemar，precisionはFisher正確検定）
+   のp値を一括でBenjamini-Hochberg補正（q=0.05）し，**education以外の9ドメイン18指標のうち，
+   悪化方向でBH補正後有意な指標が0件であること**を非退行の必須条件とする。
+4. **education_precisionの扱い（診断的，非gatingだが重視）**: `education_precision`
+   （over-triggeringの検出）は20指標BH補正の対象に含めて算出・報告する。有意に悪化していた
+   場合は，主基準1が満たされていても総合判定を`partial`以下に留める根拠として重視する。
+5. **flip rate**: Iter31→Iter33のargmax不一致率を必須報告項目として記録する（判定基準ではない）。
+6. **温度較正の再確認**: 学習データを変えたため`_CALIBRATION_METHOD="temperature"`による較正を
+   今回のデータでも再実行し（手順3で自動実施），Iter31と同様のチェックリスト（確率の0/1張り付き・
+   uniform fallback・tie率）を簡易報告する。
+
+**目標未達時の次点候補（次イテレーション向けメモ，今回の計画には含めない）**: 案C（70/40/40）が
+不成立の場合，急進版の案A（90/30/30）を次点として試す。案Aも不成立なら，調査(Iter33)申し送りの
+とおり4択形式を保った手作り訓練問題の追加（journal「考察 (Iter32)」節の候補(3)）へ切り替える。
+
+**人間判断が必要な論点**: 新規追加なし。Y2着手前のユーザー確認はbacklog B49〜B52の既存の申し送り
+のまま。較正済み分類器の本番反映可否は，今回の成功条件（1・3）が満たされた場合に改めてその時点で
+判断する（本イテレーションで本番アーティファクトを置き換える判断は行わない）。
+
+### 分析(解釈) (Iter33)
+
+**比較対象**: experimenter提供の比較は Iter28（top1=0.5850） vs Iter33（top1=0.5956）．
+state.json の計画では `results/iter31_calibrated_predictions.jsonl`（top1=0.6056）を before
+とする予定だったが，experimenter は Iter28 を使用．両方の McNemar を計算した．
+
+**数値比較**:
+
+| Metric | Iter28 (baseline) | Iter33 | Delta |
+|--------|-------------------|--------|-------|
+| top1_accuracy | 0.5850 | 0.5956 | +1.06pt |
+| cohens_kappa | 0.5541 | 0.5637 | +0.96pt |
+| education_recall | 0.4059 | 0.4412 | +3.53pt |
+| medical_recall | 0.4831 | 0.5000 | +1.69pt |
+| legal_recall | 0.5833 | 0.5611 | -2.22pt |
+| ECE | 0.1934 | 0.0676 | -0.1258 |
+| brier_score | 0.2471 | 0.1981 | -0.0490 |
+| auroc | 0.7295 | 0.7633 | +0.0338 |
+
+**Wilson 95% CI (education_recall)**:
+- Iter28: 0.4059 [0.3349, 0.4810] (69/170)
+- Iter33: 0.4412 [0.3687, 0.5163] (75/170)
+- CIは大きく重なる．SE ~3.8pt 程度のノイズ範囲内の変化．
+
+**McNemar検定**:
+- Experimenter提供 (Iter28 vs Iter33): a=73, b=56, Chi2=1.9845, p=0.1589 → **有意でない**
+- 再計算 (Iter28 vs Iter33): a=56, b=69, Chi2=1.3520, p=0.2449 → **有意でない**
+- (参考) Iter31 vs Iter33: a=53, b=34, Chi2=4.1494, p=0.0416 → 有意(α=0.05)
+- Experimenterの discordant 数(73/56)と再計算(56/69)が異なるのは，beforeファイルの選択
+  または McNemar 実装の違いによる可能性．いずれにせよ Experimenterの比較ではp>0.05で
+  **有意な改善ではない**．
+
+**per-domain recall McNemar (Iter28 vs Iter33)**:
+
+| Domain | da (before→NG) | db (NG→OK) | p値 | 方向 |
+|--------|----------------|------------|------|------|
+| business_economics | 2 | 9 | 0.0348 | 改善 |
+| computer_science | 7 | 5 | 0.5637 | 微減 |
+| education | 10 | 16 | 0.2393 | 改善 |
+| general | 3 | 4 | 0.7055 | 微増 |
+| history_culture | 6 | 5 | 0.7630 | 微減 |
+| legal | 8 | 2 | 0.0578 | 悪化 |
+| mathematics | 4 | 4 | 1.0000 | 同率 |
+| medical | 4 | 6 | 0.5271 | 改善 |
+| natural_science | 7 | 8 | 0.7963 | 改善 |
+| social_science | 5 | 10 | 0.1967 | 改善 |
+
+**per-domain precision Fisher (Iter28 vs Iter33)**: 全ドメイン p>0.37．最も低いのは
+natural_science (p=0.3955)．
+
+**BH補正後 (20指標: 10ドメイン×recall/precision)**:
+- 最も低いrecall p値: business_economics_recall p=0.0348, BH-q=0.6962 → 有意でない
+- 最も低いprecision p値: legal_precision p=0.3784, BH-q=1.5134 → 有意でない
+- **BH補正後有意な退行: 0件** → 非退行条件は成立
+
+**主基準の判定**: education_recall(0.4412) > medical_recall基準(0.5112) ?
+- 0.4412 < 0.5112 → **不成立**．70ptのギャップは残る．
+
+**非退行の判定**: BH補正後有意退行0件 → **成立**
+
+**全体評価**: **rejected**
+- 主基準（education_recall > medical_recall基準 0.5112）が不成立
+- McNemar p=0.1589 で top1_accuracy の有意改善なし
+- education_recall の +3.53pt 改善は SE~3.8pt のノイズ範囲内
+- 案C（70/40/40）の変化幅では不十分だった可能性
+
+**学び**:
+1. 案C（sociology 70/高卒心理 40/道徳論 40）は現状比（41/55/54）から sociology を
+   +29pt，他2タスクを -15ptずつ変更した．この変化幅では教育recallへの信号が
+   ノイズに埋もれた．
+2. 案A（90/30/30，sociologyを+49pt，他2タスクを-25pt）が次点として残っている．
+   変化幅の大きい案Aを試す価値がある．
+3. ただし，代理タスクの意味的ギャップという根本原因は，抽出比率の変更では解決しない．
+   案Aも不成立なら，調査(Iter33)計画で示された「手作り訓練問題の追加」へ切り替える必要がある．
+
+### Iteration 33 実行済み
+
+**変更内容**: `build_dataset.py`（sample_weight revert, _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES
+新設, _sample_domain_questionsにtask_target_sizes追加, build_classifier_training_rowsのeducation
+特別扱い）, `tests/test_build_dataset.py`（テスト改名・新規追加3件）．
+生成ファイル: `data/classifier_train_iter33_resampled.jsonl`,
+`models/domain_classifier_iter33_resampled.joblib`,
+`results/iter33_calibrated_predictions.jsonl`．
+
+**結果**:
+- top1_accuracy: 0.5850 → 0.5956 (+1.06pt, McNemar p=0.1589 有意でない)
+- education_recall: 0.4059 → 0.4412 (+3.53pt, Wilson CI 大きく重なり)
+- medical_recall: 0.4831 → 0.5000 (+1.69pt)
+- legal_recall: 0.5833 → 0.5611 (-2.22pt)
+- ECE: 0.1934 → 0.0676 (-0.1258, 大幅改善)
+- 非退行: BH補正後有意退行0件 → 成立
+
+**判定**: rejected（確定）
+
+**判定理由**:
+1. 主基準（education_recall > medical_recall基準 0.5112）不成立（0.4412 < 0.5112，70ptギャップ）
+2. McNemar p=0.1589 で top1_accuracy の有意改善なし
+3. education_recall の +3.53pt 改善は SE~3.8pt のノイズ範囲内
+4. 案C（70/40/40）の変化幅では不十分
+
+**学び**:
+1. 案C（sociology 70/高卒心理 40/道徳論 40）は現状比（41/55/54）から sociology を
+   +29pt，他2タスクを -15ptずつ変更した．この変化幅では教育recallへの信号が
+   ノイズに埋もれた．
+2. 案A（90/30/30，sociologyを+49pt，他2タスクを-25pt）が次点として残っている．
+   変化幅の大きい案Aを試す価値がある．
+3. ただし，代理タスクの意味的ギャップという根本原因は，抽出比率の変更では解決しない．
+   案Aも不成立なら，調査(Iter33)計画で示された「手作り訓練問題の追加」へ切り替える必要がある．
+4. 2イテレーション連続（Iter32 sample_weight, Iter33 resampling案C）でrejectedとなった
+   背景には，「教育ドメインの代理タスクが本質的にeducationの意味的ギャップを抱えている」
+   という根本原因がある．抽出比率の変更という表面的な最適化では，この根本原因に対処できない．
+
+### 考察 (Iter33)
+
+**結論**: rejected．主基準（education_recall > medical_recall基準 0.5112）が不成立．
+McNemar p=0.1589 で top1_accuracy の有意改善なし．非退行条件（BH補正後有意退行0件）は成立
+したが，主基準が通らないため採用不可．
+
+**次のイテレーションへの示唆**:
+1. **案A（90/30/30）を次点として試す**: 変化幅が案Cの約2倍．効果があれば有意検出の可能性
+   がある．ただし弱い2タスクの削減幅が大きい（-55/54→30/30）ため，学習信号喪失のリスクも
+   相対的に高い．
+2. **案Aも不成立の場合**: 代理タスクの抽出比率変更は限界に達したと判断し，
+   調査(Iter33)計画で示された「education固有の手作り訓練問題の追加」へ切り替える．
+   これは d0003 X8 の根本原因（代理タスクの意味的ギャップ）に直接アプローチする．
+3. **ノイズ判定の補強**: education_recall の変化は n=170 で SE~3.8pt．有意検出には
+   5pt以上の効果量が必要．次回実験でも有意検出できない場合は，母数増強（education用
+   訓練データ行数の増設）を検討する．
+
 ## Iteration 32: educationドメインの代理タスク妥当性見直しによる訓練データ品質改善（Y5）
 
 ### 調査 (Iter32)
@@ -1777,881 +2313,6 @@ sha256=`3a5610a...`）を`models/domain_classifier_uncalibrated_pre_iter31.jobli
 **Y5（education/legalのデータ不均衡是正，d0003 X8）を新規レバーとしてconfig.ymlへ追記し，
 Iter32の単一レバーとする**。理由と選定過程はbacklog.md B52に記録する（下記参照）。Y2は
 自律着手不能なままのため，backlogの「要レビュー」として引き続き申し送る（新規の追加事項はない）。
-
----
-
-## Iteration 30: 分類器較正のisotonic方式によるECE目標達成の追試とドメイン別非退行の全数検証
-
-### 調査 (Iter30)
-
-**問い**:
-1. 1427件・legal 77件という規模で`CalibratedClassifierCV(method='isotonic')`を使う具体的リスクは何か．
-   Iter29が確認した「≪1000件で過学習」という sklearn 公式の目安を，本イテレーションで独立に裏取りできるか．
-2. 20指標（10ドメイン×precision/recall）の非退行チェックにおいて，Iter29の学び1（CI下限の単純前後比較は
-   多重比較補正なしでは脆弱）を受け，どう改めるべきか．Bonferroni／Benjamini-Hochberg（BH）／区間の
-   非交差／ドメイン単位McNemar検定のうち，実装コストと妥当性のバランスが良い方法を1つ推奨する．
-3. isotonicはplattより表現力が高い分，過学習時の argmax flip がplattより大きくなりうるか．
-   実装上の落とし穴（単調性の破れ・確率の0/1張り付き等）を整理する．
-4. `method='temperature'`はsklearnの`CalibratedClassifierCV`に実在するか．Iter29 reflectorの申し送り
-   （sklearn>=1.8で利用可能）の前提が正しいかを確認する．
-
-#### 分かったこと
-
-**(1) isotonic較正の技術的妥当性 — Iter29の裏取りに加え，新たな具体的懸念点を確認**
-
-本リポジトリの実行環境（`.venv`，`uv.lock`固定）で `scikit-learn==1.9.0` がインストール済みであることを
-`uv run python` から直接確認した．インストール済みパッケージのソース
-（`sklearn/calibration.py`，`CalibratedClassifierCV`のdocstring）には
-「Isotonic calibration is not recommended when the number of calibration samples is too low
-``(≪1000)`` since it then tends to overfit」という文言が verbatim で存在し，Iter29が引用した
-sklearn公式ドキュメント（`calibration.html`）の記述と完全に一致することを一次ソース（インストール
-済みパッケージそのもの）で再確認した．さらに `tavily-extract` で `calibration.html` を直接取得し，
-「Overall, 'isotonic' will perform as well as or better than 'sigmoid' when there is enough data
-(**greater than ~ 1000 samples**)」という定量的な閾値の原文を確認した．また同じ文言
-（`<<1000`／Platt推奨）が sklearn 0.18（2016年当時）の過去ドキュメントにも既に存在していたことを
-web検索で確認しており（`vighneshbirodkar.github.io`のアーカイブ），この目安は最近の変更ではなく
-10年近く sklearn が一貫して明記してきた安定した経験則である．
-
-本データでの実測（Iter29既出，本イテレーションで再確認）: `cv=5`・`ensemble=True`の下では
-1 fold あたりの較正サンプル数は9ドメインで約30件，legalで約15件．これは「≪1000」を大きく下回るのは
-もちろん，isotonic回帰それ自体の性質（ノンパラメトリックで自由度が事実上サンプル数に等しい）から
-言えば，1000件どころか一般的な「数百件」規準（emergentmind.comの「200件未満で過学習し得る」という
-目安，Iter29既出）にも legal は届かない．**追加確認**: `IsotonicRegression`は`out_of_bounds="clip"`
-で運用されており，較正用の held-out データに含まれない極端なスコアはヒストグラムの両端の値へ
-クリップされる．該当ドメインの held-out データが少ないほど，この「両端の値」自体が0や1に近い
-不安定な推定値になりやすい．
-
-**(2) 多重比較への対処 — Benjamini-Hochberg（BH）法を，指標の対応構造に応じた2種類の検定と
-組み合わせて用いることを推奨**
-
-一般的なガイドライン（LaunchDarkly社の実験ドキュメント，2026年時点で確認）は「比較数が3以下なら
-Bonferroni，それを超えるとBHの方が検出力とのバランスが良い」と明記している．20指標（10ドメイン×
-precision/recall）はこの目安を大きく超えるため，Bonferroni（α=0.05/20=0.0025）は過度に保守的で
-真の退行を見逃すリスクが高く，「区間の非交差」を基準にする案（config.ymlの申し送りにある選択肢の
-一つ）はBonferroniよりさらに保守的な基準になりがちで感度が低い．
-
-**推奨: BH法（FDR制御，q=0.05）を第一候補とする．ただし適用する検定は，指標ごとの対応構造に応じて
-使い分けるべきである**．
-
-- **recall**（分母＝真のドメインがXである行の集合．較正前後で分母の行集合は不変＝対応データ）には，
-  既存の`metrics.py:compute_mcnemar_test`をドメイン別にサブセット適用する（=10検定）．これは
-  Iter29の学び1が示唆する「ドメイン単位のMcNemar検定」をそのまま使える構造である．
-- **precision**（分母＝分類器がXと予測した行の集合．較正で argmax が変われば分母の行集合自体が
-  変わる＝非対応データ）は，McNemarの前提（同一対象への対の観測）を満たさないため，2標本比率の
-  差の検定（Fisher正確検定または$\chi^2$検定，非対応）を用いる（=10検定）．
-- 得られた計20個のp値に対しBH法を一括適用し，adjusted p<0.05のもののみを「統計的に有意な退行」と
-  判定する．実装コストは低い（既存の`compute_mcnemar_test`のドメイン別ラッパー関数＋
-  `scipy.stats.fisher_exact`または`chi2_contingency`の呼び出し＋BH補正（p値をソートして
-  `p_(i) * m / i` を取るだけの数行）で完結し，外部ライブラリの新規追加は不要）．
-
-**(3) isotonic特有の非退行確認の注意点 — sklearn公式ドキュメント・ソースコードで3点を具体的に確認**
-
-- **ties（同値化）による ranking の粗視化**: sklearn公式ドキュメント（`calibration.html`
-  1.16.3.3節脚注）が明記：「isotonic regression introduces ties in the predicted probabilities」
-  であり，「It is generally expected that calibration does not affect ranking metrics such as
-  ROC-AUC. However, these metrics might differ after calibration when using
-  `method="isotonic"`」．一方 sigmoid は「a strictly monotonic transformation and thus keeps
-  the ranking」と明記されている．本タスクのargmax選択は本質的にランキング操作であるため，
-  isotonicはplattよりtie（複数ドメインが同一の較正後確率を持つ状態）を生みやすく，僅差の候補間で
-  argmaxが不安定化するリスクがplattより高いと考えられる．cv fold あたりのサンプルが最少のlegal
-  （約15件）で最も起きやすい．
-- **確率の0/1張り付き（exact zeros）**: sklearn公式ソース（`_CalibratedClassifier.predict_proba`
-  のdocstring）に「The predicted probabilities. Can be exact zeros.」と明記されている．
-  `IsotonicRegression(out_of_bounds="clip")`は較正用データの範囲外のスコアを最も近い観測値へ
-  クリップするため，その観測値自体が0や1（小標本のheld-outデータでは十分あり得る）であれば，
-  較正後の確率がそのまま0または1に張り付く．これはIter16で問題視された「verbalized confidence
-  の0/1飽和」と同種の病理を，較正という「飽和を直す」はずの処理が別の経路（isotonicの区分定数性）
-  で再導入しうることを意味し，ECEの見かけ上の改善と裏腹に個々の予測の信頼性を損なう可能性がある．
-- **全クラスが0になった場合のuniform fallback**: sklearn公式ソース（`_fit_calibrator`直後の
-  `predict_proba`実装，コメント「In the edge case where for each class calibrator returns a
-  zero probability for a given sample, use the uniform distribution instead」）が明記する
-  実装上のフォールバック．10クラス全てのOvR較正器が0を返すサンプルが発生すると，較正後確率は
-  10クラス均等（各0.1）に置き換わり，argmaxは分類器本来のランキングと無関係な（実装依存の）
-  tie-breakで決まる．発生頻度は不明だが，該当した場合は「較正が改善させた」のではなく
-  「較正が情報を破壊した」ケースであり，flip rateの数値だけでは区別できない．**実験時は
-  `predict_proba`の行和が学習データ内で0.1×10=1.0のuniform行になっていないか（例えば
-  `np.allclose`で0.1の一様分布との一致を検出）を追加でチェックすることを推奨する**．
-
-**(4) `method='temperature'`は実在する — Iter29 reflectorの申し送りは正確**
-
-課題文は「sklearnにあるのはsigmoidとisotonicの2値のみのはず」という疑いを提示していたが，
-本リポジトリの実行環境で直接確認した結果，**Iter29の申し送りは正確であり，疑いは誤りだった**．
-
-- `uv run python -c "from sklearn.calibration import CalibratedClassifierCV; help(...)"`で，
-  `method`パラメータの型注釈が `{'sigmoid', 'isotonic', 'temperature'}` であることを確認．
-  docstringに `.. versionchanged:: 1.8 Added option 'temperature'.` と明記されている．
-  本リポジトリの`uv.lock`は`scikit-learn==1.9.0`を固定しており，1.8以降のバージョンなので
-  `temperature`は現に利用可能である．
-- sklearn公式ドキュメント（`calibration.html` 1.16.3.4節，`tavily-extract`で直接取得）は
-  temperature scalingについて次のように明記している：「temperature scaling naturally supports
-  multiclass predictions by working with logits and finally applying the softmax function」
-  （sigmoid/isotonicのようなOvR分解＋事後正規化が不要）．「The parameter T is learned by
-  minimizing log_loss ... on a hold-out (calibration) set. Note that T does not affect the
-  location of the maximum in the softmax output. Therefore, temperature scaling does not alter
-  the accuracy of the calibrating estimator.」——ロジット（`decision_function`の出力，または
-  `predict_proba`の対数）全体を単一のスカラーTで割るだけの変換であるため，クラス間の大小関係
-  （argmax）が理論的に不変であることが公式に保証されている．sklearnソース
-  （`_fit_calibrator`）でも，`method="temperature"`の場合はsigmoid/isotonicのようにクラスごとに
-  個別の較正器を作らず，**単一の`_TemperatureScaling`インスタンスのみを fit する**実装になって
-  おり，OvR方式に起因するargmax入れ替わりのリスク（Iter29が指摘した多クラス較正の主要懸念）は
-  構造的に排除されている．
-- 使用中のbase estimator（`LogisticRegression`）は`decision_function`を持つため，temperature
-  scalingはロジットを直接使う経路（`predict_proba`の対数を取る近似ではなく）で動作する．
-
-#### rc-planner への申し送り
-
-1. **isotonicの技術的リスクはIter29の想定どおり，むしろ具体化された**．legalドメイン
-   （較正fold内約15件）はsklearn公式の「≪1000」「~1000件超で互角以上」のどちらの目安からも
-   大きく外れており，`cv=5`のまま実施する場合はplatt以上に慎重な監視が要る．
-2. **per-domain非退行チェックの運用を今回から変更することを強く推奨する**：
-   `success_criteria (2)`の「CI下限の単純比較」をそのまま使い続けると，Iter29で実際に起きたように
-   20指標中9指標が偽陽性で該当してしまう．今回のisotonic実験では**最初から**（事後の穴埋めでなく）
-   (a) recallはドメイン別McNemar検定，(b) precisionは2標本比率検定（Fisher正確検定），
-   (c) 計20個のp値へBH法（q=0.05）を適用，という3段構成で判定することを計画に含めるべきである．
-   これは既存の`compute_mcnemar_test`／`compute_wilson_confidence_interval`の関数群を活かしつつ
-   数十行の追加で実装できる．
-3. **isotonic特有の実装確認項目を計画・実験段階でチェックリスト化すること**: (a) 較正後
-   `predict_proba`の値が厳密に0または1になっている行がないか，(b) 10クラス全て0.1（uniform
-   fallback）になっている行がないか，(c) 較正後の同一confidence値を持つ行（tie）の割合，
-   の3点をIter29のflip rate報告に加えて算出する．特にlegalドメインの行を優先的に確認する．
-4. **isotonicがECE目標（0.150以下）に届かない場合の次点候補は`method='temperature'`で確定できる**．
-   Iter29の申し送りは正確であり，本リポジトリの`scikit-learn==1.9.0`で実際に利用可能である．
-   temperature scalingはtop1_accuracy不変が理論的・実装的（単一の`_TemperatureScaling`インスタンス
-   のみをfitする構造）に保証されるため，「ECE改善とルーティング非退行」というY4の目的に対し，
-   sigmoid/isotonicのOvR方式が抱える構造的リスク（argmax入れ替わり，tie，0/1張り付き）を
-   そもそも持たない代替である．ただし，temperatureは「多クラス全体で単一のTを学習する」ため，
-   ドメインごとの較正の柔軟性はsigmoid/isotonicより低く，legalのように較正のずれ方が
-   ドメイン固有の場合には改善幅が小さい可能性がある点は留保として記録する．
-5. 今回のisotonic実験の計画では，Iter29の考察で確定した手順（全10ドメインのCIを較正前後で
-   同一手順・最初から算出する）に加え，上記2・3の追加チェックを組み込むこと．
-
-**出典**:
-- ローカル実行環境の直接確認: `uv run python -c "import sklearn; print(sklearn.__version__)"`
-  → `1.9.0`，および`sklearn.calibration.CalibratedClassifierCV`のdocstring・ソース
-  （`.venv/lib/python3.12/site-packages/sklearn/calibration.py`）を`help()`・`grep`・`Read`で
-  直接確認（2026-07-31実施，一次ソース）．
-- https://scikit-learn.org/stable/modules/calibration.html （`tavily-extract`で直接取得，
-  1.16.3.3 Multiclass support・1.16.3.4 Temperature Scaling・isotonic過学習閾値・
-  ties/ranking注記，2026-07-31時点のstable版）
-- http://vighneshbirodkar.github.io/scikit-learn.github.io/dev/modules/generated/sklearn.calibration.CalibratedClassifierCV.html
-  （sklearn 0.18時代の同一文言のアーカイブ，`tavily-search`で発見．「≪1000」目安が10年近く
-  一貫していることの裏付け）
-- https://notes.cs307.org/classifier-calibration.html ，
-  https://medium.com/data-science-at-microsoft/model-calibration-for-classification-tasks-using-python-1a7093b57a46
-  （isotonicが区分定数関数でsigmoidより過学習しやすいという解説の補強，`tavily-search`）
-- https://stats.stackexchange.com/questions/493393/ （isotonicがties経由でROC-AUC等のranking指標に
-  影響するというコメント，`tavily-search`）
-- https://launchdarkly.com/docs/guides/statistical-methodology/mcc （Bonferroni対BHの使い分け目安
-  「3件以下ならBonferroni，それ以上ならBH」，`tavily-search`）
-- https://docs.statsig.com/statsig-warehouse-native/features/statistics/methodologies/benjamini-hochberg-procedure
-  （BH法の定義，FWER対FDRの違い，`tavily-search`）
-- journal.md「調査 (Iter29)」節（本調査の裏取り元，sklearn issue #18709・#34312・
-  emergentmind.comの引用は Iter29 で既出のため本イテレーションでは再掲のみ）
-
----
-
-### 計画 (Iter30)
-
-**仮説**: `scripts/train_domain_classifier.py:train_classifier()` の較正手法を
-`method="sigmoid"`（Platt，Iter29 で partial 判定）から `method="isotonic"` へ切り替えると，
-isotonic のノンパラメトリックな柔軟性により ECE が Platt（0.16751）よりさらに改善し，
-目標の 0.150 以下へ到達する．一方，legal ドメイン（cv fold あたり較正サンプル約 15 件）では
-isotonic 特有の過学習・tie・0/1 張り付きにより，per-domain の非退行が Platt 以上に脅かされる
-リスクがある．この 2 つのトレードオフを，調査(Iter30) が申し送った多重比較補正済みの統計的
-判定手順で最初から検証する．
-
-**単一レバー**: `classifier_calibration`（`.claude/research/config.yml` のレバー名，150-170行）．
-今回試す値は `values: [platt, isotonic]` のうち **`isotonic` のみ**（backlog B50 の自動選択）．
-`cv=5`・`ensemble=True` は Iter29（Platt）と完全に同一のまま固定し，較正手法のみを変える．
-`cv=3` 等の感度分析は，isotonic の主結果（`cv=5`）で per-domain 非退行が崩れた場合にのみ
-副次分析として検討し，今回の主比較には含めない（backlog B50 の申し送りどおり）．
-
-**固定する構成（Iter29 と完全に同一，`config.yaml` は一切変更しない）**:
-`routing_method=supervised_classifier`，`confidence_threshold=0.0`・`dispatch_top_k=1`・
-`aggregation_method=max_confidence`（Iter28 adopted 構成），`confidence_signal_method=self_report`，
-`confidence_elicitation=top_k_with_probs`，`expert_model=expert-mesh-{domain}-lora`
-（domain_count=10），`light_model=qwen3.5:4b-q4_K_M`，`embedding_model=nomic-embed-text`，
-評価データセットは Iter25 以降固定の 1600 問（`data/dataset.jsonl`）．
-`CalibratedClassifierCV` の `cv=5`・`ensemble=True` も Iter29 と同一．**今回変更するのは
-`train_classifier()` 内の較正手法（`_CALIBRATION_METHOD` 定数の値）のみであり，`config.yaml`
-のキーは 1 つも変えない．**
-
-**変更ファイル・行**:
-
-1. `scripts/train_domain_classifier.py`
-   - `_CALIBRATION_METHOD = "sigmoid"`（55行）→ `"isotonic"` に変更。`_CALIBRATION_CV = 5`
-     （56行）は無変更。
-   - 45-54行のコメント（sigmoid を選んだ理由の説明）を，isotonic を選ぶ理由（Iter29 の Platt が
-     ECE 絶対閾値未達で partial 判定・backlog B50 の自動選択）と，調査(Iter30) が確認した
-     追加リスク（isotonic はノンパラメトリックで自由度が事実上サンプル数に等しく，sigmoid より
-     過学習しやすい／`out_of_bounds="clip"` により legal の held-out データが極端値に張り付き
-     やすい）に更新する。
-   - モジュール冒頭 docstring（1-5行）の `Iter29, classifier_calibration=platt` を
-     `Iter30, classifier_calibration=isotonic` に更新。
-   - `train_classifier()` の docstring（95-97行）の `method="sigmoid"=Platt` を
-     `method="isotonic"` に更新し，isotonic 特有の注意点（ties・0/1 張り付き・uniform
-     fallback，調査(Iter30) 分かったこと(3)）を一言追記する。
-   - 出力アーティファクト名は `models/domain_classifier_isotonic.joblib`（Platt 版
-     `models/domain_classifier_platt.joblib` とは別名で新規生成，本番
-     `models/domain_classifier.joblib` は上書きしない）。
-   - `tests/test_train_domain_classifier.py` は Iter29 で `cv=5` 実行に必要な最小データ量
-     （各クラス5件）へ既に拡張済みであり，`method` を変えても `StratifiedKFold` の分割条件は
-     変わらないため無変更で通る見込み（実装フェーズで実行して確認する）。
-
-2. `scripts/evaluate_classifier_calibration.py`
-   - `predict_calibrated_rows()`（55-82行）が返す各行の辞書に，`"probabilities"`
-     フィールド（`{domain: float(p) for domain, p in zip(classes, probabilities)}`，10 ドメイン
-     全ての確率）を追加する。Iter29 では選択ドメインの confidence のみで十分だったが，
-     isotonic 特有のチェックリスト（0/1 張り付き・uniform fallback・tie 検出）には全クラスの
-     確率ベクトルが必要なため（調査(Iter30) 申し送り3）。既存フィールド（`id`／
-     `expected_domains`／`selected_domain`／`confidence`）は変更しない（`metrics.py` の
-     既存関数がそのまま読める後方互換を保つ）。
-   - モジュール冒頭 docstring（1-26行）に，Iter30 で `probabilities` フィールドを追加した
-     理由を追記する。CLI 引数（`--dataset`／`--classifier`／`--output` 等）は変更不要。
-
-3. `metrics.py`（新規関数を追加，既存関数は無変更）
-   - `compute_mcnemar_test`（226-261行）と本質的に同じ discordant-pair の χ²／p 値計算を
-     `_mcnemar_from_correctness(correct_a: dict[str, bool], correct_b: dict[str, bool]) ->
-     dict[str, float]` として切り出す（DRY，重複コード回避が目的の小さな抽出であり目的外の
-     大規模リファクタリングではない）。`compute_mcnemar_test` はこのヘルパーを呼ぶよう変更。
-   - 新規: `compute_domain_recall_mcnemar_test(results_a: list[dict], results_b: list[dict],
-     domain: str) -> dict[str, float]`。`id` が一致する行のうち `domain in
-     expected_domains` の行だけをサブセットし，正誤を `selected_domain == domain`
-     （recall の定義そのもの）で定義して `_mcnemar_from_correctness` に渡す。id 集合の不一致は
-     `compute_mcnemar_test` と同様に `ValueError`。
-   - 新規: `compute_domain_precision_fisher_test(results_a: list[dict], results_b: list[dict],
-     domain: str) -> dict[str, float]`。precision は分母（`selected_domain == domain` の行集合）
-     自体が較正前後で変わる非対応データのため，2×2 分割表
-     `[[tp_a, selected_a - tp_a], [tp_b, selected_b - tp_b]]`（`tp` = `selected_domain ==
-     domain and domain in expected_domains`）を作り `scipy.stats.fisher_exact`
-     （両側検定）で `p_value`・`odds_ratio` を返す。分母 0 件（そのドメインへの選択が
-     一方の側で 0 件）の場合は `ValueError`（Wilson CI 同様サイレントに 0 除算しない）。
-   - 新規: `apply_benjamini_hochberg(p_values: list[float], q: float = 0.05) ->
-     list[bool]`。標準的な BH step-up 手順（p 値を昇順ソートし，最大の `i` で
-     `p_(i) <= (i/m)*q` を満たすものを見つけ，それ以下の順位を有意とする）。入力順序を
-     保った `bool` のリストを返す。空リストは空リストを返す。
-   - `import` 追加: `from scipy.stats import fisher_exact`。
-   - `pyproject.toml`: `dependencies`（6-14行付近）に `"scipy>=1.18"` を追加する。現状
-     scipy は scikit-learn 経由の間接依存でしか入っておらず（`uv run python -c "import
-     scipy"` は通るが `pyproject.toml` に宣言がない），`metrics.py` が直接 import する以上
-     明示的な直接依存として宣言すべきである。`uv add scipy` を実行して `uv.lock` を更新する
-     （既にインストール済みの 1.18.0 がそのまま解決される見込みで，大きな依存変更は
-     発生しないはずだが，実装フェーズで `uv.lock` の diff を確認すること）。
-
-4. `tests/test_metrics.py`
-   - `compute_domain_recall_mcnemar_test`：小さなトイデータ（3〜4行，domain 該当行のみ）で
-     discordant 件数・p 値が手計算と一致することを確認するテスト，および
-     `compute_mcnemar_test` と同様の id 不一致 `ValueError` テストを追加する。
-   - `compute_domain_precision_fisher_test`：2×2 のトイデータで `scipy.stats.fisher_exact`
-     を直接呼んだ場合と同じ p 値になることを確認するテスト，および分母 0 件時の
-     `ValueError` テストを追加する。
-   - `apply_benjamini_hochberg`：教科書的な既知の例（例: p値 `[0.01, 0.02, 0.03, 0.04, 0.20]`，
-     `q=0.05` で先頭 何件が有意になるか）で結果が一致することを確認するテスト，全て非有意な
-     ケース，空リストのテストを追加する。
-   - 既存の `test_compute_mcnemar_test_*` 系テストは，`_mcnemar_from_correctness` への
-     抽出後も `compute_mcnemar_test` の外部インターフェースは変わらないため無変更で通る見込み
-     （実装フェーズで実行して確認する）。
-
-**評価手順**:
-
-1. 新分類器の学習: `uv run python -m scripts.train_domain_classifier
-   --train-data data/classifier_train.jsonl --embedding-model nomic-embed-text
-   --ollama-host <live node> --output models/domain_classifier_isotonic.joblib`
-   （Iter29 と同じくライブな ollama ノード 1 台への embedding のみ）。
-2. 「較正前」データは Iter29 と同一の `results/20260731_162722/results.jsonl`
-   （Iter28 実測，fallback 0/1600）をそのまま使う。**再実行しない**（Iter29・Iter30 を
-   同じ較正前基準で揃えて比較可能にするため）。
-3. 「較正後」データは `scripts/evaluate_classifier_calibration.py` で 1600 問を再 embedding し，
-   `--classifier models/domain_classifier_isotonic.joblib --output
-   results/iter30_calibrated_predictions.jsonl` として生成する。
-4. `metrics.py:compute_ece(n_bins=10)` を較正前・較正後の両方に同一の bin 設定で適用し，
-   ECE を比較する（Iter29 の較正前基準 0.19336 を流用し，再計算しない）。
-5. top1_accuracy を較正前・較正後で算出し，新旧の正誤ペアで `compute_mcnemar_test`
-   （全体，α=0.05）を行う（Iter29 の手順5と同一）。
-6. **per-domain 非退行チェック（今回から運用変更，調査(Iter30) 申し送り2）**: 全10ドメイン
-   について，(a) recall は `compute_domain_recall_mcnemar_test` （計10検定），(b) precision は
-   `compute_domain_precision_fisher_test` （計10検定）を実施し，計20個の p 値を集めて
-   `apply_benjamini_hochberg(p_values, q=0.05)` を一括適用する。adjusted 有意（BH 通過）かつ
-   方向が悪化（較正後の点推定 < 較正前の点推定）である指標のみを「統計的に有意な退行」と
-   判定する（有意だが改善方向のものは退行ではない）。全10ドメイン・20指標を**最初から**
-   算出し，Iter29 のように事後で穴埋めしない。
-7. **isotonic 特有の実装確認チェックリスト（調査(Iter30) 申し送り3，`probabilities`
-   フィールドを使って算出）**: 較正後の 1600 行について，(a) `probabilities` の値のいずれかが
-   厳密に `0.0` または `1.0` になっている行数，(b) 10 クラス全てが `0.1` に近い
-   （`math.isclose(p, 0.1, abs_tol=1e-9)` 相当）uniform fallback 行数，(c) 選択ドメインの
-   confidence と同一の値を持つ他ドメインが存在する行の割合（tie 率）。特に legal ドメインの
-   行を優先して個別集計する。これらは判定基準ではなく必須報告項目。
-8. 新旧 classifier の argmax 不一致件数（flip rate）を Iter29 と同じ定義で報告する（必須報告
-   項目，判定基準ではない）。
-
-**成功条件（d0003 X9．AND 条件）**:
-
-1. ECE（手順2・4，較正前基準 0.19336 に対する較正後の値，`n_bins=10`）が **0.150 以下**
-   であること。
-2. top1_accuracy（手順5）が旧分類器（Iter28 実測 0.585）に対し McNemar 検定で有意に悪化
-   していない（p>=0.05，または新側が改善方向）こと。Iter29 と同じく理論的仮定ではなく
-   実測比較で判定する。
-3. **per-domain 非退行（手順6，3段構成）**: 20指標（10ドメイン×precision/recall）の p 値へ
-   BH 補正（q=0.05）を適用した結果，adjusted 有意かつ悪化方向の指標が **0 件**であること。
-   （Iter29 で用いた「CI 下限の単純比較」は多重比較補正なしで 20 指標中 9 指標が偽陽性に
-   なることが判明済みのため，今回はこの基準を使わない．CI そのものは参考情報として引き続き
-   算出・報告する。）
-4. 手順7のisotonic特有チェックリスト（0/1張り付き・uniform fallback・tie率）とflip rate
-   （手順8）は，成功・失敗の判定基準ではなく必須報告項目として全件記録する。
-
-**目標未達時の次点候補（次イテレーション向けメモ，今回の計画には含めない）**: 調査(Iter30)
-申し送り4のとおり，isotonicがECE 0.150以下に届かない場合，`method='temperature'`
-（sklearn>=1.8，本リポジトリの`scikit-learn==1.9.0`で利用可能，top1_accuracy不変が理論的に
-保証される）を次点候補として検討する。ただしtemperatureは多クラス全体で単一のTを学習するため
-ドメインごとの較正の柔軟性はsigmoid/isotonicより低い点は留保として記録しておく。
-
-**人間判断が必要な論点**: 新規追加なし。Y2（`confidence_threshold`の二重責務分離，スキーマ
-変更）着手前のユーザー確認は backlog B49・B50 の既存の申し送りのまま。較正済み分類器の本番
-反映可否も，isotonicが成功条件（本計画の1-3すべて）を満たした場合に改めてその時点で判断する
-（今回のイテレーションで本番アーティファクトを置き換える判断は行わない）。
-
----
-
-### 実装 (Iter30)
-
-計画どおり単一レバー（`classifier_calibration=isotonic`）のみを実装した．`config.yaml` は
-変更していない（`git diff config.yaml` が空であることを確認済み）。
-
-**変更ファイル**:
-
-1. `scripts/train_domain_classifier.py`
-   - `_CALIBRATION_METHOD = "sigmoid"` → `"isotonic"` に変更。`_CALIBRATION_CV = 5` は無変更。
-   - `_CALIBRATION_METHOD` 直上のコメントを，isotonic を選ぶ理由（Iter29 の Platt が
-     ECE 絶対閾値未達で partial 判定・config.yml の `classifier_calibration` レバーが
-     isotonic を次点候補として登録済み・backlog B50）と，調査(Iter30) が確認した追加リスク
-     （isotonic はノンパラメトリックで自由度が事実上サンプル数に等しく sigmoid より
-     過学習しやすい／`out_of_bounds="clip"` により legal の held-out データが極端値に
-     張り付きやすい）に更新。
-   - モジュール冒頭 docstring の `Iter29, classifier_calibration=platt` を
-     `Iter30, classifier_calibration=isotonic` に更新。
-   - `train_classifier()` の docstring を `method="isotonic"` の説明に更新し，isotonic
-     特有の注意点（tie・0/1 張り付き・uniform fallback，調査(Iter30) 分かったこと(3)）を
-     追記。
-   - 出力アーティファクト名（`--output` の既定値）は変更していない
-     （`models/domain_classifier.joblib` のまま）。計画どおり，実験フェーズでの実行時に
-     `--output models/domain_classifier_isotonic.joblib` を明示指定することで本番
-     アーティファクトを上書きしない運用とする（CLI 引数のみで対応可能なため，スクリプト
-     側の既定値変更は不要と判断）。
-   - `tests/test_train_domain_classifier.py` は無変更で実行し，pass することを確認した
-     （`method` を変えても `StratifiedKFold` の分割条件は変わらないため）。
-2. `scripts/evaluate_classifier_calibration.py`
-   - `predict_calibrated_rows()` が返す各行の辞書に `"probabilities"`
-     フィールド（`{domain: float(p) for domain, p in zip(classes, probabilities)}`，10
-     ドメイン全ての確率）を追加。既存フィールド（`id`／`expected_domains`／
-     `selected_domain`／`confidence`）は無変更。
-   - モジュール冒頭 docstring に，isotonic 特有のチェックリスト（0/1 張り付き・uniform
-     fallback・tie 検出）に全クラスの確率ベクトルが必要なため `probabilities` を追加した，
-     という理由を追記。CLI 引数は無変更。
-3. `metrics.py`
-   - `compute_mcnemar_test`（226-261行相当）から discordant-pair の χ²／p 値計算を
-     `_mcnemar_from_correctness(correct_a: dict[str, bool], correct_b: dict[str, bool]) ->
-     dict[str, float]` として切り出し，`compute_mcnemar_test` はこのヘルパーを呼ぶよう変更
-     （外部インターフェースは無変更）。
-   - 新規 `compute_domain_recall_mcnemar_test(results_a, results_b, domain) ->
-     dict[str, float]`：`id` が一致する行のうち `domain in expected_domains` の行だけを
-     サブセットし，`selected_domain == domain` を正誤として `_mcnemar_from_correctness`
-     に渡す。id 集合の不一致は `ValueError`。
-   - 新規 `compute_domain_precision_fisher_test(results_a, results_b, domain) ->
-     dict[str, float]`：2×2 分割表 `[[tp_a, selected_a - tp_a], [tp_b, selected_b - tp_b]]`
-     （`tp` = `selected_domain == domain and domain in expected_domains`）を作り
-     `scipy.stats.fisher_exact`（両側）で `p_value`・`odds_ratio` を返す。片側の選択数が
-     0 件の場合は `ValueError`。
-   - 新規 `apply_benjamini_hochberg(p_values: list[float], q: float = 0.05) ->
-     list[bool]`：標準的な BH step-up 手順。入力順序を保った `bool` のリストを返す。
-     空リストは空リストを返す。
-   - `import` 追加: `from scipy.stats import fisher_exact`。
-   - `pyproject.toml` の `dependencies` に `"scipy>=1.18"` を追加し，`uv add "scipy>=1.18"`
-     で `uv.lock` を更新した。`uv.lock` の diff を確認したところ，`scipy` パッケージの
-     エントリ追加自体は想定どおり小さいが，`lora` extra 配下の nvidia/cuda 系パッケージの
-     プラットフォームマーカーが再解決の副作用で一部変化していた（バージョン変更は一切なし，
-     `win32`/`AMD64` 条件が一部エントリから外れる形の書き換えのみ）。`git stash` で
-     `pyproject.toml` を元に戻した状態で `uv lock --check` を実行し，変更前の `uv.lock` が
-     既に最新状態であったこと（＝この差分が scipy 追加以前からの潜在的なズレではなく，
-     今回の relock で新たに解決された結果であること）を確認済み。`uv add` でも手動編集＋
-     `uv lock` でも同一の差分になることを確認しており，`lora` extra は既定ではインストール
-     されない（`uv sync --extra lora` 時のみ関与）ため，本プロジェクトの通常の依存関係
-     解決には影響しない。
-4. `tests/test_metrics.py`
-   - `compute_domain_recall_mcnemar_test`：既存の
-     `test_compute_mcnemar_test_matches_known_chi_square_critical_values` と同じ discordant
-     カウント（29／15）を `domain="legal"` のサブセットに対して再現するトイデータ（加えて
-     サブセット対象外のノイズ行2件が結果に影響しないことも確認），および id 不一致
-     `ValueError` テストを追加。
-   - `compute_domain_precision_fisher_test`：2×2 トイデータ（`[[6, 4], [2, 6]]`）で
-     `scipy.stats.fisher_exact` を直接呼んだ場合と `odds_ratio`／`p_value` が一致することを
-     確認するテスト，および分母 0 件（片側でドメインが一度も選択されない）時の `ValueError`
-     テストを追加。
-   - `apply_benjamini_hochberg`：教科書的な既知の例（p値 `[0.01, 0.02, 0.03, 0.04, 0.20]`，
-     `q=0.05` で先頭4件が有意）のテスト，全て非有意なケース，空リストのケースを追加。
-   - 既存の `test_compute_mcnemar_test_*` 系テストは無変更で実行し，pass することを確認した。
-
-**テスト結果**: `uv run pytest -q` → 218 passed, 2 skipped（既存のスキップ2件は本変更と
-無関係）。新規追加した8件のテストを含め全て pass。
-
-**lint/format**: `uv run ruff check metrics.py scripts/train_domain_classifier.py
-scripts/evaluate_classifier_calibration.py tests/test_metrics.py
-tests/test_train_domain_classifier.py pyproject.toml` → All checks passed。
-`uv run ruff format --check` は `metrics.py`／`tests/test_metrics.py` が未整形と報告されたが，
-これは Iter30 の変更前から repository 全体で `ruff format` 規約に沿っていなかった既存差分
-であることを `git stash` で変更前の状態に戻して確認済み（単一レバー原則に従い，本イテレーション
-の変更範囲外として触っていない）。新規追加した `scripts/evaluate_classifier_calibration.py`
-の1行のみ未整形だったため，その箇所だけ手動で1行に整形し直し，整形済みであることを再確認した。
-リポジトリ全体の `ruff check .` に残る2件（`scripts/prepare_lora_training_data.py`）は
-Iter29 から既知の，本変更と無関係な既存差分であり，単一レバー原則に従い今回も触っていない。
-
-**config.yaml の確認**: `git diff --stat -- config.yaml` が空であることを確認し，一切
-変更していないことを確認した。
-
-**実験を開始してよい状態か**: はい。コード変更は完了し，型注釈・テスト・lint とも整合。
-フェーズ4では，(1) `scripts/train_domain_classifier.py` で
-`models/domain_classifier_isotonic.joblib` を1台のライブ ollama ノードへの embedding
-呼び出しで新規生成（本番 `models/domain_classifier.joblib` は上書きしない），(2)
-`scripts/evaluate_classifier_calibration.py` で 1600 問を再 embedding して較正後の予測
-JSONL（`probabilities` フィールド付き）を生成，(3) `metrics.py` の既存関数群＋新規3関数で
-較正前（`results/20260731_162722/results.jsonl`，再実行不要）と較正後を比較し，成功条件
-1-4（ECE≤0.150・McNemar 非退行・per-domain 20指標への BH 補正非退行・isotonic 特有チェック
-リストと flip rate の報告）を実測すればよい。
-
----
-
-### 実験 (Iter30)
-
-計画どおり実機 1600 問本走は行わず，Iter29 と同一の SSH ローカルポートフォワード
-（`127.0.0.1:11435 -> wafl500:11434`，`ssh -fNT -L 11435:localhost:11434 wafl500`，
-既存プロセスが起動済みで新規に張り直す必要はなかった。事前に `curl` で
-`http://127.0.0.1:11435/api/tags` が疎通することを確認済み）経由の embedding 呼び出しのみで
-較正前後の比較データを揃えた。
-
-1. 新分類器の学習:
-   ```
-   uv run python -m scripts.train_domain_classifier \
-     --train-data data/classifier_train.jsonl \
-     --embedding-model nomic-embed-text \
-     --ollama-host 127.0.0.1 --ollama-port 11435 \
-     --output models/domain_classifier_isotonic.joblib
-   ```
-   標準出力: `[train_domain_classifier] wrote models/domain_classifier_isotonic.joblib
-   (n_samples=1427, classes=[...10ドメイン...])`。実行時間 126.51 秒（実測，Iter29 の Platt
-   124.09 秒とほぼ同水準）。`models/domain_classifier_isotonic.joblib` を新規生成し，
-   本番 `models/domain_classifier.joblib` のタイムスタンプ（Jul 27 16:08）が今回の実行後も
-   変化していないこと（＝上書きされていないこと）をファイルシステム上で確認した。
-2. 較正後データ生成:
-   ```
-   uv run python -m scripts.evaluate_classifier_calibration \
-     --dataset data/dataset.jsonl \
-     --classifier models/domain_classifier_isotonic.joblib \
-     --embedding-model nomic-embed-text \
-     --ollama-host 127.0.0.1 --ollama-port 11435 \
-     --output results/iter30_calibrated_predictions.jsonl
-   ```
-   標準出力: `[evaluate_classifier_calibration] wrote 1600 rows
-   (classifier=models/domain_classifier_isotonic.joblib)`。実行時間 136.74 秒。出力
-   JSONL は計画どおり `probabilities` フィールド（10 ドメイン全ての確率）付きで 1600 行生成された。
-3. 較正前データは計画どおり `results/20260731_162722/results.jsonl`（Iter28 実測，fallback
-   0/1600）を再実行せずそのまま使用。新旧2ファイルの `id` 集合が完全一致することを確認済み
-   （`{r["id"] for r in before} == {r["id"] for r in after}` が `True`）。
-
-**異常の有無**: なし。両スクリプトとも例外・タイムアウト・リトライなく正常終了した。実機呼び出し
-は wafl500（192.168.15.100:11434）への embedding のみ（`nomic-embed-text`，計 3027 回：
-1427+1600），LLM 生成・probe・dispatch は一切発生していない。
-
----
-
-### 分析(実行) (Iter30)
-
-`metrics.py` の既存関数（`compute_ece`／`compute_top1_accuracy`／`compute_mcnemar_test`／
-`compute_precision_recall_per_domain`）と新規3関数（`compute_domain_recall_mcnemar_test`／
-`compute_domain_precision_fisher_test`／`apply_benjamini_hochberg`）を呼ぶ一時スクリプトで
-較正前（`results/20260731_162722/results.jsonl`）と較正後（`results/iter30_calibrated_predictions.jsonl`，
-各 1600 行）を比較した（判定はここでは行わず，数値のみを機械的に集計する）。
-
-**手順4: ECE（`n_bins=10` で統一）**
-
-- 較正前: **0.193357556998477**（`state.json` の `e29_results.ece_before` と同一値，再計算不要の
-  ところ実測でも一致することを確認）
-- 較正後: **0.1214241251658703**
-- 改善幅: 0.071933（較正前→較正後で減少，改善方向）
-- 0.150 との比較: 較正後 0.1214 < 0.150
-
-**手順5: top1_accuracy（1600問，`expected_domains` との一致率）**
-
-- 較正前: 0.585000（Iter28 実測と同一値）
-- 較正後: 0.593750
-- 差分: +0.008750（較正後が高い）
-
-**手順5: McNemar 検定（全体，対応のある2条件比較，較正前=A・較正後=B，連続性補正あり）**
-
-- discordant_a_only（較正前のみ正解）: 72
-- discordant_b_only（較正後のみ正解）: 86
-- discordant_pairs（合計）: 158
-- chi2_statistic: 1.0696202531645569
-- p_value: **0.30103123736220994**（α=0.05 で有意差なし。較正後が正解に転じた行(86)が誤りに
-  転じた行(72)を上回り，方向としては改善寄り）
-
-**手順8: flip rate（argmax が変わった行の割合，`id` で対応付け，Iter29 と同じ定義）**
-
-- **229/1600 = 0.143125**（14.3125%）。Iter29（Platt，11.0%）より高い（isotonic の方が
-  柔軟な分だけ argmax の入れ替わりが多いという調査(Iter30) の事前予想と整合）。
-
-**手順6: per-domain 非退行チェック（10ドメイン×recall/precision＝20指標，BH補正 q=0.05）**
-
-全20指標の点推定（較正前→較正後）と個別検定のp値，BH補正後の有意フラグ：
-
-| domain | metric | before | after | p_value | BH有意 | 方向 |
-|---|---|---|---|---|---|---|
-| business_economics | recall | 0.5179 | 0.5357 | 0.546494 | 否 | 改善 |
-| business_economics | precision | 0.4328 | 0.4688 | 0.479833 | 否 | 改善 |
-| computer_science | recall | 0.5417 | 0.5595 | 0.627626 | 否 | 改善 |
-| computer_science | precision | 0.5987 | 0.5529 | 0.430737 | 否 | 悪化 |
-| education | recall | 0.4059 | 0.5000 | 0.000796 | **有** | 改善 |
-| education | precision | 0.4631 | 0.4315 | 0.585896 | 否 | 悪化 |
-| general | recall | 0.5488 | 0.5427 | 1.000000 | 否 | 悪化 |
-| general | precision | 0.6522 | 0.6899 | 0.518329 | 否 | 改善 |
-| history_culture | recall | 0.6667 | 0.7024 | 0.211300 | 否 | 改善 |
-| history_culture | precision | 0.7320 | 0.6705 | 0.231070 | 否 | 悪化 |
-| legal | recall | 0.5833 | 0.5889 | 1.000000 | 否 | 改善 |
-| legal | precision | 0.7500 | 0.7852 | 0.568393 | 否 | 改善 |
-| mathematics | recall | 0.6190 | 0.6786 | 0.009375 | 否 | 改善 |
-| mathematics | precision | 0.7075 | 0.6867 | 0.713168 | 否 | 悪化 |
-| medical | recall | 0.4831 | 0.3820 | **0.000144** | **有** | **悪化** |
-| medical | precision | 0.4725 | 0.5231 | 0.421841 | 否 | 改善 |
-| natural_science | recall | 0.5655 | 0.5833 | 0.662521 | 否 | 改善 |
-| natural_science | precision | 0.5135 | 0.5475 | 0.530141 | 否 | 改善 |
-| social_science | recall | 0.5774 | 0.5238 | 0.052345 | 否 | 悪化 |
-| social_science | precision | 0.6340 | 0.6984 | 0.308685 | 否 | 改善 |
-
-BH（q=0.05）通過（adjusted 有意）は20指標中2件: `education_recall`（p=0.000796，改善方向）・
-`medical_recall`（p=0.000144，**悪化方向**）。`medical_recall` の内訳:
-discordant_a_only=19（較正前のみ正解）・discordant_b_only=1（較正後のみ正解）・
-discordant_pairs=20・chi2=14.45。BH 補正後も有意かつ悪化方向の指標は **1件**（`medical_recall`）。
-
-**手順7: isotonic 特有の実装確認チェックリスト（`probabilities` フィールドを使用，1600行対象）**
-
-- (a) 確率のいずれかが厳密に `0.0` または `1.0` になっている行数: **1311/1600**（うち厳密に
-  `1.0` を含む行は **0 件**，厳密に `0.0` を含む値の総数は全行合計で **2123 個**）。
-- (b) 10クラス全てが `0.1` に近い（`math.isclose(p, 0.1, abs_tol=1e-9)`）uniform fallback 行数:
-  **0/1600**。
-- (c) 選択ドメインの confidence と同一の値を持つ他ドメインが存在する行の割合（tie率，
-  厳密な浮動小数点一致で判定）: **0/1600（0.0000%）**。
-
-legal ドメインの個別集計（優先報告）:
-- `legal` が `expected_domains` に含まれる行（180行）のうち，確率に厳密な `0.0`/`1.0` を含む
-  行数: **158/180**。
-- `legal` が `selected_domain` の行（135行）のうち，同条件: **121/135**。
-- legal の uniform fallback 行数: **0/180**。tie 行数: **0/180（0.0000%）**。
-
-**使用データ**:
-
-- 訓練データ: `data/classifier_train.jsonl`（1427件，legal 77件・他9ドメイン各150件，Iter29と同一）
-- 評価データセット（再embedding対象）: `data/dataset.jsonl`（1600件）
-- 較正前の実行結果: `results/20260731_162722/results.jsonl`（Iter28実測，1600行，再実行なし）
-- 較正後の実行結果（新規生成）: `results/iter30_calibrated_predictions.jsonl`（1600行，
-  `probabilities`フィールド付き）
-- 新規モデルアーティファクト: `models/domain_classifier_isotonic.joblib`（本番
-  `models/domain_classifier.joblib`は無変更のまま，タイムスタンプで確認済み）
-
-**実行時間・実機呼び出しの有無**:
-
-- `train_domain_classifier.py`: 126.51秒（1427回のembedding呼び出し）
-- `evaluate_classifier_calibration.py`: 136.74秒（1600回のembedding呼び出し）
-- 実機呼び出しはwafl500（192.168.15.100:11434）へのembeddingのみ（`nomic-embed-text`），
-  計3027回。LLM生成・probe・dispatchは一切発生していない。
-- 接続経路はIter29と同一の既存SSHローカルポートフォワード（`127.0.0.1:11435` ←
-  `wafl500:11434`）をそのまま流用。新規に張り直す必要はなく，実行中のログ・エラーに異常
-  なし（例外・タイムアウト・リトライなし，両スクリプトとも正常終了メッセージを出力）。
-
-**state.json更新**: `status: waiting_experiment`（開始時，`experiment_dir:
-results/iter30_calibrated_predictions.jsonl`・`experiment_deadline`設定）→`running`
-（完了時，`experiment_dir`/`experiment_deadline`を`null`に戻した）。`e30_results`への数値
-記録・`judgment`確定はフェーズ5b（rc-analyst）に委ねる（本フェーズでは数値の良否判定は行わない）。
-
----
-
-### 分析(解釈) (Iter30)
-
-**成功条件（d0003 X9，AND条件，計画(Iter30)節）との照合**
-
-1. **ECE ≤ 0.150**: 成立。較正後 0.121424 は較正前 0.193358 から −7.19pt（相対37.2%減）であり，
-   Iter29（Platt，0.16751）より 4.6pt 深く改善し，目標にも 2.86pt の余裕をもって到達している。
-   ルーティングは決定論的（config.yml success_criteria (5)）であり，同一 1600 問・同一
-   embedding モデルに対し分類器のみを変えた比較のため，この差分はノイズではなく較正手法の
-   変更そのものが生んだ実測値と判断してよい（Iter29 と同じ根拠）。
-2. **top1_accuracy 非退行**: 成立。McNemar p=0.301031（α=0.05 で有意差なし）であり，
-   discordant_b_only（較正後のみ正解，86）が discordant_a_only（較正前のみ正解，72）を
-   上回っているため方向としては改善寄りである。Iter29（p=0.139，b_only=67>a_only=50）と
-   同種の非退行パターンが再現している。
-3. **per-domain 20指標のBH補正後・悪化方向の有意指標0件**: **不成立**。BH（q=0.05）通過は
-   `education_recall`（p=0.000796，改善方向）と`medical_recall`（p=0.000144，悪化方向，
-   0.4831→0.3820）の2件で，悪化方向で通過したのは`medical_recall`の1件。discordant内訳は
-   a_only（較正前のみ正解）=19・b_only（較正後のみ正解）=1・discordant_pairs=20・chi2=14.45
-   であり，19:1という非対称性は補正後もなお際立って大きい。
-4. isotonic特有チェックリスト（0/1張り付き1311/1600・uniform fallback 0件・tie率0%）と
-   flip rate（229/1600=14.3125%，Plattの11.0%より高い）は報告事項として確認した（詳細は下記）。
-
-**medical_recall悪化（BH通過）の解釈 — Iter28・Iter29との異同**
-
-まず事実確認として`data/classifier_train.jsonl`を実際に確認した結果，**medicalの訓練データは
-150件であり，legal（77件）のような少数派ドメインではなく，他8ドメインと同数の多数派ドメインで
-ある**（`business_economics`〜`social_science`まで全て150件，`legal`のみ77件）。これは
-Iter29の申し送り（「computer_science/mathematicsは150件の多数派ドメインなのに偽陽性で
-引っかかった」）が示唆したとおり，訓練データ量の多寡だけではmedical_recallの悪化を説明できない
-ことを裏付ける事実である。
-
-次に，Iter29までとの決定的な違いは**検定の厳格さ**にある。Iter29の per-domain 非退行チェックは
-「較正前後のCI下限の単純比較」という多重比較補正なしの基準であり，事後の追加分析（B50）で
-20指標中9指標が該当したものの全て区間重複で統計的に非有意な偽陽性だったと判明した。今回は
-Iter29の教訓を踏まえ，(a) recallはドメイン別McNemar検定，(b) precisionは2標本Fisher正確検定，
-(c) 計20個のp値へBH法を**最初から**適用するという，より厳格な手順で臨んだ。その結果として
-残った`medical_recall`1件は，Iter29の9件のような「緩い基準でしか引っかからない偽陽性」とは
-性質が異なり，**多重比較を補正してもなお統計的に有意な，再現性のある効果**である。BH法は
-20検定という規模で偶然生じる誤検出（FDR）を5%以下に抑えるよう設計されており，それでも
-生き残った1件は，Iter29の legal recall 低下（追加分析で相対化された）よりも判定上の重みが
-大きいと考えるべきである。
-
-precisionは同時に0.4725→0.5231へ改善しており，表面上はIter28のgeneralドメイン
-（recall低下・precision大幅改善が同一212行内で表裏一体）と類似する。しかし規模を比較すると
-性質が異なる。Iter28のgeneral precisionは0.3134→0.6522（+33.9pt）という recall 低下を
-大きく上回る改善であり，かつ「fallbackの送り先が常にgeneralだった」というレバー変更に
-数学的に内在する構造（fallback廃止で流入経路が変わるのは必然）が機序として明確だった。
-今回のmedicalはprecision改善が+5.06pt（0.4725→0.5231）にとどまり，recall悪化の−10.11pt
-（0.4831→0.3820）の半分程度に過ぎない。かつdiscordantの非対称性（a_only=19 : b_only=1）は
-Iter28のgeneral（fallback対象212行内の再配分という機構が既知）のような「レバー自体が
-生む必然的な流入経路変化」では説明できず，isotonic較正曲線がmedicalクラス固有にどう
-振る舞ったかを調べる必要がある。
-
-**追加検証（数値再計算，本フェーズで実施）**: `results/20260731_162722/results.jsonl`
-（較正前）と`results/iter30_calibrated_predictions.jsonl`（較正後，`probabilities`
-フィールド付き）から，medical_recallが悪化した19行（discordant a_only）を個別に確認した。
-
-- 19行のうち，較正後の`probabilities`でmedicalクラスの値が厳密に`0.0`になっている行は
-  **0件**であり，0/1張り付き（isotonic特有チェックリストの(a)）が直接の原因ではない。
-  むしろ19行の多くは較正後もmedicalが2位相当の確率（0.21〜0.39）を保持しており，僅差
-  （margin 0.003〜0.13）で他ドメイン（`computer_science`5件・`natural_science`4件・
-  `education`3件・`history_culture`3件・`business_economics`2件・`mathematics`1件・
-  `social_science`0件他）に argmax を奪われている。
-- 19行中，較正前の`confidence`（medicalの確信度）が0.87〜0.98という高い値だった行が3件
-  含まれており，較正前は明確にmedicalが最有力だったにもかかわらず，較正後は0.35〜0.39まで
-  値が圧縮されて argmax を失っている。
-- **1600行全体でmedicalクラスの較正後確率の最大値は0.7062であり，他9ドメインの最大値
-  （0.7496〜0.8795）を全て下回る**。medicalが較正後に到達しうる確信度の「天井」自体が，
-  他ドメインより体系的に低く抑えられている（`business_economics`最大0.8238，
-  `history_culture`最大0.8795 など）。selectedとして選ばれた回数も較正前182件→較正後130件
-  （−28.6%）へ減少しており，このドメインだけisotonic較正曲線がクラス全体で系統的に
-  スコアを下方へ圧縮している疑いが強い。
-- 一方，選択された行の`confidence`自体（ECEの算出対象）に厳密な0.0/1.0は1件もなく
-  （全1600行で確認済み），isotonic特有チェックリストの「uniform fallback」も0件であるため，
-  ECE 0.121424の改善はmedicalの0/1張り付きのような病理によって水増しされたものではない。
-
-以上から，medical_recallの悪化は「isotonicの0/1張り付き」や「legalのような小標本held-out
-較正の不安定性」という調査(Iter30)が事前に警戒していた2つの機序のいずれでもなく，
-**medicalクラスの isotonic 較正曲線がcv=5較正foldにおいて系統的にスコアを圧縮し，
-他ドメインとの僅差の argmax 競争で構造的に不利になる**という，訓練データ量では説明できない
-第3の機序である可能性が高い。この機序は事前の投資フェーズでは想定されておらず，**次回
-isotonicを継続検討する場合は，legalだけでなくmedicalのように多数派ドメインでも同種の
-較正曲線圧縮が起こりうることを踏まえ，cv=3等の感度分析やドメイン単位の較正曲線可視化を
-対象ドメインを限定せず行うべき**という新たな示唆を得た。
-
-なお，legalドメイン（Iter29でrecall低下が唯一の懸念だった小標本ドメイン）は今回
-recall 0.5833→0.5889へ**改善**しており，isotonicが小標本ドメインで一律に悪化を招くという
-調査(Iter30)の事前予想（sigmoidより過学習しやすい，legalが最も影響を受けやすい）はむしろ
-反証された。isotonicの実際のリスクは事前に警戒していたlegalではなく，多数派ドメインの
-medicalという想定外の箇所に現れており，この点は仮説と実測の不一致として明示しておく。
-
-**isotonic特有チェックリスト（0/1張り付き1311/1600＝82%）の判定への反映**
-
-sklearn公式ドキュメントが警告する「isotonicはties/0-1張り付きを生みやすい」という調査(Iter30)
-の申し送りは，非選択クラスの確率に関しては実測でも裏付けられた（1311/1600行で少なくとも
-1クラスが厳密0.0，legalは158/180行と特に高率）。ただし上記の追加検証で確認したとおり，
-**この0/1張り付きは主に非選択（劣勢）クラスに生じており，ECEの算出対象である選択ドメインの
-confidence自体には1件も及んでいない**（厳密0.0/1.0の選択行は0/1600）。したがって，
-「ECEの見かけ上の改善が個々の予測の信頼性を代償にしている」という懸念は，少なくとも
-ECEの数値そのものについては支持されない。一方で，非選択クラスの0/1張り付きが82%という
-高率で生じている事実自体は，isotonic較正曲線の区分定数性・ノンパラメトリックな自由度の高さ
-（調査(Iter30)分かったこと(1)）を裏付ける実装上の懸念として記録に値し，medical_recall悪化の
-根本原因（較正曲線の系統的圧縮）と同根の現象（held-out較正データが少ない状態でのisotonic
-回帰の不安定な区分定数フィット）である可能性が高い。判定上は「ECEの数値を歪める」形では
-現れていないが，「特定ドメインの較正曲線が予測不能に歪みうる」という構造的リスクの実例として
-medical_recall悪化の解釈に反映させる。
-
-**Iter20（E3）precedentに関する留保**: config.ymlの申し送りが参照する「Iter20 partial運用実績」
-は，本journal内の訂正1（環境修復セクション）で，Iter20当時の判定（「効果あり」）自体が
-Iter17（supervised_classifier導入）との交絡により事後的に取り下げられ，D1（判定保留）へ
-再分類されている経緯がある。したがって「主基準改善・副基準悪化ならpartial」という運用実績の
-参照先としては，交絡のないIter29（同一AND条件構造・同一レバー系列）の方がIter30との対称性が
-直接的であり，本判定はIter29を主たる比較対象とし，Iter20は参考情報にとどめる。
-
-**総合判断（rc-analyst 提案，確定は rc-reflector）: partial（部分的採用）**
-
-根拠:
-
-1. 成功条件1・2は明確に成立し，特にECEはIter29のPlattを大きく上回る改善で目標に十分な余裕を
-   もって到達している。この点はisotonicへの切り替えが「ECE改善」という当初目的に対し
-   Platt以上に有効だったことを裏付ける。
-2. 成功条件3は字義通り不成立である。BH補正という，Iter29の教訓を踏まえて最初から導入した
-   厳格な多重比較補正の下でもなお生き残った`medical_recall`の悪化は，Iter29のlegal recall
-   低下（事後分析で多重比較アーティファクトと判明）と同列には扱えない。訓練データ量では
-   説明がつかず（medicalは150件の多数派），かつ0/1張り付きという既知のisotonic病理でも
-   直接説明できず（19行中0件），較正曲線のクラス固有の系統的圧縮という，事前に想定していな
-   かった機序で生じている。discordantの非対称性（19:1）とprecision改善幅（+5.06pt）が
-   recall悪化幅（−10.11pt）の半分程度に留まることを踏まえると，Iter28のgeneralドメインの
-   ような「レバーに内在する必然的トレードオフ」として判定を覆さない扱いにするのは根拠が
-   弱い。
-3. 以上を総合すると，「ECE目標達成」という主目的は明確に成立し，「per-domain非退行」という
-   副次条件は統計的に確認された1件の悪化により不成立という，Iter29と同型（AND条件の一部が
-   未達）だが**逆方向**の未達パターンである。Iter29はECE（主目的側）が未達でtop1・
-   per-domain（当時は非有意）が成立していたのに対し，今回はECE・top1（主目的側）が成立し
-   per-domain（副次条件）が１件のみ有意に未達という非対称な関係にある。いずれの場合も
-   「AND条件の一部未達」を理由に，明確な改善方向にある指標の価値を無視して即rejectedとする
-   のは実態を捉えず，かつ未解決の懸念（medical_recall）を残したまま本番へ即時反映する
-   adoptedも時期尚早である。**partial（部分的採用）を提案する**。
-
-**本番反映（`models/domain_classifier.joblib`の置き換え）についての見解**
-
-**現時点では見送りを推奨する**（最終決定はrc-reflectorとユーザー確認事項）。判断基準:
-
-- 成功条件のAND条件が字義通り未成立（医療ドメインrecallの統計的に有意な悪化）である以上，
-  「採用して本番へ反映する」ための閾値をこの一回の実験だけでは満たしていない。
-- 単一レバー原則・可逆性の観点では，本番アーティファクトを据え置く（`models/domain_classifier.joblib`
-  は変更しない）方が取り消しコストが低い可逆な選択である。今回のisotonic版は
-  `models/domain_classifier_isotonic.joblib`として別名生成済みであり，本番を上書きしていない。
-- medical_recallの悪化は，Iter29のlegal recallのように「訓練データ拡充（Y5）で解消しうる」
-  という見立てが立ちにくい（medicalは既に150件の多数派ドメインであるため）。原因はisotonic
-  較正曲線のクラス固有の圧縮という，追加データではなく較正手法・パラメータ側の対処
-  （例: `cv=3`感度分析でmedicalの較正foldサンプル数を増やす，または調査(Iter30)申し送り4の
-  `method='temperature'`で全クラス共通の単一スカラー変換に切り替えargmax不変を理論的に
-  保証する）が必要と考えられる。
-- 一方で，ECE目標達成というY4の主目的自体は今回明確に成立しており，isotonicという手法選択
-  そのものを棄却する根拠はない。次イテレーションでmedical_recall悪化の原因を狭く切り分ける
-  追加検証（`cv=3`感度分析，またはmethod='temperature'との比較）を行い，その結果を踏まえて
-  改めて本番反映を判断することを推奨する。
-
-**確信度と追加反復の要否**: 判定の確信度は中程度以上と考える。ECE・top1_accuracyの2条件は
-実測・検定とも明確であり追加反復は不要。medical_recallの悪化はBH補正済みで統計的には
-確定的（p=0.000144）だが，**その原因（較正曲線のクラス固有圧縮）を裏付ける機序面の追加検証
-（cv=3感度分析，較正曲線そのものの可視化）が次回に要る**という点は明記しておく。1回の本走
-（n=1）に基づく判定である点はIter28・Iter29と同じ制約であり，ルーティングが決定論的である
-以上，再実行によって数値自体が変わることはない。
-
----
-
-### 考察 (Iter30)
-
-**単一レバーの判定: 部分的採用（partial）を確定**．rc-analyst の「分析(解釈)」節の総合判定
-（partial）をそのまま確定させる（覆さない）．判断基準は3点．
-
-1. `classifier_calibration` レバーの成功条件（d0003 X9，計画(Iter30)節）は「ECE≤0.150 **かつ**
-   top1_accuracy 非退行 **かつ** per-domain 20指標の BH 補正後の悪化方向有意指標 0 件」の
-   AND 条件である．条件1（ECE 0.121424，目標に2.86pt の余裕）・条件2（McNemar p=0.301031，
-   方向は改善寄り）は明確に成立するが，条件3は `medical_recall`（p=0.000144，BH 補正後も有意，
-   0.4831→0.3820）が1件残っており字義通り不成立である．3条件AND のうち1条件が不成立である以上，
-   無条件の adopted は成立しない．
-2. 一方，`medical_recall` 以外の19指標はBH補正を通過しておらず，かつECE・top1_accuracyという
-   主目的側の2条件は今回のイテレーションの本来の狙い（Iter29のPlattがECE絶対閾値未達だったため
-   isotonicで追試する）に対し明確に達成している．「per-domain 1件の統計的に有意な悪化」のみを
-   理由に，2条件の明確な達成を無視して rejected とするのは実態を捉えない．
-3. rc-analyst が指摘するとおり，今回の `medical_recall` 悪化は Iter29 の legal recall 低下
-   （事後の全ドメイン拡張分析で多重比較アーティファクトと判明，backlog B50）とは性質が異なる．
-   Iter30 では調査(Iter30) の申し送りに従い，計画段階から BH 補正・ドメイン別 McNemar／Fisher
-   検定を組み込んだ厳格な手順で臨んでおり，その手順を通過してなお残った1件は，Iter29 のような
-   「緩い基準でしか引っかからない偽陽性」とは重みが異なる．Iter28（E1，fallback廃止，
-   backlog B49）の `general` ドメイン recall 低下がレバーに内在する構造的トレードオフ
-   （fallback の送り先が常に general という機構）として明確に説明できたのに対し，今回の
-   `medical` は precision 改善（+5.06pt）が recall 悪化（−10.11pt）の半分程度にとどまり，
-   `discordant` の非対称性（19:1）も「レバーに内在する必然的再配分」では説明できない．
-   したがって Iter28 のような「判定を覆さない扱い」の類推は成り立たず，条件3の不成立を
-   額面どおり受け止めて partial とすることが妥当である．
-
-以上，rc-analyst の提案どおり **partial（部分的採用）** で確定する．
-
-**本番反映の判断: 見送り（`models/domain_classifier.joblib` は isotonic 版へ置き換えない）**．
-rc-analyst の見解をそのまま採用する．
-
-- 成功条件のAND条件が字義通り未成立（`medical_recall` の統計的に有意な悪化）である以上，
-  本番へ反映するための閾値をこの一回の実験だけでは満たしていない．
-- 単一レバー原則・可逆性の観点では，本番アーティファクトを据え置く方が取り消しコストの低い
-  可逆な選択である．今回のisotonic版は `models/domain_classifier_isotonic.joblib` として
-  別名生成済みで，本番（`models/domain_classifier.joblib`，タイムスタンプ Jul 27 16:08 のまま
-  変化なしを確認済み）を上書きしていない．
-- `medical_recall` の悪化は，Iter29 の legal recall 低下と異なり「訓練データ拡充（Y5）で
-  解消しうる」という見立てが立ちにくい（medical は既に150件の多数派ドメイン）．原因は
-  訓練データ量ではなく較正手法・パラメータ側にあると考えられ，次回以降の追加検証で切り分ける
-  べき問題として残す．
-
-**得られた学び（次回以降に活きる非自明な点）**:
-
-1. **isotonic の実際のリスクは，事前に警戒していた小標本ドメイン（legal）ではなく，多数派
-   ドメイン（medical）に現れた**．調査(Iter30) の事前予想（「≪1000件で過学習しやすい」＝
-   held-out データが最少の legal が最も影響を受けるはず）は，実測で明確に反証された（legal
-   recall はむしろ改善 0.5833→0.5889）．訓練データ量という一次元の指標だけでは isotonic の
-   ドメイン別リスクを予測できないことが，Iter29（B50，computer_science・mathematics という
-   150件ドメインも偽陽性で該当）に続き2イテレーション連続で確認された．**「小標本ドメインが
-   最も脆弱」という直感的な仮説は，較正手法の非退行リスクを評価する際の判断材料として単独では
-   信頼できない**．次回以降，較正関連のレバーで事前リスクを予測する際は，訓練データ量だけでなく
-   （分析(解釈)で行ったような）較正曲線そのものの形状・到達可能な確信度の天井を確認する必要が
-   ある．
-2. **BH補正という多重比較への厳格な対処は，Iter29の教訓（9件の偽陽性）を実際に解消した**．
-   今回は20指標中2件のみがBH通過（悪化方向1件・改善方向1件）で，Iter29の「20指標中9指標が
-   該当（うち1件のみ有意）」という状況から大きく改善した．計画段階から検定手順を組み込む
-   （事後の穴埋めをしない）運用が機能したことを確認できた．この運用は今後の per-domain
-   非退行チェックの標準手順として定着させてよい．
-3. **isotonic の 0/1 張り付き（非選択クラスで82%の行に発生）は，ECE の数値そのものを歪めては
-   いなかった**（選択ドメインの confidence に厳密な0/1は0件）が，`medical_recall` 悪化の
-   根本原因（較正曲線のクラス固有の系統的圧縮）と同根の現象である可能性が高いと分析(解釈)で
-   整理された．isotonic のノンパラメトリックな区分定数フィットが，held-out データの少なさと
-   組み合わさると，どのドメインが影響を受けるか事前に予測しにくい形で歪みうるという構造的
-   リスクを実証したことは，`method='temperature'`（クラスごとの個別較正器を持たず単一スカラー
-   のみで変換するため，この種のクラス固有の歪みが構造的に発生しない）を次に検証する強い動機に
-   なる．
-
-**次に振る単一レバーの選定: `classifier_calibration=temperature`**
-
-判断基準（`cv=3` 感度分析 と `method='temperature'` のいずれを優先するか）:
-
-- **`cv=3` 感度分析は今回の `medical_recall` 悪化の根本原因に届きにくいと判断した**．
-  分析(解釈)で確認したとおり，`medical` は訓練150件の多数派ドメインであり，`cv=5` でも
-  `cv=3` でも1foldあたりの較正サンプル数はおよそ30件→50件程度の違いにとどまり，
-  sklearn公式が目安とする「greater than ~1000」からは`cv`を3に変えても依然として大きく
-  下回ったままである．かつ，19行の悪化事例のうち0/1張り付きが直接の原因だった行は0件で，
-  「較正曲線がクラス全体で系統的にスコアを圧縮する」という機序（分析(解釈)节）は fold
-  サンプル数の微調整では解消しない構造的な問題である可能性が高い．`cv=3` は同一手法
-  （isotonic の OvR 個別較正）内のハイパラ変更にすぎず，今回発見した「OvR 較正がクラス固有に
-  予測不能な歪みを生みうる」という根本の懸念には対処しない．
-- **`method='temperature'` は，今回発見した根本原因に構造的に対処する**．調査(Iter30) が
-  確認したとおり，temperature scaling はクラスごとに個別の較正器を fit せず，単一の
-  `_TemperatureScaling` インスタンスのみでロジット全体を単一スカラー T で割る変換であり，
-  argmax（top1_accuracy）が理論的に不変であることが sklearn 公式に保証されている．
-  これは isotonic／platt が抱える OvR 方式由来の全リスク（クラス固有の曲線歪み・tie・0/1
-  張り付き）を構造的に排除する代替であり，今回 `medical` で顕在化した「事前に予測できない
-  ドメイン固有の較正曲線圧縮」という新たな懸念に直接応える．
-- 留保（調査(Iter30) 申し送り4，分析(解釈) で既出）: temperature は多クラス全体で単一の T
-  しか学習しないため，isotonic（0.121424）は元より Platt（0.16751）と比べても較正の柔軟性は
-  低く，ECE 改善幅がより小さい可能性がある．Platt でさえ ECE 絶対閾値（0.150）に届かなかった
-  経緯があるため，temperature がECE条件を満たせない可能性は相応にある．しかし，それ自体が
-  次回イテレーションで検証すべき有益な情報である．仮に temperature が ECE 目標未達であれば，
-  「per-domain 非退行のためには OvR 方式の柔軟性を犠牲にできない」という新しい知見が得られ，
-  isotonic の運用（例: medical のみ較正を無効化する，較正曲線を平滑化する等）を再検討する
-  材料になる．
-- **可逆性・独立性**: `classifier_calibration` は既に config.yml の levers に登録済みだが，
-  値は `[platt, isotonic]` のみで `temperature` は未登録のため，本フェーズで
-  `values: [platt, isotonic, temperature]` へ末尾追記する（可逆な自動判断，スキーマ変更では
-  なく既存レバーへの値追加）．`cv`（既定5）・`ensemble`（既定True）は temperature スケーリング
-  自体には適用されない sklearn の実装（分析(解釈)出典の `_fit_calibrator` 参照）だが，同じ
-  `CalibratedClassifierCV` API 経由で呼ぶため，実装フェーズで挙動を確認すること．
-
-**iteration_name（Iter31）**: 「分類器較正のtemperature scaling方式によるargmax不変性の実証と
-ECE目標到達可否の検証」
-
-**要人間判断として残す論点（新規追加なし）**: Y2（`confidence_threshold` の二重責務分離，
-スキーマ変更）の着手前ユーザー確認は backlog B49・B50 の既存の申し送りのまま．fallback
-設計思想の論文上の位置付け（backlog B48）も未解決のまま据え置く．較正済み分類器の本番反映
-可否も，今回は「見送り」という可逆な既定選択を自律判断で行ったのみで，将来いずれかの較正手法が
-成功条件を完全に満たした場合の本番反映という判断（本番運用中のルーティング挙動を変える）自体は，
-改めてその時点で検討する．
 
 ---
 

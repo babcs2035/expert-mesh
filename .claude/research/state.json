@@ -1,21 +1,23 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter33",
-  "iteration_name": null,
+  "iteration": "Iter34",
+  "iteration_name": "education代理タスク抽出比率の再配分（案A）による訓練データ構成変更",
   "phase": "investigate",
   "status": "running",
   "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785507200,
+  "updated_at": 1754000000,
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 32: 考察 (Iter32))",
-      ".claude/research/journal.md (Iteration 32: 分析(解釈) (Iter32))",
+      ".claude/research/journal.md (Iteration 33: 分析(解釈) (Iter33))",
+      ".claude/research/journal.md (Iteration 33: 考察 (Iter33))",
+      ".claude/research/journal.md (Iteration 33: Iteration 33 実行済み)",
+      ".claude/research/backlog.md (B54)",
       ".claude/research/config.yml (levers: classifier_training_data_composition)"
     ],
     "planned_lever": "classifier_training_data_composition=education_proxy_task_resampling",
-    "note": "Iter32（弱い代理タスクhigh_school_psychology/moral_disputesへのsample_weight=2.0）はrejected確定．主基準不成立に加えeducation_recall自体が悪化（0.4588→0.4412）し，全体top1_accuracyも有意悪化（McNemar p=0.0026）した．機序: LogisticRegression(class_weight=\"balanced\")はsample_weightに依存してクラス重みを自動再計算するため，狙った強化がclass_weight_[education]の自動低下（0.9513→0.5931）で減衰し，他9ドメインに一律+7.6%の相対優位を与えた（sklearnソースで確認済み）．次はsample_weightを使わず，build_classifier_training_rows()の抽出段階で3代理タスク（sociology・high_school_psychology・moral_disputes）の目標件数比率自体を変更する`education_proxy_task_resampling`を試す（education総行数150件は不変，class_weight結合の影響を受けない設計）．詳細はjournal.md「考察 (Iter32)」「分析(解釈) (Iter32)」節を参照．"
+    "note": "Iter33（案C: sociology=70/high_school_psychology=40/moral_disputes=40）はrejected確定．主基準不成立（education_recall 0.4412 < medical_recall基準 0.5112）．Iter34は案A（sociology=90/high_school_psychology=30/moral_disputes=30）を試す．変化幅が約2倍のため有意検出の可能性が高い．案Aも不成立なら，education固有の手作り訓練問題の追加へ切り替える．config.ymlのlevers noteでは案Aの例示は既にあるが，_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZESの値を案C(70/40/40)から案A(90/30/30)へ変更する必要がある．"
   },
   "e32_results": {
     "lever": "classifier_training_data_composition=education_proxy_task_revision (weak-task sample_weight: high_school_psychology=2.0, moral_disputes=2.0, others=1.0)",
@@ -157,9 +159,9 @@
     },
     "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
   },
-  "last_slack_ts": "1785507082.174189",
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
+  "last_slack_ts": "1785508468.260749",
+  "iteration_thread_ts": "1785508417.686489",
+  "notion_toggle_created": true,
   "last_commit": "750cf3e",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
@@ -348,5 +350,18 @@
       "all_regressed_cis_overlap_before_after": true,
       "interpretation": "None of the 9 flagged metrics have disjoint CIs vs before; all consistent with noise from 11.0% argmax flip redistribution, not statistically significant regression. Undermines legal-specific small-training-data hypothesis (computer_science/mathematics have 150 training rows, same as majority, yet also flagged)."
     }
+  },
+  "e33_results": {
+    "lever": "classifier_training_data_composition=education_proxy_task_resampling (案C: sociology=70, high_school_psychology=40, moral_disputes=40)",
+    "education_recall_before": 0.4059,
+    "education_recall_after": 0.4412,
+    "education_recall_mcnemar_p": 0.239317,
+    "medical_recall_threshold": 0.5112,
+    "top1_accuracy_before": 0.585,
+    "top1_accuracy_after": 0.5956,
+    "top1_accuracy_mcnemar_p": 0.1589,
+    "bh_significant_regressions_18_metrics": 0,
+    "judgment": "rejected",
+    "note": "主基準（education_recall>medical_recall基準）不成立（0.4412 < 0.5112，70ptギャップ）．McNemar p=0.1589 で top1_accuracy の有意改善なし．education_recall の +3.53pt 改善は SE~3.8pt のノイズ範囲内．案C（70/40/40）の変化幅では不十分．次イテレーションは案A（90/30/30）を次点として試す．案Aも不成立なら，education固有の手作り訓練問題の追加へ切り替えが必要．非退行条件（BH補正後有意退行0件）は成立．【rc-reflector追加】2イテレーション連続（Iter32 sample_weight, Iter33 resampling案C）でrejectedとなった背景には，「教育ドメインの代理タスクが本質的にeducationの意味的ギャップを抱えている」という根本原因がある．抽出比率の変更という表面的な最適化では，この根本原因に対処できない．"
   }
 }

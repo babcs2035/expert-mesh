@@ -1,3 +1,878 @@
+## Iteration 30: 分類器較正のisotonic方式によるECE目標達成の追試とドメイン別非退行の全数検証
+
+### 調査 (Iter30)
+
+**問い**:
+1. 1427件・legal 77件という規模で`CalibratedClassifierCV(method='isotonic')`を使う具体的リスクは何か．
+   Iter29が確認した「≪1000件で過学習」という sklearn 公式の目安を，本イテレーションで独立に裏取りできるか．
+2. 20指標（10ドメイン×precision/recall）の非退行チェックにおいて，Iter29の学び1（CI下限の単純前後比較は
+   多重比較補正なしでは脆弱）を受け，どう改めるべきか．Bonferroni／Benjamini-Hochberg（BH）／区間の
+   非交差／ドメイン単位McNemar検定のうち，実装コストと妥当性のバランスが良い方法を1つ推奨する．
+3. isotonicはplattより表現力が高い分，過学習時の argmax flip がplattより大きくなりうるか．
+   実装上の落とし穴（単調性の破れ・確率の0/1張り付き等）を整理する．
+4. `method='temperature'`はsklearnの`CalibratedClassifierCV`に実在するか．Iter29 reflectorの申し送り
+   （sklearn>=1.8で利用可能）の前提が正しいかを確認する．
+
+#### 分かったこと
+
+**(1) isotonic較正の技術的妥当性 — Iter29の裏取りに加え，新たな具体的懸念点を確認**
+
+本リポジトリの実行環境（`.venv`，`uv.lock`固定）で `scikit-learn==1.9.0` がインストール済みであることを
+`uv run python` から直接確認した．インストール済みパッケージのソース
+（`sklearn/calibration.py`，`CalibratedClassifierCV`のdocstring）には
+「Isotonic calibration is not recommended when the number of calibration samples is too low
+``(≪1000)`` since it then tends to overfit」という文言が verbatim で存在し，Iter29が引用した
+sklearn公式ドキュメント（`calibration.html`）の記述と完全に一致することを一次ソース（インストール
+済みパッケージそのもの）で再確認した．さらに `tavily-extract` で `calibration.html` を直接取得し，
+「Overall, 'isotonic' will perform as well as or better than 'sigmoid' when there is enough data
+(**greater than ~ 1000 samples**)」という定量的な閾値の原文を確認した．また同じ文言
+（`<<1000`／Platt推奨）が sklearn 0.18（2016年当時）の過去ドキュメントにも既に存在していたことを
+web検索で確認しており（`vighneshbirodkar.github.io`のアーカイブ），この目安は最近の変更ではなく
+10年近く sklearn が一貫して明記してきた安定した経験則である．
+
+本データでの実測（Iter29既出，本イテレーションで再確認）: `cv=5`・`ensemble=True`の下では
+1 fold あたりの較正サンプル数は9ドメインで約30件，legalで約15件．これは「≪1000」を大きく下回るのは
+もちろん，isotonic回帰それ自体の性質（ノンパラメトリックで自由度が事実上サンプル数に等しい）から
+言えば，1000件どころか一般的な「数百件」規準（emergentmind.comの「200件未満で過学習し得る」という
+目安，Iter29既出）にも legal は届かない．**追加確認**: `IsotonicRegression`は`out_of_bounds="clip"`
+で運用されており，較正用の held-out データに含まれない極端なスコアはヒストグラムの両端の値へ
+クリップされる．該当ドメインの held-out データが少ないほど，この「両端の値」自体が0や1に近い
+不安定な推定値になりやすい．
+
+**(2) 多重比較への対処 — Benjamini-Hochberg（BH）法を，指標の対応構造に応じた2種類の検定と
+組み合わせて用いることを推奨**
+
+一般的なガイドライン（LaunchDarkly社の実験ドキュメント，2026年時点で確認）は「比較数が3以下なら
+Bonferroni，それを超えるとBHの方が検出力とのバランスが良い」と明記している．20指標（10ドメイン×
+precision/recall）はこの目安を大きく超えるため，Bonferroni（α=0.05/20=0.0025）は過度に保守的で
+真の退行を見逃すリスクが高く，「区間の非交差」を基準にする案（config.ymlの申し送りにある選択肢の
+一つ）はBonferroniよりさらに保守的な基準になりがちで感度が低い．
+
+**推奨: BH法（FDR制御，q=0.05）を第一候補とする．ただし適用する検定は，指標ごとの対応構造に応じて
+使い分けるべきである**．
+
+- **recall**（分母＝真のドメインがXである行の集合．較正前後で分母の行集合は不変＝対応データ）には，
+  既存の`metrics.py:compute_mcnemar_test`をドメイン別にサブセット適用する（=10検定）．これは
+  Iter29の学び1が示唆する「ドメイン単位のMcNemar検定」をそのまま使える構造である．
+- **precision**（分母＝分類器がXと予測した行の集合．較正で argmax が変われば分母の行集合自体が
+  変わる＝非対応データ）は，McNemarの前提（同一対象への対の観測）を満たさないため，2標本比率の
+  差の検定（Fisher正確検定または$\chi^2$検定，非対応）を用いる（=10検定）．
+- 得られた計20個のp値に対しBH法を一括適用し，adjusted p<0.05のもののみを「統計的に有意な退行」と
+  判定する．実装コストは低い（既存の`compute_mcnemar_test`のドメイン別ラッパー関数＋
+  `scipy.stats.fisher_exact`または`chi2_contingency`の呼び出し＋BH補正（p値をソートして
+  `p_(i) * m / i` を取るだけの数行）で完結し，外部ライブラリの新規追加は不要）．
+
+**(3) isotonic特有の非退行確認の注意点 — sklearn公式ドキュメント・ソースコードで3点を具体的に確認**
+
+- **ties（同値化）による ranking の粗視化**: sklearn公式ドキュメント（`calibration.html`
+  1.16.3.3節脚注）が明記：「isotonic regression introduces ties in the predicted probabilities」
+  であり，「It is generally expected that calibration does not affect ranking metrics such as
+  ROC-AUC. However, these metrics might differ after calibration when using
+  `method="isotonic"`」．一方 sigmoid は「a strictly monotonic transformation and thus keeps
+  the ranking」と明記されている．本タスクのargmax選択は本質的にランキング操作であるため，
+  isotonicはplattよりtie（複数ドメインが同一の較正後確率を持つ状態）を生みやすく，僅差の候補間で
+  argmaxが不安定化するリスクがplattより高いと考えられる．cv fold あたりのサンプルが最少のlegal
+  （約15件）で最も起きやすい．
+- **確率の0/1張り付き（exact zeros）**: sklearn公式ソース（`_CalibratedClassifier.predict_proba`
+  のdocstring）に「The predicted probabilities. Can be exact zeros.」と明記されている．
+  `IsotonicRegression(out_of_bounds="clip")`は較正用データの範囲外のスコアを最も近い観測値へ
+  クリップするため，その観測値自体が0や1（小標本のheld-outデータでは十分あり得る）であれば，
+  較正後の確率がそのまま0または1に張り付く．これはIter16で問題視された「verbalized confidence
+  の0/1飽和」と同種の病理を，較正という「飽和を直す」はずの処理が別の経路（isotonicの区分定数性）
+  で再導入しうることを意味し，ECEの見かけ上の改善と裏腹に個々の予測の信頼性を損なう可能性がある．
+- **全クラスが0になった場合のuniform fallback**: sklearn公式ソース（`_fit_calibrator`直後の
+  `predict_proba`実装，コメント「In the edge case where for each class calibrator returns a
+  zero probability for a given sample, use the uniform distribution instead」）が明記する
+  実装上のフォールバック．10クラス全てのOvR較正器が0を返すサンプルが発生すると，較正後確率は
+  10クラス均等（各0.1）に置き換わり，argmaxは分類器本来のランキングと無関係な（実装依存の）
+  tie-breakで決まる．発生頻度は不明だが，該当した場合は「較正が改善させた」のではなく
+  「較正が情報を破壊した」ケースであり，flip rateの数値だけでは区別できない．**実験時は
+  `predict_proba`の行和が学習データ内で0.1×10=1.0のuniform行になっていないか（例えば
+  `np.allclose`で0.1の一様分布との一致を検出）を追加でチェックすることを推奨する**．
+
+**(4) `method='temperature'`は実在する — Iter29 reflectorの申し送りは正確**
+
+課題文は「sklearnにあるのはsigmoidとisotonicの2値のみのはず」という疑いを提示していたが，
+本リポジトリの実行環境で直接確認した結果，**Iter29の申し送りは正確であり，疑いは誤りだった**．
+
+- `uv run python -c "from sklearn.calibration import CalibratedClassifierCV; help(...)"`で，
+  `method`パラメータの型注釈が `{'sigmoid', 'isotonic', 'temperature'}` であることを確認．
+  docstringに `.. versionchanged:: 1.8 Added option 'temperature'.` と明記されている．
+  本リポジトリの`uv.lock`は`scikit-learn==1.9.0`を固定しており，1.8以降のバージョンなので
+  `temperature`は現に利用可能である．
+- sklearn公式ドキュメント（`calibration.html` 1.16.3.4節，`tavily-extract`で直接取得）は
+  temperature scalingについて次のように明記している：「temperature scaling naturally supports
+  multiclass predictions by working with logits and finally applying the softmax function」
+  （sigmoid/isotonicのようなOvR分解＋事後正規化が不要）．「The parameter T is learned by
+  minimizing log_loss ... on a hold-out (calibration) set. Note that T does not affect the
+  location of the maximum in the softmax output. Therefore, temperature scaling does not alter
+  the accuracy of the calibrating estimator.」——ロジット（`decision_function`の出力，または
+  `predict_proba`の対数）全体を単一のスカラーTで割るだけの変換であるため，クラス間の大小関係
+  （argmax）が理論的に不変であることが公式に保証されている．sklearnソース
+  （`_fit_calibrator`）でも，`method="temperature"`の場合はsigmoid/isotonicのようにクラスごとに
+  個別の較正器を作らず，**単一の`_TemperatureScaling`インスタンスのみを fit する**実装になって
+  おり，OvR方式に起因するargmax入れ替わりのリスク（Iter29が指摘した多クラス較正の主要懸念）は
+  構造的に排除されている．
+- 使用中のbase estimator（`LogisticRegression`）は`decision_function`を持つため，temperature
+  scalingはロジットを直接使う経路（`predict_proba`の対数を取る近似ではなく）で動作する．
+
+#### rc-planner への申し送り
+
+1. **isotonicの技術的リスクはIter29の想定どおり，むしろ具体化された**．legalドメイン
+   （較正fold内約15件）はsklearn公式の「≪1000」「~1000件超で互角以上」のどちらの目安からも
+   大きく外れており，`cv=5`のまま実施する場合はplatt以上に慎重な監視が要る．
+2. **per-domain非退行チェックの運用を今回から変更することを強く推奨する**：
+   `success_criteria (2)`の「CI下限の単純比較」をそのまま使い続けると，Iter29で実際に起きたように
+   20指標中9指標が偽陽性で該当してしまう．今回のisotonic実験では**最初から**（事後の穴埋めでなく）
+   (a) recallはドメイン別McNemar検定，(b) precisionは2標本比率検定（Fisher正確検定），
+   (c) 計20個のp値へBH法（q=0.05）を適用，という3段構成で判定することを計画に含めるべきである．
+   これは既存の`compute_mcnemar_test`／`compute_wilson_confidence_interval`の関数群を活かしつつ
+   数十行の追加で実装できる．
+3. **isotonic特有の実装確認項目を計画・実験段階でチェックリスト化すること**: (a) 較正後
+   `predict_proba`の値が厳密に0または1になっている行がないか，(b) 10クラス全て0.1（uniform
+   fallback）になっている行がないか，(c) 較正後の同一confidence値を持つ行（tie）の割合，
+   の3点をIter29のflip rate報告に加えて算出する．特にlegalドメインの行を優先的に確認する．
+4. **isotonicがECE目標（0.150以下）に届かない場合の次点候補は`method='temperature'`で確定できる**．
+   Iter29の申し送りは正確であり，本リポジトリの`scikit-learn==1.9.0`で実際に利用可能である．
+   temperature scalingはtop1_accuracy不変が理論的・実装的（単一の`_TemperatureScaling`インスタンス
+   のみをfitする構造）に保証されるため，「ECE改善とルーティング非退行」というY4の目的に対し，
+   sigmoid/isotonicのOvR方式が抱える構造的リスク（argmax入れ替わり，tie，0/1張り付き）を
+   そもそも持たない代替である．ただし，temperatureは「多クラス全体で単一のTを学習する」ため，
+   ドメインごとの較正の柔軟性はsigmoid/isotonicより低く，legalのように較正のずれ方が
+   ドメイン固有の場合には改善幅が小さい可能性がある点は留保として記録する．
+5. 今回のisotonic実験の計画では，Iter29の考察で確定した手順（全10ドメインのCIを較正前後で
+   同一手順・最初から算出する）に加え，上記2・3の追加チェックを組み込むこと．
+
+**出典**:
+- ローカル実行環境の直接確認: `uv run python -c "import sklearn; print(sklearn.__version__)"`
+  → `1.9.0`，および`sklearn.calibration.CalibratedClassifierCV`のdocstring・ソース
+  （`.venv/lib/python3.12/site-packages/sklearn/calibration.py`）を`help()`・`grep`・`Read`で
+  直接確認（2026-07-31実施，一次ソース）．
+- https://scikit-learn.org/stable/modules/calibration.html （`tavily-extract`で直接取得，
+  1.16.3.3 Multiclass support・1.16.3.4 Temperature Scaling・isotonic過学習閾値・
+  ties/ranking注記，2026-07-31時点のstable版）
+- http://vighneshbirodkar.github.io/scikit-learn.github.io/dev/modules/generated/sklearn.calibration.CalibratedClassifierCV.html
+  （sklearn 0.18時代の同一文言のアーカイブ，`tavily-search`で発見．「≪1000」目安が10年近く
+  一貫していることの裏付け）
+- https://notes.cs307.org/classifier-calibration.html ，
+  https://medium.com/data-science-at-microsoft/model-calibration-for-classification-tasks-using-python-1a7093b57a46
+  （isotonicが区分定数関数でsigmoidより過学習しやすいという解説の補強，`tavily-search`）
+- https://stats.stackexchange.com/questions/493393/ （isotonicがties経由でROC-AUC等のranking指標に
+  影響するというコメント，`tavily-search`）
+- https://launchdarkly.com/docs/guides/statistical-methodology/mcc （Bonferroni対BHの使い分け目安
+  「3件以下ならBonferroni，それ以上ならBH」，`tavily-search`）
+- https://docs.statsig.com/statsig-warehouse-native/features/statistics/methodologies/benjamini-hochberg-procedure
+  （BH法の定義，FWER対FDRの違い，`tavily-search`）
+- journal.md「調査 (Iter29)」節（本調査の裏取り元，sklearn issue #18709・#34312・
+  emergentmind.comの引用は Iter29 で既出のため本イテレーションでは再掲のみ）
+
+---
+
+### 計画 (Iter30)
+
+**仮説**: `scripts/train_domain_classifier.py:train_classifier()` の較正手法を
+`method="sigmoid"`（Platt，Iter29 で partial 判定）から `method="isotonic"` へ切り替えると，
+isotonic のノンパラメトリックな柔軟性により ECE が Platt（0.16751）よりさらに改善し，
+目標の 0.150 以下へ到達する．一方，legal ドメイン（cv fold あたり較正サンプル約 15 件）では
+isotonic 特有の過学習・tie・0/1 張り付きにより，per-domain の非退行が Platt 以上に脅かされる
+リスクがある．この 2 つのトレードオフを，調査(Iter30) が申し送った多重比較補正済みの統計的
+判定手順で最初から検証する．
+
+**単一レバー**: `classifier_calibration`（`.claude/research/config.yml` のレバー名，150-170行）．
+今回試す値は `values: [platt, isotonic]` のうち **`isotonic` のみ**（backlog B50 の自動選択）．
+`cv=5`・`ensemble=True` は Iter29（Platt）と完全に同一のまま固定し，較正手法のみを変える．
+`cv=3` 等の感度分析は，isotonic の主結果（`cv=5`）で per-domain 非退行が崩れた場合にのみ
+副次分析として検討し，今回の主比較には含めない（backlog B50 の申し送りどおり）．
+
+**固定する構成（Iter29 と完全に同一，`config.yaml` は一切変更しない）**:
+`routing_method=supervised_classifier`，`confidence_threshold=0.0`・`dispatch_top_k=1`・
+`aggregation_method=max_confidence`（Iter28 adopted 構成），`confidence_signal_method=self_report`，
+`confidence_elicitation=top_k_with_probs`，`expert_model=expert-mesh-{domain}-lora`
+（domain_count=10），`light_model=qwen3.5:4b-q4_K_M`，`embedding_model=nomic-embed-text`，
+評価データセットは Iter25 以降固定の 1600 問（`data/dataset.jsonl`）．
+`CalibratedClassifierCV` の `cv=5`・`ensemble=True` も Iter29 と同一．**今回変更するのは
+`train_classifier()` 内の較正手法（`_CALIBRATION_METHOD` 定数の値）のみであり，`config.yaml`
+のキーは 1 つも変えない．**
+
+**変更ファイル・行**:
+
+1. `scripts/train_domain_classifier.py`
+   - `_CALIBRATION_METHOD = "sigmoid"`（55行）→ `"isotonic"` に変更。`_CALIBRATION_CV = 5`
+     （56行）は無変更。
+   - 45-54行のコメント（sigmoid を選んだ理由の説明）を，isotonic を選ぶ理由（Iter29 の Platt が
+     ECE 絶対閾値未達で partial 判定・backlog B50 の自動選択）と，調査(Iter30) が確認した
+     追加リスク（isotonic はノンパラメトリックで自由度が事実上サンプル数に等しく，sigmoid より
+     過学習しやすい／`out_of_bounds="clip"` により legal の held-out データが極端値に張り付き
+     やすい）に更新する。
+   - モジュール冒頭 docstring（1-5行）の `Iter29, classifier_calibration=platt` を
+     `Iter30, classifier_calibration=isotonic` に更新。
+   - `train_classifier()` の docstring（95-97行）の `method="sigmoid"=Platt` を
+     `method="isotonic"` に更新し，isotonic 特有の注意点（ties・0/1 張り付き・uniform
+     fallback，調査(Iter30) 分かったこと(3)）を一言追記する。
+   - 出力アーティファクト名は `models/domain_classifier_isotonic.joblib`（Platt 版
+     `models/domain_classifier_platt.joblib` とは別名で新規生成，本番
+     `models/domain_classifier.joblib` は上書きしない）。
+   - `tests/test_train_domain_classifier.py` は Iter29 で `cv=5` 実行に必要な最小データ量
+     （各クラス5件）へ既に拡張済みであり，`method` を変えても `StratifiedKFold` の分割条件は
+     変わらないため無変更で通る見込み（実装フェーズで実行して確認する）。
+
+2. `scripts/evaluate_classifier_calibration.py`
+   - `predict_calibrated_rows()`（55-82行）が返す各行の辞書に，`"probabilities"`
+     フィールド（`{domain: float(p) for domain, p in zip(classes, probabilities)}`，10 ドメイン
+     全ての確率）を追加する。Iter29 では選択ドメインの confidence のみで十分だったが，
+     isotonic 特有のチェックリスト（0/1 張り付き・uniform fallback・tie 検出）には全クラスの
+     確率ベクトルが必要なため（調査(Iter30) 申し送り3）。既存フィールド（`id`／
+     `expected_domains`／`selected_domain`／`confidence`）は変更しない（`metrics.py` の
+     既存関数がそのまま読める後方互換を保つ）。
+   - モジュール冒頭 docstring（1-26行）に，Iter30 で `probabilities` フィールドを追加した
+     理由を追記する。CLI 引数（`--dataset`／`--classifier`／`--output` 等）は変更不要。
+
+3. `metrics.py`（新規関数を追加，既存関数は無変更）
+   - `compute_mcnemar_test`（226-261行）と本質的に同じ discordant-pair の χ²／p 値計算を
+     `_mcnemar_from_correctness(correct_a: dict[str, bool], correct_b: dict[str, bool]) ->
+     dict[str, float]` として切り出す（DRY，重複コード回避が目的の小さな抽出であり目的外の
+     大規模リファクタリングではない）。`compute_mcnemar_test` はこのヘルパーを呼ぶよう変更。
+   - 新規: `compute_domain_recall_mcnemar_test(results_a: list[dict], results_b: list[dict],
+     domain: str) -> dict[str, float]`。`id` が一致する行のうち `domain in
+     expected_domains` の行だけをサブセットし，正誤を `selected_domain == domain`
+     （recall の定義そのもの）で定義して `_mcnemar_from_correctness` に渡す。id 集合の不一致は
+     `compute_mcnemar_test` と同様に `ValueError`。
+   - 新規: `compute_domain_precision_fisher_test(results_a: list[dict], results_b: list[dict],
+     domain: str) -> dict[str, float]`。precision は分母（`selected_domain == domain` の行集合）
+     自体が較正前後で変わる非対応データのため，2×2 分割表
+     `[[tp_a, selected_a - tp_a], [tp_b, selected_b - tp_b]]`（`tp` = `selected_domain ==
+     domain and domain in expected_domains`）を作り `scipy.stats.fisher_exact`
+     （両側検定）で `p_value`・`odds_ratio` を返す。分母 0 件（そのドメインへの選択が
+     一方の側で 0 件）の場合は `ValueError`（Wilson CI 同様サイレントに 0 除算しない）。
+   - 新規: `apply_benjamini_hochberg(p_values: list[float], q: float = 0.05) ->
+     list[bool]`。標準的な BH step-up 手順（p 値を昇順ソートし，最大の `i` で
+     `p_(i) <= (i/m)*q` を満たすものを見つけ，それ以下の順位を有意とする）。入力順序を
+     保った `bool` のリストを返す。空リストは空リストを返す。
+   - `import` 追加: `from scipy.stats import fisher_exact`。
+   - `pyproject.toml`: `dependencies`（6-14行付近）に `"scipy>=1.18"` を追加する。現状
+     scipy は scikit-learn 経由の間接依存でしか入っておらず（`uv run python -c "import
+     scipy"` は通るが `pyproject.toml` に宣言がない），`metrics.py` が直接 import する以上
+     明示的な直接依存として宣言すべきである。`uv add scipy` を実行して `uv.lock` を更新する
+     （既にインストール済みの 1.18.0 がそのまま解決される見込みで，大きな依存変更は
+     発生しないはずだが，実装フェーズで `uv.lock` の diff を確認すること）。
+
+4. `tests/test_metrics.py`
+   - `compute_domain_recall_mcnemar_test`：小さなトイデータ（3〜4行，domain 該当行のみ）で
+     discordant 件数・p 値が手計算と一致することを確認するテスト，および
+     `compute_mcnemar_test` と同様の id 不一致 `ValueError` テストを追加する。
+   - `compute_domain_precision_fisher_test`：2×2 のトイデータで `scipy.stats.fisher_exact`
+     を直接呼んだ場合と同じ p 値になることを確認するテスト，および分母 0 件時の
+     `ValueError` テストを追加する。
+   - `apply_benjamini_hochberg`：教科書的な既知の例（例: p値 `[0.01, 0.02, 0.03, 0.04, 0.20]`，
+     `q=0.05` で先頭 何件が有意になるか）で結果が一致することを確認するテスト，全て非有意な
+     ケース，空リストのテストを追加する。
+   - 既存の `test_compute_mcnemar_test_*` 系テストは，`_mcnemar_from_correctness` への
+     抽出後も `compute_mcnemar_test` の外部インターフェースは変わらないため無変更で通る見込み
+     （実装フェーズで実行して確認する）。
+
+**評価手順**:
+
+1. 新分類器の学習: `uv run python -m scripts.train_domain_classifier
+   --train-data data/classifier_train.jsonl --embedding-model nomic-embed-text
+   --ollama-host <live node> --output models/domain_classifier_isotonic.joblib`
+   （Iter29 と同じくライブな ollama ノード 1 台への embedding のみ）。
+2. 「較正前」データは Iter29 と同一の `results/20260731_162722/results.jsonl`
+   （Iter28 実測，fallback 0/1600）をそのまま使う。**再実行しない**（Iter29・Iter30 を
+   同じ較正前基準で揃えて比較可能にするため）。
+3. 「較正後」データは `scripts/evaluate_classifier_calibration.py` で 1600 問を再 embedding し，
+   `--classifier models/domain_classifier_isotonic.joblib --output
+   results/iter30_calibrated_predictions.jsonl` として生成する。
+4. `metrics.py:compute_ece(n_bins=10)` を較正前・較正後の両方に同一の bin 設定で適用し，
+   ECE を比較する（Iter29 の較正前基準 0.19336 を流用し，再計算しない）。
+5. top1_accuracy を較正前・較正後で算出し，新旧の正誤ペアで `compute_mcnemar_test`
+   （全体，α=0.05）を行う（Iter29 の手順5と同一）。
+6. **per-domain 非退行チェック（今回から運用変更，調査(Iter30) 申し送り2）**: 全10ドメイン
+   について，(a) recall は `compute_domain_recall_mcnemar_test` （計10検定），(b) precision は
+   `compute_domain_precision_fisher_test` （計10検定）を実施し，計20個の p 値を集めて
+   `apply_benjamini_hochberg(p_values, q=0.05)` を一括適用する。adjusted 有意（BH 通過）かつ
+   方向が悪化（較正後の点推定 < 較正前の点推定）である指標のみを「統計的に有意な退行」と
+   判定する（有意だが改善方向のものは退行ではない）。全10ドメイン・20指標を**最初から**
+   算出し，Iter29 のように事後で穴埋めしない。
+7. **isotonic 特有の実装確認チェックリスト（調査(Iter30) 申し送り3，`probabilities`
+   フィールドを使って算出）**: 較正後の 1600 行について，(a) `probabilities` の値のいずれかが
+   厳密に `0.0` または `1.0` になっている行数，(b) 10 クラス全てが `0.1` に近い
+   （`math.isclose(p, 0.1, abs_tol=1e-9)` 相当）uniform fallback 行数，(c) 選択ドメインの
+   confidence と同一の値を持つ他ドメインが存在する行の割合（tie 率）。特に legal ドメインの
+   行を優先して個別集計する。これらは判定基準ではなく必須報告項目。
+8. 新旧 classifier の argmax 不一致件数（flip rate）を Iter29 と同じ定義で報告する（必須報告
+   項目，判定基準ではない）。
+
+**成功条件（d0003 X9．AND 条件）**:
+
+1. ECE（手順2・4，較正前基準 0.19336 に対する較正後の値，`n_bins=10`）が **0.150 以下**
+   であること。
+2. top1_accuracy（手順5）が旧分類器（Iter28 実測 0.585）に対し McNemar 検定で有意に悪化
+   していない（p>=0.05，または新側が改善方向）こと。Iter29 と同じく理論的仮定ではなく
+   実測比較で判定する。
+3. **per-domain 非退行（手順6，3段構成）**: 20指標（10ドメイン×precision/recall）の p 値へ
+   BH 補正（q=0.05）を適用した結果，adjusted 有意かつ悪化方向の指標が **0 件**であること。
+   （Iter29 で用いた「CI 下限の単純比較」は多重比較補正なしで 20 指標中 9 指標が偽陽性に
+   なることが判明済みのため，今回はこの基準を使わない．CI そのものは参考情報として引き続き
+   算出・報告する。）
+4. 手順7のisotonic特有チェックリスト（0/1張り付き・uniform fallback・tie率）とflip rate
+   （手順8）は，成功・失敗の判定基準ではなく必須報告項目として全件記録する。
+
+**目標未達時の次点候補（次イテレーション向けメモ，今回の計画には含めない）**: 調査(Iter30)
+申し送り4のとおり，isotonicがECE 0.150以下に届かない場合，`method='temperature'`
+（sklearn>=1.8，本リポジトリの`scikit-learn==1.9.0`で利用可能，top1_accuracy不変が理論的に
+保証される）を次点候補として検討する。ただしtemperatureは多クラス全体で単一のTを学習するため
+ドメインごとの較正の柔軟性はsigmoid/isotonicより低い点は留保として記録しておく。
+
+**人間判断が必要な論点**: 新規追加なし。Y2（`confidence_threshold`の二重責務分離，スキーマ
+変更）着手前のユーザー確認は backlog B49・B50 の既存の申し送りのまま。較正済み分類器の本番
+反映可否も，isotonicが成功条件（本計画の1-3すべて）を満たした場合に改めてその時点で判断する
+（今回のイテレーションで本番アーティファクトを置き換える判断は行わない）。
+
+---
+
+### 実装 (Iter30)
+
+計画どおり単一レバー（`classifier_calibration=isotonic`）のみを実装した．`config.yaml` は
+変更していない（`git diff config.yaml` が空であることを確認済み）。
+
+**変更ファイル**:
+
+1. `scripts/train_domain_classifier.py`
+   - `_CALIBRATION_METHOD = "sigmoid"` → `"isotonic"` に変更。`_CALIBRATION_CV = 5` は無変更。
+   - `_CALIBRATION_METHOD` 直上のコメントを，isotonic を選ぶ理由（Iter29 の Platt が
+     ECE 絶対閾値未達で partial 判定・config.yml の `classifier_calibration` レバーが
+     isotonic を次点候補として登録済み・backlog B50）と，調査(Iter30) が確認した追加リスク
+     （isotonic はノンパラメトリックで自由度が事実上サンプル数に等しく sigmoid より
+     過学習しやすい／`out_of_bounds="clip"` により legal の held-out データが極端値に
+     張り付きやすい）に更新。
+   - モジュール冒頭 docstring の `Iter29, classifier_calibration=platt` を
+     `Iter30, classifier_calibration=isotonic` に更新。
+   - `train_classifier()` の docstring を `method="isotonic"` の説明に更新し，isotonic
+     特有の注意点（tie・0/1 張り付き・uniform fallback，調査(Iter30) 分かったこと(3)）を
+     追記。
+   - 出力アーティファクト名（`--output` の既定値）は変更していない
+     （`models/domain_classifier.joblib` のまま）。計画どおり，実験フェーズでの実行時に
+     `--output models/domain_classifier_isotonic.joblib` を明示指定することで本番
+     アーティファクトを上書きしない運用とする（CLI 引数のみで対応可能なため，スクリプト
+     側の既定値変更は不要と判断）。
+   - `tests/test_train_domain_classifier.py` は無変更で実行し，pass することを確認した
+     （`method` を変えても `StratifiedKFold` の分割条件は変わらないため）。
+2. `scripts/evaluate_classifier_calibration.py`
+   - `predict_calibrated_rows()` が返す各行の辞書に `"probabilities"`
+     フィールド（`{domain: float(p) for domain, p in zip(classes, probabilities)}`，10
+     ドメイン全ての確率）を追加。既存フィールド（`id`／`expected_domains`／
+     `selected_domain`／`confidence`）は無変更。
+   - モジュール冒頭 docstring に，isotonic 特有のチェックリスト（0/1 張り付き・uniform
+     fallback・tie 検出）に全クラスの確率ベクトルが必要なため `probabilities` を追加した，
+     という理由を追記。CLI 引数は無変更。
+3. `metrics.py`
+   - `compute_mcnemar_test`（226-261行相当）から discordant-pair の χ²／p 値計算を
+     `_mcnemar_from_correctness(correct_a: dict[str, bool], correct_b: dict[str, bool]) ->
+     dict[str, float]` として切り出し，`compute_mcnemar_test` はこのヘルパーを呼ぶよう変更
+     （外部インターフェースは無変更）。
+   - 新規 `compute_domain_recall_mcnemar_test(results_a, results_b, domain) ->
+     dict[str, float]`：`id` が一致する行のうち `domain in expected_domains` の行だけを
+     サブセットし，`selected_domain == domain` を正誤として `_mcnemar_from_correctness`
+     に渡す。id 集合の不一致は `ValueError`。
+   - 新規 `compute_domain_precision_fisher_test(results_a, results_b, domain) ->
+     dict[str, float]`：2×2 分割表 `[[tp_a, selected_a - tp_a], [tp_b, selected_b - tp_b]]`
+     （`tp` = `selected_domain == domain and domain in expected_domains`）を作り
+     `scipy.stats.fisher_exact`（両側）で `p_value`・`odds_ratio` を返す。片側の選択数が
+     0 件の場合は `ValueError`。
+   - 新規 `apply_benjamini_hochberg(p_values: list[float], q: float = 0.05) ->
+     list[bool]`：標準的な BH step-up 手順。入力順序を保った `bool` のリストを返す。
+     空リストは空リストを返す。
+   - `import` 追加: `from scipy.stats import fisher_exact`。
+   - `pyproject.toml` の `dependencies` に `"scipy>=1.18"` を追加し，`uv add "scipy>=1.18"`
+     で `uv.lock` を更新した。`uv.lock` の diff を確認したところ，`scipy` パッケージの
+     エントリ追加自体は想定どおり小さいが，`lora` extra 配下の nvidia/cuda 系パッケージの
+     プラットフォームマーカーが再解決の副作用で一部変化していた（バージョン変更は一切なし，
+     `win32`/`AMD64` 条件が一部エントリから外れる形の書き換えのみ）。`git stash` で
+     `pyproject.toml` を元に戻した状態で `uv lock --check` を実行し，変更前の `uv.lock` が
+     既に最新状態であったこと（＝この差分が scipy 追加以前からの潜在的なズレではなく，
+     今回の relock で新たに解決された結果であること）を確認済み。`uv add` でも手動編集＋
+     `uv lock` でも同一の差分になることを確認しており，`lora` extra は既定ではインストール
+     されない（`uv sync --extra lora` 時のみ関与）ため，本プロジェクトの通常の依存関係
+     解決には影響しない。
+4. `tests/test_metrics.py`
+   - `compute_domain_recall_mcnemar_test`：既存の
+     `test_compute_mcnemar_test_matches_known_chi_square_critical_values` と同じ discordant
+     カウント（29／15）を `domain="legal"` のサブセットに対して再現するトイデータ（加えて
+     サブセット対象外のノイズ行2件が結果に影響しないことも確認），および id 不一致
+     `ValueError` テストを追加。
+   - `compute_domain_precision_fisher_test`：2×2 トイデータ（`[[6, 4], [2, 6]]`）で
+     `scipy.stats.fisher_exact` を直接呼んだ場合と `odds_ratio`／`p_value` が一致することを
+     確認するテスト，および分母 0 件（片側でドメインが一度も選択されない）時の `ValueError`
+     テストを追加。
+   - `apply_benjamini_hochberg`：教科書的な既知の例（p値 `[0.01, 0.02, 0.03, 0.04, 0.20]`，
+     `q=0.05` で先頭4件が有意）のテスト，全て非有意なケース，空リストのケースを追加。
+   - 既存の `test_compute_mcnemar_test_*` 系テストは無変更で実行し，pass することを確認した。
+
+**テスト結果**: `uv run pytest -q` → 218 passed, 2 skipped（既存のスキップ2件は本変更と
+無関係）。新規追加した8件のテストを含め全て pass。
+
+**lint/format**: `uv run ruff check metrics.py scripts/train_domain_classifier.py
+scripts/evaluate_classifier_calibration.py tests/test_metrics.py
+tests/test_train_domain_classifier.py pyproject.toml` → All checks passed。
+`uv run ruff format --check` は `metrics.py`／`tests/test_metrics.py` が未整形と報告されたが，
+これは Iter30 の変更前から repository 全体で `ruff format` 規約に沿っていなかった既存差分
+であることを `git stash` で変更前の状態に戻して確認済み（単一レバー原則に従い，本イテレーション
+の変更範囲外として触っていない）。新規追加した `scripts/evaluate_classifier_calibration.py`
+の1行のみ未整形だったため，その箇所だけ手動で1行に整形し直し，整形済みであることを再確認した。
+リポジトリ全体の `ruff check .` に残る2件（`scripts/prepare_lora_training_data.py`）は
+Iter29 から既知の，本変更と無関係な既存差分であり，単一レバー原則に従い今回も触っていない。
+
+**config.yaml の確認**: `git diff --stat -- config.yaml` が空であることを確認し，一切
+変更していないことを確認した。
+
+**実験を開始してよい状態か**: はい。コード変更は完了し，型注釈・テスト・lint とも整合。
+フェーズ4では，(1) `scripts/train_domain_classifier.py` で
+`models/domain_classifier_isotonic.joblib` を1台のライブ ollama ノードへの embedding
+呼び出しで新規生成（本番 `models/domain_classifier.joblib` は上書きしない），(2)
+`scripts/evaluate_classifier_calibration.py` で 1600 問を再 embedding して較正後の予測
+JSONL（`probabilities` フィールド付き）を生成，(3) `metrics.py` の既存関数群＋新規3関数で
+較正前（`results/20260731_162722/results.jsonl`，再実行不要）と較正後を比較し，成功条件
+1-4（ECE≤0.150・McNemar 非退行・per-domain 20指標への BH 補正非退行・isotonic 特有チェック
+リストと flip rate の報告）を実測すればよい。
+
+---
+
+### 実験 (Iter30)
+
+計画どおり実機 1600 問本走は行わず，Iter29 と同一の SSH ローカルポートフォワード
+（`127.0.0.1:11435 -> wafl500:11434`，`ssh -fNT -L 11435:localhost:11434 wafl500`，
+既存プロセスが起動済みで新規に張り直す必要はなかった。事前に `curl` で
+`http://127.0.0.1:11435/api/tags` が疎通することを確認済み）経由の embedding 呼び出しのみで
+較正前後の比較データを揃えた。
+
+1. 新分類器の学習:
+   ```
+   uv run python -m scripts.train_domain_classifier \
+     --train-data data/classifier_train.jsonl \
+     --embedding-model nomic-embed-text \
+     --ollama-host 127.0.0.1 --ollama-port 11435 \
+     --output models/domain_classifier_isotonic.joblib
+   ```
+   標準出力: `[train_domain_classifier] wrote models/domain_classifier_isotonic.joblib
+   (n_samples=1427, classes=[...10ドメイン...])`。実行時間 126.51 秒（実測，Iter29 の Platt
+   124.09 秒とほぼ同水準）。`models/domain_classifier_isotonic.joblib` を新規生成し，
+   本番 `models/domain_classifier.joblib` のタイムスタンプ（Jul 27 16:08）が今回の実行後も
+   変化していないこと（＝上書きされていないこと）をファイルシステム上で確認した。
+2. 較正後データ生成:
+   ```
+   uv run python -m scripts.evaluate_classifier_calibration \
+     --dataset data/dataset.jsonl \
+     --classifier models/domain_classifier_isotonic.joblib \
+     --embedding-model nomic-embed-text \
+     --ollama-host 127.0.0.1 --ollama-port 11435 \
+     --output results/iter30_calibrated_predictions.jsonl
+   ```
+   標準出力: `[evaluate_classifier_calibration] wrote 1600 rows
+   (classifier=models/domain_classifier_isotonic.joblib)`。実行時間 136.74 秒。出力
+   JSONL は計画どおり `probabilities` フィールド（10 ドメイン全ての確率）付きで 1600 行生成された。
+3. 較正前データは計画どおり `results/20260731_162722/results.jsonl`（Iter28 実測，fallback
+   0/1600）を再実行せずそのまま使用。新旧2ファイルの `id` 集合が完全一致することを確認済み
+   （`{r["id"] for r in before} == {r["id"] for r in after}` が `True`）。
+
+**異常の有無**: なし。両スクリプトとも例外・タイムアウト・リトライなく正常終了した。実機呼び出し
+は wafl500（192.168.15.100:11434）への embedding のみ（`nomic-embed-text`，計 3027 回：
+1427+1600），LLM 生成・probe・dispatch は一切発生していない。
+
+---
+
+### 分析(実行) (Iter30)
+
+`metrics.py` の既存関数（`compute_ece`／`compute_top1_accuracy`／`compute_mcnemar_test`／
+`compute_precision_recall_per_domain`）と新規3関数（`compute_domain_recall_mcnemar_test`／
+`compute_domain_precision_fisher_test`／`apply_benjamini_hochberg`）を呼ぶ一時スクリプトで
+較正前（`results/20260731_162722/results.jsonl`）と較正後（`results/iter30_calibrated_predictions.jsonl`，
+各 1600 行）を比較した（判定はここでは行わず，数値のみを機械的に集計する）。
+
+**手順4: ECE（`n_bins=10` で統一）**
+
+- 較正前: **0.193357556998477**（`state.json` の `e29_results.ece_before` と同一値，再計算不要の
+  ところ実測でも一致することを確認）
+- 較正後: **0.1214241251658703**
+- 改善幅: 0.071933（較正前→較正後で減少，改善方向）
+- 0.150 との比較: 較正後 0.1214 < 0.150
+
+**手順5: top1_accuracy（1600問，`expected_domains` との一致率）**
+
+- 較正前: 0.585000（Iter28 実測と同一値）
+- 較正後: 0.593750
+- 差分: +0.008750（較正後が高い）
+
+**手順5: McNemar 検定（全体，対応のある2条件比較，較正前=A・較正後=B，連続性補正あり）**
+
+- discordant_a_only（較正前のみ正解）: 72
+- discordant_b_only（較正後のみ正解）: 86
+- discordant_pairs（合計）: 158
+- chi2_statistic: 1.0696202531645569
+- p_value: **0.30103123736220994**（α=0.05 で有意差なし。較正後が正解に転じた行(86)が誤りに
+  転じた行(72)を上回り，方向としては改善寄り）
+
+**手順8: flip rate（argmax が変わった行の割合，`id` で対応付け，Iter29 と同じ定義）**
+
+- **229/1600 = 0.143125**（14.3125%）。Iter29（Platt，11.0%）より高い（isotonic の方が
+  柔軟な分だけ argmax の入れ替わりが多いという調査(Iter30) の事前予想と整合）。
+
+**手順6: per-domain 非退行チェック（10ドメイン×recall/precision＝20指標，BH補正 q=0.05）**
+
+全20指標の点推定（較正前→較正後）と個別検定のp値，BH補正後の有意フラグ：
+
+| domain | metric | before | after | p_value | BH有意 | 方向 |
+|---|---|---|---|---|---|---|
+| business_economics | recall | 0.5179 | 0.5357 | 0.546494 | 否 | 改善 |
+| business_economics | precision | 0.4328 | 0.4688 | 0.479833 | 否 | 改善 |
+| computer_science | recall | 0.5417 | 0.5595 | 0.627626 | 否 | 改善 |
+| computer_science | precision | 0.5987 | 0.5529 | 0.430737 | 否 | 悪化 |
+| education | recall | 0.4059 | 0.5000 | 0.000796 | **有** | 改善 |
+| education | precision | 0.4631 | 0.4315 | 0.585896 | 否 | 悪化 |
+| general | recall | 0.5488 | 0.5427 | 1.000000 | 否 | 悪化 |
+| general | precision | 0.6522 | 0.6899 | 0.518329 | 否 | 改善 |
+| history_culture | recall | 0.6667 | 0.7024 | 0.211300 | 否 | 改善 |
+| history_culture | precision | 0.7320 | 0.6705 | 0.231070 | 否 | 悪化 |
+| legal | recall | 0.5833 | 0.5889 | 1.000000 | 否 | 改善 |
+| legal | precision | 0.7500 | 0.7852 | 0.568393 | 否 | 改善 |
+| mathematics | recall | 0.6190 | 0.6786 | 0.009375 | 否 | 改善 |
+| mathematics | precision | 0.7075 | 0.6867 | 0.713168 | 否 | 悪化 |
+| medical | recall | 0.4831 | 0.3820 | **0.000144** | **有** | **悪化** |
+| medical | precision | 0.4725 | 0.5231 | 0.421841 | 否 | 改善 |
+| natural_science | recall | 0.5655 | 0.5833 | 0.662521 | 否 | 改善 |
+| natural_science | precision | 0.5135 | 0.5475 | 0.530141 | 否 | 改善 |
+| social_science | recall | 0.5774 | 0.5238 | 0.052345 | 否 | 悪化 |
+| social_science | precision | 0.6340 | 0.6984 | 0.308685 | 否 | 改善 |
+
+BH（q=0.05）通過（adjusted 有意）は20指標中2件: `education_recall`（p=0.000796，改善方向）・
+`medical_recall`（p=0.000144，**悪化方向**）。`medical_recall` の内訳:
+discordant_a_only=19（較正前のみ正解）・discordant_b_only=1（較正後のみ正解）・
+discordant_pairs=20・chi2=14.45。BH 補正後も有意かつ悪化方向の指標は **1件**（`medical_recall`）。
+
+**手順7: isotonic 特有の実装確認チェックリスト（`probabilities` フィールドを使用，1600行対象）**
+
+- (a) 確率のいずれかが厳密に `0.0` または `1.0` になっている行数: **1311/1600**（うち厳密に
+  `1.0` を含む行は **0 件**，厳密に `0.0` を含む値の総数は全行合計で **2123 個**）。
+- (b) 10クラス全てが `0.1` に近い（`math.isclose(p, 0.1, abs_tol=1e-9)`）uniform fallback 行数:
+  **0/1600**。
+- (c) 選択ドメインの confidence と同一の値を持つ他ドメインが存在する行の割合（tie率，
+  厳密な浮動小数点一致で判定）: **0/1600（0.0000%）**。
+
+legal ドメインの個別集計（優先報告）:
+- `legal` が `expected_domains` に含まれる行（180行）のうち，確率に厳密な `0.0`/`1.0` を含む
+  行数: **158/180**。
+- `legal` が `selected_domain` の行（135行）のうち，同条件: **121/135**。
+- legal の uniform fallback 行数: **0/180**。tie 行数: **0/180（0.0000%）**。
+
+**使用データ**:
+
+- 訓練データ: `data/classifier_train.jsonl`（1427件，legal 77件・他9ドメイン各150件，Iter29と同一）
+- 評価データセット（再embedding対象）: `data/dataset.jsonl`（1600件）
+- 較正前の実行結果: `results/20260731_162722/results.jsonl`（Iter28実測，1600行，再実行なし）
+- 較正後の実行結果（新規生成）: `results/iter30_calibrated_predictions.jsonl`（1600行，
+  `probabilities`フィールド付き）
+- 新規モデルアーティファクト: `models/domain_classifier_isotonic.joblib`（本番
+  `models/domain_classifier.joblib`は無変更のまま，タイムスタンプで確認済み）
+
+**実行時間・実機呼び出しの有無**:
+
+- `train_domain_classifier.py`: 126.51秒（1427回のembedding呼び出し）
+- `evaluate_classifier_calibration.py`: 136.74秒（1600回のembedding呼び出し）
+- 実機呼び出しはwafl500（192.168.15.100:11434）へのembeddingのみ（`nomic-embed-text`），
+  計3027回。LLM生成・probe・dispatchは一切発生していない。
+- 接続経路はIter29と同一の既存SSHローカルポートフォワード（`127.0.0.1:11435` ←
+  `wafl500:11434`）をそのまま流用。新規に張り直す必要はなく，実行中のログ・エラーに異常
+  なし（例外・タイムアウト・リトライなし，両スクリプトとも正常終了メッセージを出力）。
+
+**state.json更新**: `status: waiting_experiment`（開始時，`experiment_dir:
+results/iter30_calibrated_predictions.jsonl`・`experiment_deadline`設定）→`running`
+（完了時，`experiment_dir`/`experiment_deadline`を`null`に戻した）。`e30_results`への数値
+記録・`judgment`確定はフェーズ5b（rc-analyst）に委ねる（本フェーズでは数値の良否判定は行わない）。
+
+---
+
+### 分析(解釈) (Iter30)
+
+**成功条件（d0003 X9，AND条件，計画(Iter30)節）との照合**
+
+1. **ECE ≤ 0.150**: 成立。較正後 0.121424 は較正前 0.193358 から −7.19pt（相対37.2%減）であり，
+   Iter29（Platt，0.16751）より 4.6pt 深く改善し，目標にも 2.86pt の余裕をもって到達している。
+   ルーティングは決定論的（config.yml success_criteria (5)）であり，同一 1600 問・同一
+   embedding モデルに対し分類器のみを変えた比較のため，この差分はノイズではなく較正手法の
+   変更そのものが生んだ実測値と判断してよい（Iter29 と同じ根拠）。
+2. **top1_accuracy 非退行**: 成立。McNemar p=0.301031（α=0.05 で有意差なし）であり，
+   discordant_b_only（較正後のみ正解，86）が discordant_a_only（較正前のみ正解，72）を
+   上回っているため方向としては改善寄りである。Iter29（p=0.139，b_only=67>a_only=50）と
+   同種の非退行パターンが再現している。
+3. **per-domain 20指標のBH補正後・悪化方向の有意指標0件**: **不成立**。BH（q=0.05）通過は
+   `education_recall`（p=0.000796，改善方向）と`medical_recall`（p=0.000144，悪化方向，
+   0.4831→0.3820）の2件で，悪化方向で通過したのは`medical_recall`の1件。discordant内訳は
+   a_only（較正前のみ正解）=19・b_only（較正後のみ正解）=1・discordant_pairs=20・chi2=14.45
+   であり，19:1という非対称性は補正後もなお際立って大きい。
+4. isotonic特有チェックリスト（0/1張り付き1311/1600・uniform fallback 0件・tie率0%）と
+   flip rate（229/1600=14.3125%，Plattの11.0%より高い）は報告事項として確認した（詳細は下記）。
+
+**medical_recall悪化（BH通過）の解釈 — Iter28・Iter29との異同**
+
+まず事実確認として`data/classifier_train.jsonl`を実際に確認した結果，**medicalの訓練データは
+150件であり，legal（77件）のような少数派ドメインではなく，他8ドメインと同数の多数派ドメインで
+ある**（`business_economics`〜`social_science`まで全て150件，`legal`のみ77件）。これは
+Iter29の申し送り（「computer_science/mathematicsは150件の多数派ドメインなのに偽陽性で
+引っかかった」）が示唆したとおり，訓練データ量の多寡だけではmedical_recallの悪化を説明できない
+ことを裏付ける事実である。
+
+次に，Iter29までとの決定的な違いは**検定の厳格さ**にある。Iter29の per-domain 非退行チェックは
+「較正前後のCI下限の単純比較」という多重比較補正なしの基準であり，事後の追加分析（B50）で
+20指標中9指標が該当したものの全て区間重複で統計的に非有意な偽陽性だったと判明した。今回は
+Iter29の教訓を踏まえ，(a) recallはドメイン別McNemar検定，(b) precisionは2標本Fisher正確検定，
+(c) 計20個のp値へBH法を**最初から**適用するという，より厳格な手順で臨んだ。その結果として
+残った`medical_recall`1件は，Iter29の9件のような「緩い基準でしか引っかからない偽陽性」とは
+性質が異なり，**多重比較を補正してもなお統計的に有意な，再現性のある効果**である。BH法は
+20検定という規模で偶然生じる誤検出（FDR）を5%以下に抑えるよう設計されており，それでも
+生き残った1件は，Iter29の legal recall 低下（追加分析で相対化された）よりも判定上の重みが
+大きいと考えるべきである。
+
+precisionは同時に0.4725→0.5231へ改善しており，表面上はIter28のgeneralドメイン
+（recall低下・precision大幅改善が同一212行内で表裏一体）と類似する。しかし規模を比較すると
+性質が異なる。Iter28のgeneral precisionは0.3134→0.6522（+33.9pt）という recall 低下を
+大きく上回る改善であり，かつ「fallbackの送り先が常にgeneralだった」というレバー変更に
+数学的に内在する構造（fallback廃止で流入経路が変わるのは必然）が機序として明確だった。
+今回のmedicalはprecision改善が+5.06pt（0.4725→0.5231）にとどまり，recall悪化の−10.11pt
+（0.4831→0.3820）の半分程度に過ぎない。かつdiscordantの非対称性（a_only=19 : b_only=1）は
+Iter28のgeneral（fallback対象212行内の再配分という機構が既知）のような「レバー自体が
+生む必然的な流入経路変化」では説明できず，isotonic較正曲線がmedicalクラス固有にどう
+振る舞ったかを調べる必要がある。
+
+**追加検証（数値再計算，本フェーズで実施）**: `results/20260731_162722/results.jsonl`
+（較正前）と`results/iter30_calibrated_predictions.jsonl`（較正後，`probabilities`
+フィールド付き）から，medical_recallが悪化した19行（discordant a_only）を個別に確認した。
+
+- 19行のうち，較正後の`probabilities`でmedicalクラスの値が厳密に`0.0`になっている行は
+  **0件**であり，0/1張り付き（isotonic特有チェックリストの(a)）が直接の原因ではない。
+  むしろ19行の多くは較正後もmedicalが2位相当の確率（0.21〜0.39）を保持しており，僅差
+  （margin 0.003〜0.13）で他ドメイン（`computer_science`5件・`natural_science`4件・
+  `education`3件・`history_culture`3件・`business_economics`2件・`mathematics`1件・
+  `social_science`0件他）に argmax を奪われている。
+- 19行中，較正前の`confidence`（medicalの確信度）が0.87〜0.98という高い値だった行が3件
+  含まれており，較正前は明確にmedicalが最有力だったにもかかわらず，較正後は0.35〜0.39まで
+  値が圧縮されて argmax を失っている。
+- **1600行全体でmedicalクラスの較正後確率の最大値は0.7062であり，他9ドメインの最大値
+  （0.7496〜0.8795）を全て下回る**。medicalが較正後に到達しうる確信度の「天井」自体が，
+  他ドメインより体系的に低く抑えられている（`business_economics`最大0.8238，
+  `history_culture`最大0.8795 など）。selectedとして選ばれた回数も較正前182件→較正後130件
+  （−28.6%）へ減少しており，このドメインだけisotonic較正曲線がクラス全体で系統的に
+  スコアを下方へ圧縮している疑いが強い。
+- 一方，選択された行の`confidence`自体（ECEの算出対象）に厳密な0.0/1.0は1件もなく
+  （全1600行で確認済み），isotonic特有チェックリストの「uniform fallback」も0件であるため，
+  ECE 0.121424の改善はmedicalの0/1張り付きのような病理によって水増しされたものではない。
+
+以上から，medical_recallの悪化は「isotonicの0/1張り付き」や「legalのような小標本held-out
+較正の不安定性」という調査(Iter30)が事前に警戒していた2つの機序のいずれでもなく，
+**medicalクラスの isotonic 較正曲線がcv=5較正foldにおいて系統的にスコアを圧縮し，
+他ドメインとの僅差の argmax 競争で構造的に不利になる**という，訓練データ量では説明できない
+第3の機序である可能性が高い。この機序は事前の投資フェーズでは想定されておらず，**次回
+isotonicを継続検討する場合は，legalだけでなくmedicalのように多数派ドメインでも同種の
+較正曲線圧縮が起こりうることを踏まえ，cv=3等の感度分析やドメイン単位の較正曲線可視化を
+対象ドメインを限定せず行うべき**という新たな示唆を得た。
+
+なお，legalドメイン（Iter29でrecall低下が唯一の懸念だった小標本ドメイン）は今回
+recall 0.5833→0.5889へ**改善**しており，isotonicが小標本ドメインで一律に悪化を招くという
+調査(Iter30)の事前予想（sigmoidより過学習しやすい，legalが最も影響を受けやすい）はむしろ
+反証された。isotonicの実際のリスクは事前に警戒していたlegalではなく，多数派ドメインの
+medicalという想定外の箇所に現れており，この点は仮説と実測の不一致として明示しておく。
+
+**isotonic特有チェックリスト（0/1張り付き1311/1600＝82%）の判定への反映**
+
+sklearn公式ドキュメントが警告する「isotonicはties/0-1張り付きを生みやすい」という調査(Iter30)
+の申し送りは，非選択クラスの確率に関しては実測でも裏付けられた（1311/1600行で少なくとも
+1クラスが厳密0.0，legalは158/180行と特に高率）。ただし上記の追加検証で確認したとおり，
+**この0/1張り付きは主に非選択（劣勢）クラスに生じており，ECEの算出対象である選択ドメインの
+confidence自体には1件も及んでいない**（厳密0.0/1.0の選択行は0/1600）。したがって，
+「ECEの見かけ上の改善が個々の予測の信頼性を代償にしている」という懸念は，少なくとも
+ECEの数値そのものについては支持されない。一方で，非選択クラスの0/1張り付きが82%という
+高率で生じている事実自体は，isotonic較正曲線の区分定数性・ノンパラメトリックな自由度の高さ
+（調査(Iter30)分かったこと(1)）を裏付ける実装上の懸念として記録に値し，medical_recall悪化の
+根本原因（較正曲線の系統的圧縮）と同根の現象（held-out較正データが少ない状態でのisotonic
+回帰の不安定な区分定数フィット）である可能性が高い。判定上は「ECEの数値を歪める」形では
+現れていないが，「特定ドメインの較正曲線が予測不能に歪みうる」という構造的リスクの実例として
+medical_recall悪化の解釈に反映させる。
+
+**Iter20（E3）precedentに関する留保**: config.ymlの申し送りが参照する「Iter20 partial運用実績」
+は，本journal内の訂正1（環境修復セクション）で，Iter20当時の判定（「効果あり」）自体が
+Iter17（supervised_classifier導入）との交絡により事後的に取り下げられ，D1（判定保留）へ
+再分類されている経緯がある。したがって「主基準改善・副基準悪化ならpartial」という運用実績の
+参照先としては，交絡のないIter29（同一AND条件構造・同一レバー系列）の方がIter30との対称性が
+直接的であり，本判定はIter29を主たる比較対象とし，Iter20は参考情報にとどめる。
+
+**総合判断（rc-analyst 提案，確定は rc-reflector）: partial（部分的採用）**
+
+根拠:
+
+1. 成功条件1・2は明確に成立し，特にECEはIter29のPlattを大きく上回る改善で目標に十分な余裕を
+   もって到達している。この点はisotonicへの切り替えが「ECE改善」という当初目的に対し
+   Platt以上に有効だったことを裏付ける。
+2. 成功条件3は字義通り不成立である。BH補正という，Iter29の教訓を踏まえて最初から導入した
+   厳格な多重比較補正の下でもなお生き残った`medical_recall`の悪化は，Iter29のlegal recall
+   低下（事後分析で多重比較アーティファクトと判明）と同列には扱えない。訓練データ量では
+   説明がつかず（medicalは150件の多数派），かつ0/1張り付きという既知のisotonic病理でも
+   直接説明できず（19行中0件），較正曲線のクラス固有の系統的圧縮という，事前に想定していな
+   かった機序で生じている。discordantの非対称性（19:1）とprecision改善幅（+5.06pt）が
+   recall悪化幅（−10.11pt）の半分程度に留まることを踏まえると，Iter28のgeneralドメインの
+   ような「レバーに内在する必然的トレードオフ」として判定を覆さない扱いにするのは根拠が
+   弱い。
+3. 以上を総合すると，「ECE目標達成」という主目的は明確に成立し，「per-domain非退行」という
+   副次条件は統計的に確認された1件の悪化により不成立という，Iter29と同型（AND条件の一部が
+   未達）だが**逆方向**の未達パターンである。Iter29はECE（主目的側）が未達でtop1・
+   per-domain（当時は非有意）が成立していたのに対し，今回はECE・top1（主目的側）が成立し
+   per-domain（副次条件）が１件のみ有意に未達という非対称な関係にある。いずれの場合も
+   「AND条件の一部未達」を理由に，明確な改善方向にある指標の価値を無視して即rejectedとする
+   のは実態を捉えず，かつ未解決の懸念（medical_recall）を残したまま本番へ即時反映する
+   adoptedも時期尚早である。**partial（部分的採用）を提案する**。
+
+**本番反映（`models/domain_classifier.joblib`の置き換え）についての見解**
+
+**現時点では見送りを推奨する**（最終決定はrc-reflectorとユーザー確認事項）。判断基準:
+
+- 成功条件のAND条件が字義通り未成立（医療ドメインrecallの統計的に有意な悪化）である以上，
+  「採用して本番へ反映する」ための閾値をこの一回の実験だけでは満たしていない。
+- 単一レバー原則・可逆性の観点では，本番アーティファクトを据え置く（`models/domain_classifier.joblib`
+  は変更しない）方が取り消しコストが低い可逆な選択である。今回のisotonic版は
+  `models/domain_classifier_isotonic.joblib`として別名生成済みであり，本番を上書きしていない。
+- medical_recallの悪化は，Iter29のlegal recallのように「訓練データ拡充（Y5）で解消しうる」
+  という見立てが立ちにくい（medicalは既に150件の多数派ドメインであるため）。原因はisotonic
+  較正曲線のクラス固有の圧縮という，追加データではなく較正手法・パラメータ側の対処
+  （例: `cv=3`感度分析でmedicalの較正foldサンプル数を増やす，または調査(Iter30)申し送り4の
+  `method='temperature'`で全クラス共通の単一スカラー変換に切り替えargmax不変を理論的に
+  保証する）が必要と考えられる。
+- 一方で，ECE目標達成というY4の主目的自体は今回明確に成立しており，isotonicという手法選択
+  そのものを棄却する根拠はない。次イテレーションでmedical_recall悪化の原因を狭く切り分ける
+  追加検証（`cv=3`感度分析，またはmethod='temperature'との比較）を行い，その結果を踏まえて
+  改めて本番反映を判断することを推奨する。
+
+**確信度と追加反復の要否**: 判定の確信度は中程度以上と考える。ECE・top1_accuracyの2条件は
+実測・検定とも明確であり追加反復は不要。medical_recallの悪化はBH補正済みで統計的には
+確定的（p=0.000144）だが，**その原因（較正曲線のクラス固有圧縮）を裏付ける機序面の追加検証
+（cv=3感度分析，較正曲線そのものの可視化）が次回に要る**という点は明記しておく。1回の本走
+（n=1）に基づく判定である点はIter28・Iter29と同じ制約であり，ルーティングが決定論的である
+以上，再実行によって数値自体が変わることはない。
+
+---
+
+### 考察 (Iter30)
+
+**単一レバーの判定: 部分的採用（partial）を確定**．rc-analyst の「分析(解釈)」節の総合判定
+（partial）をそのまま確定させる（覆さない）．判断基準は3点．
+
+1. `classifier_calibration` レバーの成功条件（d0003 X9，計画(Iter30)節）は「ECE≤0.150 **かつ**
+   top1_accuracy 非退行 **かつ** per-domain 20指標の BH 補正後の悪化方向有意指標 0 件」の
+   AND 条件である．条件1（ECE 0.121424，目標に2.86pt の余裕）・条件2（McNemar p=0.301031，
+   方向は改善寄り）は明確に成立するが，条件3は `medical_recall`（p=0.000144，BH 補正後も有意，
+   0.4831→0.3820）が1件残っており字義通り不成立である．3条件AND のうち1条件が不成立である以上，
+   無条件の adopted は成立しない．
+2. 一方，`medical_recall` 以外の19指標はBH補正を通過しておらず，かつECE・top1_accuracyという
+   主目的側の2条件は今回のイテレーションの本来の狙い（Iter29のPlattがECE絶対閾値未達だったため
+   isotonicで追試する）に対し明確に達成している．「per-domain 1件の統計的に有意な悪化」のみを
+   理由に，2条件の明確な達成を無視して rejected とするのは実態を捉えない．
+3. rc-analyst が指摘するとおり，今回の `medical_recall` 悪化は Iter29 の legal recall 低下
+   （事後の全ドメイン拡張分析で多重比較アーティファクトと判明，backlog B50）とは性質が異なる．
+   Iter30 では調査(Iter30) の申し送りに従い，計画段階から BH 補正・ドメイン別 McNemar／Fisher
+   検定を組み込んだ厳格な手順で臨んでおり，その手順を通過してなお残った1件は，Iter29 のような
+   「緩い基準でしか引っかからない偽陽性」とは重みが異なる．Iter28（E1，fallback廃止，
+   backlog B49）の `general` ドメイン recall 低下がレバーに内在する構造的トレードオフ
+   （fallback の送り先が常に general という機構）として明確に説明できたのに対し，今回の
+   `medical` は precision 改善（+5.06pt）が recall 悪化（−10.11pt）の半分程度にとどまり，
+   `discordant` の非対称性（19:1）も「レバーに内在する必然的再配分」では説明できない．
+   したがって Iter28 のような「判定を覆さない扱い」の類推は成り立たず，条件3の不成立を
+   額面どおり受け止めて partial とすることが妥当である．
+
+以上，rc-analyst の提案どおり **partial（部分的採用）** で確定する．
+
+**本番反映の判断: 見送り（`models/domain_classifier.joblib` は isotonic 版へ置き換えない）**．
+rc-analyst の見解をそのまま採用する．
+
+- 成功条件のAND条件が字義通り未成立（`medical_recall` の統計的に有意な悪化）である以上，
+  本番へ反映するための閾値をこの一回の実験だけでは満たしていない．
+- 単一レバー原則・可逆性の観点では，本番アーティファクトを据え置く方が取り消しコストの低い
+  可逆な選択である．今回のisotonic版は `models/domain_classifier_isotonic.joblib` として
+  別名生成済みで，本番（`models/domain_classifier.joblib`，タイムスタンプ Jul 27 16:08 のまま
+  変化なしを確認済み）を上書きしていない．
+- `medical_recall` の悪化は，Iter29 の legal recall 低下と異なり「訓練データ拡充（Y5）で
+  解消しうる」という見立てが立ちにくい（medical は既に150件の多数派ドメイン）．原因は
+  訓練データ量ではなく較正手法・パラメータ側にあると考えられ，次回以降の追加検証で切り分ける
+  べき問題として残す．
+
+**得られた学び（次回以降に活きる非自明な点）**:
+
+1. **isotonic の実際のリスクは，事前に警戒していた小標本ドメイン（legal）ではなく，多数派
+   ドメイン（medical）に現れた**．調査(Iter30) の事前予想（「≪1000件で過学習しやすい」＝
+   held-out データが最少の legal が最も影響を受けるはず）は，実測で明確に反証された（legal
+   recall はむしろ改善 0.5833→0.5889）．訓練データ量という一次元の指標だけでは isotonic の
+   ドメイン別リスクを予測できないことが，Iter29（B50，computer_science・mathematics という
+   150件ドメインも偽陽性で該当）に続き2イテレーション連続で確認された．**「小標本ドメインが
+   最も脆弱」という直感的な仮説は，較正手法の非退行リスクを評価する際の判断材料として単独では
+   信頼できない**．次回以降，較正関連のレバーで事前リスクを予測する際は，訓練データ量だけでなく
+   （分析(解釈)で行ったような）較正曲線そのものの形状・到達可能な確信度の天井を確認する必要が
+   ある．
+2. **BH補正という多重比較への厳格な対処は，Iter29の教訓（9件の偽陽性）を実際に解消した**．
+   今回は20指標中2件のみがBH通過（悪化方向1件・改善方向1件）で，Iter29の「20指標中9指標が
+   該当（うち1件のみ有意）」という状況から大きく改善した．計画段階から検定手順を組み込む
+   （事後の穴埋めをしない）運用が機能したことを確認できた．この運用は今後の per-domain
+   非退行チェックの標準手順として定着させてよい．
+3. **isotonic の 0/1 張り付き（非選択クラスで82%の行に発生）は，ECE の数値そのものを歪めては
+   いなかった**（選択ドメインの confidence に厳密な0/1は0件）が，`medical_recall` 悪化の
+   根本原因（較正曲線のクラス固有の系統的圧縮）と同根の現象である可能性が高いと分析(解釈)で
+   整理された．isotonic のノンパラメトリックな区分定数フィットが，held-out データの少なさと
+   組み合わさると，どのドメインが影響を受けるか事前に予測しにくい形で歪みうるという構造的
+   リスクを実証したことは，`method='temperature'`（クラスごとの個別較正器を持たず単一スカラー
+   のみで変換するため，この種のクラス固有の歪みが構造的に発生しない）を次に検証する強い動機に
+   なる．
+
+**次に振る単一レバーの選定: `classifier_calibration=temperature`**
+
+判断基準（`cv=3` 感度分析 と `method='temperature'` のいずれを優先するか）:
+
+- **`cv=3` 感度分析は今回の `medical_recall` 悪化の根本原因に届きにくいと判断した**．
+  分析(解釈)で確認したとおり，`medical` は訓練150件の多数派ドメインであり，`cv=5` でも
+  `cv=3` でも1foldあたりの較正サンプル数はおよそ30件→50件程度の違いにとどまり，
+  sklearn公式が目安とする「greater than ~1000」からは`cv`を3に変えても依然として大きく
+  下回ったままである．かつ，19行の悪化事例のうち0/1張り付きが直接の原因だった行は0件で，
+  「較正曲線がクラス全体で系統的にスコアを圧縮する」という機序（分析(解釈)节）は fold
+  サンプル数の微調整では解消しない構造的な問題である可能性が高い．`cv=3` は同一手法
+  （isotonic の OvR 個別較正）内のハイパラ変更にすぎず，今回発見した「OvR 較正がクラス固有に
+  予測不能な歪みを生みうる」という根本の懸念には対処しない．
+- **`method='temperature'` は，今回発見した根本原因に構造的に対処する**．調査(Iter30) が
+  確認したとおり，temperature scaling はクラスごとに個別の較正器を fit せず，単一の
+  `_TemperatureScaling` インスタンスのみでロジット全体を単一スカラー T で割る変換であり，
+  argmax（top1_accuracy）が理論的に不変であることが sklearn 公式に保証されている．
+  これは isotonic／platt が抱える OvR 方式由来の全リスク（クラス固有の曲線歪み・tie・0/1
+  張り付き）を構造的に排除する代替であり，今回 `medical` で顕在化した「事前に予測できない
+  ドメイン固有の較正曲線圧縮」という新たな懸念に直接応える．
+- 留保（調査(Iter30) 申し送り4，分析(解釈) で既出）: temperature は多クラス全体で単一の T
+  しか学習しないため，isotonic（0.121424）は元より Platt（0.16751）と比べても較正の柔軟性は
+  低く，ECE 改善幅がより小さい可能性がある．Platt でさえ ECE 絶対閾値（0.150）に届かなかった
+  経緯があるため，temperature がECE条件を満たせない可能性は相応にある．しかし，それ自体が
+  次回イテレーションで検証すべき有益な情報である．仮に temperature が ECE 目標未達であれば，
+  「per-domain 非退行のためには OvR 方式の柔軟性を犠牲にできない」という新しい知見が得られ，
+  isotonic の運用（例: medical のみ較正を無効化する，較正曲線を平滑化する等）を再検討する
+  材料になる．
+- **可逆性・独立性**: `classifier_calibration` は既に config.yml の levers に登録済みだが，
+  値は `[platt, isotonic]` のみで `temperature` は未登録のため，本フェーズで
+  `values: [platt, isotonic, temperature]` へ末尾追記する（可逆な自動判断，スキーマ変更では
+  なく既存レバーへの値追加）．`cv`（既定5）・`ensemble`（既定True）は temperature スケーリング
+  自体には適用されない sklearn の実装（分析(解釈)出典の `_fit_calibrator` 参照）だが，同じ
+  `CalibratedClassifierCV` API 経由で呼ぶため，実装フェーズで挙動を確認すること．
+
+**iteration_name（Iter31）**: 「分類器較正のtemperature scaling方式によるargmax不変性の実証と
+ECE目標到達可否の検証」
+
+**要人間判断として残す論点（新規追加なし）**: Y2（`confidence_threshold` の二重責務分離，
+スキーマ変更）の着手前ユーザー確認は backlog B49・B50 の既存の申し送りのまま．fallback
+設計思想の論文上の位置付け（backlog B48）も未解決のまま据え置く．較正済み分類器の本番反映
+可否も，今回は「見送り」という可逆な既定選択を自律判断で行ったのみで，将来いずれかの較正手法が
+成功条件を完全に満たした場合の本番反映という判断（本番運用中のルーティング挙動を変える）自体は，
+改めてその時点で検討する．
+
+---
+
 ## Iteration 29: 分類器の較正（CalibratedClassifierCV）によるECE改善とルーティング非退行の検証
 
 ### 計画 (Iter29)

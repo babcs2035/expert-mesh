@@ -3,6 +3,52 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B54 [auto-decided 2026-08-01] Iter33 は rejected で確定．次は案A（90/30/30）を1回試す
+
+- 状況: Iter33（classifier_training_data_composition=education_proxy_task_resampling，案C:
+  sociology=70/high_school_psychology=40/moral_disputes=40）の rc-analyst 判定（rejected）を
+  rc-reflector が検証・確定させた．
+- **判定: rejected（確定）**．主基準（education_recallがmedical_recall基準0.5112を上回ること）が
+  不成立（0.4412 < 0.5112，70ptギャップ）．McNemar p=0.1589 で top1_accuracy の有意改善なし．
+  education_recall の +3.53pt 改善は SE~3.8pt のノイズ範囲内．非退行条件（BH補正後有意退行0件）
+  は成立するが，主基準が通らないため採用不可．
+- **学び**:
+  1. 案C（70/40/40）は現状比（41/55/54）から sociology を +29pt，他2タスクを -15ptずつ
+     変更した．この変化幅では教育recallへの信号がノイズに埋もれた．
+  2. 2イテレーション連続（Iter32 sample_weight, Iter33 resampling案C）でrejectedとなった
+     背景には，「教育ドメインの代理タスクが本質的にeducationの意味的ギャップを抱えている」
+     という根本原因がある．抽出比率の変更という表面的な最適化では，この根本原因に対処できない．
+  3. 案A（90/30/30）は変化幅が約2倍（sociology +49pt，他2タスク -25pt）であり，有意検出の
+     可能性が高い．ただし弱い2タスクの削減幅が大きい（-45%）ため，学習信号喪失のリスクも
+     相対的に高い．
+  4. 案Aも不成立なら，「代理タスクの意味的ギャップ」を解消する根本対策（education固有の
+     手作り訓練問題の追加）へ切り替える必要がある．
+- **自動選択: 次イテレーション（Iter34）の単一レバーを
+  `classifier_training_data_composition=education_proxy_task_resampling`（案A: sociology=90,
+  high_school_psychology=30, moral_disputes=30）とする**．`iteration_name` は
+  「education代理タスク抽出比率の再配分（案A）による訓練データ構成変更」．
+- **根拠**:
+  1. 案Aはconfig.ymlのlevers noteでbacklog B53が既に例示している（sociology 90・
+     high_school_psychology 30・moral_disputes 30）．案Cがrc-plannerによって第一候補に
+     選ばれたが，案Aが次点として登録済み．
+  2. 案Aは変化幅が案Cの約2倍であり，有意検出の可能性が高い．
+  3. config.ymlの`values`に`education_proxy_task_resampling`は既に登録済み（案Cが既定）．
+     案Aへの変更は`values`の順序変更または`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`の
+     値変更のみで，スキーマ変更ではない．
+  4. 案Aを1回試して不成立なら，handmade problem追加へ切り替える．これ以上resamplingのバリエ
+     ーションを増やしても，意味的ギャップという根本原因には届かないと判断する．
+- **留保**: 案Aの弱い2タスクの削減幅（-45%）は相対的に高く，Iter32のconfusion matrix分析が
+  示す「弱い2タスクの誤分類は`medical`・`social_science`・`legal`との学術的近接が主因」
+  という機序を踏まえると，該当タスクの学習信号自体を失わせて逆効果になるリスクがある．
+  案Aがrejectedの場合，handmade problem追加へ直ちに切り替える．
+- **要レビュー**: (1) 案Aの Sociology 90 件は残りプール上限 94 件に対し 95.7% を使い切る．
+  これ以上 sociology を増やす余地がないため，案Aが不成立の場合の次の一手は handmade
+  problem追加のみになる．(2) Y2（`confidence_threshold`の二重責務分離，スキーマ変更）
+  着手前のユーザー確認は引き続き必要（B49〜B52既存項目）．(3) fallback設計思想の論文上の
+  位置付け（B48）も未解決．
+
+---
+
 ## B53 [auto-decided 2026-07-31] Iter32 は rejected で確定．sample_weightはclass_weightと結合し逆効果．次は抽出比率の再配分
 
 - 状況: Iter32（classifier_training_data_composition=education_proxy_task_revision，弱い代理タスク
