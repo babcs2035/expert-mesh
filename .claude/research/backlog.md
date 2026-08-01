@@ -3,6 +3,34 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B64 [auto-decided 2026-08-02] Iter41: embedding_adapter_only_lora (r=16) rejected。次レバー=embedding_adapter_lora_r8
+
+- 状況: Iter41（embedding_adaptation=embedding_adapter_only_lora, r=16）の rc-analyst 判定（rejected）
+  を rc-reflector が検証・確定させた。
+- **判定: rejected（確定）**。argmax flip rate 35.88%（閾値<15%の2.4倍超過）。top1_accuracy 有意悪化
+  （McNemar p=0.0050）。BH補正後有意退行 1件（medical_recall: q=0.0158）。
+- **決定的な学び**:
+  1. **LoRAは全パラメータfine-tuningより構造的に優れる**: argmax flip rate 52.56%→35.88%、
+     BH-regressions 13→1、top1_accuracy悪化幅 -0.1162→-0.0337。全次元で単調改善。
+  2. **social_science/business_economicsの崩壊**: これらのproxy-taskドメインはeducationと意味的に
+     近いため、LoRAのembedding変化で最も大きな影響を受けた（social_science -0.2262,
+     business_economics -0.1845）。
+  3. **ECE改善はLoRAの穏やかな変化の証**: ECE 0.0712→0.0164。LoRAのgentlerなembedding変化が
+     確率分布の安定化に寄与。
+  4. **トレンドはrank削減を支持**: 52.56%(full FT) → 35.88%(r=16)。r=8では~20%、r=4では~10-15%
+     のargmax flip rateが期待される。
+- **config.yml の変更**: `embedding_adaptation` レバーの `values` に `embedding_adapter_lora_r8`
+  を追記済み。
+- **次の一手: Iter42 で `embedding_adaptation=embedding_adapter_lora_r8` を検証**。
+  rc-plannerは計画フェーズでLoRA r=8の詳細設計を確定すること。
+  変更: `scripts/fine_tune_embedding_lora.py` の `r=16` → `r=8`, `lora_alpha=32` → `lora_alpha=16`。
+- **r=8がrejectedの場合の次の手**: LoRAアプローチは構造的限界の可能性が高い（全12層のattention層に
+  適用するため、rankを下げてもembedding空間への影響が累積する）。その場合は、(a) embedding出力への
+  線形射影（projection head）方式、(b) LoRA target_modulesをout_projのみに限定、のいずれかを検討。
+  両方失敗した場合、rc-investigatorへ調査フェーズからの再探索を申し送る。
+- **要人間判断**: (1) education_recall の基準値（medical_recall 0.5112）の再検討。(2) Y2
+  （`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認は引き続き必要。
+
 ## B63 [auto-decided 2026-08-02] Iter40: embedding_adaptation=setfit_education_finetune rejected。次レバー=embedding_adapter_only_lora
 
 - 状況: Iter40（embedding_adaptation=setfit_education_finetune）の rc-analyst 判定（rejected）を rc-reflector が検証・確定させた。
@@ -1332,3 +1360,29 @@
 - 要レビュー: success_criteria の数値基準が未確定（イテレーションを重ねてノイズ幅が分かってから rc-planner が
   数値化する設計）．research_frontier の各項目（ベースライン比較・回答品質評価等）は levers 探索後の着手を
   想定しているが，優先度を変えたい場合は config.yml の該当セクションを直接編集してよい．
+
+## B64 [auto-decided 2026-08-02] Iter41: embedding_adaptation=embedding_adapter_only_lora の計画
+
+- **自動選択**: 単一レバーを `embedding_adaptation=embedding_adapter_only_lora` とする。
+  `iteration_name` は「PEFT LoRAによるeducationドメイン埋め込み適応」．
+- **選定理由**:
+  1. Iter40（setfit_education_finetune）で全パラメータfine-tuningが単一レバー原則と両立しないことが確定（argmax flip rate 52.56%）
+  2. rc-investigator（Iter41調査フェーズ）は PEFT LoRA の feasibility が HIGH と判定
+  3. SentenceTransformer 3.x が LoRA を公式サポート
+  4. 既存の `--fine-tuned-embed-model` 統合（Iter40 で実装済み）を再利用可能
+  5. LoRA adapter の更新パラメータは base model の 0.86% のみ（rank=16, attention layers のみ）
+  6. オフライン完結（実機1600問本走不要、総コスト~30-45分）
+- **計画フェーズの決定事項**:
+  1. **Rank dimension**: r=16（保守的。単一レバー原則優先。r=32 は fallback）
+  2. **Training loss**: MultipleNegativesRankingLoss（SBERT 公式推奨、TripletLoss より安定）
+  3. **Runtime embedding path**: classifier training + evaluation で LoRA adapter 適用。runtime routing は base model のまま（単一レバー原則）。train/inference mismatch を避けるため、classifier training と evaluation で同一の LoRA-adapted embeddings を使用。
+  4. **Negative pair sampling**: 60/40 priority/random（Iter40 と同一）
+  5. **LoRA target modules**: `.*attn.*`（attention 投影層のみ。MLP 層は対象外）
+- **変更ファイル**:
+  1. `scripts/fine_tune_embedding_lora.py`（新規作成）— LoRA 訓練スクリプト
+  2. `scripts/train_domain_classifier.py`（`build_training_features()` に `set_adapter("default")` 追加）
+  3. `scripts/evaluate_classifier_calibration.py`（`predict_calibrated_rows()` に `set_adapter("default")` 追加）
+  4. `pyproject.toml`（`research` deps に `peft>=0.12` 追加）
+- **成功条件**: education_recall > medical_recall基準(0.5112)、他9ドメイン18指標のBH補正後有意退行0件、argmax flip rate < 15%
+- **失敗条件**: education_recall が基準超えない、BH補正後有意退行1件以上、argmax flip rate >= 15%、LoRA adapter ロードエラー
+- **コスト**: 低〜中（~30-45分、オフライン完結）

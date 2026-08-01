@@ -408,10 +408,20 @@ wheels = [
 ]
 
 [[package]]
+name = "einops"
+version = "0.8.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/77/850bef8d72ffb9219f0b1aac23fbc1bf7d038ee6ea666f331fa273031aa2/einops-0.8.2.tar.gz", hash = "sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827", size = 56261 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl", hash = "sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193", size = 65638 },
+]
+
+[[package]]
 name = "encounter-expert-mesh"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "einops" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "pydantic" },
@@ -432,6 +442,7 @@ lora = [
 ]
 research = [
     { name = "numpy" },
+    { name = "peft" },
     { name = "sentence-transformers" },
     { name = "setfit" },
 ]
@@ -448,10 +459,12 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'lora'", specifier = ">=1.0" },
     { name = "bitsandbytes", marker = "extra == 'lora'", specifier = ">=0.44" },
     { name = "datasets", marker = "extra == 'lora'", specifier = ">=2.20" },
+    { name = "einops", extras = ["research"], specifier = ">=0.8.2" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "numpy", marker = "extra == 'research'", specifier = ">=1.26" },
     { name = "peft", marker = "extra == 'lora'", specifier = ">=0.12" },
+    { name = "peft", marker = "extra == 'research'", specifier = ">=0.12" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "scikit-learn", specifier = ">=1.5" },

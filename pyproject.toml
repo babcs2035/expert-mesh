@@ -11,6 +11,7 @@ dependencies = [
     "pyyaml>=6.0",
     "scikit-learn>=1.5",
     "scipy>=1.18",
+    "einops[research]>=0.8.2",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +20,7 @@ dependencies = [
 # the precomputed transform with plain Python, so nodes never need this.
 research = [
     "numpy>=1.26",
+    "peft>=0.12",
     "setfit>=1.1",
     "sentence-transformers>=3.0",
 ]

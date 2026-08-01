@@ -87,6 +87,9 @@ async def predict_calibrated_rows(
         local_model = SentenceTransformer(
             fine_tuned_embed_model, trust_remote_code=True, device="cpu"
         )
+        # Load and activate the LoRA adapter (PEFT default adapter name)
+        local_model.load_adapter(fine_tuned_embed_model, "default")
+        local_model.set_adapter("default")
         for row in dataset:
             query_embedding = local_model.encode(row["query"], normalize_embeddings=True,
                                                  show_progress_bar=False)

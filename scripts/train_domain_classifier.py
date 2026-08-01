@@ -110,12 +110,15 @@ async def build_training_features(
     from sentence_transformers import SentenceTransformer
 
     if fine_tuned_embed_model is not None:
-        # Use local fine-tuned model
+        # Use local fine-tuned model (supports PEFT LoRA adapter)
         print(f"[train_domain_classifier] using fine-tuned embed model: {fine_tuned_embed_model}",
               file=sys.stderr)
         local_model = SentenceTransformer(
             fine_tuned_embed_model, trust_remote_code=True, device="cpu"
         )
+        # Load and activate the LoRA adapter (PEFT default adapter name)
+        local_model.load_adapter(fine_tuned_embed_model, "default")
+        local_model.set_adapter("default")
         embeddings = []
         labels = []
         for row in rows:
