@@ -10,9 +10,11 @@ testing. Every function here takes {"query": ..., "domain": ...} rows
 (e.g. from build_dataset.py's build_classifier_training_rows), so there
 is no parameter through which probe/dispatch results could leak in.
 Rows may additionally carry a "sample_weight" field (Iter32,
-classifier_training_data_composition=education_proxy_task_revision), which
-is passed through to CalibratedClassifierCV.fit() unchanged; rows without
-it (pre-Iter32 data) default to 1.0, i.e. unweighted.
+classifier_training_data_composition=education_proxy_task_revision),
+but this field is currently unused: `_extract_sample_weights()` computes
+domain-balanced weights automatically from domain counts, reproducing
+sklearn's class_weight='balanced' effective weighting without the Iter32
+multiplicative bug (sample_weight *= class_weight_).
 
 Usage (module mode; requires a live ollama node reachable for embeddings):
     uv run python -m scripts.train_domain_classifier \\
@@ -76,8 +78,22 @@ def _load_training_rows(train_data_path: str) -> list[dict]:
 
 
 def _extract_sample_weights(rows: list[dict]) -> list[float]:
-    """Per-row training weight (Iter32); rows without it (pre-Iter32 data) default to 1.0."""
-    return [row.get("sample_weight", 1.0) for row in rows]
+    """Per-row training weight: domain-balanced weights matching sklearn's class_weight='balanced'.
+
+    With class_weight=None in LogisticRegression, we compute sample_weight here
+    to reproduce the exact same effective weighting that class_weight='balanced'
+    provided (n_samples / (n_classes * n_domain_samples)). This avoids the
+    Iter32 bug where sample_weight *= class_weight_ caused unintended multiplicative shifts.
+    """
+    from collections import Counter
+    domain_counts = Counter(row["domain"] for row in rows)
+    n_samples = len(rows)
+    n_classes = len(domain_counts)
+    weights = []
+    for row in rows:
+        d = row["domain"]
+        weights.append(n_samples / (n_classes * domain_counts[d]))
+    return weights
 
 
 async def build_training_features(
@@ -104,14 +120,18 @@ def train_classifier(
 ) -> CalibratedClassifierCV:
     """Fit a calibrated multi-class classifier from embedding features to domain labels.
 
-    Base estimator is LogisticRegression; class_weight="balanced"
-    re-weights each class inversely to its frequency: legal's training
-    pool is structurally about half the size of every other domain's at
-    the default domain_target_size (JMMLU has no professional_law task;
-    see build_dataset.py's build_classifier_training_rows docstring), and
-    without this the classifier would be trained to under-predict legal
-    simply because it saw fewer examples, not because the signal is
-    weaker.
+    Base estimator is LogisticRegression with class_weight=None.
+    Domain balancing is achieved via `sample_weight` passed from
+    `_extract_sample_weights()`, which computes per-row weights as
+    n_samples / (n_classes * n_domain_samples) to reproduce the exact
+    effective weighting of sklearn's class_weight='balanced' without the
+    Iter32 bug (sample_weight *= class_weight_ multiplicative shift).
+    Legal's training pool is structurally about half the size of every
+    other domain's at the default domain_target_size (JMMLU has no
+    professional_law task; see build_dataset.py's
+    build_classifier_training_rows docstring), so its per-row sample_weight
+    is ~2x that of 150-row domains, giving equal total effective weight
+    per domain.
 
     The base estimator is then wrapped in CalibratedClassifierCV
     (method="temperature", ensemble=True; see _CALIBRATION_METHOD's comment
@@ -129,19 +149,13 @@ def train_classifier(
     a smaller fold count on toy data, rather than branching test code
     away from what production actually runs.
 
-    `sample_weight` (Iter32, classifier_training_data_composition=
-    education_proxy_task_revision) is forwarded to
-    CalibratedClassifierCV.fit(), which passes it through to the base
-    estimator's fit() on each fold. This is independent of
-    class_weight="balanced" above: LogisticRegression.fit() internally
-    multiplies sample_weight *= class_weight_ (confirmed against this
-    repo's installed scikit-learn==1.9.0,
-    sklearn/linear_model/_logistic.py:436), so the existing domain-level
-    balancing and this row-level, task-driven weighting compose rather
-    than override each other. Defaults to None (all rows weighted equally,
-    i.e. identical behavior to pre-Iter32 callers).
+    `sample_weight` is forwarded to CalibratedClassifierCV.fit(), which
+    passes it through to the base estimator's fit() on each fold. With
+    class_weight=None, the sample_weight values are used directly as
+    effective weights without any multiplicative adjustment. Defaults to
+    None (all rows weighted equally).
     """
-    base_estimator = LogisticRegression(max_iter=_MAX_ITER, class_weight="balanced")
+    base_estimator = LogisticRegression(max_iter=_MAX_ITER, class_weight=None)
     calibrated_model = CalibratedClassifierCV(
         base_estimator, method=_CALIBRATION_METHOD, cv=cv, ensemble=True
     )

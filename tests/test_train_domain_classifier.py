@@ -1,5 +1,6 @@
 """Tests for E6's offline classifier training (scripts/train_domain_classifier.py)."""
 
+import pytest
 from unittest.mock import AsyncMock, patch
 
 from expert_backend import OllamaClient
@@ -58,14 +59,34 @@ def test_train_classifier_fits_a_model_that_predicts_seen_labels() -> None:
     assert list(model.predict([[0.0, 1.0]])) == ["legal"]
 
 
-def test_extract_sample_weights_defaults_missing_field_to_one() -> None:
-    """Rows without sample_weight (pre-Iter32 data) are treated as unweighted (1.0)."""
-    rows = [
-        {"id": "education-train-001", "query": "q1", "domain": "education", "sample_weight": 2.0},
-        {"id": "medical-train-001", "query": "q2", "domain": "medical"},
-    ]
+def test_extract_sample_weights_computes_domain_balanced_weights() -> None:
+    """_extract_sample_weights() computes n_samples/(n_classes*n_domain) for each row,
+    reproducing sklearn's class_weight='balanced' effective weighting.
 
-    assert _extract_sample_weights(rows) == [2.0, 1.0]
+    With equal domain counts, all rows get weight=1.0. With an imbalanced domain
+    (e.g. legal=77 vs others=150), the minority domain gets ~2x weight per row.
+    The row-level "sample_weight" field is ignored (Iter39: manual sample_weight
+    replaces class_weight='balanced').
+    """
+    # Equal counts: 2 domains, 2 rows each => weight = 4/(2*2) = 1.0
+    rows_equal = [
+        {"id": "e1", "query": "q1", "domain": "education"},
+        {"id": "e2", "query": "q2", "domain": "education"},
+        {"id": "m1", "query": "q3", "domain": "medical"},
+        {"id": "m2", "query": "q4", "domain": "medical"},
+    ]
+    assert _extract_sample_weights(rows_equal) == [1.0, 1.0, 1.0, 1.0]
+
+    # Imbalanced: 3 education + 1 legal => weight_edu=4/(2*3)=0.6667, weight_legal=4/(2*1)=2.0
+    rows_imbalanced = [
+        {"id": "e1", "query": "q1", "domain": "education"},
+        {"id": "e2", "query": "q2", "domain": "education"},
+        {"id": "e3", "query": "q3", "domain": "education"},
+        {"id": "l1", "query": "q4", "domain": "legal"},
+    ]
+    weights = _extract_sample_weights(rows_imbalanced)
+    assert weights[3] == pytest.approx(2.0, rel=1e-6)
+    assert all(w == pytest.approx(4 / 6, rel=1e-6) for w in weights[:3])
 
 
 def test_train_classifier_forwards_sample_weight_to_calibrated_fit() -> None:
