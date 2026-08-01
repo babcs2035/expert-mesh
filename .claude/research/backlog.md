@@ -3,7 +3,38 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
-## B55 [auto-decided 2026-08-01] Iter34 は rejected で確定．resampling系レバー尽き，education固有の手作り訓練問題追加へ
+## B56 [auto-decided 2026-08-01] Iter35 は rejected で確定．config全levers試し切り完了，次イテレーションは調査フェーズへ
+
+- 状況: Iter35（classifier_training_data_composition=education_handmade_training_problems，
+  handmade 50件追加）の rc-analyst 判定（rejected）を rc-reflector が検証・確定させた．
+- **判定: rejected（確定）**．主基準（education_recallがmedical_recall基準0.5112を上回ること）が
+  不成立（0.4118 < 0.5112, gap=9.94pt）．education_recall自体がIter31比で-4.71pt悪化．
+  top1_accuracy McNemar p=0.4966で有意改善なし．ECE悪化（0.0712→0.0751）．
+- **4連投のrejected（Iter32-35）は決定的**．education_recallのトレンド:
+  0.5000 (Iter31) → 0.4412 (Iter32) → 0.4412 (Iter33) → 0.4353 (Iter34) → 0.4118 (Iter35)．
+  baseline (Iter28: 0.4059) と同等まで低下した．
+- **決定的な学び**:
+  1. **埋め込み空間での意味的競合**: handmade問題50件は既存proxyタスク150件の埋め込み空間と競合し，
+     classification boundaryを混乱させた。educationの分類確率平均はほぼ不変だが中央値が低下（0.2552→0.2228）。
+     non-education行の偽陽性率（4.83%→5.03%）はほぼ不変であり， handmade問題は「既存education行の
+     埋め込み信号を薄めている」．追加ではなく置換が必要かもしれない．
+  2. **config.ymlの全leversを試し切った**:
+     - classifier_training_data_composition: 3値すべてrejected（revision, resampling, handmade）
+     - classifier_calibration: 3値すべて試済み（platt=partial, isotonic=partial, temperature=adopted）
+     - fallback_policy: adopted（完了）
+     - aggregation_method: Y2ブロックで試せない
+     - E1-E10: 履歴済みまたはno-op
+  3. **Y2（スキーマ変更）は着手不能**: dispatch_candidate_thresholdの新設はユーザー確認が必要．
+- **自動選択: 次イテレーション（Iter36）の単一レバーをnullとする（調査フェーズから開始）**．
+  `iteration_name` は「education_recallの根本原因に対する代替アプローチの調査」．
+  rc-investigatorはtavily-search等で以下の観点から調査すること:
+  1. educationドメインのembeddingsを改善する既存の手法（ドメイン特化埋め込み，fine-tuning等）
+  2. proxyタスクの置換（意味的ギャップが小さい代替タスクの探索）
+  3. education_recallのボトルネック分析（どの教育問題がどのドメインに誤分類されているか，
+     具体的な失敗パターンから改善方向性を見出す）
+  4. Y2（dispatch_candidate_threshold）の下調べ（閾値設計の指針となる先行研究）
+- **残る要レビュー**: (1) Y2着手前のユーザー確認（B49〜B52）(2) fallback設計思想の論文上の位置付け（B48）
+  (3) D5（data/modelsのバージョン管理方針）(4) education_recallの根本原因に対する代替アプローチ
 
 - 状況: Iter34（classifier_training_data_composition=education_proxy_task_resampling，案A:
   sociology=90/high_school_psychology=30/moral_disputes=30）の rc-analyst 判定（rejected）を

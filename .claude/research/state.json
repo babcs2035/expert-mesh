@@ -1,24 +1,23 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter35",
-  "iteration_name": null,
+  "iteration": "Iter36",
+  "iteration_name": "education_recallの根本原因に対する代替アプローチの調査",
   "phase": "investigate",
   "status": "running",
   "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785579451,
+  "updated_at": 1785582000,
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 34: education\u4ee3\u7406\u30bf\u30b9\u30af\u62bd\u51fa\u6bd4\u7387\u306e\u518d\u914d\u5206\uff08\u6848A\uff09\u306b\u3088\u308b\u8a13\u7df4\u30c7\u30fc\u30bf\u69cb\u6210\u5909\u66f4)",
-      ".claude/research/journal.md (Iteration 34: \u5206\u6790(\u89e3\u91c8) (Iter34))",
-      ".claude/research/journal.md (Iteration 34: \u8003\u5bdf (Iter34))",
-      ".claude/research/journal.md (Iteration 34: Iteration 34 \u5b9f\u884c\u6e08\u307f)",
-      ".claude/research/backlog.md (B54)",
+      ".claude/research/journal.md (Iteration 35: education固有の手作り訓練問題追加による意味的ギャップ解消)",
+      ".claude/research/journal.md (Iteration 35: 分析(解釈) (Iter35))",
+      ".claude/research/journal.md (Iteration 35: 考察 (Iter35))",
+      ".claude/research/backlog.md (B56)",
       ".claude/research/config.yml (levers: classifier_training_data_composition)"
     ],
-    "planned_lever": "classifier_training_data_composition=education_handmade_training_problems",
-    "note": "Iter34\uff08\u6848A: sociology=90/high_school_psychology=30/moral_disputes=30\uff09\u306frejected\u78ba\u5b9a\uff0eeducation_recall 0.4353 < medical_recall\u57fa\u6e96 0.5112\uff0875.59pt\u30ae\u30e3\u30c3\u30d7\uff09\uff0e3\u9023\u6295\uff08Iter32 sample_weight, Iter33 \u6848C, Iter34 \u6848A\uff09\u3067resampling\u7cfb\u30ec\u30d0\u30fc\u306f\u5c3d\u304d\u305f\uff08sociology pool cap 94\u306b\u5bfe\u305790\u4ef6\u4f7f\u7528\uff09\uff0e\u6839\u672c\u539f\u56e0\u306f\u300c\u6559\u80b2\u30c9\u30e1\u30a4\u30f3\u306e\u4ee3\u7406\u30bf\u30b9\u30af\u304c\u672c\u8cea\u7684\u306beducation\u306e\u610f\u5473\u7684\u30ae\u30e3\u30c3\u30d7\u3092\u62b1\u3048\u3066\u3044\u308b\u300d\uff0e\u6b21\u30a4\u30c6\u30ec\u30fc\u30b7\u30e7\u30f3\uff08Iter35\uff09\u306feducation\u56fa\u6709\u306e\u624b\u4f5c\u308a\u8a13\u7df4\u554f\u984c\u306e\u8ffd\u52a0\u3078\u5207\u308a\u66ff\u3048\u308b\uff0e\u624b\u4f5c\u308a\u554f\u984c\u306f4\u629e\u5f62\u5f0f\uff08A/B/C/D\uff09\u3092\u4fdd\u3064\u3053\u3068\uff08\u66f8\u5f0f shortcuts \u30ea\u30b9\u30af\uff0cIter32\u8abf\u67fb\u3067\u78ba\u8a8d\u6e08\u307f\uff09\uff0e\u6559\u80b2\u884c\u653f\u5b9f\u52d9\u306b\u5373\u3057\u305f\u554f\u984c\uff08\u5b66\u6821\u4e8b\u6545\u8cac\u4efb\uff0c\u751f\u5f92\u5065\u5eb7\u7ba1\u7406\uff0c\u30a2\u30ec\u30eb\u30ae\u30fc\u5bfe\u5fdc\uff0c\u61f2\u6212\u51e6\u5206\u7b49\uff09\u3092\u4f5c\u6210\u3059\u308b\uff0e\u30b3\u30b9\u30c8: 1-3\u65e5\uff0c\u30aa\u30d5\u30e9\u30a4\u30f3\u5b8c\u7d50\uff08\u5206\u985e\u5668\u518d\u8a13\u7df4\uff0bevaluate_classifier_calibration.py\u3067\u306e\u518d\u8a55\u4fa1\u306e\u307f\uff09\uff0erc-investigator\u306f\u307e\u305abuild_dataset.py\u306e\u65e2\u5b58\u5b9f\u88c5\u69cb\u9020\u3092\u8abf\u67fb\u3057\uff0c\u624b\u4f5c\u308a\u554f\u984c\u306e\u8ffd\u52a0\u65b9\u6cd5\uff08_COMPOUND_QUESTIONS\u3068\u540c\u69d8\u306e\u624b\u6cd5\u304b\uff0c\u5225\u7d4c\u8def\u304b\uff09\u3092\u7279\u5b9a\u3059\u308b\u3053\u3068\uff0e"
+    "planned_lever": null,
+    "note": "Iter35（handmade 50件）はrejected確定．education_recall 0.4118 < medical_recall基準 0.5112（9.94ptギャップ）．4連投（Iter32-35）でrejected確定．config.ymlの全leversを試し尽くした． handmade問題は既存proxyタスクの埋め込み空間と競合し，classification boundaryを混乱させた．次のイテレーション（Iter36）は調査フェーズから開始する．rc-investigatorはtavily-search等で以下の観点から調査すること: (1) educationドメインのembeddingsを改善する既存の手法（ドメイン特化埋め込み，fine-tuning等） (2) proxyタスクの置換（意味的ギャップが小さい代替タスクの探索） (3) education_recallのボトルネック分析（具体的な失敗パターンから改善方向性を見出す） (4) Y2（dispatch_candidate_threshold）の下調べ（閾値設計の指針）．"
   },
   "e32_results": {
     "lever": "classifier_training_data_composition=education_proxy_task_revision (weak-task sample_weight: high_school_psychology=2.0, moral_disputes=2.0, others=1.0)",
@@ -32,7 +31,7 @@
     "flip_rate": 0.009375,
     "bh_significant_regressions_18_metrics": 0,
     "judgment": "rejected",
-    "note": "\u4e3b\u57fa\u6e96\uff08education_recall>medical_recall\u57fa\u6e96\uff09\u4e0d\u6210\u7acb\u306b\u52a0\u3048\uff0ceducation_recall\u81ea\u4f53\u304c\u60aa\u5316\u3057\u5168\u4f53top1_accuracy\u3082\u6709\u610f\u60aa\u5316\u3057\u305f\uff0e\u6a5f\u5e8f\u306fLogisticRegression(class_weight=\"balanced\")\u304csample_weight\u306b\u4f9d\u5b58\u3057\u3066\u81ea\u52d5\u518d\u8a08\u7b97\u3055\u308c\u308b\u305f\u3081\uff0c\u72d9\u3063\u305f\u52b9\u679c\u304c\u6e1b\u8870\u3057\u4ed69\u30c9\u30e1\u30a4\u30f3\u306b\u76f8\u5bfe\u512a\u4f4d\u3092\u4e0e\u3048\u305f\u3053\u3068\uff08sklearn\u30bd\u30fc\u30b9\u3067\u78ba\u8a8d\u6e08\u307f\uff09\uff0e\u975e\u9000\u884c\u30c1\u30a7\u30c3\u30af\uff08BH\u88dc\u6b63\uff09\u306f\u5b57\u7fa9\u901a\u308a\u6210\u7acb\u3059\u308b\u304c\u691c\u5b9a\u529b\u4e0d\u8db3\u306e\u898b\u304b\u3051\u4e0a\u306e\u975e\u9000\u884c\u3068\u5224\u65ad\uff0emodels/domain_classifier.joblib\uff08Iter31 temperature\u8f03\u6b63\u7248\uff09\u306f\u7121\u5909\u66f4\u306e\u307e\u307e\uff0e"
+    "note": "主基準（education_recall>medical_recall基準）不成立に加え，education_recall自体が悪化し全体top1_accuracyも有意悪化した．機序はLogisticRegression(class_weight=\"balanced\")がsample_weightに依存して自動再計算されるため，狙った効果が減衰し他9ドメインに相対優位を与えたこと（sklearnソースで確認済み）．非退行チェック（BH補正）は字義通り成立するが検定力不足の見かけ上の非退行と判断．models/domain_classifier.joblib（Iter31 temperature較正版）は無変更のまま．"
   },
   "e30_results": {
     "lever": "classifier_calibration=isotonic (CalibratedClassifierCV method='isotonic', cv=5, ensemble=True)",
@@ -84,7 +83,7 @@
     },
     "judgment": "partial",
     "production_rollout": "deferred (per-domain non-regression criterion not met: medical_recall BH-significant regression; models/domain_classifier.joblib unchanged)",
-    "note": "rc-analyst\u63d0\u6848\u3069\u304a\u308arc-reflector\u304cpartial\u3092\u78ba\u5b9a\uff08journal.md \u8003\u5bdf(Iter30)\u53c2\u7167\uff09\u3002ECE\u30fbtop1_accuracy\u306f\u660e\u78ba\u306b\u6210\u7acb\u3001per-domain 20\u6307\u6a19BH\u88dc\u6b63\u5f8c\u306e\u60aa\u5316\u65b9\u5411\u6709\u610f\u6307\u6a19\u304cmedical_recall 1\u4ef6\u3067\u4e0d\u6210\u7acb\u3002medical\u306f\u8a13\u7df4150\u4ef6\u306e\u591a\u6570\u6d3e\u30c9\u30e1\u30a4\u30f3\u3067\u5c0f\u6a19\u672c\u4eee\u8aac\u306f\u53cd\u8a3c\u3055\u308c\u3001isotonic\u8f03\u6b63\u66f2\u7dda\u306e\u30af\u30e9\u30b9\u56fa\u6709\u306e\u7cfb\u7d71\u7684\u5727\u7e2e\u304c\u7591\u308f\u308c\u308b\u3002\u6b21\u30a4\u30c6\u30ec\u30fc\u30b7\u30e7\u30f3\u306fmethod='temperature'\u3092\u691c\u8a3c\u3059\u308b\u3002"
+    "note": "rc-analyst提案どおりrc-reflectorがpartialを確定（journal.md 考察(Iter30)参照）。ECE・top1_accuracyは明確に成立、per-domain 20指標BH補正後の悪化方向有意指標がmedical_recall 1件で不成立。medicalは訓練150件の多数派ドメインで小標本仮説は反証され、isotonic較正曲線のクラス固有の系統的圧縮が疑われる。次イテレーションはmethod='temperature'を検証する。"
   },
   "e28_results": {
     "lever": "fallback_policy=disabled (confidence_threshold: 0.5->0.0, dispatch_top_k: 2->1, aggregation_method: llm_judge->max_confidence)",
@@ -100,7 +99,7 @@
     "mcnemar_discordant_pairs": 77,
     "mcnemar_p_value": 1.5868484193326537e-07,
     "judgment": "adopted",
-    "note": "\u6210\u529f\u6761\u4ef64\u9805\u76ee\u4e2d3\u9805\u76ee\uff08top1\u6709\u610f\u6539\u5584p=1.59e-7\u30fbfallback0/1600\u30fbanswer_quality\u6539\u5584+3.8pt>3SD=2.61pt\uff09\u304c\u660e\u78ba\u306b\u6210\u7acb\u3002\u6761\u4ef64\uff08\u975e\u9000\u884c\uff09\u306fgeneral\u30c9\u30e1\u30a4\u30f3recall\u306e\u307fCI\u4e0b\u9650\u5272\u308c\u3060\u304c\u3001\u540c\u4e00212\u884c\u5185\u3067precision\u304c0.3134->0.6522\u3078\u5927\u5e45\u6539\u5584\u3057\u3066\u304a\u308afallback\u5ec3\u6b62\u306b\u5185\u5728\u3059\u308b\u69cb\u9020\u7684\u30c8\u30ec\u30fc\u30c9\u30aa\u30d5\u3068\u5224\u65ad\u3001\u5224\u5b9a\u306f\u8986\u3055\u305a\u3002\u4e8b\u524d\u5b9f\u6e2c\uff08central_iter26 vs 26b\uff09\u3068top1\u30fb\u03ba\u304c\u307b\u307c\u5b8c\u5168\u4e00\u81f4\u3057\u3001Iter26\u306e\u300e\u30a2\u30fc\u30ad\u30c6\u30af\u30c1\u30e3\u3092\u5909\u3048\u3066\u3082\u30eb\u30fc\u30c6\u30a3\u30f3\u30b0\u306f\u5b8c\u5168\u4e00\u81f4\u300f\u3092\u5225\u30ec\u30d0\u30fc\u3067\u518d\u78ba\u8a8d\u3002\u6b21\u30ec\u30d0\u30fc\u306fY4\uff08classifier_calibration\uff09\u3002"
+    "note": "成功条件4項目中3項目（top1有意改善p=1.59e-7・fallback0/1600・answer_quality改善+3.8pt>3SD=2.61pt）が明確に成立。条件4（非退行）はgeneralドメインrecallのみCI下限割れだが、同一212行内でprecisionが0.3134->0.6522へ大幅改善しておりfallback廃止に内在する構造的トレードオフと判断、判定は覆さず。事前実測（central_iter26 vs 26b）とtop1・κがほぼ完全一致し、Iter26の『アーキテクチャを変えてもルーティングは完全一致』を別レバーで再確認。次レバーはY4（classifier_calibration）。"
   },
   "e27_results": {
     "lever": "aggregation_method (max_confidence / majority_vote / llm_judge, dispatch_top_k=2)",
@@ -118,11 +117,11 @@
       "llm_judge": 0.508
     },
     "judgment": "invalid",
-    "note": "\u5b9f\u9a13\u4e0d\u6210\u7acb\uff08no-op\uff09\uff0econfidence_threshold=0.5 \u306e\u5019\u88dc\u30b2\u30fc\u30c8\u306b\u3088\u308a 2 \u4f4d\u30ce\u30fc\u30c9\u304c\u4e00\u5ea6\u3082\u9069\u683c\u306b\u306a\u3089\u305a\uff082\u4f4dconfidence\u306e\u6700\u5927\u5024 0.4955\uff09\uff0cdispatch_top_k=2 \u304c\u767a\u706b\u3057\u306a\u304b\u3063\u305f\uff0e3 \u65b9\u5f0f\u3068\u3082 Iter25 \u57fa\u6e96\u7dda\u3068\u30d3\u30c3\u30c8\u5358\u4f4d\u4e00\u81f4\uff0e\u6a5f\u5e8f\u306f docs/d0004 \u00a73\uff0e"
+    "note": "実験不成立（no-op）．confidence_threshold=0.5 の候補ゲートにより 2 位ノードが一度も適格にならず（2位confidenceの最大値 0.4955），dispatch_top_k=2 が発火しなかった．3 方式とも Iter25 基準線とビット単位一致．機序は docs/d0004 §3．"
   },
   "noise_floor_axis23": {
-    "source": "Iter25 \u57fa\u6e96\u7dda + Iter27 \u306e 3 \u5b9f\u884c\uff08\u30eb\u30fc\u30c6\u30a3\u30f3\u30b0\u306f\u6c7a\u5b9a\u8ad6\u7684\u306b\u540c\u4e00\uff0c\u751f\u6210\u306e\u30e9\u30f3\u30c0\u30e0\u6027\u306e\u307f\u7570\u306a\u308b 4 \u53cd\u5fa9\uff09",
-    "metric": "answer_quality_accuracy (JMMLU 1500 \u554f\uff0c\u62bd\u51fa\u7167\u5408)",
+    "source": "Iter25 基準線 + Iter27 の 3 実行（ルーティングは決定論的に同一，生成のランダム性のみ異なる 4 反復）",
+    "metric": "answer_quality_accuracy (JMMLU 1500 問，抽出照合)",
     "values": [
       0.5086666666666667,
       0.496,
@@ -133,10 +132,10 @@
     "stdev_pt": 0.87,
     "three_sd_pt": 2.61,
     "row_level_flip_rate": 0.239,
-    "note": "d0003 X6 \u306b\u76f8\u5f53\u3059\u308b\u6e2c\u5b9a\u304c\u5b9f\u8cea\u5b8c\u4e86\uff0e\u66ab\u5b9a\u5024 1.3pt\uff08n=2, d0002 \u00a76-F\uff09\u3092 3SD=2.6pt \u3078\u7f6e\u304d\u63db\u3048\uff0cconfig.yml \u306e success_criteria \u306b\u53cd\u6620\u6e08\u307f\uff0e"
+    "note": "d0003 X6 に相当する測定が実質完了．暫定値 1.3pt（n=2, d0002 §6-F）を 3SD=2.6pt へ置き換え，config.yml の success_criteria に反映済み．"
   },
   "fallback_ablation_precomputed": {
-    "source": "results/central_iter26/\uff08fallback \u5ec3\u6b62\u76f8\u5f53\uff09vs results/central_iter26b/\uff08\u73fe\u884c\uff09\uff0e\u30a2\u30fc\u30ad\u30c6\u30af\u30c1\u30e3\u30fb\u5206\u985e\u5668\u30fb\u30c7\u30fc\u30bf\u30bb\u30c3\u30c8\u306f\u540c\u4e00\u3067 fallback \u65b9\u7b56\u306e\u307f\u7570\u306a\u308b\uff08B46 \u306e\u526f\u7523\u7269\uff09",
+    "source": "results/central_iter26/（fallback 廃止相当）vs results/central_iter26b/（現行）．アーキテクチャ・分類器・データセットは同一で fallback 方策のみ異なる（B46 の副産物）",
     "top1_accuracy": {
       "no_fallback": 0.585,
       "with_fallback": 0.5556
@@ -158,11 +157,11 @@
       "sent_to_general": "18/212 (8.5%)",
       "sent_to_argmax": "65/212 (30.7%)"
     },
-    "note": "Iter28\uff08Y1\uff09\u306e\u4e8b\u524d\u6839\u62e0\uff0e\u5206\u6563\u7248\u3067\u306e\u518d\u73fe\u78ba\u8a8d\u304c Iter28 \u306e\u76ee\u7684\uff0e"
+    "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
   },
   "last_slack_ts": "1785508468.260749",
-  "iteration_thread_ts": "1785508417.686489",
-  "notion_toggle_created": true,
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
   "last_commit": "c28a5ee",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
@@ -176,7 +175,7 @@
     "mean_duration_ms": 4558.229,
     "distributed_mean_duration_ms": 3626.775,
     "judgment": "adopted",
-    "note": "confidence_threshold/fallback\u65b9\u7b56\u3092\u5206\u6563\u7248\u3068\u63c3\u3048\u305f\u7d50\u679c\uff0c\u30eb\u30fc\u30c6\u30a3\u30f3\u30b0\u7cbe\u5ea6\u306f\u5b8c\u5168\u4e00\u81f4\uff08McNemar discordant=0\uff09\u3002\u4e2d\u592e\u7248\u306f\u5206\u6563\u7248\u3088\u308a25.7%\u9045\u3044\uff08SSH\u8d8a\u3057\u306e\u30aa\u30fc\u30d0\u30fc\u30d8\u30c3\u30c9\uff09\u3002\u4eee\u8aac1\u652f\u6301\u30fb\u4eee\u8aac2\u4e0d\u652f\u6301\u3002\u56de\u7b54\u54c1\u8cea -1.53pt\u30fbE2E -1.50pt \u306f 3SD=2.6pt \u672a\u6e80\u306b\u3064\u304d\u30ce\u30a4\u30ba\u3068\u78ba\u5b9a\uff08Iter27 \u3067\u5224\u660e\uff09\u3002"
+    "note": "confidence_threshold/fallback方策を分散版と揃えた結果，ルーティング精度は完全一致（McNemar discordant=0）。中央版は分散版より25.7%遅い（SSH越しのオーバーヘッド）。仮説1支持・仮説2不支持。回答品質 -1.53pt・E2E -1.50pt は 3SD=2.6pt 未満につきノイズと確定（Iter27 で判明）。"
   },
   "e25_results": {
     "lever": "eval_dataset_compound_expansion_20_to_100",
@@ -190,7 +189,7 @@
     "ece": 0.20402063160346984,
     "fallback_rate": 0.1325,
     "judgment": "adopted",
-    "note": "research_frontier\u9805\u76ee2\u5b9f\u65bd\u3002\u8907\u5408\u8a2d\u554f20\u2192100\u554f\u62e1\u5145\u5f8c\u306e\u65b0\u57fa\u6e96\u7dda\uff081600\u554f\uff0cresults/20260730_145356/\uff09\u3002single_domain_top1/kappa/answer_quality\u306fIter23\u3068\u5b8c\u5168\u4e00\u81f4\uff0c\u30eb\u30fc\u30c6\u30a3\u30f3\u30b0\u9000\u884c\u306a\u3057\u3002"
+    "note": "research_frontier項目2実施。複合設問20→100問拡充後の新基準線（1600問，results/20260730_145356/）。single_domain_top1/kappa/answer_qualityはIter23と完全一致，ルーティング退行なし。"
   },
   "e24_results": {
     "lever": "routing_architecture=central_router",
@@ -204,7 +203,7 @@
     "answer_quality_accuracy": 0.546,
     "end_to_end_accuracy": 0.294,
     "judgment": "rejected",
-    "note": "\u4e2d\u592e\u96c6\u6a29\u30eb\u30fc\u30bf\u306f\u5b9f\u88c5\u30d0\u30b0\uff08few-shot\u6b20\u843d\uff09\u3067rejected\u3002probe\u901f\u5ea6\u306f\u4e88\u6e2c\u901a\u308a\u6539\u5584\uff0855.7%\uff09\u3002"
+    "note": "中央集権ルータは実装バグ（few-shot欠落）でrejected。probe速度は予測通り改善（55.7%）。"
   },
   "e10_results": {
     "lever": "expert_specialization=domain_lora",
@@ -255,7 +254,7 @@
     "auroc": 0.723004,
     "fallback_rate": 0.131579,
     "judgment": "adopted",
-    "note": "X1: \u6e2c\u5b9a\u7cfb\u4fee\u5fa9\u5f8c\u306e\u57fa\u6e96\u7dda\u518d\u53d6\u5f97\u3002\u4e3b\u57fa\u6e964\u9805\u76ee\u304c\u671f\u5f85\u5024\u3068\u5b8c\u5168\u306b\u4e00\u81f4\u3002"
+    "note": "X1: 測定系修復後の基準線再取得。主基準4項目が期待値と完全に一致。"
   },
   "e29_results": {
     "lever": "classifier_calibration=platt (CalibratedClassifierCV method='sigmoid', cv=5, ensemble=True)",
@@ -353,7 +352,7 @@
     }
   },
   "e33_results": {
-    "lever": "classifier_training_data_composition=education_proxy_task_resampling (\u6848C: sociology=70, high_school_psychology=40, moral_disputes=40)",
+    "lever": "classifier_training_data_composition=education_proxy_task_resampling (案C: sociology=70, high_school_psychology=40, moral_disputes=40)",
     "education_recall_before": 0.4059,
     "education_recall_after": 0.4412,
     "education_recall_mcnemar_p": 0.239317,
@@ -363,11 +362,11 @@
     "top1_accuracy_mcnemar_p": 0.1589,
     "bh_significant_regressions_18_metrics": 0,
     "judgment": "rejected",
-    "note": "\u4e3b\u57fa\u6e96\uff08education_recall>medical_recall\u57fa\u6e96\uff09\u4e0d\u6210\u7acb\uff080.4412 < 0.5112\uff0c70pt\u30ae\u30e3\u30c3\u30d7\uff09\uff0eMcNemar p=0.1589 \u3067 top1_accuracy \u306e\u6709\u610f\u6539\u5584\u306a\u3057\uff0eeducation_recall \u306e +3.53pt \u6539\u5584\u306f SE~3.8pt \u306e\u30ce\u30a4\u30ba\u7bc4\u56f2\u5185\uff0e\u6848C\uff0870/40/40\uff09\u306e\u5909\u5316\u5e45\u3067\u306f\u4e0d\u5341\u5206\uff0e\u6b21\u30a4\u30c6\u30ec\u30fc\u30b7\u30e7\u30f3\u306f\u6848A\uff0890/30/30\uff09\u3092\u6b21\u70b9\u3068\u3057\u3066\u8a66\u3059\uff0e\u6848A\u3082\u4e0d\u6210\u7acb\u306a\u3089\uff0ceducation\u56fa\u6709\u306e\u624b\u4f5c\u308a\u8a13\u7df4\u554f\u984c\u306e\u8ffd\u52a0\u3078\u5207\u308a\u66ff\u3048\u304c\u5fc5\u8981\uff0e\u975e\u9000\u884c\u6761\u4ef6\uff08BH\u88dc\u6b63\u5f8c\u6709\u610f\u9000\u884c0\u4ef6\uff09\u306f\u6210\u7acb\uff0e\u3010rc-reflector\u8ffd\u52a0\u30112\u30a4\u30c6\u30ec\u30fc\u30b7\u30e7\u30f3\u9023\u7d9a\uff08Iter32 sample_weight, Iter33 resampling\u6848C\uff09\u3067rejected\u3068\u306a\u3063\u305f\u80cc\u666f\u306b\u306f\uff0c\u300c\u6559\u80b2\u30c9\u30e1\u30a4\u30f3\u306e\u4ee3\u7406\u30bf\u30b9\u30af\u304c\u672c\u8cea\u7684\u306beducation\u306e\u610f\u5473\u7684\u30ae\u30e3\u30c3\u30d7\u3092\u62b1\u3048\u3066\u3044\u308b\u300d\u3068\u3044\u3046\u6839\u672c\u539f\u56e0\u304c\u3042\u308b\uff0e\u62bd\u51fa\u6bd4\u7387\u306e\u5909\u66f4\u3068\u3044\u3046\u8868\u9762\u7684\u306a\u6700\u9069\u5316\u3067\u306f\uff0c\u3053\u306e\u6839\u672c\u539f\u56e0\u306b\u5bfe\u51e6\u3067\u304d\u306a\u3044\uff0e"
+    "note": "主基準（education_recall>medical_recall基準）不成立（0.4412 < 0.5112，70ptギャップ）．McNemar p=0.1589 で top1_accuracy の有意改善なし．education_recall の +3.53pt 改善は SE~3.8pt のノイズ範囲内．案C（70/40/40）の変化幅では不十分．次イテレーションは案A（90/30/30）を次点として試す．案Aも不成立なら，education固有の手作り訓練問題の追加へ切り替えが必要．非退行条件（BH補正後有意退行0件）は成立．【rc-reflector追加】2イテレーション連続（Iter32 sample_weight, Iter33 resampling案C）でrejectedとなった背景には，「教育ドメインの代理タスクが本質的にeducationの意味的ギャップを抱えている」という根本原因がある．抽出比率の変更という表面的な最適化では，この根本原因に対処できない．"
   },
   "e34_results": {
-    "lever": "classifier_training_data_composition=education_proxy_task_resampling (\u6848A: sociology=90, high_school_psychology=30, moral_disputes=30)",
-    "education_recall_before": 0.5000,
+    "lever": "classifier_training_data_composition=education_proxy_task_resampling (案A: sociology=90, high_school_psychology=30, moral_disputes=30)",
+    "education_recall_before": 0.5,
     "education_recall_after": 0.4353,
     "education_recall_mcnemar_p": 0.072486,
     "medical_recall_threshold": 0.5112,
@@ -376,6 +375,49 @@
     "top1_accuracy_mcnemar_p": null,
     "bh_significant_regressions_18_metrics": 0,
     "judgment": "rejected",
-    "note": "\u4e3b\u57fa\u6e96\uff08education_recall>medical_recall\u57fa\u6e96\uff09\u4e0d\u6210\u7acb\uff080.4353 < 0.5112\uff0c75.59pt\u30ae\u30e3\u30c3\u30d7\uff09\uff0eIter31\u6bd4\u3067-6.47pt\uff0cIter33\uff08\u6848C\uff09\u6bd4\u3067\u3082-0.59pt\u306e\u4f4e\u4e0b\uff0eMcNemar p=0.0725 \u3067 top1_accuracy \u306e\u6709\u610f\u6539\u5584\u306a\u3057\uff0e\u975e\u9000\u884c\u6761\u4ef6\uff08BH\u88dc\u6b63\u5f8c\u6709\u610f\u9000\u884c0\u4ef6\uff09\u306f\u6210\u7acb\uff0e3\u30a4\u30c6\u30ec\u30fc\u30b7\u30e7\u30f3\u9023\u7d9a\uff08Iter32 sample_weight, Iter33 \u6848C, Iter34 \u6848A\uff09\u3067rejected\u78ba\u5b9a\uff0eresampling\u7cfb\u30ec\u30d0\u30fc\u306f\u5c3d\u304d\u305f\uff08sociology pool cap 94\u5bfe\u305790\u4ef6\u4f7f\u7528\uff09\uff0e\u6b21\u30a4\u30c6\u30ec\u30fc\u30b7\u30e7\u30f3\uff08Iter35\uff09\u306feducation\u56fa\u6709\u306e\u624b\u4f5c\u308a\u8a13\u7df4\u554f\u984c\u306e\u8ffd\u52a0\u3078\u5207\u308a\u66ff\u3048\uff0e\u672c\u5b9f\u539f\u56e0\u306f\u4ee3\u7406\u30bf\u30b9\u30af\u3068education\u306e\u610f\u5473\u7684\u30ae\u30e3\u30c3\u30d7\uff08Iter32\u8abf\u67fb\u78ba\u8a8d\uff09\u3067\u3042\u308a\uff0c\u62bd\u51fa\u6bd4\u7387\u306e\u5909\u66f4\u3067\u306f\u89e3\u6c7a\u4e0d\u53ef\u80fd\uff0e\u624b\u4f5c\u308a\u554f\u984c\u306f4\u9078\u30d5\u30a9\u30fc\u30de\u30c3\u30c8\u3092\u4fdd\u3064\u5fc5\u8981\u3042\u308a\uff08\u66f8\u5f0f\u305f\u304b\u308a\u30b7\u30e7\u30fc\u30c8\u30ea\u30f3\u30b0\u30ea\u30b9\u30af\uff09\uff0e"
+    "note": "主基準（education_recall>medical_recall基準）不成立（0.4353 < 0.5112，75.59ptギャップ）．Iter31比で-6.47pt，Iter33（案C）比でも-0.59ptの低下．McNemar p=0.0725 で top1_accuracy の有意改善なし．非退行条件（BH補正後有意退行0件）は成立．3イテレーション連続（Iter32 sample_weight, Iter33 案C, Iter34 案A）でrejected確定．resampling系レバーは尽きた（sociology pool cap 94対し90件使用）．次イテレーション（Iter35）はeducation固有の手作り訓練問題の追加へ切り替え．本実原因は代理タスクとeducationの意味的ギャップ（Iter32調査確認）であり，抽出比率の変更では解決不可能．手作り問題は4選フォーマットを保つ必要あり（書式たかりショートリングリスク）．"
+  },
+  "e35_results": {
+    "lever": "classifier_training_data_composition=education_handmade_training_problems (50件追加)",
+    "education_recall_before": 0.4588,
+    "education_recall_after": 0.4118,
+    "education_recall_mcnemar_p": 0.2433,
+    "medical_recall_threshold": 0.5112,
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.6006,
+    "top1_accuracy_mcnemar_p": 0.4966,
+    "flip_rate": 0.11,
+    "bh_significant_regressions_18_metrics": 0,
+    "ece_before": 0.0712,
+    "ece_after": 0.0751,
+    "education_flip_correct_to_wrong": 22,
+    "education_flip_wrong_to_correct": 14,
+    "education_confusion_top3": {
+      "medical": 18,
+      "business_economics": 18,
+      "general": 14
+    },
+    "education_prob_mean": {
+      "before": 0.3056,
+      "after": 0.3026
+    },
+    "education_wilson_ci": {
+      "before": [
+        0.3857,
+        0.5338
+      ],
+      "after": [
+        0.3405,
+        0.4869
+      ]
+    },
+    "data_used": {
+      "train_data": "data/classifier_train_iter35_handmade.jsonl (1477 rows, education=200: proxy=150+handmade=50)",
+      "before_results": "results/iter31_calibrated_predictions.jsonl (1600 rows, not re-run)",
+      "after_results": "results/iter35_calibrated_predictions.jsonl (1600 rows, newly generated)",
+      "classifier_model": "models/domain_classifier_iter35_handmade.joblib (n_samples=1477, temperature calibration)"
+    },
+    "judgment": "rejected",
+    "note": "主基準（education_recall>medical_recall基準）不成立（0.4118 < 0.5112, gap=9.94pt）。education_recall自体がIter31比で-4.71pt、Iter34比で-2.34ptの悪化。手作り問題50件の追加は既存proxyタスク埋め込みと競合しclassification boundaryを混乱させた。non-education偽陽性率不変（4.83%→5.03%）は手作り埋め込みが他ドメインに漏出していないことを示すが、既存education埋め込みとの競合が問題。top1_accuracy McNemar p=0.4966で有意改善なし。ECE悪化（0.0712→0.0751）。BH補正後有意退行0件（非退行は成立）。Wilson CI重なり（[0.3857,0.5338] vs [0.3405,0.4869]）で統計的有意差なしだが、5反復の系統的低下トレンド（0.5000→0.4118）は懸念。resampling系レバーは尽きた（sociology pool cap 94に対し90件使用）。次イテレーションは代替アプローチの検討が必要。"
   }
 }
