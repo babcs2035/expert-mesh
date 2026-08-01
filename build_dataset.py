@@ -156,17 +156,28 @@ _DOMAIN_TASK_MAP: dict[str, list[str]] = {
     ],
 }
 
-# Iter32 (classifier_training_data_composition=education_proxy_task_revision, Y5):
-# confusion-matrix実測（journal Iter32調査）でeducationの3代理タスクのうち
-# high_school_psychology(recall 0.438)・moral_disputes(0.435)がsociology(0.625)より
-# 明確に弱いと判明した。classifier訓練行にタスク別のsample_weightを付与し，弱い2タスクの
-# 決定境界寄与を重くする。マップに無いタスク（他9ドメイン全て・sociology含む）は
-# _DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT(1.0)のまま，Iter31以前と同じ挙動になる。
-_CLASSIFIER_TASK_SAMPLE_WEIGHTS: dict[str, float] = {
-    "high_school_psychology": 2.0,
-    "moral_disputes": 2.0,
-}
+# Iter32 (classifier_training_data_composition=education_proxy_task_revision, Y5) で
+# 導入されたsample_weight機構は，`class_weight="balanced"`との数式結合によりIter32計画の
+# 意図に反し逆効果と判明したためrejected・revert済み（backlog B53参照）。
+# Iter33以降は`education_proxy_task_resampling`（抽出段階でのタスク別目標件数変更）に
+# 移行し，`sample_weight`は使わない設計とする。_CLASSIFIER_TASK_SAMPLE_WEIGHTSは空辞書であり，
+# _classifier_task_sample_weight()はすべてのタスクで1.0を返す（no-op）。
+_CLASSIFIER_TASK_SAMPLE_WEIGHTS: dict[str, float] = {}
 _DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT = 1.0
+
+# Iter33 (classifier_training_data_composition=education_proxy_task_resampling, Y5):
+# Iter32のsample_weight方式はrejected（class_weight="balanced"との数式結合で逆効果，
+# backlog B53）。sample_weightを使わず，抽出段階でのタスク別目標件数を変えることで
+# 同じ着想（sociology優位の反映）を実現する。合計は_DOMAIN_TARGET_SIZE(150)のまま不変
+# ＝class_weight_[education]はIter31以前と同じ値を保つ。配分は案C（journal Iter33計画）:
+# sociology(recall 0.625,相対的に良好)を最も厚く，high_school_psychology(0.438)・
+# moral_disputes(0.435)を均等に薄くする中庸案。
+_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES: dict[str, int] = {
+    "sociology": 70,
+    "high_school_psychology": 40,
+    "moral_disputes": 40,
+}
+assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE
 
 
 def _classifier_task_sample_weight(task_name: str) -> float:
@@ -616,6 +627,7 @@ def _sample_domain_questions(
     seed: int,
     exclude_tasks: frozenset[str],
     exclude_queries: frozenset[str] = frozenset(),
+    task_target_sizes: dict[str, int] | None = None,
 ) -> list[tuple[str, str, str]]:
     """Sample up to target_size (query, answer, task_name) tuples for one domain's tasks.
 
@@ -626,7 +638,36 @@ def _sample_domain_questions(
     exclude_queries removes specific questions from the pool before
     sampling (used by build_classifier_training_rows to guarantee its
     output never overlaps the evaluation dataset's questions).
+
+    When task_target_sizes is provided, each task is sampled independently
+    from its own pool using the task-specific target size (capped at pool
+    size). This allows per-task control of representation (e.g., Iter33's
+    education proxy task resampling). Uses a single random.Random(seed)
+    instance, calling rng.sample() in task_names order for deterministic
+    reproducibility.
     """
+    rng = random.Random(seed)
+
+    if task_target_sizes is not None:
+        assert set(task_names) <= set(task_target_sizes), (
+            f"task_target_sizes must cover all task_names: "
+            f"{set(task_names) - set(task_target_sizes)} missing"
+        )
+        result: list[tuple[str, str, str]] = []
+        for task_name in task_names:
+            if task_name in exclude_tasks:
+                continue
+            task_pool: list[tuple[str, str, str]] = []
+            for row in _parse_jmmlu_task_csv(zf, task_name):
+                query = _format_jmmlu_query(row)
+                if query in exclude_queries:
+                    continue
+                task_pool.append((query, row["answer"], task_name))
+            task_target = task_target_sizes.get(task_name, target_size)
+            sample_size = min(task_target, len(task_pool))
+            result.extend(rng.sample(task_pool, sample_size))
+        return result
+
     pool: list[tuple[str, str, str]] = []
     for task_name in task_names:
         if task_name in exclude_tasks:
@@ -637,7 +678,7 @@ def _sample_domain_questions(
                 continue
             pool.append((query, row["answer"], task_name))
     sample_size = min(target_size, len(pool))
-    return random.Random(seed).sample(pool, sample_size)
+    return rng.sample(pool, sample_size)
 
 
 def _build_jmmlu_backed_groups(
@@ -756,17 +797,44 @@ def build_classifier_training_rows(
     _CLASSIFIER_TASK_SAMPLE_WEIGHTS get that weight, all others default to
     1.0, so pre-Iter32 behavior (uniform weighting) is unchanged unless a
     task is explicitly listed.
+
+    Iter33 education override: the `education` domain is sampled separately
+    from other domains, using task-specific target sizes defined by
+    _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES (sociology=70,
+    high_school_psychology=40, moral_disputes=40). This avoids the
+    `sample_weight` mechanism that was rejected in Iter32 due to its
+    interaction with `class_weight="balanced"`. All other domains continue
+    to use the standard pooled sampling via _build_jmmlu_backed_groups().
     """
     eval_queries = frozenset(row["query"] for row in eval_rows if not row["is_compound"])
     zip_bytes = _load_jmmlu_zip_bytes(jmmlu_zip_path)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        domain_task_map_without_education = {
+            domain: tasks
+            for domain, tasks in domain_task_map.items()
+            if domain != "education"
+        }
         domain_groups = _build_jmmlu_backed_groups(
             zf,
             domain_target_size,
             exclude_restricted_license_tasks,
-            domain_task_map,
+            domain_task_map_without_education,
             seed=_CLASSIFIER_TRAIN_SAMPLE_SEED,
             exclude_queries=eval_queries,
+        )
+        exclude_tasks = (
+            _RESTRICTED_LICENSE_TASKS
+            if exclude_restricted_license_tasks
+            else frozenset()
+        )
+        domain_groups["education"] = _sample_domain_questions(
+            zf,
+            domain_task_map["education"],
+            domain_target_size,
+            _CLASSIFIER_TRAIN_SAMPLE_SEED,
+            exclude_tasks,
+            exclude_queries=eval_queries,
+            task_target_sizes=_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES,
         )
 
     rows = []

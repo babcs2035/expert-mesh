@@ -8,13 +8,18 @@ run fully offline with no network access and no copyrighted content.
 
 import io
 import json
+import zipfile
 from pathlib import Path
 
 from build_dataset import (
+    _DOMAIN_TASK_MAP,
+    _DOMAIN_TARGET_SIZE,
+    _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES,
     _RESTRICTED_LICENSE_TASKS,
     _build_rows,
     _classifier_task_sample_weight,
     _ensure_parent_dir,
+    _sample_domain_questions,
     build_classifier_training_rows,
     write_dataset,
 )
@@ -247,12 +252,13 @@ def test_build_classifier_training_rows_have_query_domain_and_sample_weight_only
         assert isinstance(row["sample_weight"], float)
 
 
-def test_classifier_task_sample_weight_upweights_only_the_two_weak_proxy_tasks() -> None:
-    """high_school_psychology/moral_disputes (Iter32 weak-recall proxy tasks) get 2.0;
-    sociology (the third education proxy task, relatively strong) and any other task
-    (e.g. a task from an unrelated domain) default to 1.0, unchanged from pre-Iter32."""
-    assert _classifier_task_sample_weight("high_school_psychology") == 2.0
-    assert _classifier_task_sample_weight("moral_disputes") == 2.0
+def test_classifier_task_sample_weight_defaults_all_tasks_to_one_after_iter32_revert() -> None:
+    """After Iter32 revert, _CLASSIFIER_TASK_SAMPLE_WEIGHTS is empty, so all tasks
+    (including the former weak proxy tasks) default to 1.0. Iter33 replaces the
+    sample_weight mechanism with education_proxy_task_resampling at the data
+    extraction stage."""
+    assert _classifier_task_sample_weight("high_school_psychology") == 1.0
+    assert _classifier_task_sample_weight("moral_disputes") == 1.0
     assert _classifier_task_sample_weight("sociology") == 1.0
     assert _classifier_task_sample_weight("anatomy") == 1.0
 
@@ -271,3 +277,62 @@ def test_ensure_parent_dir_creates_missing_directory(tmp_path) -> None:
 def test_ensure_parent_dir_is_a_no_op_for_a_bare_filename() -> None:
     """A path with no directory component (e.g. writing to the cwd) must not raise."""
     _ensure_parent_dir("dataset.jsonl")
+
+
+def test_sample_domain_questions_with_task_target_sizes_respects_per_task_targets() -> None:
+    """When task_target_sizes is provided, each task is sampled independently with its
+    own target size, capped at the pool size."""
+    with zipfile.ZipFile(_FIXTURE_ZIP) as zf:
+        # Use two tasks from the fixture: sociology (education) and anatomy (medical)
+        # as a stand-in for a "2-task domain"
+        task_names = ["sociology", "anatomy"]
+        target_sizes = {"sociology": 1, "anatomy": 2}
+        # Extra keys in target_sizes that are not in task_names should be ignored
+        target_sizes["moral_disputes"] = 10
+
+        result = _sample_domain_questions(
+            zf,
+            task_names=task_names,
+            target_size=100,
+            seed=42,
+            exclude_tasks=frozenset(),
+            exclude_queries=frozenset(),
+            task_target_sizes=target_sizes,
+        )
+
+        soc_count = sum(1 for _q, _a, t in result if t == "sociology")
+        anat_count = sum(1 for _q, _a, t in result if t == "anatomy")
+        assert soc_count == 1
+        assert anat_count == 2
+        assert len(result) == 3
+
+
+def test_sample_domain_questions_without_task_target_sizes_preserves_existing_behavior() -> None:
+    """When task_target_sizes is None (default), the function pools all tasks and
+    samples once, exactly as before Iter33."""
+    with zipfile.ZipFile(_FIXTURE_ZIP) as zf:
+        result = _sample_domain_questions(
+            zf,
+            task_names=["sociology", "anatomy"],
+            target_size=5,
+            seed=42,
+            exclude_tasks=frozenset(),
+            exclude_queries=frozenset(),
+            task_target_sizes=None,
+        )
+
+        assert len(result) == 5
+        # All items should be from one of the two tasks
+        tasks_seen = {t for _q, _a, t in result}
+        assert tasks_seen <= {"sociology", "anatomy"}
+
+
+def test_education_proxy_task_train_target_sizes_static_integrity() -> None:
+    """Static integrity: _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES keys must match
+    _DOMAIN_TASK_MAP['education'] and values must sum to _DOMAIN_TARGET_SIZE (150)."""
+    education_tasks = set(_DOMAIN_TASK_MAP["education"])
+    target_keys = set(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.keys())
+    assert target_keys == education_tasks, (
+        f"Keys mismatch: {target_keys} vs {education_tasks}"
+    )
+    assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE
