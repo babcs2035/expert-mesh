@@ -1,24 +1,182 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter37",
-  "iteration_name": "history_cultureからjapanese_civicsをeducationへ再割当による訓練データ構成変更",
-  "phase": "reflect",
+  "iteration": "Iter38",
+  "iteration_name": "education_classificationのLabel Leakage回避策の調査とhybrid proxy approachの実装計画",
+  "phase": "plan",
   "status": "running",
-  "current_lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
+  "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785686400,
+  "updated_at": 1785606461,
   "iteration_thread_ts": null,
   "notion_toggle_created": false,
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 36: education_recallの根本原因に対する代替アプローチの調査, 考察)",
-      ".claude/research/journal.md (Iteration 35: education固有の手作り訓練問題追加による意味的ギャップ解消, 考察)",
-      ".claude/research/backlog.md (B58)",
-      ".claude/research/config.yml (levers: classifier_training_data_composition)"
+      ".claude/research/journal.md (Iteration 37: history_cultureからjapanese_civicsをeducationへ再割当による訓練データ構成変更, 考察)",
+      ".claude/research/journal.md (Iteration 36: education代理タスクをjapanese_civicsへ置換による訓練データ構成変更, 考察)",
+      ".claude/research/backlog.md (B59)",
+      ".claude/research/backlog.md (B58)"
     ],
-    "planned_lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
-    "note": "Iter36（japanese_civics置換）はrejected確定（education_recall 0.0529 < 0.5112）。train/evalタスク不一致が根本原因。次イテレーションはhistory_cultureからjapanese_civicsをeducationへ再割当。ただし、evalデータセットは旧proxyタスクベースのため、同様のtrain/eval不一致リスクがある（Iter36で確認済み）。このアプローチも失敗する可能性がある。失敗した場合: (1) education_recall基準値再検討（人間判断必要）(2) JMMLU外部からの教育固有タスク追加 (3) Y2着手前の下調べ（調査フェーズ）。"
+    "planned_lever": null,
+    "note": "Iter37はinvalid確定（Label Leakage）。classifier_training_data_compositionの全値を試し切り。次イテレーションは調査フェーズから開始。rc-investigatorは(Label Leakage回避策を重点調査：japanese_civicsをeducation訓練データとして使用するが、evalのeducation行を旧proxyタスクに戻すhybrid approachの実装計画)を立てること。代替アプローチ(JMMLU外部からの教育固有タスク追加)も調査すること。"
+  },
+  "e37_results": {
+    "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.7156,
+    "top1_accuracy_diff": 0.1100,
+    "mcnemar_top1": {
+      "discordant_a_only": 256,
+      "discordant_b_only": 432,
+      "chi2": 44.513081,
+      "p_value": 0.0
+    },
+    "education_recall_before": 0.4588,
+    "education_recall_after": 0.8824,
+    "education_recall_diff": 0.4235,
+    "education_recall_mcnemar": {
+      "a_only": 2,
+      "b_only": 74,
+      "chi2": 66.328947,
+      "p_value": 0.0
+    },
+    "medical_recall_before": 0.5112,
+    "medical_recall_after": 0.4663,
+    "medical_recall_diff": -0.0449,
+    "medical_recall_mcnemar": {
+      "a_only": 42,
+      "b_only": 34,
+      "chi2": 0.6447,
+      "p_value": 0.422
+    },
+    "ece_before": 0.071201,
+    "ece_after": 0.117635,
+    "ece_diff": 0.046434,
+    "flip_rate": 0.5250,
+    "flip_count": 840,
+    "flip_total": 1600,
+    "flip_rate_note": "argmax一致ベース: 840/1600=52.5%. experimenter報告83.37%は確率分布ベースの定義(例: 確信度閾値を超えたargmax変化)を使用. いずれも単一レバー原則を大幅逸脱(<15%が基準). 確率変化>0.1の行数: 1509/1600=94.3%.",
+    "bh_significant_regressions_20_metrics": 0,
+    "bh_significant_regressions_details": [],
+    "bh_significant_improvements_20_metrics": 4,
+    "bh_significant_improvements_details": [
+      "education_recall: p=3.33e-16, q=6.66e-15 (improvement, but label leakage)",
+      "education_precision: p=1.55e-10, q=1.55e-09 (improvement, but label leakage)",
+      "legal_recall: p=1.14e-06, q=7.61e-06 (improvement, training data increase)",
+      "general_recall: p=2.12e-03, q=1.06e-02 (improvement)"
+    ],
+    "per_domain_recall_ci": {
+      "business_economics": {"before": [0.4780, 0.6267], "after": [0.5334, 0.6782]},
+      "computer_science": {"before": [0.5083, 0.6566], "after": [0.5226, 0.6727]},
+      "education": {"before": [0.3857, 0.5338], "after": [0.8253, 0.9225]},
+      "general": {"before": [0.5325, 0.6856], "after": [0.6527, 0.7881]},
+      "history_culture": {"before": [0.6055, 0.7485], "after": [0.6356, 0.7718]},
+      "legal": {"before": [0.5047, 0.6529], "after": [0.7296, 0.8470]},
+      "mathematics": {"before": [0.5558, 0.7002], "after": [0.6418, 0.7772]},
+      "medical": {"before": [0.4383, 0.5837], "after": [0.3945, 0.5395]},
+      "natural_science": {"before": [0.5077, 0.6552], "after": [0.5027, 0.6522]},
+      "social_science": {"before": [0.5018, 0.6495], "after": [0.5985, 0.7390]}
+    },
+    "per_domain_recall_ci_lower_drop": ["medical"],
+    "ci_lower_drop_note": "medical CI lower bound: 0.4383->0.3945 (-0.0438). natural_science: 0.5077->0.5027 (-0.0050). Both marginal. All CIs overlap substantially.",
+    "judgment": "invalid",
+    "data_used": {
+      "train_data": "data/classifier_train_iter37_reassigned.jsonl (education=150 japanese_civics)",
+      "before_results": "results/iter31_calibrated_predictions.jsonl (1600 rows, temperature calibrated)",
+      "after_results": "results/iter37_reassigned_calibrated_predictions.jsonl (1600 rows, newly generated)",
+      "classifier_model": "models/domain_classifier_iter37_reassigned.joblib (trained on japanese_civics)"
+    },
+    "label_leakage_risk": {
+      "education_eval_pure_rows": 150,
+      "education_eval_compound_rows": 20,
+      "education_eval_total": 170,
+      "japanese_civics_training_pool": 150,
+      "overlap_estimate": "150/150 = 100% of pure education eval rows are in training data",
+      "pure_education_recall": 1.0000,
+      "note": "ALL 150 japanese_civics eval questions are used for BOTH training and evaluation. Pure education recall = 100% is definitive proof of memorization."
+    },
+    "single_lever_violation": {
+      "note": "The classifier was fundamentally retrained with completely different training data (sociology+proxy -> japanese_civics). Argmax flip rate 52.5% (probability-based 83.37%) confirms this is NOT a single-lever change. Additionally, legal training data increased 77->150.",
+      "flip_rate": 0.5250,
+      "legal_training_increase": "77 -> 150",
+      "legal_recall_delta": "+0.2167 (0.5778 -> 0.7944)"
+    },
+    "note": "education_recall 0.4588->0.8824 (+0.4235) appears to be a massive improvement, but this experiment is INVALID due to: (1) CRITICAL label leakage: ALL 150 japanese_civics eval questions are in the training data, making pure education recall 100% (memorization, not generalization). (2) Single-lever violation: argmax flip rate 52.5% (far above 15% threshold). (3) Legal training data increased 77->150, explaining legal_recall improvement. The education_recall improvement is an artifact of memorization. This experiment cannot be used to evaluate the effectiveness of japanese_civics as an education proxy task. Next step: regenerate eval dataset excluding japanese_civics from education eval (Option A in journal analysis)."
+  },
+  "e36_results": {
+    "lever": "classifier_training_data_composition=education_proxy_task_replacement (japanese_civicsへの置換)",
+    "education_recall_before": 0.4588,
+    "education_recall_after": 0.0529,
+    "education_recall_drop": -0.4059,
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.5556,
+    "top1_accuracy_mcnemar_p": "<0.0001",
+    "bh_significant_regressions_18_metrics": 0,
+    "judgment": "rejected",
+    "note": "主基準（education_recall>medical_recall基準 0.5112）完全に不成立（0.0529 < 0.5112）。根本原因: train/evalタスク不一致（分類器はjapanese_civicsで訓練、evalは旧proxyタスク）。JMMLUの排他マッピング制約により、japanese_civicsをeducationに完全に割り当てるにはhistory_cultureから除外する必要がある。"
+  },
+  "e35_results": {
+    "lever": "classifier_training_data_composition=education_handmade_training_problems (50件追加)",
+    "education_recall_before": 0.4588,
+    "education_recall_after": 0.4118,
+    "education_recall_mcnemar_p": 0.2433,
+    "medical_recall_threshold": 0.5112,
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.6006,
+    "top1_accuracy_mcnemar_p": 0.4966,
+    "flip_rate": 0.11,
+    "bh_significant_regressions_18_metrics": 0,
+    "ece_before": 0.0712,
+    "ece_after": 0.0751,
+    "education_flip_correct_to_wrong": 22,
+    "education_flip_wrong_to_correct": 14,
+    "education_confusion_top3": {
+      "medical": 18,
+      "business_economics": 18,
+      "general": 14
+    },
+    "education_prob_mean": {
+      "before": 0.3056,
+      "after": 0.3026
+    },
+    "education_wilson_ci": {
+      "before": [0.3857, 0.5338],
+      "after": [0.3405, 0.4869]
+    },
+    "data_used": {
+      "train_data": "data/classifier_train_iter35_handmade.jsonl (1477 rows, education=200: proxy=150+handmade=50)",
+      "before_results": "results/iter31_calibrated_predictions.jsonl (1600 rows, not re-run)",
+      "after_results": "results/iter35_calibrated_predictions.jsonl (1600 rows, newly generated)",
+      "classifier_model": "models/domain_classifier_iter35_handmade.joblib (n_samples=1477, temperature calibration)"
+    },
+    "judgment": "rejected",
+    "note": "主基準（education_recall>medical_recall基準 0.5112）不成立（0.4118 < 0.5112, gap=9.94pt）。education_recall自体がIter31比で-4.71pt悪化。手作り問題50件の追加は既存proxyタスク埋め込み空間と競合しclassification boundaryを混乱させた。"
+  },
+  "e34_results": {
+    "lever": "classifier_training_data_composition=education_proxy_task_resampling (案A: sociology=90, high_school_psychology=30, moral_disputes=30)",
+    "education_recall_before": 0.5,
+    "education_recall_after": 0.4353,
+    "education_recall_mcnemar_p": 0.072486,
+    "medical_recall_threshold": 0.5112,
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.5969,
+    "top1_accuracy_mcnemar_p": null,
+    "bh_significant_regressions_18_metrics": 0,
+    "judgment": "rejected",
+    "note": "主基準（education_recall>medical_recall基準 0.5112）不成立（0.4353 < 0.5112, 75.59ptギャップ）。Iter31比で-6.47pt、Iter33比でも-0.59ptの低下。resampling系レバーは尽きた（sociology pool cap 94に対し90件使用）。"
+  },
+  "e33_results": {
+    "lever": "classifier_training_data_composition=education_proxy_task_resampling (案C: sociology=70, high_school_psychology=40, moral_disputes=40)",
+    "education_recall_before": 0.4059,
+    "education_recall_after": 0.4412,
+    "education_recall_mcnemar_p": 0.239317,
+    "medical_recall_threshold": 0.5112,
+    "top1_accuracy_before": 0.585,
+    "top1_accuracy_after": 0.5956,
+    "top1_accuracy_mcnemar_p": 0.1589,
+    "bh_significant_regressions_18_metrics": 0,
+    "judgment": "rejected",
+    "note": "主基準（education_recall>medical_recall基準 0.5112）不成立（0.4412 < 0.5112, 70ptギャップ）。案C（70/40/40）の変化幅では不十分。"
   },
   "e32_results": {
     "lever": "classifier_training_data_composition=education_proxy_task_revision (weak-task sample_weight: high_school_psychology=2.0, moral_disputes=2.0, others=1.0)",
@@ -32,7 +190,7 @@
     "flip_rate": 0.009375,
     "bh_significant_regressions_18_metrics": 0,
     "judgment": "rejected",
-    "note": "主基準（education_recall>medical_recall基準）不成立に加え，education_recall自体が悪化し全体top1_accuracyも有意悪化した．機序はLogisticRegression(class_weight=\"balanced\")がsample_weightに依存して自動再計算されるため，狙った効果が減衰し他9ドメインに相対優位を与えたこと（sklearnソースで確認済み）．非退行チェック（BH補正）は字義通り成立するが検定力不足の見かけ上の非退行と判断．models/domain_classifier.joblib（Iter31 temperature較正版）は無変更のまま．"
+    "note": "主基準（education_recall>medical_recall基準 0.5112）不成立に加え、education_recall自体が悪化。全体top1_accuracyも有意悪化（McNemar p=0.0026）。機序: sklearnのLogisticRegression(class_weight=\"balanced\")はsample_weightに依存してclass_weightを再計算するため、sample_weight増加とclass_weightバランス調整が数式レベルで結合していた。"
   },
   "e30_results": {
     "lever": "classifier_calibration=isotonic (CalibratedClassifierCV method='isotonic', cv=5, ensemble=True)",
@@ -84,176 +242,7 @@
     },
     "judgment": "partial",
     "production_rollout": "deferred (per-domain non-regression criterion not met: medical_recall BH-significant regression; models/domain_classifier.joblib unchanged)",
-    "note": "rc-analyst提案どおりrc-reflectorがpartialを確定（journal.md 考察(Iter30)参照）。ECE・top1_accuracyは明確に成立、per-domain 20指標BH補正後の悪化方向有意指標がmedical_recall 1件で不成立。medicalは訓練150件の多数派ドメインで小標本仮説は反証され、isotonic較正曲線のクラス固有の系統的圧縮が疑われる。次イテレーションはmethod='temperature'を検証する。"
-  },
-  "e28_results": {
-    "lever": "fallback_policy=disabled (confidence_threshold: 0.5->0.0, dispatch_top_k: 2->1, aggregation_method: llm_judge->max_confidence)",
-    "top1_accuracy": 0.585,
-    "cohens_kappa": 0.554074,
-    "single_domain_top1_accuracy": 0.598667,
-    "compound_domain_top1_accuracy": 0.38,
-    "compound_domain_set_recall": 0.19,
-    "answer_quality_accuracy": 0.546667,
-    "end_to_end_accuracy": 0.31625,
-    "mean_duration_ms": 3394.894,
-    "fallback_rate": 0.0,
-    "mcnemar_discordant_pairs": 77,
-    "mcnemar_p_value": 1.5868484193326537e-07,
-    "judgment": "adopted",
-    "note": "成功条件4項目中3項目（top1有意改善p=1.59e-7・fallback0/1600・answer_quality改善+3.8pt>3SD=2.61pt）が明確に成立。条件4（非退行）はgeneralドメインrecallのみCI下限割れだが、同一212行内でprecisionが0.3134->0.6522へ大幅改善しておりfallback廃止に内在する構造的トレードオフと判断、判定は覆さず。事前実測（central_iter26 vs 26b）とtop1・κがほぼ完全一致し、Iter26の『アーキテクチャを変えてもルーティングは完全一致』を別レバーで再確認。次レバーはY4（classifier_calibration）。"
-  },
-  "e27_results": {
-    "lever": "aggregation_method (max_confidence / majority_vote / llm_judge, dispatch_top_k=2)",
-    "top1_accuracy": 0.555625,
-    "cohens_kappa": 0.5214814814814815,
-    "ece": 0.20402063160346984,
-    "fallback_rate": 0.1325,
-    "mcnemar_discordant_pairs": 0,
-    "mcnemar_p_value": 1.0,
-    "rows_dispatched_to_2plus": 0,
-    "second_rank_confidence_max": 0.4955,
-    "answer_quality_accuracy_jmmlu": {
-      "max_confidence": 0.496,
-      "majority_vote": 0.49133333333333334,
-      "llm_judge": 0.508
-    },
-    "judgment": "invalid",
-    "note": "実験不成立（no-op）．confidence_threshold=0.5 の候補ゲートにより 2 位ノードが一度も適格にならず（2位confidenceの最大値 0.4955），dispatch_top_k=2 が発火しなかった．3 方式とも Iter25 基準線とビット単位一致．機序は docs/d0004 §3．"
-  },
-  "noise_floor_axis23": {
-    "source": "Iter25 基準線 + Iter27 の 3 実行（ルーティングは決定論的に同一，生成のランダム性のみ異なる 4 反復）",
-    "metric": "answer_quality_accuracy (JMMLU 1500 問，抽出照合)",
-    "values": [
-      0.5086666666666667,
-      0.496,
-      0.49133333333333334,
-      0.508
-    ],
-    "mean": 0.501,
-    "stdev_pt": 0.87,
-    "three_sd_pt": 2.61,
-    "row_level_flip_rate": 0.239,
-    "note": "d0003 X6 に相当する測定が実質完了．暫定値 1.3pt（n=2, d0002 §6-F）を 3SD=2.6pt へ置き換え，config.yml の success_criteria に反映済み．"
-  },
-  "fallback_ablation_precomputed": {
-    "source": "results/central_iter26/（fallback 廃止相当）vs results/central_iter26b/（現行）．アーキテクチャ・分類器・データセットは同一で fallback 方策のみ異なる（B46 の副産物）",
-    "top1_accuracy": {
-      "no_fallback": 0.585,
-      "with_fallback": 0.5556
-    },
-    "cohens_kappa": {
-      "no_fallback": 0.5541,
-      "with_fallback": 0.5215
-    },
-    "answer_quality_jmmlu": {
-      "no_fallback": 0.5507,
-      "with_fallback": 0.4933
-    },
-    "mean_duration_ms": {
-      "no_fallback": 4234.8,
-      "with_fallback": 4558.2
-    },
-    "mcnemar_p_value": 1.5868484193326537e-07,
-    "fallback_rows_routing_correct": {
-      "sent_to_general": "18/212 (8.5%)",
-      "sent_to_argmax": "65/212 (30.7%)"
-    },
-    "note": "Iter28（Y1）の事前根拠．分散版での再現確認が Iter28 の目的．"
-  },
-  "last_slack_ts": "1785600144.499129",
-  "last_commit": "44e7c80",
-  "e26_results": {
-    "lever": "routing_architecture=central_router_bugfixed",
-    "top1_accuracy": 0.555625,
-    "cohens_kappa": 0.5214814814814815,
-    "mcnemar_discordant_pairs": 0,
-    "mcnemar_p_value": 1.0,
-    "fallback_rate": 0.1325,
-    "answer_quality_accuracy": 0.49333333333333335,
-    "end_to_end_accuracy": 0.313125,
-    "mean_duration_ms": 4558.229,
-    "distributed_mean_duration_ms": 3626.775,
-    "judgment": "adopted",
-    "note": "confidence_threshold/fallback方策を分散版と揃えた結果，ルーティング精度は完全一致（McNemar discordant=0）。中央版は分散版より25.7%遅い（SSH越しのオーバーヘッド）。仮説1支持・仮説2不支持。回答品質 -1.53pt・E2E -1.50pt は 3SD=2.6pt 未満につきノイズと確定（Iter27 で判明）。"
-  },
-  "e25_results": {
-    "lever": "eval_dataset_compound_expansion_20_to_100",
-    "single_domain_top1_accuracy": 0.5693333333333334,
-    "top1_accuracy_overall": 0.555625,
-    "cohens_kappa": 0.5214814814814815,
-    "compound_domain_top1_accuracy": 0.35,
-    "compound_domain_set_recall": 0.165,
-    "answer_quality_accuracy": 0.5086666666666667,
-    "end_to_end_accuracy": 0.328125,
-    "ece": 0.20402063160346984,
-    "fallback_rate": 0.1325,
-    "judgment": "adopted",
-    "note": "research_frontier項目2実施。複合設問20→100問拡充後の新基準線（1600問，results/20260730_145356/）。single_domain_top1/kappa/answer_qualityはIter23と完全一致，ルーティング退行なし。"
-  },
-  "e24_results": {
-    "lever": "routing_architecture=central_router",
-    "top1_accuracy": 0.525658,
-    "cohens_kappa": 0.480741,
-    "ece": 0.383296,
-    "brier_score": 0.388843,
-    "auroc": 0.7399,
-    "fallback_rate": 0.0,
-    "mean_duration_ms": 1981.1,
-    "answer_quality_accuracy": 0.546,
-    "end_to_end_accuracy": 0.294,
-    "judgment": "rejected",
-    "note": "中央集権ルータは実装バグ（few-shot欠落）でrejected。probe速度は予測通り改善（55.7%）。"
-  },
-  "e10_results": {
-    "lever": "expert_specialization=domain_lora",
-    "answer_quality_accuracy": 0.5013,
-    "end_to_end_accuracy": 0.3151,
-    "top1_accuracy": 0.5693,
-    "cohens_kappa": 0.5215,
-    "judgment": "adopted"
-  },
-  "e20_results": {
-    "lever": "confidence_elicitation=top_k_with_probs",
-    "answer_quality_accuracy": 0.2313,
-    "end_to_end_accuracy": 0.1355,
-    "top1_accuracy": 0.5651,
-    "cohens_kappa": 0.5215,
-    "ece": 0.1927,
-    "tie_rate": "0.00%",
-    "judgment": "adopted"
-  },
-  "e8_results": {
-    "lever": "expert_model_size=qwen3.5-4b-q4_K_M",
-    "answer_quality_accuracy": 0.2373,
-    "end_to_end_accuracy": 0.1434,
-    "top1_accuracy": 0.5651,
-    "mean_duration_ms": 6498,
-    "vram_gb": 3.4,
-    "judgment": "rejected"
-  },
-  "e22_results": {
-    "lever": "confidence_signal_method=self_consistency_semantic",
-    "top1_accuracy": 0.5651315789473684,
-    "cohens_kappa": 0.5214814814814815,
-    "answer_quality_accuracy": 0.218,
-    "end_to_end_accuracy": 0.1256578947368421,
-    "fallback_rate": 0.13157894736842105,
-    "judgment": "invalid",
-    "note": "Bug not fixed: routing_method=supervised_classifier early return in _estimate_probe_confidence() prevents self_consistency_semantic code path from executing. Results identical to E20 (diff < 0.0001)."
-  },
-  "e23_results": {
-    "lever": "F1-F3-F5_commit_and_X1_baseline_reacquisition",
-    "top1_accuracy": 0.5651315789473684,
-    "cohens_kappa": 0.5214814814814815,
-    "ece": 0.19265409042498843,
-    "tie_rate": "0.00%",
-    "answer_quality_accuracy": 0.508667,
-    "end_to_end_accuracy": 0.318421,
-    "brier_score": 0.240286,
-    "auroc": 0.723004,
-    "fallback_rate": 0.131579,
-    "judgment": "adopted",
-    "note": "X1: 測定系修復後の基準線再取得。主基準4項目が期待値と完全に一致。"
+    "note": "rc-analyst提案どおりrc-reflectorがpartialを確定（journal.md 考察(Iter30)参照）。ECE・top1_accuracyは明確に成立、per-domain 20指標BH補正後の悪化方向有意指標がmedical_recall 1件で不成立。medicalは訓練150件の多数派ドメインで小標本仮説は反証。次イテレーションはmethod='temperature'を検証。"
   },
   "e29_results": {
     "lever": "classifier_calibration=platt (CalibratedClassifierCV method='sigmoid', cv=5, ensemble=True)",
@@ -277,22 +266,10 @@
       "precision_after": 0.8151260504201681,
       "recall_before": 0.5833333333333334,
       "recall_after": 0.5388888888888889,
-      "precision_ci_before": [
-        0.6722461054834166,
-        0.814400794331877
-      ],
-      "precision_ci_after": [
-        0.7359201390242527,
-        0.8746229196467938
-      ],
-      "recall_ci_before": [
-        0.510305304279413,
-        0.6528787794003181
-      ],
-      "recall_ci_after": [
-        0.4660142740943432,
-        0.6101382982895314
-      ],
+      "precision_ci_before": [0.6722461054834166, 0.814400794331877],
+      "precision_ci_after": [0.735920139042527, 0.87462291964938],
+      "recall_ci_before": [0.510305304279413, 0.6528787794003181],
+      "recall_ci_after": [0.46601427403432, 0.610138298895314],
       "recall_ci_lower_bound_regressed": true
     },
     "per_domain_education": {
@@ -300,22 +277,10 @@
       "precision_after": 0.4632768361581921,
       "recall_before": 0.40588235294117647,
       "recall_after": 0.4823529411764706,
-      "precision_ci_before": [
-        0.3849579354501229,
-        0.5430720631845758
-      ],
-      "precision_ci_after": [
-        0.3913761364147671,
-        0.5367376927659099
-      ],
-      "recall_ci_before": [
-        0.33493503930374724,
-        0.48098919294164666
-      ],
-      "recall_ci_after": [
-        0.40846206851341693,
-        0.5570237250325943
-      ],
+      "precision_ci_before": [0.3849579354501229, 0.5430720631845758],
+      "precision_ci_after": [0.39137613647671, 0.5367376927659099],
+      "recall_ci_before": [0.33493503930374724, 0.48098919294164666],
+      "recall_ci_after": [0.40846206851341693, 0.5570237250325943],
       "recall_ci_lower_bound_regressed": false
     },
     "data_used": {
@@ -350,73 +315,171 @@
       "interpretation": "None of the 9 flagged metrics have disjoint CIs vs before; all consistent with noise from 11.0% argmax flip redistribution, not statistically significant regression. Undermines legal-specific small-training-data hypothesis (computer_science/mathematics have 150 training rows, same as majority, yet also flagged)."
     }
   },
-  "e33_results": {
-    "lever": "classifier_training_data_composition=education_proxy_task_resampling (案C: sociology=70, high_school_psychology=40, moral_disputes=40)",
-    "education_recall_before": 0.4059,
-    "education_recall_after": 0.4412,
-    "education_recall_mcnemar_p": 0.239317,
-    "medical_recall_threshold": 0.5112,
-    "top1_accuracy_before": 0.585,
-    "top1_accuracy_after": 0.5956,
-    "top1_accuracy_mcnemar_p": 0.1589,
-    "bh_significant_regressions_18_metrics": 0,
-    "judgment": "rejected",
-    "note": "主基準（education_recall>medical_recall基準）不成立（0.4412 < 0.5112，70ptギャップ）．McNemar p=0.1589 で top1_accuracy の有意改善なし．education_recall の +3.53pt 改善は SE~3.8pt のノイズ範囲内．案C（70/40/40）の変化幅では不十分．次イテレーションは案A（90/30/30）を次点として試す．案Aも不成立なら，education固有の手作り訓練問題の追加へ切り替えが必要．非退行条件（BH補正後有意退行0件）は成立．【rc-reflector追加】2イテレーション連続（Iter32 sample_weight, Iter33 resampling案C）でrejectedとなった背景には，「教育ドメインの代理タスクが本質的にeducationの意味的ギャップを抱えている」という根本原因がある．抽出比率の変更という表面的な最適化では，この根本原因に対処できない．"
+  "e28_results": {
+    "lever": "fallback_policy=disabled (confidence_threshold: 0.5->0.0, dispatch_top_k: 2->1, aggregation_method: llm_judge->max_confidence)",
+    "top1_accuracy": 0.585,
+    "cohens_kappa": 0.554074,
+    "single_domain_top1_accuracy": 0.598667,
+    "compound_domain_top1_accuracy": 0.38,
+    "compound_domain_set_recall": 0.19,
+    "answer_quality_accuracy": 0.546667,
+    "end_to_end_accuracy": 0.31625,
+    "mean_duration_ms": 3394.894,
+    "fallback_rate": 0.0,
+    "mcnemar_discordant_pairs": 77,
+    "mcnemar_p_value": 1.5868484193326537e-07,
+    "judgment": "adopted",
+    "note": "成功条件4項目中3項目（top1有意改善p=1.59e-7・fallback0/1600・answer_quality改善+3.8pt>3SD=2.61pt）が明確に成立。条件4（非退行）はgeneralドメインrecallのみCI下限割れだが、同一212行内でprecisionが0.3134->0.6522へ大幅改善しておりfallback廃止に内在する構造的トレードオフと判断。"
   },
-  "e34_results": {
-    "lever": "classifier_training_data_composition=education_proxy_task_resampling (案A: sociology=90, high_school_psychology=30, moral_disputes=30)",
-    "education_recall_before": 0.5,
-    "education_recall_after": 0.4353,
-    "education_recall_mcnemar_p": 0.072486,
-    "medical_recall_threshold": 0.5112,
-    "top1_accuracy_before": 0.6056,
-    "top1_accuracy_after": 0.5969,
-    "top1_accuracy_mcnemar_p": null,
-    "bh_significant_regressions_18_metrics": 0,
-    "judgment": "rejected",
-    "note": "主基準（education_recall>medical_recall基準）不成立（0.4353 < 0.5112，75.59ptギャップ）．Iter31比で-6.47pt，Iter33（案C）比でも-0.59ptの低下．McNemar p=0.0725 で top1_accuracy の有意改善なし．非退行条件（BH補正後有意退行0件）は成立．3イテレーション連続（Iter32 sample_weight, Iter33 案C, Iter34 案A）でrejected確定．resampling系レバーは尽きた（sociology pool cap 94対し90件使用）．次イテレーション（Iter35）はeducation固有の手作り訓練問題の追加へ切り替え．本実原因は代理タスクとeducationの意味的ギャップ（Iter32調査確認）であり，抽出比率の変更では解決不可能．手作り問題は4選フォーマットを保つ必要あり（書式たかりショートリングリスク）．"
+  "e27_results": {
+    "lever": "aggregation_method (max_confidence / majority_vote / llm_judge, dispatch_top_k=2)",
+    "top1_accuracy": 0.555625,
+    "cohens_kappa": 0.5214814814814815,
+    "ece": 0.20402063160346984,
+    "fallback_rate": 0.1325,
+    "mcnemar_discordant_pairs": 0,
+    "mcnemar_p_value": 1.0,
+    "rows_dispatched_to_2plus": 0,
+    "second_rank_confidence_max": 0.4955,
+    "answer_quality_accuracy_jmmlu": {
+      "max_confidence": 0.496,
+      "majority_vote": 0.49133333333333334,
+      "llm_judge": 0.508
+    },
+    "judgment": "invalid",
+    "note": "実験不成立（no-op）。confidence_threshold=0.5 の候補ゲートにより 2 位ノードが一度も適格にならず（2位confidenceの最大値 0.4955）、dispatch_top_k=2 が発火しなかった。3 方式とも Iter25 基準線とビット単位一致。"
   },
-  "e35_results": {
-    "lever": "classifier_training_data_composition=education_handmade_training_problems (50件追加)",
-    "education_recall_before": 0.4588,
-    "education_recall_after": 0.4118,
-    "education_recall_mcnemar_p": 0.2433,
-    "medical_recall_threshold": 0.5112,
-    "top1_accuracy_before": 0.6056,
-    "top1_accuracy_after": 0.6006,
-    "top1_accuracy_mcnemar_p": 0.4966,
-    "flip_rate": 0.11,
-    "bh_significant_regressions_18_metrics": 0,
-    "ece_before": 0.0712,
-    "ece_after": 0.0751,
-    "education_flip_correct_to_wrong": 22,
-    "education_flip_wrong_to_correct": 14,
-    "education_confusion_top3": {
-      "medical": 18,
-      "business_economics": 18,
-      "general": 14
+  "noise_floor_axis23": {
+    "source": "Iter25 基準線 + Iter27 の 3 実行（ルーティングは決定論的に同一、生成のランダム性のみ異なる 4 反復）",
+    "metric": "answer_quality_accuracy (JMMLU 1500 問、抽出照合)",
+    "values": [
+      0.5086666666666667,
+      0.496,
+      0.49133333333333334,
+      0.508
+    ],
+    "mean": 0.501,
+    "stdev_pt": 0.87,
+    "three_sd_pt": 2.61,
+    "row_level_flip_rate": 0.239,
+    "note": "d0003 X6 に相当する測定が実質完了。暫定値 1.3pt（n=2, d0002 §6-F）を 3SD=2.6pt へ置き換え、config.yml の success_criteria に反映済み。"
+  },
+  "fallback_ablation_precomputed": {
+    "source": "results/central_iter26/（fallback 廃止相当）vs results/central_iter26b/（現行）。アーキテクチャ・分類器・データセットは同一で fallback 方策のみ異なる（B46 の副産物）",
+    "top1_accuracy": {
+      "no_fallback": 0.585,
+      "with_fallback": 0.5556
     },
-    "education_prob_mean": {
-      "before": 0.3056,
-      "after": 0.3026
+    "cohens_kappa": {
+      "no_fallback": 0.5541,
+      "with_fallback": 0.5215
     },
-    "education_wilson_ci": {
-      "before": [
-        0.3857,
-        0.5338
-      ],
-      "after": [
-        0.3405,
-        0.4869
-      ]
+    "answer_quality_jmmlu": {
+      "no_fallback": 0.5507,
+      "with_fallback": 0.4933
     },
-    "data_used": {
-      "train_data": "data/classifier_train_iter35_handmade.jsonl (1477 rows, education=200: proxy=150+handmade=50)",
-      "before_results": "results/iter31_calibrated_predictions.jsonl (1600 rows, not re-run)",
-      "after_results": "results/iter35_calibrated_predictions.jsonl (1600 rows, newly generated)",
-      "classifier_model": "models/domain_classifier_iter35_handmade.joblib (n_samples=1477, temperature calibration)"
+    "mean_duration_ms": {
+      "no_fallback": 4234.8,
+      "with_fallback": 4558.2
     },
+    "mcnemar_p_value": 1.5868484193326537e-07,
+    "fallback_rows_routing_correct": {
+      "sent_to_general": "18/212 (8.5%)",
+      "sent_to_argmax": "65/212 (30.7%)"
+    },
+    "note": "Iter28（Y1）の事前根拠。分散版での再確認が Iter28 の目的。"
+  },
+  "last_slack_ts": "1785602477.232869",
+  "last_commit": "c6d77cb",
+  "e26_results": {
+    "lever": "routing_architecture=central_router_bugfixed",
+    "top1_accuracy": 0.555625,
+    "cohens_kappa": 0.5214814814814815,
+    "mcnemar_discordant_pairs": 0,
+    "mcnemar_p_value": 1.0,
+    "fallback_rate": 0.1325,
+    "answer_quality_accuracy": 0.49333333333333335,
+    "end_to_end_accuracy": 0.313125,
+    "mean_duration_ms": 4558.229,
+    "distributed_mean_duration_ms": 3626.775,
+    "judgment": "adopted",
+    "note": "confidence_threshold/fallback方策を分散版と揃えた結果、ルーティング精度は完全一致（McNemar discordant=0, p=1.0）した一方、中央版は分散版より約25.7%遅い（SSH越しのオーバーヘッド）。仮説1支持・仮説2不支持。回答品質 -1.53pt・E2E -1.50pt は 3SD=2.6pt 未満でノイズと確定（Iter27 で判定）。"
+  },
+  "e25_results": {
+    "lever": "eval_dataset_compound_expansion_20_to_100",
+    "single_domain_top1_accuracy": 0.5693333333333334,
+    "top1_accuracy_overall": 0.555625,
+    "cohens_kappa": 0.5214814814814815,
+    "compound_domain_top1_accuracy": 0.35,
+    "compound_domain_set_recall": 0.165,
+    "answer_quality_accuracy": 0.5086666666666667,
+    "end_to_end_accuracy": 0.328125,
+    "ece": 0.20402063160346984,
+    "fallback_rate": 0.1325,
+    "judgment": "adopted",
+    "note": "research_frontier項目2実施。複合設問20→100問拡張後の新基準線（1600問、results/20260730_145356/）。single_domain_top1/kappa/answer_qualityはIter23と完全一致、ルーティング退行なし。"
+  },
+  "e24_results": {
+    "lever": "routing_architecture=central_router",
+    "top1_accuracy": 0.525658,
+    "cohens_kappa": 0.480741,
+    "ece": 0.383296,
+    "brier_score": 0.388843,
+    "auroc": 0.7399,
+    "fallback_rate": 0.0,
+    "mean_duration_ms": 1981.1,
+    "answer_quality_accuracy": 0.546,
+    "end_to_end_accuracy": 0.294,
     "judgment": "rejected",
-    "note": "主基準（education_recall>medical_recall基準）不成立（0.4118 < 0.5112, gap=9.94pt）。education_recall自体がIter31比で-4.71pt、Iter34比で-2.34ptの悪化。手作り問題50件の追加は既存proxyタスク埋め込みと競合しclassification boundaryを混乱させた。non-education偽陽性率不変（4.83%→5.03%）は手作り埋め込みが他ドメインに漏出していないことを示すが、既存education埋め込みとの競合が問題。top1_accuracy McNemar p=0.4966で有意改善なし。ECE悪化（0.0712→0.0751）。BH補正後有意退行0件（非退行は成立）。Wilson CI重なり（[0.3857,0.5338] vs [0.3405,0.4869]）で統計的有意差なしだが、5反復の系統的低下トレンド（0.5000→0.4118）は懸念。resampling系レバーは尽きた（sociology pool cap 94に対し90件使用）。次イテレーションは代替アプローチの検討が必要。"
+    "note": "中央集権ルータは実装バグ（few-shot欠落）でrejected。probe速度は予測通り改善（55.7%）。"
+  },
+  "e10_results": {
+    "lever": "expert_specialization=domain_lora",
+    "answer_quality_accuracy": 0.5013,
+    "end_to_end_accuracy": 0.3151,
+    "top1_accuracy": 0.5693,
+    "cohens_kappa": 0.5215,
+    "judgment": "adopted"
+  },
+  "e20_results": {
+    "lever": "confidence_elicitation=top_k_with_probs",
+    "answer_quality_accuracy": 0.2313,
+    "end_to_end_accuracy": 0.1355,
+    "top1_accuracy": 0.5651,
+    "cohens_kappa": 0.5215,
+    "judgment": "adopted"
+  },
+  "e8_results": {
+    "lever": "expert_model_size=qwen3.5-4b-q4_K_M",
+    "answer_quality_accuracy": 0.2373,
+    "end_to_end_accuracy": 0.1434,
+    "top1_accuracy": 0.5651,
+    "mean_duration_ms": 6498,
+    "vram_gb": 3.4,
+    "judgment": "rejected"
+  },
+  "e22_results": {
+    "lever": "confidence_signal_method=self_consistency_semantic",
+    "top1_accuracy": 0.5651315789473684,
+    "cohens_kappa": 0.5214814814814815,
+    "answer_quality_accuracy": 0.218,
+    "end_to_end_accuracy": 0.1256578947368421,
+    "fallback_rate": 0.13157894736842105,
+    "judgment": "invalid",
+    "note": "Bug not fixed: routing_method=supervised_classifier early return in _estimate_probe_confidence() prevents self_consistency_semantic code path from executing. Results identical to E20 (diff < 0.0001)."
+  },
+  "e23_results": {
+    "lever": "F1-F3-F5-commit_and_X1_baseline_reacquisition",
+    "top1_accuracy": 0.5651315789473684,
+    "cohens_kappa": 0.5214814814814815,
+    "ece": 0.19265409042498843,
+    "tie_rate": "0.00%",
+    "answer_quality_accuracy": 0.508667,
+    "end_to_end_accuracy": 0.318421,
+    "brier_score": 0.240286,
+    "auroc": 0.723004,
+    "fallback_rate": 0.131579,
+    "judgment": "adopted",
+    "note": "X1: 測定系修復後の基準線再取得。主基準4項目が期待値と完全に一致。"
   }
 }

@@ -3,6 +3,31 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B59 [auto-decided 2026-08-02] Iter37 は invalid で確定。classifier_training_data_composition 全値試し切り、次イテレーションは調査フェーズ
+
+- 状況: Iter37（classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education）の rc-analyst 判定（invalid）を rc-reflector が検証・確定させた。
+- **判定: invalid（確定）**。3つの致命的問題:
+  1. **Label Leakage（決定打）**: japanese_civics プールは正確に 150 件で eval ターゲットサイズと同一。全 150 件の japanese_civics 質問が訓練データと評価データの両方に含まれる。純粋 education recall = 1.0000（100%）は分類器が eval 問題を完全に暗記している決定的証拠。
+  2. **単一レバー原則の逸脱**: argmax flip rate 52.5% は単一レバー比較の範囲（<15%）を大幅に逸脱。分類器は完全に再訓練された。
+  3. **Legal 訓練データ増加**: legal 訓練行数が 77→150 に増加。legal_recall の有意な改善 (+0.2167) は訓練データ増加の直接的結果。
+- **決定的な学び**:
+  1. **japanese_civics は意味的に適切だが、JMMLU の排他マッピング制約により 150 件しか確保できない**。150 件 = eval ターゲットサイズのため、train/eval で同一質問の重複（Label Leakage）が避けられない。
+  2. **この制約を回避するには**: (a) eval から japanese_civics を除外して旧 proxy タスクに戻す、(b) japanese_civics のサブセットのみを訓練に使用する、(c) JMMLU 外部から教育固有タスクを追加する。
+  3. **japanese_civics が education の proxy タスクとして意味的に適切である可能性**は示唆された（education_recall +0.4235 の改善方向）。ただし Label Leakage により値は信頼できない。
+- **config.yml の全 levers を試し切り**:
+  - classifier_training_data_composition: 5 値すべて試済み（revision=rejected, resampling 案C=rejected, resampling 案A=rejected, handmade=rejected, replacement=rejected, reassignment=invalid）
+  - classifier_calibration: 3 値すべて試済み（platt=partial, isotonic=partial, temperature=adopted）
+  - fallback_policy: adopted（完了）
+  - aggregation_method: Y2 ブロックで試せない
+  - E1-E10: 履歴済みまたは no-op
+- **Iter38 の単一レバー**: `null`（調査フェーズから開始）。`iteration_name` は「education_classification の Label Leakage 回避策の調査と hybrid proxy approach の実装計画」。
+- **rc-investigator への申し送り**:
+  1. **Label Leakage の回避策を重点調査**: japanese_civics を education 訓練データとして使用するが、eval の education 行を旧 proxy タスクに戻す（hybrid approach）が最も現実的。Label Leakage が解消され、japanese_civics の真の効果が測定可能。
+  2. **hybrid approach の実装計画**: `build_dataset.py` と `prepare_lora_training_data.py` で education のタスクマッピングを `japanese_civics + 旧 proxy タスク` に変更。訓練データは japanese_civics + 旧 proxy タスクの両方を含む。eval は旧 proxy タスクのみ。
+  3. **代替アプローチの調査**: JMMLU 外部からの教育固有タスク追加の有効性とコスト見積もり。
+- **要人間判断**: education_recall の基準値（medical_recall 0.5112）の再検討は、hybrid approach の結果を見てから判断する。
+- **留保**: hybrid approach では eval の education 行が旧 proxy タスク（sociology, high_school_psychology, moral_disputes）になる。これは「japanese_civics が旧 proxy タスク上でどれだけ有用か」を測定するものであり、教育固有質問上の性能ではない。
+
 ## B58 [auto-decided 2026-08-02] Iter36 は rejected で確定。history_cultureからjapanese_civicsをeducationへ再割当を次レバーに
 
 - 状況: Iter36（classifier_training_data_composition=education_proxy_task_replacement, japanese_civicsへの置換）の rc-analyst 判定（rejected）を rc-reflector が検証・確定させた。

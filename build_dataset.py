@@ -136,7 +136,6 @@ _DOMAIN_TASK_MAP: dict[str, list[str]] = {
     ],
     "history_culture": [
         "japanese_history",
-        "japanese_civics",
         "high_school_european_history",
         "prehistory",
         "japanese_idiom",
