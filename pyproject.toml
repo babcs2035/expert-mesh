@@ -17,7 +17,11 @@ dependencies = [
 # Only needed to fit a new embedding_postprocess=whiten artifact
 # (scripts/fit_embedding_whitening.py); the serving path (router.py) applies
 # the precomputed transform with plain Python, so nodes never need this.
-research = ["numpy>=1.26"]
+research = [
+    "numpy>=1.26",
+    "setfit>=1.1",
+    "sentence-transformers>=3.0",
+]
 # E10: LoRA training dependencies for scripts/train_domain_lora.py.
 # Not installed by default to keep the serving image small and avoid
 # pulling torch/transformers on nodes that only run inference.

@@ -97,19 +97,40 @@ def _extract_sample_weights(rows: list[dict]) -> list[float]:
 
 
 async def build_training_features(
-    ollama_client: OllamaClient, embedding_model: str, rows: list[dict]
+    ollama_client: OllamaClient, embedding_model: str, rows: list[dict],
+    fine_tuned_embed_model: str | None = None,
 ) -> tuple[list[list[float]], list[str]]:
     """Embed every row's query text; return (embeddings, domain labels) in matching order.
 
+    If fine_tuned_embed_model is provided, uses a local SentenceTransformer
+    instead of the Ollama client for embedding generation.
     Sequential (not concurrent) to mirror run_experiment.py's and
     fit_embedding_whitening.py's sequential embedding calls.
     """
-    embeddings = []
-    labels = []
-    for row in rows:
-        embeddings.append(await ollama_client.embed(embedding_model, row["query"]))
-        labels.append(row["domain"])
-    return embeddings, labels
+    from sentence_transformers import SentenceTransformer
+
+    if fine_tuned_embed_model is not None:
+        # Use local fine-tuned model
+        print(f"[train_domain_classifier] using fine-tuned embed model: {fine_tuned_embed_model}",
+              file=sys.stderr)
+        local_model = SentenceTransformer(
+            fine_tuned_embed_model, trust_remote_code=True, device="cpu"
+        )
+        embeddings = []
+        labels = []
+        for row in rows:
+            emb = local_model.encode(row["query"], normalize_embeddings=True,
+                                     show_progress_bar=False)
+            embeddings.append(emb.tolist())
+            labels.append(row["domain"])
+        return embeddings, labels
+    else:
+        embeddings = []
+        labels = []
+        for row in rows:
+            embeddings.append(await ollama_client.embed(embedding_model, row["query"]))
+            labels.append(row["domain"])
+        return embeddings, labels
 
 
 def train_classifier(
@@ -164,12 +185,15 @@ def train_classifier(
 
 
 async def _train_and_save(
-    train_data_path: str, embedding_model: str, ollama_host: str, ollama_port: int, output_path: str
+    train_data_path: str, embedding_model: str, ollama_host: str, ollama_port: int,
+    output_path: str, fine_tuned_embed_model: str | None = None,
 ) -> None:
     rows = _load_training_rows(train_data_path)
     sample_weight = _extract_sample_weights(rows)
     ollama_client = OllamaClient(host=f"http://{ollama_host}:{ollama_port}")
-    embeddings, labels = await build_training_features(ollama_client, embedding_model, rows)
+    embeddings, labels = await build_training_features(
+        ollama_client, embedding_model, rows, fine_tuned_embed_model=fine_tuned_embed_model
+    )
     model = train_classifier(embeddings, labels, sample_weight=sample_weight)
     output_dir = os.path.dirname(output_path)
     if output_dir:
@@ -197,12 +221,19 @@ def main() -> None:
     )
     parser.add_argument("--ollama-host", required=True, help="A live node's ollama daemon host/IP")
     parser.add_argument("--ollama-port", type=int, default=11434)
+    parser.add_argument(
+        "--fine-tuned-embed-model",
+        default=None,
+        help="Path to a fine-tuned SentenceTransformer model (optional). "
+             "If provided, uses this local model for embeddings instead of Ollama.",
+    )
     parser.add_argument("--output", default="models/domain_classifier.joblib")
     args = parser.parse_args()
 
     asyncio.run(
         _train_and_save(
-            args.train_data, args.embedding_model, args.ollama_host, args.ollama_port, args.output
+            args.train_data, args.embedding_model, args.ollama_host, args.ollama_port,
+            args.output, fine_tuned_embed_model=args.fine_tuned_embed_model,
         )
     )
 

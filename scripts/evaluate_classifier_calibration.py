@@ -67,29 +67,54 @@ async def predict_calibrated_rows(
     embedding_model: str,
     classifier: CalibratedClassifierCV,
     dataset: list[dict],
+    fine_tuned_embed_model: str | None = None,
 ) -> list[dict]:
     """Recompute (selected_domain, confidence) for every dataset row via the calibrated classifier.
 
+    If fine_tuned_embed_model is provided, uses a local SentenceTransformer
+    instead of the Ollama client for embedding generation.
     Sequential (not concurrent) embedding calls, matching
     train_domain_classifier.py's build_training_features and
     fit_embedding_whitening.py's existing pattern for single-node
     offline embedding jobs.
     """
+    from sentence_transformers import SentenceTransformer
+
     classes = list(classifier.classes_)
     rows = []
-    for row in dataset:
-        query_embedding = await ollama_client.embed(embedding_model, row["query"])
-        probabilities = classifier.predict_proba([query_embedding])[0]
-        best_index = max(range(len(classes)), key=lambda i: probabilities[i])
-        rows.append(
-            {
-                "id": row["id"],
-                "expected_domains": row["expected_domains"],
-                "selected_domain": classes[best_index],
-                "confidence": float(probabilities[best_index]),
-                "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
-            }
+
+    if fine_tuned_embed_model is not None:
+        local_model = SentenceTransformer(
+            fine_tuned_embed_model, trust_remote_code=True, device="cpu"
         )
+        for row in dataset:
+            query_embedding = local_model.encode(row["query"], normalize_embeddings=True,
+                                                 show_progress_bar=False)
+            probabilities = classifier.predict_proba([query_embedding])[0]
+            best_index = max(range(len(classes)), key=lambda i: probabilities[i])
+            rows.append(
+                {
+                    "id": row["id"],
+                    "expected_domains": row["expected_domains"],
+                    "selected_domain": classes[best_index],
+                    "confidence": float(probabilities[best_index]),
+                    "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
+                }
+            )
+    else:
+        for row in dataset:
+            query_embedding = await ollama_client.embed(embedding_model, row["query"])
+            probabilities = classifier.predict_proba([query_embedding])[0]
+            best_index = max(range(len(classes)), key=lambda i: probabilities[i])
+            rows.append(
+                {
+                    "id": row["id"],
+                    "expected_domains": row["expected_domains"],
+                    "selected_domain": classes[best_index],
+                    "confidence": float(probabilities[best_index]),
+                    "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
+                }
+            )
     return rows
 
 
@@ -100,11 +125,15 @@ async def _run(
     ollama_host: str,
     ollama_port: int,
     output: TextIO,
+    fine_tuned_embed_model: str | None = None,
 ) -> None:
     dataset = _read_jsonl(dataset_path)
     classifier = load_domain_classifier(classifier_path)
     ollama_client = OllamaClient(host=f"http://{ollama_host}:{ollama_port}")
-    rows = await predict_calibrated_rows(ollama_client, embedding_model, classifier, dataset)
+    rows = await predict_calibrated_rows(
+        ollama_client, embedding_model, classifier, dataset,
+        fine_tuned_embed_model=fine_tuned_embed_model,
+    )
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False) + "\n")
     print(
@@ -134,6 +163,12 @@ def main() -> None:
     parser.add_argument("--ollama-host", required=True, help="A live node's ollama daemon host/IP")
     parser.add_argument("--ollama-port", type=int, default=11434)
     parser.add_argument(
+        "--fine-tuned-embed-model",
+        default=None,
+        help="Path to a fine-tuned SentenceTransformer model (optional). "
+             "If provided, uses this local model for embeddings instead of Ollama.",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write the calibrated-side JSONL to (default: stdout)",
@@ -149,6 +184,7 @@ def main() -> None:
                 args.ollama_host,
                 args.ollama_port,
                 sys.stdout,
+                fine_tuned_embed_model=args.fine_tuned_embed_model,
             )
         )
     else:
@@ -161,6 +197,7 @@ def main() -> None:
                     args.ollama_host,
                     args.ollama_port,
                     f,
+                    fine_tuned_embed_model=args.fine_tuned_embed_model,
                 )
             )
 

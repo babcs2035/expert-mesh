@@ -312,7 +312,7 @@ levers:
   # --- embedding_adaptation: 【2026-08-02 Iter39追加】nomic-embed-textのSetFit fine-tuning
   #     によりeducationドメインの埋め込み空間を改善。根本原因（embedding分離不足）に直接対処。 ---
   - {name: embedding_adaptation,
-     values: [setfit_education_finetune],
+     values: [setfit_education_finetune, embedding_adapter_only_lora],
      note: "[2026-08-02 Iter39 / backlog B61] `class_weight_adjustment` はrejected確定。
             education_recall=0.4588で不変だった。根本原因はembedding空間の分離不足。
             **SetFit**（HuggingFace 2023）はSentence Transformersのfew-shot fine-tuning。
@@ -326,7 +326,12 @@ levers:
             使用。positive pairはeducation行同士、negative pairは他ドメイン行からサンプリング。
             **コスト**: 中（数日〜1週間）。embeddingの再訓練が必要で、実機実行（1600問本走）も必要。
             **成功条件**: education_recall > medical_recall基準(0.5112)、
-            他9ドメイン18指標のBH補正後有意退行0件、top1_accuracyのMcNemar有意改善"}
+            他9ドメイン18指標のBH補正後有意退行0件、top1_accuracyのMcNemar有意改善
+            [2026-08-02 Iter40 reflector追記] `setfit_education_finetune` はrejected確定。
+            全パラメータfine-tuningは単一レバー原則と両立しない（argmax flip rate 52.56%）。
+            次値 `embedding_adapter_only_lora` はLoRAスタイルの低ランク適応で、
+            embeddingモデルの全パラメータを更新せず、低ランク行列のみをfine-tuningする。
+            既存のWAFL-PEFTインフラ（domain_lora, Iter18 adopted）のLoRAフックが参考になる。"}
 
   - {name: class_weight_adjustment,
      values: [none_manual_sample_weight],

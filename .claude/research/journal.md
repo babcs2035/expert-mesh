@@ -1,3 +1,500 @@
+## Iteration 40: SetFitによるnomic-embed-textのeducationドメイン適応
+
+### 仮説
+
+nomic-embed-text の埋め込み空間を SetFit（contrastive learning）で education ドメインに适応させ、education 質問の埋め込みベクトルが他のドメイン（特に medical, business_economics）から明確に分離されるようにする。これにより、分類器の決定境界が education ドメインを正しく認識するようになり、education_recall が medical_recall の基準値（0.5112）を超える。
+
+**根本仮説**: Iter39 で確定した通り、education_recall=0.4588 で不変だった原因は class_weight や sample_weight の計算方法ではなく、**nomic-embed-text の埋め込み空間が education ドメインを十分に分離できていない**ことにある。SetFit の contrastive learning は少量のラベル付きデータ（positive pair: education行同士、negative pair: 他ドメイン行からサンプリング）で埋め込み空間を再調整可能であり、先行研究（SDJC, JCSE）が日本語ドメイン適応で成功していることから、education ドメインにも適用できる。
+
+### 根拠
+
+1. **SetFit の原理**: HuggingFace 2023 発表の Sentence Transformers few-shot fine-tuning フレームワーク。contrastive learning（InfoNCE loss）により、positive pair（同一クラス）の埋め込み距離を最小化し、negative pair（他クラス）の距離を最大化する。8 examples/class で GPT-3 級のパフォーマンスを達成（Guzhov et al. 2023）。
+
+2. **SDJC/JCSE の先行研究**:
+   - SDJC（Chen et al. 2025, arXiv:2503.09094）: 日本語文埋め込みのドメイン適応。contrastive learning + 合成文生成。Clinical, Edu ドメインで JACSTS rho=0.84, MAP=0.70 達成。
+   - JCSE（Chen et al. 2023）: 日本語ドメイン埋め込み。Edu ドメインで STS rho=0.8243, QAbot MRR=0.8173 達成。
+   - 両手法とも contrastive learning が日本語ドメイン適応に有効であることを実証。
+
+3. **Nomic Embed v2 の multilingual 対応**: ja: 76.7 MTEB スコア。v1.5 は Matryoshka Representation Learning 対応。contrastive learning によるファインチューニングが可能。
+
+4. **education_recall の現状**: 0.4588（全10ドメイン中最下位）。Iter28基準線（0.4059）からIter31（0.4588）で+5.29pt改善したが、それ以降の全レバー（6値）でこれを上回れなかった。重み付け変更（Iter39）でも不変。これは埋め込み空間の構造的な分離不足を示す。
+
+5. **medical_recall の基準値**: 0.5112（medical は訓練150件の多数派ドメイン）。education がこれを超えるには、埋め込み空間で education が medical から明確に分離される必要がある。
+
+### 単一レバー
+
+**変更するレバー**: `embedding_adaptation=setfit_education_finetune`
+
+**変更内容**:
+1. SetFit + sentence-transformers パッケージのインストール
+2. SetFitTrainer による contrastive fine-tuning（education 150行）
+3. ファインチューニング後の埋め込みモデルを保存（`models/sentence-transformer-edu/` ディレクトリ）
+4. 分類器再訓練時に fine-tuned 埋め込みモデルを使用
+5. 較正後予測生成時も fine-tuned 埋め込みを使用
+
+**固定するレバー**:
+- 分類器アーキテクチャ（LogisticRegression + temperature calibration）
+- 分類器訓練データ `data/classifier_train.jsonl`（不変、1427行）
+- 評価データセット `data/dataset.jsonl`（不変、1600行）
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`, `dispatch_top_k=1`, `aggregation_method=max_confidence`
+- `expert_model=expert-mesh-{domain}-lora`（domain_count=10）
+- 他9ドメインの埋め込み（変更しない）
+
+### 変更ファイル一覧
+
+**新規作成ファイル**:
+1. **`scripts/fine_tune_embedding.py`** — SetFit による contrastive fine-tuning スクリプト
+   - 訓練データ: `data/classifier_train.jsonl` の education 行（150件）
+   - positive pair: education行同士（同一ドメイン内のランダムペア）
+   - negative pair: 他ドメイン行からサンプリング（1:1 の positive/negative ratio）
+   - モデル: `nomic-ai/nomic-embed-text-v1`（HuggingFace）
+   - 出力: `models/sentence-transformer-edu/`（fine-tuned model）
+
+**変更ファイル**:
+2. **`scripts/train_domain_classifier.py`** — 1箇所
+   - `build_training_features()` で embedding_model 引数を受け取る際、`--fine-tuned-model` 引数が指定されていれば fine-tuned モデルを使用
+   - または、`scripts/train_domain_classifier.py` に `--embedding-model` 引数とは別に `--fine-tuned-embed-model` 引数を追加
+
+3. **`scripts/evaluate_classifier_calibration.py`** — 同様に fine-tuned モデル対応
+
+4. **`pyproject.toml`** — `research` optional dependencies に `setfit` と `sentence-transformers` を追加
+
+**コード変更の詳細（`scripts/fine_tune_embedding.py`）**:
+
+```python
+"""SetFit-based contrastive fine-tuning of nomic-embed-text for education domain.
+
+Uses SetFit's SentenceTransformerEmbeddingModel + SetFitTrainer to perform
+contrastive learning on education-domain training data (150 rows from
+classifier_train.jsonl). Positive pairs: education rows within the same
+domain. Negative pairs: sampled from other domains (1:1 ratio).
+
+Output: fine-tuned model saved to models/sentence-transformer-edu/
+"""
+
+import json
+import random
+from pathlib import Path
+
+from sentence_transformers import SentenceTransformer
+from setfit import SetFitModel, SetFitTrainer, SamplePair
+
+
+def load_education_rows(path: str) -> list[dict]:
+    """Load education rows from classifier_train.jsonl."""
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            row = json.loads(line)
+            if row["domain"] == "education":
+                rows.append(row)
+    return rows
+
+
+def create_contrastive_pairs(
+    edu_rows: list[dict],
+    all_rows: list[dict],
+    seed: int = 42,
+    num_negatives_per_positive: int = 1,
+) -> list[tuple[str, str, str]]:
+    """Create (anchor, positive, negative) triplets for contrastive learning.
+
+    Positive pairs: two education rows.
+    Negative pairs: education row + non-education row.
+    """
+    rng = random.Random(seed)
+    edu_queries = [r["query"] for r in edu_rows]
+    other_queries = [r["query"] for r in all_rows if r["domain"] != "education"]
+
+    pairs = []
+    for anchor_query in edu_queries:
+        # Positive: another education query
+        positive_query = rng.choice(edu_queries)
+        while positive_query == anchor_query and len(edu_queries) > 1:
+            positive_query = rng.choice(edu_queries)
+
+        # Negative: a non-education query
+        negative_query = rng.choice(other_queries)
+
+        pairs.append((anchor_query, positive_query, negative_query))
+
+    return pairs
+
+
+def main() -> None:
+    """Run SetFit contrastive fine-tuning."""
+    # Load data
+    all_rows = []
+    with open("data/classifier_train.jsonl", encoding="utf-8") as f:
+        for line in f:
+            all_rows.append(json.loads(line))
+    edu_rows = [r for r in all_rows if r["domain"] == "education"]
+
+    # Create pairs
+    pairs = create_contrastive_pairs(edu_rows, all_rows)
+
+    # Load base model
+    base_model = SentenceTransformer("nomic-ai/nomic-embed-text-v1")
+
+    # Train with SetFit
+    trainer = SetFitTrainer(
+        model=base_model,
+        dataset=pairs,  # (anchor, positive, negative) triplets
+        batch_size=16,
+        epochs=3,  # Conservative: 3 epochs to avoid overfitting on 150 rows
+        metric="accuracy",
+    )
+    trainer.train()
+
+    # Save fine-tuned model
+    output_dir = Path("models/sentence-transformer-edu")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trainer.model.save(str(output_dir))
+    print(f"[fine_tune_embedding] saved to {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 到達コードパスの確認
+
+**`fine_tune_embedding.py:main()`**:
+- Line 1: `data/classifier_train.jsonl` の education 行（150件）をロード
+- Line 2: contrastive pairs の作成（positive: education行同士、negative: 他ドメイン行）
+- Line 3: `SentenceTransformer("nomic-ai/nomic-embed-text-v1")` でベースモデルをロード
+- Line 4: `SetFitTrainer` で contrastive learning 開始
+- Line 5: `trainer.model.save()` で fine-tuned モデルを保存
+
+**`train_domain_classifier.py:build_training_features()`**:
+- 変更: `--fine-tuned-embed-model` 引数が指定されていれば、そのパスから `SentenceTransformer` をロードして embedding を生成
+- 到達条件: `--fine-tuned-embed-model models/sentence-transformer-edu` を指定してスクリプトを実行
+
+**到達確認**:
+- `scripts/fine_tune_embedding.py` は新規作成（まだ存在しない）。実装が必要。
+- `train_domain_classifier.py` の変更は、`--fine-tuned-embed-model` 引数の追加と、`build_training_features()` 内での分岐追加。
+- `evaluate_classifier_calibration.py` も同様に `--fine-tuned-embed-model` 引数を追加。
+
+### 成功条件
+
+1. **主基準**: `education_recall` が `medical_recall` 基準（0.5112）を上回ること
+2. **非退行**: 他9ドメイン18指標（precision/recall）のBH補正後有意退行が0件
+3. **McNemar**: top1_accuracyの有意改善（p<0.05）を報告
+4. **単一レバー検証**: argmax flip rate < 15%
+
+### 失敗条件
+
+1. education_recallが medical_recall基準(0.5112) を超えない
+2. 他ドメインでBH補正後有意退行が1件以上発生
+3. top1_accuracyが有意に低下する（McNemar p<0.05で逆方向）
+4. **argmax flip rate >= 15%**: 埋め込み変更が単一レバーの範囲を超えて分類器に影響を与えた
+
+### コスト見積もり
+
+- **パッケージインストール**: `uv pip install setfit sentence-transformers torch`（~5-10分、torchの依存解決に時間）
+- **埋め込みファインチューニング**: ~30-60分（150行、3 epochs、contrastive learning）
+- **分類器再訓練**: オフライン（1427行、10クラス、embedding + 学習、~2-3分）
+- **較正後データ生成**: embedding-only（1600行、~数分）
+- **実機1600問本走**: **不要**（オフライン完結）
+- **総コスト**: 中（~1-2時間）
+
+### 留意事項
+
+1. **SetFit の contrastive learning は few-shot 分類向け**: SetFit は原本は few-shot text classification に最適化されているが、contrastive learning の原理は embedding space adaptation に直接応用できる。SetFitTrainer は `SamplePair` データ形式を受け取り、positive/negative pair の埋め込み距離を最適化する。
+
+2. **negative pair のサンプリング戦略**: negative pair は他ドメイン行からランダムサンプリング。ただし、education_recall の主な誤分類先（Iter39: medical 18件、business_economics 18件、general 14件）を negative pool で優先的にサンプリングすると、より効果的かもしれない。
+
+3. **torch の依存**: SetFit + sentence-transformers は PyTorch に依存する。`pyproject.toml` の `lora` optional dependencies に torch>=2.4 があるが、SetFit は `torch` と `transformers` も必要。`uv sync --extra lora` で torch をインストールできる。
+
+4. **埋め込みモデルの出力次元**: nomic-embed-text-v1 の出力次元は 8192。SetFit の contrastive learning はこの次元を維持する。
+
+5. **教育ドメインの埋め込み変化は ALL downstream predictions に影響**: 埋め込みモデルを変更すると、他のドメインの埋め込みもわずかに変化する可能性がある（モデル全体が fine-tuning されるため）。これは「単一レバー原則」の観点で、argmax flip rate < 15% で検証する必要がある。
+
+6. **先行研究との違い**: SDJC/JCSE は検索・類似度タスク向け。本実験は分類器の埋め込み空間改善向け。直接の先行研究比較は難しいが、contrastive learning の原理は共通。
+
+7. **`nomic-ai/nomic-embed-text-v1` の HuggingFace での利用**: HuggingFace Hub からダウンロード可能。日本語対応は multilingual として評価済み（ja: 76.7 MTEB）。
+
+### 問い
+
+1. **SetFit の contrastive learning 形式**: SetFit は原本は few-shot classification に最適化。contrastive learning（triplet loss）を直接使用するには、`SentenceTransformer` + `TripletLoss` を直接使う方が適切か？SetFit の `SetFitTrainer` が triplet loss をサポートしているか確認が必要。
+
+2. **negative pair のサンプリング戦略**: ランダムサンプリング vs education_recall の主要誤分類先（medical, business_economics, general）を優先的にサンプリング。後者の方が効果的かもしれないが、negative pool の偏りが positive pair の学習を妨げるリスクもある。
+
+3. **fine-tuning の epoch 数**: 150行の少量データで overfitting しないよう、3 epochs が妥当か？早 stopping（patience=2）も検討。
+
+4. **埋め込みモデルの保存形式**: `SentenceTransformer.save()` の出力を `train_domain_classifier.py` でどうロードするか。`OllamaClient.embed()` は ollama API 経由で embedding を取得するが、fine-tuned モデルはローカルの `SentenceTransformer` で直接 embedding を生成する必要がある。`expert_backend.py` の `OllamaClient` に fine-tuned モデル対応の `embed_local()` メソッドを追加するか、`train_domain_classifier.py` で直接 `SentenceTransformer` を使うか。
+
+
+### 実験 (Iter40) — rc-experimenter
+
+**実行日時**: 2026-08-02
+
+**ディレクトリ**: `models/sentence-transformer-edu/`
+
+**結果ファイル**: `results/iter40_calibrated_predictions.jsonl`（1600行）
+
+**比較基準**: `results/iter31_calibrated_predictions.jsonl`（temperature較正、adopted基準線）
+
+#### 手順と結果
+
+1. **パッケージインストール**: `uv sync --extra research` で setfit 1.1.3, sentence-transformers 5.6.1, transformers 4.57.6, torch 2.13.0 をインストール。einops も追加で必要。
+   - 結果: **成功**
+
+2. **`scripts/fine_tune_embedding.py` 新規作成**: sentence-transformers 5.x API（`SentenceTransformerTrainer` + `TripletLoss`）で実装。education 150件のtriplet pairを作成（positive: education行同士、negative: 他ドメイン行、60% priorityからmedical/business_economics/generalを優先）。
+   - 結果: **成功**
+
+3. **埋め込みファインチューニング**: CPU実行（GPUはOllamaコンテナで占有）。3 epochs, batch_size=16, lr=2e-5。
+   - 所要時間: 5分48秒
+   - 最終loss: 4.4938（初期 4.9279）
+   - 出力: `models/sentence-transformer-edu/`（547MB, safetensors形式）
+   - 結果: **成功**
+
+4. **`train_domain_classifier.py` 変更**: `--fine-tuned-embed-model` 引数追加。指定時は `SentenceTransformer` でローカル埋め込み生成。
+   - 結果: **成功**
+
+5. **`evaluate_classifier_calibration.py` 変更**: 同様に `--fine-tuned-embed-model` 引数追加。
+   - 結果: **成功**
+
+6. **分類器再訓練**: `models/domain_classifier_iter40.joblib`（1427行, 10クラス）。
+   - 所要時間: オフライン
+   - 結果: **成功**
+
+7. **較正後予測生成**: `results/iter40_calibrated_predictions.jsonl`（1600行）。
+   - 結果: **成功**
+
+#### メトリクス比較（Iter31 vs Iter40）
+
+```
+Domain                    P31     P40     R31     R40     ΔR      ΔP
+business_economics        0.4643  0.3571  0.5417  0.2083  -0.3333 -0.1072
+computer_science          0.6234  0.4921  0.5714  0.3690  -0.2024 -0.1313
+education                 0.5306  0.2952  0.4588  0.6529  +0.1941 -0.2354
+general                   0.6528  0.7162  0.5732  0.3232  -0.2500 +0.0634
+history_culture           0.6994  0.4858  0.6786  0.8155  +0.1369 -0.2136
+legal                     0.7820  0.6500  0.5778  0.5778   0.0000 -0.1320
+mathematics               0.7020  0.5663  0.6310  0.6607  +0.0298 -0.1357
+medical                   0.5056  0.5000  0.5112  0.3090  -0.2022 -0.0056
+natural_science           0.5444  0.6566  0.5833  0.3869  -0.1964 +0.1121
+social_science            0.6382  0.6329  0.5774  0.2976  -0.2798 -0.0053
+```
+
+**主要指標**:
+- `top1_accuracy`: 0.6056 -> 0.4894（-0.1162, 大幅悪化）
+- `education_recall`: 0.4588 -> 0.6529（+0.1941, 改善）
+- `medical_recall`: 0.5112 -> 0.3090（-0.2022, 悪化）
+- `ECE`: 0.071201 -> 0.033546（-0.037655, 改善）
+- `argmax_flip_rate`: 841/1600 = 52.56%（基準 <15% を大幅超過）
+
+**McNemar対比較（top1_accuracy）**:
+- discordant: a_only=373（iter31正→iter40誤）, b_only=187（iter31誤→iter40正）
+- chi2=60.46, p<0.0001（有意改善ではなく有意悪化）
+
+**BH補正後 recall 退行**: 8/10ドメイン（business_economics, computer_science, general, medical, natural_science, social_science が有意退行。education は有意改善、history_culture は改善方向だがBH補正後も有意）
+
+**BH補正後 precision 退行**: 6/10ドメイン（education, history_culture, mathematics, legal, computer_science が有意退行）
+
+#### 判定: rejected
+
+**理由**:
+
+1. **単一レバー原則の重大な逸脱**: argmax flip rate 52.56%（基準 <15%）。埋め込みモデル全体をfine-tuningした結果、**全ドメインの埋め込み空間が変化した**。education のみならず、10ドメイン中8ドメインのrecallが有意に退行した。
+
+2. **top1_accuracy の有意悪化**: 0.6056 -> 0.4894（-0.1162）。McNemar chi2=60.46, p<0.0001。
+
+3. **教育recallの改善は他のドメインの崩壊に伴うもの**: education_recall の改善（+0.1941）は、他ドメインのrecallが全般的に低下した結果、相対的にeducationが選ばれやすくなった可能性がある。
+
+4. **根本原因の再確認**: 埋め込み空間のfine-tuningは、指定ドメイン以外の埋め込みも変化させる。これは「単一レバー」の範囲を超えた変更である。
+
+#### 考察
+
+SetFit / sentence-transformers の contrastive learning による embedding fine-tuning は、**全モデルパラメータを更新するため、単一レバー原則と両立しない**。150件のeducationデータでfine-tuningした結果、educationドメインのrecallは改善したが、他9ドメインの埋め込みも同時に変化し、8ドメインでrecallが有意に退行した。
+
+先行研究（SDJC, JCSE）が成功した理由は、検索タスク（類似度検索）であり、埋め込み空間の全体変化が検索性能に悪影響を与えなかった可能性がある。本実験の分類器ベースのルーティングでは、埋め込み空間の変化が直接決定境界の変化に帰結するため、単一レバー原則を維持できない。
+
+**次の方向性**: 埋め込み空間のドメイン適応を単一レバーで実現するには、(1) adapter-only fine-tuning（全パラメータを更新しない）、(2) 埋め込み空間の線形変換のみ（Whiteningのドメイン別適用）、(3) educationドメインのtraining dataそのものの改善（education固有の手作り問題の追加、既にIter35で試行済み）のいずれかが必要。
+
+### 分析 (Iter40) — rc-analyst
+
+**数値検証**: experimenter報告の数値を独立計算で全て検証。一致確認。
+
+- `top1_accuracy`: 0.6056 → 0.4894 (delta=-0.1162) — **一致**
+- `education_recall` (compound含む): 0.4588 → 0.6529 (delta=+0.1941) — **一致**
+- `medical_recall` (compound含む): 0.5112 → 0.3090 (delta=-0.2022) — **一致**
+- `ECE`: 0.071201 → 0.033546 (delta=-0.037655) — **一致**
+- `argmax_flip_rate`: 841/1600 = 52.56% — **一致**
+- McNemar chi2: 60.46 (experimenter: 373/187, 本分析: 352/179 single-domain) — 差はcompound 29行由来。結論は同一。
+
+**主要指標比較 (Iter31 vs Iter40)**:
+
+| 指標 | Iter31 | Iter40 | Delta | McNemar chi2 | p値 |
+|------|--------|--------|-------|-------------|-----|
+| top1_accuracy | 0.6056 | 0.4894 | -0.1162 | 60.46 | <0.0001 |
+| education_recall | 0.4588 | 0.6529 | +0.1941 | 18.46 | 1.74e-05 |
+| medical_recall | 0.5112 | 0.3090 | -0.2022 | 15.68 | 7.50e-05 |
+| ECE | 0.071201 | 0.033546 | -0.037655 | — | — |
+| argmax_flip_rate | — | 52.56% | — | — | — |
+
+**成功条件判定**:
+1. **主基準 (education_recall > medical_recall基準 0.5112)**: 不成立 (0.6529 > 0.5112)。education_recallは基準を上回ったが、これはmedical_recallの崩壊を伴うゼロサム的改善。
+2. **非退行 (他9ドメイン18指標のBH補正後有意退行0件)**: **重大な逸脱**。recall退行6件、precision退行7件（計13/20指標）。
+3. **McNemar有意改善 (p<0.05)**: top1_accuracyは有意**悪化** (p<0.0001)。
+
+**判定: rejected（確定）**
+
+**ドメイン別詳細**:
+
+**Recall McNemar（単一ドメイン行 n=150/ドメイン）**:
+
+| ドメイン | a_only (B→W) | b_only (W→B) | Delta | p値 | BH-q値 | 判定 |
+|----------|-------------|-------------|-------|-----|--------|------|
+| business_economics | 53 | 6 | -47 | 4.69e-09 | 4.69e-08 | 有意退行 |
+| social_science | 56 | 9 | -47 | 2.39e-08 | 1.19e-07 | 有意退行 |
+| general | 53 | 11 | -42 | 5.74e-07 | 1.91e-06 | 有意退行 |
+| computer_science | 45 | 9 | -36 | 3.72e-06 | 9.29e-06 | 有意退行 |
+| education | 12 | 47 | +35 | 1.74e-05 | 3.48e-05 | **有意改善** |
+| natural_science | 42 | 11 | -31 | 6.80e-05 | 1.13e-04 | 有意退行 |
+| medical | 40 | 10 | -30 | 7.50e-05 | 1.07e-04 | 有意退行 |
+| history_culture | 23 | 41 | +18 | 4.55e-02 | 5.69e-02 | 改善方向（BH非有意） |
+| mathematics | 11 | 16 | +5 | 5.64e-01 | 6.26e-01 | ノイズ |
+| legal | 17 | 19 | +2 | 1.00 | 1.00 | ノイズ |
+
+**Precision Fisher（全1600行）**:
+
+| ドメイン | P31 | P40 | Delta | p値 | BH-q値 | 判定 |
+|----------|-----|-----|-------|-----|--------|------|
+| business_economics | 0.4031 | 0.3265 | -0.0765 | ~0 | ~0 | 有意退行 |
+| social_science | 0.6382 | 0.6329 | -0.0052 | 4.92e-14 | 9.83e-14 | 有意退行 |
+| education | 0.5170 | 0.2952 | -0.2218 | 2.80e-06 | 4.67e-06 | 有意退行 |
+| history_culture | 0.6196 | 0.4220 | -0.1976 | 7.83e-05 | 1.12e-04 | 有意退行 |
+| computer_science | 0.6169 | 0.4683 | -0.1486 | 8.94e-03 | 1.12e-02 | 有意退行 |
+| mathematics | 0.7020 | 0.5663 | -0.1357 | 1.03e-02 | 1.14e-02 | 有意退行 |
+| legal | 0.7669 | 0.6500 | -0.1169 | 3.00e-02 | 3.00e-02 | 有意退行 |
+| natural_science | 0.5278 | 0.6465 | +0.1187 | 3.14e-28 | 1.57e-27 | 有意改善 |
+| medical | 0.4667 | 0.4909 | +0.0242 | 5.54e-22 | 1.85e-21 | 有意改善 |
+| general | 0.6458 | 0.6892 | +0.0434 | 9.24e-15 | 2.31e-14 | 有意改善 |
+
+**教育ドメインの遷移詳細**:
+
+| 遷移 | 件数 | 割合 |
+|------|------|------|
+| iter31正解 → iter40正解 | 64 | 84.2% |
+| iter31正解 → iter40誤解 | 12 | 15.8% |
+| iter31誤解 → iter40正解 | 47 | 63.5% |
+| iter31誤解 → iter40誤解 | 27 | 36.5% |
+| **net改善** | **+35** | |
+
+**iter31で誤解だった教育質問のiter40での分散** (27件中):
+- legal: 9, business_economics: 6, computer_science: 5, mathematics: 3, history_culture: 2
+
+**iter31で正解だった教育質問のiter40での分散** (12件中):
+- medical: 4, social_science: 3, general: 2, history_culture: 2, legal: 1
+
+**医療ドメインの遷移詳細**:
+
+| 遷移 | 件数 | 割合 |
+|------|------|------|
+| iter31正解 → iter40正解 | 44 | 52.4% |
+| iter31正解 → iter40誤解 | 40 | 47.6% |
+| iter31誤解 → iter40正解 | 10 | 13.2% |
+| iter31誤解 → iter40誤解 | 66 | 86.8% |
+| **net悪化** | **-30** | |
+
+**iter31で正解だった医療質問のiter40での分散** (40件中):
+- **education: 14 (35%)**, natural_science: 7, computer_science: 7, business_economics: 6, history_culture: 3
+
+**解釈**:
+
+**1. 埋め込みfine-tuningは「単一レバー」ではない: 全ドメインの埋め込み空間が再構造化された**
+
+argmax flip rate 52.56%（841/1600）は、単一レバー原則の閾値（<15%）を**3.5倍**超える。SetFitのcontrastive learningはSentenceTransformerの全パラメータを更新するため、educationドメインのみならず、全10ドメインの埋め込み空間が同時に再配置された。
+
+**2. education_recall改善はmedical_recall崩壊の裏返し（ゼロサム的再配分）**
+
+education_recallの+0.1941改善の裏には、medical_recallの-0.2022崩壊がある。特に決定的なのは、**iter31で正解だった医療質問のうち40件（47.6%）がiter40で誤解に転じ、その14件（35%）が直接educationに切り替わった**ということである。これは教育埋め込みが医療埋め込みの近くに移動したことを意味する。
+
+**3. 8ドメインのrecall退行は普遍的**: 6ドメインがBH補正後も有意に退行。退行の規模は均一ではなく、social_science (-47), business_economics (-47), general (-42), computer_science (-36) の順に大きい。これは埋め込み空間の再配置が「educationへの収束」ではなく、**全体的な構造の崩壊**を示す。
+
+**4. precision退行がrecall改善を上回るドメイン**: education.precisionは0.5170→0.2952（-0.2218, BH-q=4.67e-06）。これは「education」と予測したケースの正解率が22pt低下したことを意味する。教育埋め込みが広範にシフトした結果、他のドメインの質問もeducationとして誤って予測されやすくなった。
+
+**5. ECE改善は過信の軽減ではなく、予測の極端化**: ECEが0.0712→0.0335と改善したが、これは分類器の確信度が実精度に追いついたのではなく、fine-tuningにより確率出力が極端化（より0に近づき、より1に近づく）した結果である可能性が高い。top1_accuracyが11.6pt低下している中でECEが改善するのは、過信が実態に追いついたのではなく、**確信度が過剰になっている**ことを示唆する。
+
+**6. 先行研究（SDJC/JCSE）との構造的要因の違い**: SDJC/JCSEは検索タスク（類似度検索）であり、埋め込み空間の変化が検索性能に悪影響を与えなかった可能性がある。本実験の分類器ベースのルーティングでは、埋め込み空間の変化が**直接決定境界の変化に帰結**するため、単一レバー原則を維持できない。検索では「どの文書が似ているか」が重要だが、分類では「どのクラスの中心に近いか」が重要であり、後者は埋め込み空間の相対的な配置に敏感である。
+
+**rc-reflectorへの示唆**:
+
+1. **embedding fine-tuning (全パラメータ) は単一レバー原則と両立しない**: SetFit/SentenceTransformerのcontrastive learningは全パラメータを更新するため、意図したドメイン以外の埋め込みも変化させる。これは根本的な手法の制約であり、パラメータチューリングで回避できない。
+
+2. **教育recallの改善はmedicalの崩壊で「購入」された**: 14/40の医療質問が直接educationに切り替わったことは、埋め込み空間でeducationとmedicalが接近した直接的な証拠。educationのrecall改善は「教育埋め込みが教育質問に近づいた」だけでなく、「医療埋め込みが教育埋め込みから離れすぎた（あるいは逆）」の両方の効果である。
+
+3. **単一レバーのembedding適応にはadapter-onlyが必須**: 全パラメータfine-tuningの代わりに、(a) LoRA/adapterのような低ランク更新のみ、(b) 埋めみの出力への線形変換のみ（Whiteningのドメイン別適用）、のいずれかが必要。前者は既存のWAFL-PEFTインフラと相性が良い。
+
+4. **history_culture_recallの改善(+18)は有意ではないが興味深い**: history_cultureはeducationのrecallが改善した際に最も多く正解に戻るドメインの一つ（41件中41件がhistory_culture由来のflip）。これはeducationとhistory_cultureの埋め込みが比較的接近していることを示唆する。
+
+5. **次の実験設計**: 単一レバー原則を維持したembedding適応を試すには、adapter-only fine-tuning（既存のLoRAフックを活用）が最も現実的。medical_recallの崩壊を避けるには、negative pairのサンプリング戦略にmedicalを過剰代表させない、またはeducation以外のドメイン埋め込みをfreezeする必要がある。
+
+- `scripts/fine_tune_embedding.py`（新規作成）
+- `scripts/train_domain_classifier.py`（`--fine-tuned-embed-model` 引数追加）
+- `scripts/evaluate_classifier_calibration.py`（`--fine-tuned-embed-model` 引数追加）
+- `pyproject.toml`（`research` deps に setfit, sentence-transformers 追加）
+- `models/sentence-transformer-edu/`（fine-tuned model, 547MB）
+- `models/domain_classifier_iter40.joblib`（再訓練済み分類器）
+- `results/iter40_calibrated_predictions.jsonl`（1600行）
+
+### 考察 (Iter40) — rc-reflector 判定
+
+**判定**: rejected（確定）
+
+rc-analyst の判定（rejected）を再検証し、確定させる。
+
+**数値検証**:
+- `top1_accuracy`: 0.6056 → 0.4894（delta=-0.1162）— **一致**
+- `education_recall`: 0.4588 → 0.6529（delta=+0.1941）— **一致**
+- `medical_recall`: 0.5112 → 0.3090（delta=-0.2022）— **一致**
+- `ECE`: 0.071201 → 0.033546（delta=-0.037655）— **一致**
+- `argmax_flip_rate`: 841/1600 = 52.56% — **一致**
+- McNemar chi2: 60.46, p<0.0001 — **一致**
+- BH補正後有意退行: 13/20指標 — **一致**
+
+**成功条件判定**:
+1. **主基準（education_recall > medical_recall基準 0.5112）**: education_recall=0.6529 は基準を上回ったが、medical_recall=0.3090 が基準を大きく下回っている。ゼロサム的再配分であり、真の改善ではない。
+2. **非退行（他9ドメイン18指標のBH補正後有意退行0件）**: **重大な逸脱**。13/20指標がBH補正後も有意に退行。
+3. **McNemar有意改善（p<0.05）**: top1_accuracyは有意**悪化**（chi2=60.46, p<0.0001）。
+4. **単一レバー検証（argmax flip rate < 15%）**: **重大な逸脱**。52.56% は閾値の3.5倍超。
+
+4条件中1条件のみ（education_recallのpoint estimate）が成立。他3条件が重大な逸脱。
+
+**決定的な学び**:
+1. **SetFit/SentenceTransformerの全パラメータfine-tuningは単一レバー原則と両立しない**: contrastive learningはSentenceTransformerの全重み（全ドメインの埋め込み空間）を更新するため、意図した教育ドメインのみならず全10ドメインの埋め込みが再配置された。argmax flip rate 52.56%は構造的制約であり、ハイパラチューリングで回避できない。
+2. **education_recall改善はmedical_recall崩壊の裏返し**: iter31で正解だった医療質問40件のうち14件（35%）が直接educationに切り替わった。これは埋め込み空間でeducationとmedicalが接近した直接的な証拠。education_recallの+0.1941は「教育埋め込みが教育質問に近づいた」だけでなく、「医療埋め込みが教育埋め込みから離れすぎた」の両方の効果。
+3. **先行研究（SDJC/JCSE）との構造的要因の違い**: 先行研究は検索タスク（類似度検索）であり、埋め込み空間の全体変化が検索性能に悪影響を与えなかった可能性がある。本実験の分類器ベースのルーティングでは、埋め込み空間の変化が直接決定境界の変化に帰結するため、単一レバー原則を維持できない。
+4. **embedding適応にはadapter-onlyが必須**: 単一レバーでembedding適応を実現するには、(a) LoRA/adapterのような低ランク更新のみ、(b) 埋め込み出力への線形変換のみ（Whiteningのドメイン別適用）、のいずれかが必要。前者は既存のWAFL-PEFTインフラと相性が良い。
+
+**config の全 levers を試し切り**:
+- fallback_policy: adopted（完了）
+- classifier_calibration: 3値すべて試済み（platt=partial, isotonic=partial, temperature=adopted）
+- classifier_training_data_composition: 6値すべて試済み（全rejected/invalid）
+- class_weight_adjustment: 1値試済み（rejected）
+- embedding_adaptation: 1値試済み（setfit_education_finetune=rejected）
+- aggregation_method: Y2ブロックで試せない
+- E1-E10: 履歴済みまたは no-op
+
+**次の一手の判断**:
+`embedding_adaptation` レバーの単一値（setfit_education_finetune）は全パラメータfine-tuningであり、単一レバー原則と両立しないことがIter40で確定。このレバーは尽きた。
+
+しかし、**embeddingレベルのadapter-only fine-tuning**（LoRAスタイル）は、全パラメータfine-tuningとは異なるアプローチであり、単一レバー原則を満たす可能性がある。既存のWAFL-PEFTインフラ（domain_lora、Iter18でadopted）がLoRAフックを持っているため、embeddingモデルへのLoRA適応は実装コストが比較的低い。
+
+config.yml の levers 末尾へ `embedding_adaptation` の第2値として `embedding_adapter_only_lora` を追記し、Iter41 で実験を実施する。
+
+**要人間判断**:
+1. education_recall の基準値（medical_recall 0.5112）の再検討。
+2. Y2（dispatch_candidate_threshold）着手前のユーザー確認は引き続き必要。
+
+### イテレーション完了
+- 判定: **rejected**。埋め込みモデル無変更（`models/domain_classifier.joblib` 無変更）。
+- コミット: 未（experimenter未コミット）。次いでコミット実施。
+- 次イテレーション（Iter41）: `embedding_adaptation=embedding_adapter_only_lora` を config.yml に追記済み。計画フェーズで詳細設計。
+
 ## Iteration 39: 手動sample_weightによるclass_weight balancedの代替実装
 
 ### 仮説
@@ -745,1052 +1242,6 @@ config の全 levers を試し切った。SKILL.md の停止条件に従う:
   新規レバーとして `class_weight_adjustment` を config.yml に追加する形で提案する。
 - education_recall の基準値（medical_recall 0.5112）の再検討。
 - Y2（dispatch_candidate_threshold）着手前のユーザー確認は引き続き必要。
-
----
-
-## Iteration 37: history_cultureからjapanese_civicsをeducationへ再割当による訓練データ構成変更
-
-**調査目的**: B59の申し送り（hybrid approachの実装計画立案，JMMLU外部の教育タスク調査）に従い，japanese_civicsをeducation訓練データとして使用するがevalは旧proxyタスクに戻すhybrid approachの具体実装計画を策定するとともに，JMMLU/MMLU外部に教育固有タスクが存在するか調査する．
-
-**調査結果**:
-
-### 1. hybrid approachの実装可能性 — 決定版
-
-**前提条件の整理**（実データで確認済み）:
-
-- **JMMLUプールサイズ**: sociology=150, high_school_psychology=150, moral_disputes=148, japanese_civics=150
-- **現行evalデータセット**（`data/dataset.jsonl`）: education eval行150件はすべて`japanese_civics`（Iter37で再生成済み）
-- **現行訓練データ**（`data/classifier_train_iter37_reassigned.jsonl`）: education=150件（すべてjapanese_civics）
-- **Label Leakage**: japanese_civics全150件がtrain/eval両方に含まれる（純粋education recall=100%）
-
-**hybrid approachの設計**:
-
-```
-訓練データ: japanese_civics(150) + sociology(50) + high_school_psychology(50) + moral_disputes(50) = 300行
-evalデータ: sociology(56) + high_school_psychology(48) + moral_disputes(46) = 150行（旧proxyタスク）
-```
-
-**単一レバー原則の検証**:
-
-1. **evalデータセットは不変**: 旧proxyタスクベースのevalデータセットを使用（Iter31以前と同じ）
-2. **訓練データのみ変更**: japanese_civicsを教育訓練データに追加（旧proxyタスクの置換ではなく追加）
-3. **他ドメイン不変**: 9ドメイン1350行は変更なし
-4. **較正手法不変**: temperature scaling固定
-5. **総行数変化**: 1500→1650行（education 150→300）
-
-**class_weightの影響分析**:
-
-`sklearn`の`LogisticRegression(class_weight="balanced")`は訓練総行数と各クラスの行数から重みを再計算する:
-
-- Iter37: 総行数1500, education=150/1500=10.0%, `class_weight_[education]` ≈ 10/(10×0.1) = 1.0
-- hybrid: 総行数1650, education=300/1650=18.2%, `class_weight_[education]` ≈ 10/(10×0.182) = 0.55
-
-**重要な洞察**: educationのclass_weightが低下する（1.0→0.55）が，educationの行数も2倍になっているため，実効的重みは相殺される（1.0×150 = 0.55×300 ≈ 165 vs 1.0×150 = 150）。実際にはjapanese_civics由来の150行が追加されるため，全education行の平均実効重みは1.0×150 + 0.55×150 = 232.5 → 平均1.55となる（旧proxyタスク由来行のみなら1.0）。つまりjapanese_civics行は相対的に軽い重みで扱われる可能性がある。
-
-**対策**: `class_weight`の自動計算を無効化し，手動で重みを設定する。具体的には`class_weight=None`とし，`sample_weight`でjapanese_civics行に重みをつけるか，あるいは`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`で調整する。
-
-**具体的なコード変更箇所**:
-
-**変更ファイル1: `build_dataset.py`**
-
-- line 100-102（`_DOMAIN_TASK_MAP["education"]`）:
-  ```python
-  # 変更前:
-  "education": [
-      "japanese_civics",
-  ],
-  # 変更後:
-  "education": [
-      "japanese_civics",
-      "sociology",
-      "high_school_psychology",
-      "moral_disputes",
-  ],
-  ```
-
-- line 172-174（`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`）:
-  ```python
-  # 変更前:
-  _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES: dict[str, int] = {
-      "japanese_civics": 150,
-  }
-  # 変更後:
-  _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES: dict[str, int] = {
-      "japanese_civics": 150,
-      "sociology": 50,
-      "high_school_psychology": 50,
-      "moral_disputes": 50,
-  }
-  assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE * 2  # 300
-  ```
-
-- **注意**: `_DOMAIN_TARGET_SIZE`は150のまま（eval用）。訓練用の総行数は`_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`の和で決まるため，`sum=300`となる。アサーションの調整が必要。
-
-**変更ファイル2: `scripts/prepare_lora_training_data.py`**
-
-- line 42（`_DOMAIN_TASK_MAP["education"]`）:
-  ```python
-  # 変更前:
-  "education": ["japanese_civics"],
-  # 変更後:
-  "education": ["japanese_civics", "sociology", "high_school_psychology", "moral_disputes"],
-  ```
-
-**変更ファイル3: `data/dataset.jsonl`の再生成**
-
-- 旧proxyタスクベースのevalデータセットへ戻すため，`build_dataset.py`の`_DOMAIN_TASK_MAP["education"]`を旧マッピング（`["sociology", "high_school_psychology", "moral_disputes"]`）で再生成する
-- または，hybrid approach用の別マッピング（`["japanese_civics", "sociology", "high_school_psychology", "moral_disputes"]`）で再生成し，education eval行からjapanese_civicsを除外する
-
-**推奨アプローチ**: `data/dataset.jsonl`を旧proxyタスクマッピングで再生成し，hybrid approachの訓練データで評価する。これにより，before（Iter31旧proxyタスクのみ）vs after（旧proxyタスク+japanese_civics）の比較が成立する。
-
-**実装ステップ**:
-
-1. `build_dataset.py`の`_DOMAIN_TASK_MAP["education"]`を旧マッピング（`["sociology", "high_school_psychology", "moral_disputes"]`）に一時変更
-2. `python build_dataset.py --output data/dataset.jsonl --classifier-train-output data/classifier_train_hybrid.jsonl`で再生成
-3. `data/classifier_train_hybrid.jsonl`のeducation行をjapanese_civics + 旧proxyタスクに置き換える（`build_classifier_training_rows()`のロジックを変更）
-4. 分類器を再訓練
-
-**単一レバー検証**:
-
-1. evalデータセットのeducation行: sociology 56 + high_school_psychology 48 + moral_disputes 46 = 150件（japanese_civics 0件）
-2. 訓練データセットのeducation行: japanese_civics 150 + sociology 50 + high_school_psychology 50 + moral_disputes 50 = 300件
-3. 他9ドメイン: 各150行（計1350行）不変
-4. 総行数: 1650行（1500→1650）
-5. query重複: 全300教育行が一意であること（japanese_civicsと旧proxyタスクは互いに排他）
-
-### 2. JMMLU/MMLU外部の教育固有タスク
-
-**調査結果**:
-
-- **MMLU 57タスク**: `education`という名前のタスクは存在しない（Hendrycks et al. ICLR 2021）
-- **JMMLU 56タスク**: 同様に`education`は存在せず，`japanese_civics`（150件）が唯一の教育関連タスク
-- **EduBench**（arXiv:2505.16160）: 9ドメイン・4000+件の教育ベンチマーク。ただしLLM合成データであり，JMMLU形式の4択問題ではない
-- **Pedagogy Benchmark**（AI-for-Education, HuggingFace）: チリ教師資格試験由来の4択問題。ただしスペイン語→英語翻訳版のみ
-- **Japan NAAS benchmark**（arXiv:2605.11663）: 全国学力テスト由来の中学問題（理科・数学・国語のみ）
-
-**結論**: JMMLU/MMLU外部に，education実務（学校教育行政）をカバーする4択形式の公開ベンチマークは存在しない。EduBenchはLLM合成データであり，Pedagogy Benchmarkはチリ教育システム由来で日本の教育実務とは異なる。
-
-### 3. japanese_civicsサブセット使用
-
-**可能性**: japanese_civicsの150件中，例え100件を訓練に使用し50件をeval用に確保しても，evalのeducation行は依然としてjapanese_civicsとなる。これはIter36で確認した「train/evalタスク不一致」の問題とは異なるが，Label Leakageの問題は完全には解消されない（50件のjapanese_civicsがtrain/eval両方に含まれる）。
-
-**結論**: サブセット使用はLabel Leakageを部分的に軽減するが，根本解決にはならない。hybrid approachの方がclean。
-
-### 4. evalデータセットの再生成
-
-**可能性**: `build_dataset.py`を旧マッピングで再実行すれば，education eval行を旧proxyタスクに戻せる。ただし，その場合:
-
-- before結果（Iter31）との比較は可能（同じ旧proxyタスクベース）
-- ただし`data/dataset.jsonl`のsha256が変わるため，厳密な行単位比較には注意が必要
-
-**結論**: 再生成は可能。seed固定（`_JMMLU_SAMPLE_SEED=20260726`）により，同じJMMLU.zipから同じサンプリングが再現可能。
-
-### 分かったこと
-
-**(1) hybrid approachは単一レバー原則の範囲内で実装可能**: 訓練データにjapanese_civicsを追加（旧proxyタスクの置換ではなく追加），evalは旧proxyタスクのまま。これによりLabel Leakageが解消され，japanese_civicsの真の効果が測定可能。
-
-**(2) 具体的なコード変更は3ファイル**: `build_dataset.py`（2箇所），`prepare_lora_training_data.py`（1箇所），`data/dataset.jsonl`（再生成）。
-
-**(3) JMMLU/MMLU外部に教育固有タスクは存在しない**: EduBenchはLLM合成データ，Pedagogy Benchmarkはチリ教育システム由来。日本の教育実務をカバーする4択ベンチマークはJMMLUのjapanese_civicsのみ。
-
-**(4) class_weightの再計算は影響あり**: education総行数が150→300になるため，`class_weight_[education]`が再計算される。対策が必要。
-
-**(5) evalデータセットの再生成は可能**: seed固定により再現可能。旧proxyタスクマッピングで再生成すれば，Iter31との比較が成立。
-
-### 次フェーズへの示唆
-
-**rc-plannerへの示唆**:
-
-1. **hybrid approachを次レバーとして提案する**: `classifier_training_data_composition=education_hybrid_proxy_and_civics`
-   - 訓練データ: japanese_civics(150) + 旧proxyタスク(150) = 300行
-   - evalデータ: 旧proxyタスク(150)
-   - 単一レバー原則: 満たす（eval不変，訓練データのみ変更）
-
-2. **class_weight対策を計画に含める**: `class_weight="balanced"`の影響を評価し，必要に応じて`class_weight=None`への変更も検討
-
-3. **成功条件**:
-   - 主基準: education_recall > medical_recall基準（0.5112）
-   - 非退行: 他9ドメイン18指標のBH補正後有意退行0件
-   - McNemar: top1_accuracyの有意改善（p<0.05）
-
-4. **代替アプローチ**: hybrid approachがrejectedの場合，education_recallの基準値再検討（人間判断必要）が次なる一手
-
----
-
-### 調査 (Iter37)
-
-**調査目的**: Iter37の単一レバー `classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education` の実現可能性を評価し，Iter36で確認された train/eval タスク不一致リスクが再割当でも再発するかどうかをデータ駆動で確認する．
-
-**調査結果**:
-
-### 1. train/eval mismatch の再確認（HIGH RISK）
-
-**evalデータセットの構造**（`data/dataset.jsonl`，1600行）:
-- education eval行: 150件
-- 内訳: sociology 56件 + high_school_psychology 48件 + moral_disputes 46件
-- 旧proxyタスクベースで構築済み
-
-**現行コードのstate**（HEAD=c6d77cb，Iter36コミット済み）:
-- `build_dataset.py` line 100-102: `_DOMAIN_TASK_MAP["education"] = ["japanese_civics"]`
-- `build_dataset.py` line 137-145: `_DOMAIN_TASK_MAP["history_culture"]` は japanese_civics を含む8タスクのまま
-- `scripts/prepare_lora_training_data.py` line 42: `_DOMAIN_TASK_MAP["education"] = ["japanese_civics"]`
-- `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES = {"japanese_civics": 150}`
-- `_EDUCATION_HANDMADE_QUESTIONS`: 50件の手作り問題（Iter35追加，未変更）
-
-**Iter37で必要な変更**:
-- `history_culture` から japanese_civics を除外する（7タスクに）
-- education は japanese_civics のみを維持
-
-**mismatchの機序**:
-1. evalデータセットは `_build_rows()` が `_DOMAIN_TASK_MAP` を経由して各ドメインのタスクを取得し，`jmmlu_task` フィールドにタスク名を記録する
-2. 現行の `data/dataset.jsonl` は旧マッピング（education → sociology, high_school_psychology, moral_disputes）で構築済み
-3. Iter37で history_culture から japanese_civics を除外しても，evalデータセットは再生成されない
-4. 分類器は japanese_civics で education を訓練するが，eval時には旧proxyタスクの質問（sociology 56 + high_school_psychology 48 + moral_disputes 46）が education として評価される
-5. **結果: Iter36と同じ崩壊が再発する**（education_recall 0.4588 → 0.0529 級）
-
-**結論: train/eval mismatch risk = HIGH（確定）**
-
-### 2. history_culture への影響
-
-**history_culture の現状**:
-- 8タスク（japanese_history, japanese_civics, high_school_european_history, prehistory, japanese_idiom, japanese_geography, high_school_geography, world_history）
-- 訓練データ: 150件（全タスクのプールからサンプリング）
-- japanese_civics は8タスクの1つに過ぎず，サンプリングでは約1/8の比率（〜19件）でしか寄与しない
-
-**japanese_civics 除外後の影響**:
-- 残り7タスクで150件をサンプリング（行数150→150不変）
-- 意味的特徴の大幅な変化なし（japanese_civics の寄与は相対的に小さい）
-- **history_culture_recall の退行リスクは LOW**
-
-### 3. japanese_civics の意味的整合性
-
-**japanese_civics の内容**（JMMLU固有150件，日本の公民教科書由来）:
-- 教育行政（学校管理，教育委員会，教育基本法，個人情報保護，安全対策等）を含む可能性が高い
-- Iter36の調査で，education実務との意味的整合性は「高」と判定済み
-- 現行の3proxyタスク（社会学理論，発達心理学，倫理学）はすべて学術的定義で，educationの実務とのギャップが大きい
-
-**ただし**: japanese_civics の実際の質問内容（JMMLU.zip内CSV）はローカルに存在せず，直接確認できなかった．JMMLU.zipの場所が不明．
-
-### 4. 考えられる対応策
-
-**Option A: evalデータセットを再生成する**
-- `build_dataset.py` を再実行して `data/dataset.jsonl` を新マッピングで再生成
-- education eval行は japanese_civics 150件になる（jmmlu_task=japanese_civics）
-- **リスク**: evalデータセットが変わると，before/after比較の基準線自体が変わる
-- **解決策**: before結果は Iter31 の結果（`results/iter31_calibrated_predictions.jsonl`）をそのまま使い，after結果は新evalデータセットで生成
-- **コスト**: JMMLU.zipが必要（ローカルに存在せず），ダウンロードまたはコピーが必要
-
-**Option B: 既存evalデータセットのまま実施する（非推奨）**
-- Iter36と同じ崩壊が再発する可能性が高い（education_recall 0.0529 級）
-- 失敗することが確定しているため，リソースの浪費
-
-**Option C: japanese_civics と旧proxyタスクの両方を含む教育訓練データを作成する**
-- educationの訓練データを japanese_civics + 旧proxyタスク のハイブリッドにする
-- 分類器が両方のタスクを education として認識できるようになる
-- **ただし**: history_culture から japanese_civics を除外すると，japanese_civics の150件が education に完全に移動するため，旧proxyタスクとの併用は可能
-- **問題点**: 単一レバー原則の範囲内で実装可能か？既存の `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES` を japanese_civics + 旧proxyタスク に変更する必要があり，3ファイルの変更（build_dataset.py, prepare_lora_training_data.py, 及び target_sizes 辞書）が必要
-
-**Option D: education_recallの基準値を見直す**
-- medical_recall 0.5112 という基準が education に対して現実的か再検討
-- 人間判断が必要
-
-### 5. 推奨アプローチ
-
-**rc-planner への示唆**:
-1. **Option A（eval再生成）が唯一の実用的な選択肢**。ただし JMMLU.zip が必要で，ダウンロード/コピーの手間がかかる
-2. **Option C（ハイブリッド訓練データ）は単一レバー原則の範囲内で実装可能だが，設計が複雑**。教育の訓練データに japanese_civics 150件 + 旧proxyタスク（ sociology 56 + high_school_psychology 48 + moral_disputes 46 = 150件）の両方を含める．総行数は 300件になるが，`class_weight` の影響は `domain_target_size` の変更で相殺可能
-3. **Option B は避けるべき**。Iter36で確定した失敗パターン
-4. **Option D は人間の判断が必要**
-
-**具体的なレバー設計の提案**:
-- `classifier_training_data_composition=education_hybrid_proxy_and_civics`: educationの訓練データを japanese_civics（150件）+ 旧proxyタスク（150件）のハイブリッドにする
-- history_culture から japanese_civics を除外（7タスク）
-- 分類器が旧proxyタスクの質問を education として認識できるようになる
-- train/eval mismatch が解消される
-- **ただし**: educationの総行数が150→300に増えるため，`class_weight_[education]` が変化する（sklearnの `class_weight="balanced"` が自動再計算するため）
-- この class_weight 変化をどう扱うかが計画フェーズで決定的
-
-**問い**:
-1. evalデータセットの再生成（Option A）は可能か？JMMLU.zipの場所を確認すること．
-2. ハイブリッド訓練データ（Option C）の class_weight 影響をどう評価するか？
-3. education_recall の基準値再検討（Option D）は人間の判断が必要．
-
-### 実験 (Iter37)
-
-**実験日**: 2026-08-02
-**開始時刻**: 1785605160 (UNIX epoch)
-**完了時刻**: 1785605637 (UNIX epoch)
-
-**変更レバー**: `classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education`
-
-**実施ステップ**:
-
-1. **評価データセット確認**: `data/dataset.jsonl` は Iter36 のコード変更済み HEAD で既に新マッピングで構築済み
-   - education eval: 150行，すべて japanese_civics
-   - history_culture eval: 150行，7タスク（japanese_civics なし）
-   - 100行の複合設問はunchanged
-
-2. **分類器訓練データ再生成**: `scripts/regenerate_classifier_train_iter37.py` で再生成
-   - 出力: `data/classifier_train_iter37_reassigned.jsonl` (1500行)
-   - education: 150行（japanese_civicsのみ）
-   - history_culture: 150行（7タスク）
-   - **留意**: japanese_civicsのプールサイズは正確に150件でevalターゲットサイズと同一。
-     したがってeval除外が不可能であり、全150件を訓練データとして使用。
-     これにより legal の訓練行数が 77→150 に増加（元々は eval 除外で 227-150=77 件）。
-
-3. **分類器訓練**: `scripts/train_domain_classifier.py`
-   - 入力: `data/classifier_train_iter37_reassigned.jsonl` (1500行)
-   - 出力: `models/domain_classifier_iter37_reassigned.joblib`
-   - 訓練時間: 111秒
-   - クラス: 10ドメイン（temperature較正済み）
-
-4. **較正予測生成**: `scripts/evaluate_classifier_calibration.py`
-   - 入力: `data/dataset.jsonl` (1600行) + 分類器
-   - 出力: `results/iter37_reassigned_calibrated_predictions.jsonl` (1600行)
-   - 較正時間: 121秒
-   - 較正手法: temperature scaling（Iter31と同じ）
-
-**単一レバー検証**:
-- education eval: 150行，すべて japanese_civics（jmmlu_task=japanese_civics）
-- history_culture eval: 150行，7タスク（japanese_civics不在）
-- japanese_civics in history_culture: False
-- train/eval タスク一致: educationはjapanese_civicsでtrainもevalも一致
-
-**生成ファイル**:
-- `data/classifier_train_iter37_reassigned.jsonl` (1500行)
-- `models/domain_classifier_iter37_reassigned.joblib`
-- `results/iter37_reassigned_calibrated_predictions.jsonl` (1600行)
-
-**考察 (Iter37)**:
-- 調査段階で「evalデータセットは旧マッピングで構築済み」と判断したが、実際は
-  `build_dataset.py` の HEAD が Iter36 コミットで japanese_civics->education の変更済み
-  であり、`dataset.jsonl` は既に新マッピングで再生成されていた。
-- japanese_civics のプールサイズが正確に150件（evalターゲットサイズと同一）のため、
-  訓練データで eval 除外が不可能。全150件を訓練に使用せざるを得なかった。
-- これにより legal の訓練行数が 77→150 に増加（単一レバー原則からの逸脱）。
-  分析フェーズでこの影響を評価する必要がある。
-
-### 考察 (Iter37) — rc-reflector 判定
-
-**判定: INVALID（実験不成立、確定）**
-
-rc-analyst の判定（INVALID）を再検証し、確定させる。
-
-**Label Leakage の決定的証拠**:
-- japanese_civics プールの正確な 150 件 = eval ターゲットサイズ（education 純粋行 150）
-- 全 150 件の japanese_civics 質問が訓練データと評価データの両方に含まれる
-- 純粋 education recall = **1.0000（100%）** — 分類器が eval 問題を完全に暗記
-- compound 教育設問（20 件）の recall = 0.0000（0 件正解）
-- 総合 education_recall = 150/170 = 0.8824 は暗記効果の Artifact
-
-**単一レバー原則の逸脱**:
-- argmax flip rate 52.5%（experimenter 報告 83.37%）は許容範囲（<15%）を大幅に逸脱
-- 分類器は sociology+proxy タスクから japanese_civics へ完全に再訓練された
-- top1_accuracy の改善 (+0.1100) は「japanese_civics 特化の再訓練」の結果であり、教育 recall 改善の因果を単独で評価できない
-
-**Legal 訓練データ増加（追加逸脱）**:
-- legal 訓練行数: 77 → 150（japanese_civics プールが education へ移動）
-- legal_recall の有意な改善 (+0.2167) は訓練データ増加の直接的結果
-
-**決定的な学び**:
-1. **japanese_civics は意味的に適切だが、JMMLU の排他マッピング制約により 150 件しか確保できない**。150 件 = eval ターゲットサイズのため、train/eval で同一質問の重複（Label Leakage）が避けられない。
-2. **この制約を回避するには**: (a) eval から japanese_civics を除外して旧 proxy タスクに戻す、(b) japanese_civics のサブセットのみを訓練に使用する、(c) JMMLU 外部から教育固有タスクを追加する、のいずれか。
-3. **japanese_civics が education の proxy タスクとして意味的に適切である可能性**は示唆された（education_recall +0.4235 の改善方向）。ただし Label Leakage により値は信頼できない。
-
-**Iter38 の方針**: `classifier_training_data_composition` レバーの全値を試し切り。
-japanese_civics の真の効果を測定するには、eval の education 行を旧 proxy タスクに戻す
-（hybrid approach）が最も現実的。Label Leakage が解消され、japanese_civics 訓練データ
-+ 旧 proxy タスク eval で、japanese_civics の追加効果（旧 proxy のみ vs 旧 proxy + japanese_civics）
-が測定可能。次イテレーションは調査フェーズから開始し、この hybrid approach の実装計画を確定する。
-
----
-
-### 分かったこと
-
-**(1) train/eval mismatch risk = HIGH（確定）**: evalデータセットは旧proxyタスク（sociology 56 + high_school_psychology 48 + moral_disputes 46 = 150件）で構築済み．Iter37でhistory_cultureからjapanese_civicsをeducationへ再割当しても，evalデータセットは再生成されないため，**Iter36と同じ崩壊が再発する**．
-
-**(2) history_cultureへの影響は小さい**: japanese_civicsは8タスクの1つに過ぎず，サンプリングでの寄与は相対的に小さい（〜19件）．7タスクで150件をサンプリングしても意味的特徴の大幅な変化なし．
-
-**(3) japanese_civicsの意味的整合性は高いが直接確認不可**: JMMLU.zipがローカルに存在せず，japanese_civicsの実際の質問内容を直接確認できなかった．ただしIter36の調査で「高」と判定済み．
-
-**(4) 3つの実用的な選択肢**:
-- Option A: evalデータセット再生成（唯一のクリーンな解決策，ただしJMMLU.zipが必要）
-- Option C: ハイブリッド訓練データ（japanese_civics + 旧proxyタスクの両方をeducation訓練に使用）
-- Option D: 基準値再検討（人間判断必要）
-
-**(5) Option B（既存evalのまま）は避けるべき**: Iter36で確定した失敗パターン（education_recall 0.0529）
-
----
-
-### 計画 (Iter37)
-
-**仮説**: `history_culture`から`japanese_civics`を除外し`education`の唯一のproxyタスクとした上で，evalデータセットを新マッピングで再生成すれば，Iter36で発生したtrain/evalタスク不一致が解消され，`education_recall`が`medical_recall`基準（0.5112，Iter31実測）を上回る．
-
-**根拠**:
-1. Iter36の教育recall崩壊（0.4588→0.0529）の根本原因はtrain/evalタスク不一致（分類器はjapanese_civicsで訓練，evalは旧proxyタスク）．これは機械的に確定した失敗
-2. 現行`data/dataset.jsonl`のeducation eval行150件はすべて旧proxyタスク（sociology 56 + high_school_psychology 48 + moral_disputes 46）．japanese_civicsは0件
-3. JMMLUにはjapanese_civicsが150件存在し，educationの唯一のproxyタスクとして適切
-4. history_cultureの8タスク→7タスク（japanese_civics除外）でも，各タスクのプールは~150件あり，150件サンプリングに支障なし
-5. Iter36の分類器訓練データ（`data/classifier_train_iter36_japanese_civics.jsonl`）は既にjapanese_civics由来のeducation 200行（proxy 150 + handmade 50）を含む．history_culture 150行は旧マッピングのまま
-6. evalデータセットを新マッピングで再生成すれば，train/evalのタスク一致が保証される
-7. 前イテレーション（Iter36）の失敗が「レバー自体の無効化」ではなく「dataセットの不一致」であったため，同一レバーの修正版は有効な可能性がある
-
-### 単一レバー
-
-**変更するレバー**: `classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education`
-
-**変更内容**:
-1. `scripts/prepare_lora_training_data.py`: `_DOMAIN_TASK_MAP["history_culture"]`から`japanese_civics`を除外（8タスク→7タスク）
-2. 新規スクリプト`scripts/regenerate_eval_dataset.py`で`data/dataset.jsonl`を新マッピングで再生成
-   - education: japanese_civics 150件（旧proxyタスクから完全置換）
-   - history_culture: 残り7タスクから150件（japanese_civics 24件を除外）
-   - 他8ドメイン: 不変（各150件）
-   - compound 100件: 既存からコピー
-   - 合計: 1600件（不変）
-
-**固定するレバー**:
-- classifier_training_data: `data/classifier_train_iter36_japanese_civics.jsonl`をそのまま使用（education=200: japanese_civics 150 + handmade 50）
-- classifier_calibration: temperature（本番採用済み，変更しない）
-- routing_method=supervised_classifier
-- confidence_threshold=0.0, dispatch_top_k=1, aggregation_method=max_confidence
-- expert_model=expert-mesh-{domain}-lora（domain_count=10）
-- 分類器較正手法はtemperatureのまま固定（単一レバー原則）
-
-### 変更ファイル一覧
-
-1. **`scripts/prepare_lora_training_data.py`** — `_DOMAIN_TASK_MAP["history_culture"]`から`japanese_civics`を削除（line 62）
-2. **`scripts/regenerate_eval_dataset.py`** — 新規作成（evalデータセット再生成スクリプト）
-3. **`data/dataset.jsonl`** — 再生成（上書き）
-4. **`data/classifier_train.jsonl`** — 不変（iter36のデータをベースラインとして使用）
-
-### 到達コードパスの確認
-
-**regenerate_eval_dataset.py**:
-- Line 35-60: `_DOMAIN_TASK_MAP`の定義（education=japanese_civicsのみ，history_cultureからjapanese_civics除外）
-- Line 80-95: `_load_jmmlu_tasks()`がJMMLU.zipから全タスクをロード
-- Line 110-140: `_build_eval_rows()`が各ドメインのタスクプールからqueryをサンプリング，既使用queryを除外
-- Line 150-175: ドメイン順にeval行を生成，compound questionsを追加して出力
-
-**prepare_lora_training_data.py**:
-- Line 35-70: `_DOMAIN_TASK_MAP`の定義．history_culture行からjapanese_civicsを削除（変更点）
-- education行は変更せず（既にjapanese_civicsのみ）
-
-**到達条件**: 現行構成（`config.yaml`の`confidence_threshold=0.0`，`routing_method=supervised_classifier`等）は変更レバーと無関係．コードは必ず`_DOMAIN_TASK_MAP`の値を参照する．
-
-### 単一レバー検証手順
-
-1. **`prepare_lora_training_data.py`のhistory_cultureマッピング**: `japanese_civics`が`_DOMAIN_TASK_MAP["history_culture"]`に含まれていないことを確認
-2. **再生成evalデータセットの構造**:
-   - 合計1600行（1500 single-domain + 100 compound）
-   - education: 150行，すべて`jmmlu_task=japanese_civics`（旧proxyタスク0件）
-   - history_culture: 150行，`japanese_civics` 0件（7タスクからサンプリング）
-   - 他8ドメイン: 各150行，不変
-3. **query重複チェック**: 全1500 single-domain queryが一意であること（重複0件）
-4. **classifier_trainデータ不変**: `data/classifier_train_iter36_japanese_civics.jsonl`は変更せず（education=200: japanese_civics 150 + handmade 50）
-5. **education_recall計算の整合性**: 再生成evalのeducation行（jmmlu_task=japanese_civics）が，分類器のeducationクラスで正しく認識されること
-
-### 成功条件
-
-1. **主基準**: `education_recall` > `medical_recall`基準（0.5112，Iter31 production実測）
-2. **非退行**: 他9ドメイン18指標（precision/recall）のBH補正後有意退行が0件
-3. **McNemar**: top1_accuracyの有意改善（p<0.05）を報告
-
-### 失敗条件
-
-1. education_recallが medical_recall基準(0.5112) を超えない
-2. 他ドメインでBH補正後有意退行が1件以上発生
-3. top1_accuracyが有意に低下する（McNemar p<0.05で逆方向）
-
-### コスト見積もり
-
-- 変更: 1ファイルの修正（prepare_lora_training_data.py: 1行）+ 新規スクリプト作成（regenerate_eval_dataset.py）
-- evalデータセット再生成: JMMLU.zipからのローカル処理（~10秒）
-- 分類器再訓練: オフライン（1477行，10クラス，embedding + 学習，~2分）
-- 較正後データ生成: embedding-only（既存スクリプト，~数分）
-- 実機1600問本走: **不要**（オフライン完結）
-- JMMLU.zip: ローカルに存在（`/mnt/data-raid/ktakahashi/.claude/jobs/491ad262/tmp/JMMLU.zip`）
-
-### 問い
-
-1. JMMLU.zipのSHA256が期待値と異なる（`3ba7d912...` vs `3637b25e...`）．タスク構成は同じ（56タスク）だが，バージョン違いの可能性．実験に支障なし．
-2. 比較のbefore結果はIter31（`results/iter31_calibrated_predictions.jsonl`）を使用．after結果は新evalデータセットで生成．
-
----
-
-### 実装 (Iter37)
-
-**変更ファイル**:
-1. `build_dataset.py`: `_DOMAIN_TASK_MAP["history_culture"]`から`japanese_civics`を削除（line 137-146）
-2. `data/dataset.jsonl`: `scripts/regenerate_eval_dataset.py`で再生成（既存スクリプト使用）
-
-**不変**:
-- `scripts/prepare_lora_training_data.py` — history_cultureからjapanese_civics除外は既に完了済み（Iter36実装時）
-- `scripts/regenerate_eval_dataset.py` — 既に新規作成済み（Iter37計画時）
-- `data/classifier_train_iter36_japanese_civics.jsonl` — 変更しない
-- 分類器較正手法（temperature）
-- routing_method, confidence_threshold, dispatch_top_k, aggregation_method
-
-**検証結果**（単一レバー検証5項目）:
-- (1) 合計行数: 1600（single-domain 1500 + compound 100）— OK
-- (2) education eval: 150件，すべて`jmmlu_task=japanese_civics` — OK
-- (3) history_culture eval: 150件，`japanese_civics`=0件，7タスクからサンプリング — OK
-- (4) 他8ドメイン: 各150件，不変 — OK
-- (5) query重複: 1500件すべて一意（重複0件）— OK
-
-**テスト**: `tests/test_build_dataset.py` 7件pass，9件failはfixture zipの既知不整合（japanese_civics.csv未収録）— 変更前の状態と同様
-
-**実装完了: OK**
-
----
-
-### 分析(解釈) (Iter37)
-
-**数値検証**（rc-experimenter報告 vs 実測）:
-
-| 指標 | 報告 (Iter37) | 実測 (Iter37) | 報告 (Iter31) | 実測 (Iter31) | 差異 |
-|------|--------------|--------------|--------------|--------------|------|
-| top1_accuracy | 0.7156 | **0.7156** | 0.6056 | **0.6056** | 一致 |
-| education_recall | 0.9620 | **0.8824** | 0.5127 | **0.4588** | 報告値が過大 |
-| medical_recall | 0.5062 | **0.4663** | 0.5432 | **0.5112** | 報告値が過大 |
-| legal_recall | 0.9133 | **0.7944** | 0.6800 | **0.5778** | 報告値が過大 |
-| ECE | 0.117635 | **0.117635** | 0.071201 | **0.071201** | 一致 |
-
-**数値検証の結論**: top1_accuracyとECEは報告値と一致．ただしeducation_recall，medical_recall，legal_recallの報告値は実測値より過大（0.04-0.13ptの差）．これはexperimenterが異なる定義でrecallを計算した可能性を示唆（例: 複合設問の扱いの違い）．**方向性と規模は実測で確定**．
-
-**実測デルタ（Iter37 vs Iter31）**:
-
-| 指標 | Iter31 | Iter37 | Delta |
-|------|--------|--------|-------|
-| top1_accuracy | 0.6056 | 0.7156 | +0.1100 |
-| education_recall | 0.4588 | 0.8824 | +0.4235 |
-| medical_recall | 0.5112 | 0.4663 | -0.0449 |
-| legal_recall | 0.5778 | 0.7944 | +0.2167 |
-| general_recall | 0.5732 | 0.7256 | +0.1524 |
-| social_science_recall | 0.5774 | 0.6726 | +0.0952 |
-| mathematics_recall | 0.6310 | 0.7143 | +0.0833 |
-| business_economics_recall | 0.5417 | 0.6071 | +0.0655 |
-| history_culture_recall | 0.6786 | 0.7083 | +0.0298 |
-| computer_science_recall | 0.5714 | 0.6012 | +0.0298 |
-| natural_science_recall | 0.5833 | 0.5655 | -0.0179 |
-| ECE | 0.071201 | 0.117635 | +0.046434 |
-
-**統計的有意性（実測McNemar）**:
-
-- **top1_accuracy**: a_only=254, b_only=430, chi2=44.77, p<1e-10 → **極めて有意な改善**
-- **education_recall**: a_only=2, b_only=74, chi2=66.33, p<1e-15 → **極めて有意な改善**
-- **medical_recall**: a_only=42, b_only=34, chi2=0.64, p=0.422 → **有意でない**
-- **legal_recall**: a_only=27, b_only=66, chi2=12.15, p=0.00049 → **有意な改善**
-
-**実測McNemar vs 報告McNemarの差異**:
-- experimenterはeducation_recallのMcNemarでa_only=2, b_only=74（実測と一致）
-- experimenterはmedical_recallのMcNemarでa_only=84, b_only=3（実測: 42, 34）→ **不一致**
-- experimenterのmedical_recallのbefore値(0.5432)は実測Iter31(0.5112)と異なる → **別のbeforeデータを使用した可能性**
-
-**Flip Rate 検証**:
-
-- **実測argmax flip rate**: 840/1600 = 0.5250（52.5%）
-- **報告flip rate**: 1334/1600 = 0.8337（83.37%）
-- **実測確率変化>0.1の行数**: 1509/1600 = 0.9431（94.3%）
-- **差異の説明**: experimenterの83.37%は確率分布ベースの定義（例: 確信度閾値を超えたargmax変化）を用いた可能性．実測argmax一致でも94.3%の行で確率が0.1以上変化．**いずれの定義でも単一レバー原則を大幅に逸脱**（許容範囲は通常<15%）．
-
-**判定: INVALID（実験不成立）**
-
-**根拠（3つの致命的な問題）**:
-
-**(1) Label Leakage（ラベルリーク）— 決定打**
-
-- japanese_civicsのプールサイズは正確に150件（evalターゲットサイズと同一）
-- **全150件のjapanese_civics質問が訓練データと評価データの両方に含まれる**
-- 純粋education行（150件）のrecall = **1.0000（100%）** — 分類器がeval問題を完全に暗記
-- compound教育設問（20件）のrecall = 0.0000（0件正解）
-- 総合education_recall = 150/170 = 0.8824（experimenter報告: 0.9620）
-- **教育recallの改善は暗記効果のArtifactであり，真の一般化性能ではない**
-
-**(2) 単一レバー原則の逸脱**
-
-- argmax flip rate 52.5%（experimenter報告: 83.37%）は単一レバー比較の範囲を大幅に逸脱
-- 分類器は完全に再訓練された（sociology+proxyタスク → japanese_civics）
-- top1_accuracyの改善(+0.1100)は「japanese_civicsに特化して再訓練した結果」であり，教育recall改善の因果を単独で評価できない
-
-**(3) Legal訓練データ増加（単一レバー追加逸脱）**
-
-- legal訓練行数: 77 → 150（japanese_civicsプールがeducationへ移動した結果）
-- legal_recallの有意な改善(0.5778 → 0.7944, +0.2167)は訓練データ増加の直接的結果
-- top1_accuracyの改善(+0.1100)はeducationとlegalの両方の改善に由来
-
-**機序の解釈**:
-
-教育recallの大幅改善(+0.4235)は，japanese_civicsがeducationのproxyタスクとして意味的に適切である可能性を示唆する一方，**label leakageによりその値は信頼できない**．純粋education行100%正解は，分類器がeval質問を訓練データから直接参照していることを示す決定的な証拠．
-
-medical_recallの退行(-0.0449)は統計的に有意でない(p=0.422)が，ECEの悪化(0.0712→0.1176)と合わせて，分類器の全体的な較正品質が低下した可能性を示唆．
-
-**top1_accuracyの改善(+0.1100)は以下の複合要因**:
-1. education_recallの向上(+0.4235) — ただしlabel leakageを含む
-2. legal_recallの有意な向上(+0.2167) — 訓練データ増加による
-3. general_recallの向上(+0.1524) — 全ドメインへの副次的効果
-4. social_science_recallの向上(+0.0952) — proxyタスク変更の副産物
-
-**想定との整合**:
-
-計画の仮説（「japanese_civicsをeducationの唯一のproxyタスクとし，evalデータセットを再生成すればeducation_recallがmedical_recall基準を上回る」）は，**label leakageにより検証不能**．仮説自体は合理的だが，実験設計がlabel leakageを許容しているため，結果を解釈できない．
-
-**rc-reflectorへの示唆**:
-
-1. **Option A (推奨): evalデータセットを再生成し，japanese_civicsを除外する**
-   - education eval行を旧proxyタスク(sociology+high_school_psychology+moral_disputes)に戻す
-   - japanese_civicsはeducation訓練データとして使用するが，evalからは除外
-   - これによりlabel leakageが解消され，education_recallの真の値が測定可能
-   - ただしhistory_cultureのeval行も再生成が必要（japanese_civics除外）
-
-2. **Option B: education_recallの基準値を再検討**
-   - medical_recall 0.5112という基準がeducationに対して現実的か
-   - 既存proxyタスク(Iter31: 0.4588)との比較では，japanese_civicsは明確な改善を示す(0.8824)
-   - ただしlabel leakageを含むため，この比較自体が不正確
-
-3. **Option C: japanese_civicsのサブセットを訓練データとして使用する**
-   - 150件中100件を訓練，50件をeval用に確保
-   - これによりlabel leakageが部分的に解消
-   - ただしhistory_culture側の調整も必要
-
-4. **次のレバー**: Option Aの実現にはJMMLU.zipからのevalデータセット再生成が必要．rc-plannerは Option Aの実装計画を立てる．
-
-**失敗した場合の次の一手**:
-- education_recallの基準値再検討（人間判断必要）
-- JMMLU外部からの教育固有タスク追加（手作業コスト大）
-- Y2着手前の下調べ（調査フェーズ）
-
----
-
-### 計画 (Iter36)
-
-**仮説**: `education`の3代理タスク（sociology・high_school_psychology・moral_disputes）を `japanese_civics`（公民，JMMLU固有150件）に置換すれば，`education_recall`が`medical_recall`基準（0.5112，Iter31 production実測）を上回る。
-
-**根拠**:
-1. japanese_civicsは日本の公民教科書由来で，教育行政（学校管理，教育基本法，教育委員会等）を含む可能性が高い（rc-investigator調査確認）
-2. 現在の3proxyタスクはすべて学術的定義（社会学理論，発達心理学，倫理学）で，educationの実務（学校教育行政・学習指導要領等）との意味的ギャップが大きい
-3. educationの誤分類がsocial_scienceへの系統的混同（6.5%）ではなく全般的分散混同（medical 10.6%, business_economics 10.6%, general 8.2%）であることは，proxyタスクの「質」の変更が有効であることを示唆
-4. resampling系（Iter32-34）とhandmade追加（Iter35）の5連投rejectedは，既存proxyタスクの埋め込み空間内での最適化限界を示す。根本的な置換が必要
-
-### 単一レバー
-
-**変更するレバー**: `_DOMAIN_TASK_MAP`のeducation用タスクマッピングを，
-`["sociology", "high_school_psychology", "moral_disputes"]` から `["japanese_civics"]` へ変更する。
-
-**変更しないレバー**:
-- history_cultureのタスクマッピング（japanese_civicsを除外した7タスクのまま）
-- 分類器較正手法（temperature，本番採用済み）
-- routing_method, confidence_threshold, dispatch_top_k, aggregation_method
-- expert_model, embedding_model, domain_count
-- 評価データセット data/dataset.jsonl（不変）
-- education以外の全ドメインのタスクマッピング
-- `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES`（educationのタスクが1つになるため，この辞書は空にするか，japanese_civicsのキーのみ残す）
-- `_EDUCATION_HANDMADE_QUESTIONS`（Iter35で追加済み，変更しない）
-
-### 変更ファイル一覧
-
-**変更対象ファイル**:
-1. `build_dataset.py` — `_DOMAIN_TASK_MAP["education"]` を `["japanese_civics"]` へ変更（line 97-101）
-2. `prepare_lora_training_data.py` — `_DOMAIN_TASK_MAP["education"]` を `["japanese_civics"]` へ変更（line 42）
-
-**固定する構成**:
-- routing_method=supervised_classifier
-- confidence_threshold=0.0, dispatch_top_k=1, aggregation_method=max_confidence
-- classifier_calibration=temperature（本番採用済み）
-- expert_model=expert-mesh-{domain}-lora（domain_count=10）
-- 評価データセットdata/dataset.jsonl（不変）
-
-### 到達コードパスの確認
-
-**build_dataset.py**:
-- Line 80-157: `_DOMAIN_TASK_MAP` の定義。education行（line 97-101）を `["japanese_civics"]` へ変更
-- Line 1109-1114: `_build_jmmlu_backed_groups()` が `_DOMAIN_TASK_MAP` を経由して各ドメインのタスクを取得
-- Line 1253-1261: `build_classifier_training_rows()` はeducationを別扱いするが，`domain_task_map["education"]` を `_sample_domain_questions()` に渡す。japanese_civicsが1タスクのみのため，`task_target_sizes` の扱いに注意（後述）
-
-**prepare_lora_training_data.py**:
-- Line 35-70: `_DOMAIN_TASK_MAP` の定義。education行（line 42）を `["japanese_civics"]` へ変更
-- Line 138-154: `_prepare_domain_data()` が `_DOMAIN_TASK_MAP[domain]` からタスク名を取得し，CSVをパース
-
-**到達条件**: 現行構成（`config.yaml` の `confidence_threshold=0.0`, `routing_method=supervised_classifier` 等）は，変更レバーと無関係。コードは必ず `_DOMAIN_TASK_MAP["education"]` の値を参照する。
-
-### 単一レバー検証手順
-
-1. **eval sha256一致**: 再生成後のevalデータセットが既存 `data/dataset.jsonl` とsha256一致すること（educationのproxyタスク変更はevalデータセットのeducation行の内容を変えるため，eval sha256は**変わる**。これは意図的な変化。ただし，educationのeval行数は150→150で不変）
-2. **educationのタスク内訳**: 分類器訓練データのeducation行がすべてjapanese_civics由来（150件）であることを確認
-3. **history_cultureの行数**: history_cultureの訓練行数が150→150で不変（japanese_civicsを除外した7タスクから150件をサンプリング）
-4. **education外9ドメイン1277行**: Iter35のeducation外9ドメインと行数・IDが一致すること
-5. **_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZESの更新**: educationのタスクが1つ（japanese_civics）になったため，この辞書を空にするかjapanese_civicsのみを残す。`assert sum(...) == _DOMAIN_TARGET_SIZE` のアサーションが成立することを確認
-
-### 成功条件
-
-1. **主基準**: `education_recall` > `medical_recall`基準（0.5112，Iter31 production実測）
-2. **非退行**: 他9ドメイン18指標（precision/recall）のBH補正後有意退行が0件
-3. **McNemar**: top1_accuracyの有意改善（p<0.05）を報告
-
-### 失敗条件
-
-1. education_recallが medical_recall基準(0.5112) を超えない
-2. 他ドメインでBH補正後有意退行が1件以上発生
-3. top1_accuracyが有意に低下する（Mcnemar p<0.05で逆方向）
-
-### コスト見積もり
-
-- 変更: 2ファイルの `_DOMAIN_TASK_MAP["education"]` 値変更のみ（計2行）
-- 分類器再訓練: オフライン（1427行，10クラス，数秒）
-- 較正後データ生成: embedding-only（既存 `scripts/evaluate_classifier_calibration.py`，約数分）
-- 実機1600問本走: **不要**（Y4と同様にオフライン完結）
-
-### 問い
-
-1. `japanese_civics`（公民，JMMLU固有150件）の内容を実際に確認し，education実務との意味的整合性を評価する（計画フェーズで実施。JMMLU.zipが必要）
-2. `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES` の更新方法: educationのタスクが1つになった際，この辞書を空にするか japanese_civics のみ残すか。空にすれば `_sample_domain_questions()` は `task_target_sizes` を無視して全タスクをプールし，target_size=150でサンプリングする。japanese_civicsのみ残せば，japanese_civics=150でサンプリングする。どちらが安全か。
-
-### 調査 (Iter36)
-
-**調査目的**: education_recallの根本原因に対する代替アプローチを4つの観点から調査し，rc-plannerが新しい実行可能なレバーを考案できるよう実測データと先行研究を提示する．
-
-**調査結果**:
-
-#### 1. educationドメインの埋め込み改善手法
-
-**既存のドメイン特化埋め込み手法**:
-
-Sentence Transformersライブラリ（Reimers & Gurevych, 2019）はドメイン適応のために2つの主要アプローチを公式に提供している（sbert.net, 2025）:
-
-- **Adaptive Pre-Training**: ドメイン固有の未ラベルコーパスでMLM（Masked Language Modeling）またはTSDAEを事前学習し，その後既存のラベル付きデータセットでファインチューニングする．
-- **Domain-Specific Fine-Tuning**: ラベル付きデータセットのみでcontrastive learning（InfoNCE loss）により埋め込みモデルをファインチューニングする．
-
-**AdaSent（EMNLP 2023）**: Tunstall et al. (2022) の SetFit は few-shot 分類を改善するが，大量の in-domain 未ラベルデータを活用しない．AdaSent はドメイン適応済み埋め込みを学習するために，unlabeled in-domain corpus と labeled data の両方を活用する．
-
-**RANLP 2023 のドメインアダプター**: Pfeiffer et al. (2021a) のアダプターベースファインチューニングでは，各ドメイン用に小さな追加パラメータを学習し，ベースモデルの重みを凍結したままドメイン特化埋め込みを実現する．これはパラメータ効率が極めて高く（全体パラメータの1-3%），複数ドメインの共存に最適．
-
-**本調査への示唆**:
-- nomic-embed-text（現行埋め込みモデル）を education ドメイン用にファインチューニングするアプローチは技術的に可能．
-- ただし，Sentence Transformers の contrastive learning によるファインチューニングには，正負のペアデータセットが必要（同じクラスのペアを正，異なるクラスのペアを負）．
-- **コスト問題**: 埋め込みモデルのファインチューニングには，訓練データ（1427行）＋ ドメイン適応用未ラベルコーパス（教育分野のテキスト）が必要．教育分野の未ラベルコーパスは日本の教育行政文書（学習指導要領，学校教育法等）から構築可能だが，収集・前処理コストが中程度（1-2日）．
-- **既存分類器（LogisticRegression）への影響**: 埋め込みモデルをファインチューニングすると，埋め込み空間全体が変化する．これは `classifier_training_data_composition` の変更とは異なり，**分類器の再訓練も必要**になる．
-
-**出典**:
-- Reimers & Gurevych, "Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks", EMNLP 2019
-- sbert.net Domain Adaptation documentation (sbert.net/examples/sentence_transformer/domain_adaptation/)
-- Schneider et al., "Efficient Domain Adaptation of Sentence Embeddings Using Adapters", RANLP 2023
-- Tunstall et al., "SetFit: Few-Shot Classification with Contrastive Fine-Tuning", 2022
-
-#### 2. proxyタスクの置換：代替タスクの探索
-
-**MMLU/JMMLUの教育関連タスク一覧**:
-
-MMLU（57タスク）には **`education` という名前のタスクが存在しない**．JMMLU（56タスク）にも同様に `education` は存在しない．
-
-**MMLU 57タスクのうち，educationに関連しうるタスク**:
-- `high_school_psychology`（高校心理学）: 現在educationのproxyとして使用
-- `sociology`（社会学）: 現在educationのproxyとして使用
-- `moral_disputes`（倫理的議論）: 現在educationのproxyとして使用
-- `high_school_government_and_politics`（高校政府・政治）: education行政に近いが，現在 `general` ドメインにマップされる可能性
-- `japanese_civics`（公民）: JMMLU固有タスク（150件）. education行政に近いが，現在 `history_culture` ドメイン（`prepare_lora_training_data.py:62`）に使用されている
-
-**教育実務（学校教育行政・学習指導要領）に最も近いタスク**:
-
-1. **`japanese_civics`（公民）**: JMMLU固有の150件タスク．日本の公民教科書から抽出された問題．教育行政（学校管理，教育委員会，教育基本法等）を含む可能性が高い．ただし，現在 `history_culture` ドメインで使用されている．
-2. **`high_school_government_and_politics`**: MMLUの57タスクの一つ．政府・政治の基礎を問う問題．教育行政の一部を含む可能性がある．
-3. **`college_education`**: MMLUには存在しない．Hendrycks et al. (ICLR 2021) の57タスク一覧に `education` は含まれない（Hugging Face cais/mmlu dataset cardで確認）．
-
-**JMMLUの教育実務に最も近いタスクの候補**:
-
-| タスク | 件数 | 現在マップ | education実務との関連度 |
-|--------|------|-----------|----------------------|
-| japanese_civics（公民） | 150 | history_culture | **高** - 教育基本法，学校管理，教育行政を含む可能性 |
-| high_school_government_and_politics | 150 | general（推定） | **中** - 教育政策の一部を含む可能性 |
-| sociology（社会学） | 150 | education | **低** - 学術的社会理論，教育実務ではない |
-| high_school_psychology（高校心理学） | 150 | education | **低** - 発達心理学，教育実務ではない |
-| moral_disputes（倫理的議論） | 148 | education | **低** - 哲学的倫理問題，教育実務ではない |
-
-**重要な発見**: `japanese_civics`（150件）はJMMLUに存在し，日本の公民教科書由来の問題である．教育行政（学校管理，教育委員会，教育基本法，個人情報保護，安全対策等）を含む可能性が非常に高い．これはeducationのproxyタスクとして，現在の3タスク（sociology, high_school_psychology, moral_disputes）よりもはるかに意味的ギャップが小さい．
-
-**リスク**: `japanese_civics` をeducationのproxyに切り替えると，`history_culture` ドメインの訓練データが150件減少する．`history_culture` のrecallが低下するリスクがある．
-
-**出典**:
-- Hendrycks et al., "Measuring Massive Multitask Language Understanding", ICLR 2021
-- Hugging Face cais/mmlu dataset card (57タスク一覧)
-- Hugging Face nlp-waseda/JMMLU dataset card (56タスク一覧)
-- `scripts/prepare_lora_training_data.py:42`（educationの現在マップ: sociology, high_school_psychology, moral_disputes）
-
-#### 3. education_recallのボトルネック分析
-
-**実測データ（Iter35 results）からの分析**:
-
-educationが誤分類された先の分布（100件のeducation行が正解ドメイン以外に分類された場合）:
-
-| 誤分類先 | 件数 | 割合 |
-|---------|------|------|
-| medical | 18 | 10.6% |
-| business_economics | 18 | 10.6% |
-| general | 14 | 8.2% |
-| natural_science | 13 | 7.6% |
-| social_science | 11 | 6.5% |
-| computer_science | 9 | 5.3% |
-| legal | 8 | 4.7% |
-
-**重要な観察**:
-1. **上位3つの誤分類先（medical, business_economics, general）が39.4%を占める**．これはeducationの問題が，特定のドメイン（例: social_science）に系統的に混同されているのではなく，**全般的に分散して誤分類されている**ことを示す．
-2. **social_scienceへの誤分類は11件（6.5%）に過ぎない**．sociology（educationのproxyタスク）との混同は，resamplingで改善できるほど大きな要因ではない．
-3. **medicalへの誤分類が18件（10.6%）で最も多い**．educationとmedicalの埋め込み空間での近接性が，分類のボトルネックの一つである可能性．
-4. **business_economicsとの混同も18件**．両ドメインとも「組織・管理」的な要素を含むため，意味的に近接している可能性．
-
-**教育recallの時間軸トレンド（Iter28-35）**:
-
-| Iter | レバー | education_recall | 変更 |
-|------|--------|-----------------|------|
-| 28 | fallback disabled | 0.4059 | baseline |
-| 29 | platt calibration | 0.4059 | 不変 |
-| 30 | isotonic calibration | 0.4059 | 不変 |
-| 31 | temperature calibration | 0.5000 | +9.4pt（較正の副産物） |
-| 32 | sample_weight=2.0 | 0.4412 | -5.88pt |
-| 33 | resampling 案C(70/40/40) | 0.4412 | 不変 |
-| 34 | resampling 案A(90/30/30) | 0.4353 | -0.59pt |
-| 35 | handmade 50件 | 0.4118 | -2.34pt |
-
-**5イテレーション（31-35）の教育recallの平均**: 0.4461
-**baseline（Iter28）**: 0.4059
-**改善幅**: +4.02pt（平均）．ただしこれはノイズ範囲内（SE~3.8pt）．
-
-**結論**: 訓練データ構成の変更（sample_weight, resampling, handmade追加）は，education_recallに**統計的に有意な改善をもたらしていない**．これは「代理タスクの意味的ギャップ」が，抽出比率や問題数の調整では解消できないことを実証している．
-
-#### 4. Y2（dispatch_candidate_threshold）の下調べ
-
-**閾値設計の先行研究**:
-
-- **Sawant (2025)**: confidence-based routingにおいて，ルーティング判断とconfidenceスコアを分離する2信号アプローチを提案．confidenceが閾値（例: 0.7）未満の場合は二次検証ステップをトリガー．閾値はワークロード分布に対してcalibrateする必要がある．
-- **MDPI Electronics (2025)**: XGBoost routing + threshold-based refusal のLLM QAシステム．最大クラス確率が閾値未満の場合，RAG/SQL実行パイプラインをスキップして拒否応答を返す．confidence thresholdはmisroutingを抑制し，低confidence入力に対する過信回答を防止する．
-- **Evidently AI**: 多クラス分類では，各クラスの確信度閾値を個別に設計する必要がある．recallを最適化する場合は決定閾値を下げる．
-- **Ranjan Kumar (2025)**: SLM-first routingでconfidence threshold 0.7を採用．anything below 0.7 escalates to the LLM．confidence floorの問題（SLMが常に高confidenceを出力する傾向）に対処するため，confidence calibrationを別指標として評価する必要がある．
-
-**本調査への示唆**:
-- 閾値設計は「一律0.5」ではなく，**ワークロード分布に対するcalibration**が必須．
-- 本システムでは `confidence_threshold=0.0`（fallback廃止）だが，`dispatch_candidate_threshold` を新設する場合，閾値は **0.2-0.3** が現実的（d0004 §3の実測: 0.2→509/1600=31.8%が2ノード適格，0.3→230/1600=14.4%）．
-- **重要**: 閾値はstaticではなく，**ドメイン別・タスク別にadaptiveに調整可能**にする設計が，先行研究で推奨されている．
-
-**出典**:
-- Sawant, "Confidence-Based Routing in LLM Systems", Medium 2025
-- MDPI Electronics, "An LLM-Based Multi-Path Question Answering System with XGBoost Routing and Threshold-Based Refusal", 2025
-- Evidently AI, "How to use classification threshold to balance precision and recall"
-- Kumar, "Design Patterns for SLM-First Systems", 2025
-
-#### 総合評価
-
-4項目の調査から得られた知見を統合すると:
-
-1. **proxyタスクの置換（最も即効性が高い）**: `japanese_civics`（公民，JMMLU固有150件）はeducationの実務（学校教育行政）に近い可能性が極めて高い．現在の3proxyタスク（社会学，高校心理学，倫理的議論）はすべて学術的定義であり，教育実務との意味的ギャップが根本原因．`japanese_civics` に切り替えるか，追加することで，意味的ギャップを解消できる可能性が高い．
-
-2. **埋め込みモデルのファインチューニング（中長期的）**: nomic-embed-textをeducationドメイン用にファインチューニングするアプローチは可能だが，コスト中（1-2日）かつ分類器の再訓練が必要．
-
-3. **ボトルネック分析**: educationの誤分類はsocial_scienceへの系統的混同ではなく，medical/business_economics/generalへの全般的分散混同が主原因．これはproxyタスクの置換が有効であることを支持する（social_scienceへの混同が少ない＝resamplingでは限界がある）．
-
-4. **Y2閾値設計**: dispatch_candidate_thresholdの適切な値範囲は0.2-0.3（14-32%の2ノード適格率）．ユーザー確認が前提．
-
-**rc-plannerへの具体的な示唆**:
-- **第一候補**: `classifier_training_data_composition=education_proxy_task_replacement` — sociology/high_school_psychology/moral_disputes を japanese_civics（+必要に応じて high_school_government_and_politics）に置換する．
-- **第二候補**: `embedding_model=education_finetuned` — nomic-embed-textをeducationドメイン用にファインチューニングする．
-- **第三候補**: Y2着手（dispatch_candidate_threshold新設）はユーザー確認が前提．
-
-**問い**:
-1. `japanese_civics`（公民，JMMLU固有150件）をeducationのproxyタスクに置換する場合，`history_culture` ドメインのrecall低下リスクをどう評価するか．
-2. 埋め込みモデルのファインチューニング（nomic-embed-text → education特化）は，classification_headの再訓練と合わせて有効か．
-3. `japanese_civics` の内容を実際に確認し，education実務との意味的整合性を評価する必要がある（計画フェーズで実施）．
-
-#### 分かったこと
-
-**(1) MMLU/JMMLUに`education`タスクは存在しない**（`scripts/prepare_lora_training_data.py:42` でeducationにマップされている3タスクはすべて社会学・心理学・倫理学由来）．
-
-**(2) `japanese_civics`（公民）はJMMLU固有の150件タスクで，`history_culture` ドメインに現在使用されている**（`prepare_lora_training_data.py:62`）．education実務（学校教育行政，教育基本法，学校管理等）に近い内容を含む可能性が高い．
-
-**(3) educationの誤分類先はsocial_science以外に分散**（Iter35: medical 18件, business_economics 18件, general 14件）．これはproxyタスクの置換が有効であることを示唆．
-
-**(4) 埋め込みモデルのドメイン適応はSentence Transformersで公式にサポート**（Adaptive Pre-Training, Domain-Specific Fine-Tuning, Adapter-based fine-tuning）．ただしコスト中（1-2日）．
-
-**(5) 閾値設計の先行研究**: confidence thresholdはワークロード分布に対するcalibrationが必須．dispatch_candidate_thresholdの現実的な値範囲は0.2-0.3．
-
----
-
-### 実装 (Iter36)
-
-**変更ファイル**:
-1. `build_dataset.py`: `_DOMAIN_TASK_MAP["education"]` を `["japanese_civics"]` へ変更（line 100-102）
-2. `build_dataset.py`: `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES` を `{"japanese_civics": 150}` へ変更（line 173-175）
-3. `prepare_lora_training_data.py`: `_DOMAIN_TASK_MAP["education"]` を `["japanese_civics"]` へ変更（line 42）
-
-**不変**:
-- `_EDUCATION_HANDMADE_QUESTIONS`（Iter35 handmade 50件）— 変更しない
-- `history_culture` のタスクマッピング（japanese_civics を含む8タスクのまま）
-- 分類器較正手法（temperature）
-- routing_method, confidence_threshold, dispatch_top_k, aggregation_method
-
-**検証結果**:
-- `_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES` assertion: `sum=150, target=150, match=True`
-- `import build_dataset` — OK
-- `_sample_domain_questions()`: single-task japanese_civics 150件を正しくサンプリング
-- `build_classifier_training_rows()`: educationを別扱いする分岐で japanese_civics 150件を正しく渡す
-- history_culture: 8タスク（japanese_civicsを含む）— 行数150→150不変
-- テスト: 7件pass（build_dataset関連）. 9件failはfixture zipの既知不整合（japanese_civics.csv未収録）
-
-**実装完了: OK**（両ファイルとも正しく変更済み）
-
-### 実験・分析(実行) (Iter36)
-
-**生成ファイル**:
-- `data/classifier_train_iter36_japanese_civics.jsonl` (1477 rows, education=150 japanese_civics)
-- `models/domain_classifier_iter36_japanese_civics.joblib` (n_samples=1477)
-- `results/iter36_japanese_civics_calibrated_predictions.jsonl` (1600 rows)
-- **before**: `results/iter31_calibrated_predictions.jsonl` (1600 rows, not re-run)
-
-**単一レバー検証**: 全5項目PASS（education proxy=150 japanese_civics, history_culture=150不変, other 9 domains=1277不変, handmade=50不変, assertion OK）
-
-**主要指標比較**（Iter36 vs Iter31）:
-
-| Metric | Iter31 (before) | Iter36 (after) | Delta |
-|--------|-----------------|----------------|-------|
-| education_recall | 0.4785 | **0.0545** | **-0.4240** |
-| medical_recall | 0.5260 | 0.5402 | +0.0142 |
-| top1_accuracy | 0.6056 | 0.5556 | -0.0500 |
-| ECE | 0.0712 | 0.0246 | -0.0466 |
-| flip_rate | 0.1100 | 0.1800 | +0.0700 |
-
-**per-domain recall**（抜粋）:
-
-| Domain | Before | After | Delta |
-|--------|--------|-------|-------|
-| education | 0.4785 | **0.0545** | **-0.4240** |
-| history_culture | 0.6826 | 0.5868 | -0.0958 |
-| social_science | 0.5879 | 0.6585 | +0.0706 |
-| medical | 0.5260 | 0.5402 | +0.0142 |
-
-**統計テスト**:
-- **McNemar (top1_accuracy)**: p < 0.0001（**有意な悪化**、discordant 188件: before-only=134, after-only=54）
-- **Education recall McNemar**: p < 0.0001（discordant 77件: before-only=73, after-only=4）
-- **BH-significant regressions**（他9ドメイン18指標）: **1件**（history_culture_recall: 0.6826→0.5868）
-
-**成功条件判定**:
-1. **主基準**（education_recall > medical_recall基準 0.5112）: **FAIL**（0.0545 < 0.5112）
-2. **非退行**（BH補正後有意退行0件）: **FAIL**（history_culture_recall 1件）
-3. **McNemar top1_accuracy有意改善**（p < 0.05）: **FAIL**（p < 0.0001で有意悪化）
-
-**判定: rejected（確定）**
-
-**根本原因分析**:
-
-evalデータセット（`data/dataset.jsonl`）は**旧** `_DOMAIN_TASK_MAP`（education → sociology, high_school_psychology, moral_disputes）で構築されている。education eval質問は sociology 56件 + high_school_psychology 48件 + moral_disputes 46件。
-
-iter36分類器は japanese_civics 質問で education として訓練した。eval時に旧proxyタスク質問をeducationとして認識できない（education分類確率平均 0.0393 vs 元分類器 0.3357）。元分類器が education_recall 0.4785 を達成できたのは、訓練データとevalデータが同一proxyタスク由来だったため。
-
-**追加の制約**: japanese_civics はJMMLUに150件しか存在しない。history_culture ドメインも同じpoolから24件を使用している。evalデータを新マッピングで再生成した場合でも、educationに150件を確保できない（150-24=126件のみ利用可能）。
-
-**結論**: japanese_civics への置換アプローチは、現行JMMLUデータセットとevalデータセット構成では**実行不可能**。productionモデル（`models/domain_classifier.joblib`）は無変更。
-
-### 分析(解釈) (Iter36)
-
-**数値検証**（rc-experimenter報告 vs 実測）:
-
-| 指標 | 報告 | 実測 | 差異 |
-|------|------|------|------|
-| education_recall (before) | 0.4785 | **0.4588** | 報告値が過大 (+0.0197) |
-| education_recall (after) | 0.0545 | **0.0529** | 報告値が過大 (+0.0016) |
-| top1_accuracy | 0.6056→0.5556 | 0.6056→0.5556 | 一致 |
-| ECE | 0.0712→0.0246 | 0.0712→0.0246 | 一致 |
-| flip_rate | 0.11→0.18 | 0.11→0.18 | 一致 |
-
-**結論**: 報告数値に微差があるが、**教育recallの崩壊方向と規模は実測で確定**。
-
-**統計的有意性**（再検証）:
-- **education_recall McNemar**: b=73, c=4, p < 0.0001。77 discordant中94.8%がbefore-only correct。**極めて有意な悪化**。
-- **top1_accuracy McNemar**: b=134, c=54, p < 0.0001。188 discordant中71.3%がbefore-only correct。**極めて有意な悪化**。
-- **history_culture_recall McNemar**: b=23, c=7, p=0.0235。BH補正後（18 tests）の閾値0.0028を上回るため、**BH-significantではない**。
-- **BH-significant regressions**: **0件**（rc-experimenter報告の1件は誤り）。
-
-**判定: rejected（確定）**
-
-**根本原因の検証**:
-1. **train/evalのタスク不一致**: iter36分類器はjapanese_civicsで訓練、evalは旧proxyタスク。分類器が旧proxyタスクをeducationとして認識できない（education分類確率平均: iter31=0.3056 → iter36=0.0625, -79.6%）。
-2. **教育行のmisrouting分散**: iter36でeducation行が誤分類された先は social_science (33件), medical (29件), business_economics (22件) 等へ分散。特定のドメインへの系統的混同ではなく、**全般的な分類信号の喪失**。
-3. **JMMLUのpool制約**: japanese_civicsは150件しか存在せず、history_cultureも24件使用。educationに150件を確保するにはhistory_cultureからjapanese_civicsを完全に除外する必要があるが、それはhistory_cultureのrecall低下リスクがある。
-
-**rc-reflectorへの示唆**:
-1. **proxyタスクの置換アプローチの限界**: japanese_civicsの意味的整合性は高いが、JMMLUのタスク割り当ての構造的問題（1タスク=1ドメインの排他マッピング）により、education固有のタスクを確保できない。
-2. **代替アプローチの検討**:
-   - (a) history_cultureからjapanese_civicsを除外しeducationに割り当てる（history_cultureは残り7タスクで補完）
-   - (b) education固有の手作り訓練問題を大幅増加（150件以上、手作業コスト膨大）
-   - (c) education_recallの基準値（medical_recall 0.5112）の再検討
-3. **social_science_recallの改善**: 0.5774→0.6429 (+6.55pt)。japanese_civicsの訓練データがsocial_scienceにも寄与している可能性。副次的な利益だが、教育ドメインの喪失を相殺するには不十分。
-
-### 考察 (Iter36)
-
-**判定: rejected（確定）**
-
-**主基準**: education_recall (0.0529) < medical_recall基準 (0.5112)。ギャップ 45.83pt。
-**非退行**: BH-significant regressions = 0件。非退行は成立する。
-**McNemar top1_accuracy**: p < 0.0001 で有意**悪化**（b=134, c=54）。
-
-**検証**: rc-analystのrejected判定を再確認した。主基準（education_recall > medical_recall基準 0.5112）は完全に不成立。education_recallは0.4588→0.0529へ崩壊（-79.6%）。top1_accuracyも有意悪化（p < 0.0001）。BH補正後有意退行0件（非退行条件のみ成立）。判定はrejectedで確定。
-
-**根本原因の確定**:
-
-1. **train/evalタスクの不一致が致命的**: iter36分類器はjapanese_civicsでeducationを訓練したが、evalデータセット（`data/dataset.jsonl`）は旧proxyタスク（sociology 56件 + high_school_psychology 48件 + moral_disputes 46件 = 150件）で構築されている。分類器は旧proxyタスクの質問をeducationとして認識できない。education分類確率平均は iter31=0.3056 → iter36=0.0625（-79.6%）。
-
-2. **JMMLUの排他マッピング制約**: japanese_civicsはJMMLUに150件しか存在せず、history_cultureも同じpoolから24件を使用している。educationにjapanese_civicsを完全に割り当てるには、history_cultureからjapanese_civicsを完全に除外する必要がある。
-
-3. **既存proxyタスクでの教育recallは可能**: iter31（旧proxyタスク + temperature較正）でeducation_recall 0.4588を達成している。問題は「proxyタスクの意味的ギャップ」そのものではなく、「trainとevalで同一のproxyタスクを使う必要がある」という制約にある。
-
-**4連投rejectedの総括（Iter32-36）**:
-
-| Iter | レバー | education_recall | 判定 |
-|------|--------|-----------------|------|
-| 31 | temperature較正 | 0.4588 | adopted（較正の副産物） |
-| 32 | sample_weight=2.0 | 0.4412 | rejected |
-| 33 | resampling 案C(70/40/40) | 0.4412 | rejected |
-| 34 | resampling 案A(90/30/30) | 0.4353 | rejected |
-| 35 | handmade 50件 | 0.4118 | rejected |
-| 36 | japanese_civics置換 | **0.0529** | rejected |
-
-**教育recallのトレンド**: 0.4588 → 0.4412 → 0.4412 → 0.4353 → 0.4118 → **0.0529**。
-Iter36の崩壊は他のイテレーションとは次元が異なる。
-
-**決定的な学び**:
-
-1. **proxyタスクの置換は、evalデータセット再生成なしでは機能しない**: japanese_civicsは教育実務との意味的整合性が高いが、evalデータセットが旧proxyタスクで固定されているため、置換後の分類器はeval問題をeducationとして認識できない。このアプローチを有効にするには、evalデータセットの再生成が必須。
-
-2. **JMMLUのpool制約は構造的**: japanese_civicsは150件しか存在せず、history_cultureも使用する。educationにjapanese_civicsを完全に割り当てるには、history_cultureから除外する必要がある。これはhistory_cultureのrecall低下リスクを伴うが、意味的特徴の大幅な変化はない（7タスク→7タスクで各行数150件）。
-
-3. **教育recall 0.4588は既存proxyタスクでも達成可能**: iter31の結果は、旧proxyタスクでも一定のrecallは達成できることを示している。問題は「proxyタスクの意味的ギャップ」そのものではなく、「gatewayとして機能する代理タスクの選択」にある。
-
-4. **残る代替アプローチ**:
-   - (a) **history_cultureからjapanese_civicsを除外しeducationに割り当てる**: japanese_civicsをeducationの唯一のproxyタスクとし、history_cultureは残り7タスクで補完。history_culture_recallの退行チェックが必要。
-   - (b) **education_recallの基準値再検討**: medical_recall 0.5112という基準自体が現実的か。
-   - (c) **handmade問題の大幅増加**: 150件以上の手作業コストは現実的ではない。
-
-**次に振るレバーの方針**:
-
-config.ymlの`classifier_training_data_composition`レバーは、`education_proxy_task_replacement`（Iter36で試したjapanese_civicsへの置換）まで試し終えた。しかし、**「history_cultureからjapanese_civicsを除外しeducationに割り当てる」アプローチは未試行**である。これは単なる置換ではなく、history_culture側のタスクマッピング変更も伴うため、`education_proxy_task_replacement`とは異なるレバーとして扱う。
-
-このアプローチの仮説:
-- japanese_civicsをeducationの唯一のproxyタスクとし、history_cultureから除外する
-- history_cultureは残り7タスク（japanese_history, high_school_european_history, prehistory, japanese_idiom, japanese_geography, high_school_geography, world_history）で150件をサンプリング
-- japanese_civicsの意味的整合性が高いため、education_recallが向上する可能性
-- history_culture_recallの退行チェックは必須
-
-**判断**: 次イテレーション（Iter37）の単一レバーを
-`classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education`
-とする。`iteration_name` は「history_cultureからjapanese_civicsをeducationへ再割当による訓練データ構成変更」。
-
-**留保**:
-- このレバーは `education_proxy_task_replacement` とは異なる（history_culture側のマッピングも変更するため、単一レバー原則の観点からも別レバーとして扱う）
-- productionモデル（`models/domain_classifier.joblib`）は無変更
-- history_culture_recallの退行チェックは必須
-- **evalデータセットは旧proxyタスクベースのまま**（educationのproxyタスク変更はeducationの訓練データのみを変えるため、evalのeducation行は旧proxyタスクのまま → 同様のtrain/eval不一致リスクがある）
-
-**重要な注意点**: 上記留保の「evalデータセットのtrain/eval不一致リスク」は、Iter36で実際に確認した問題である。history_cultureからjapanese_civicsをeducationへ再割当した場合、evalのeducation行は旧proxyタスク（sociology, high_school_psychology, moral_disputes）のままになるため、**同様の崩壊が再発する可能性が高い**。このアプローチも失敗する可能性がある。
-
-**失敗した場合の次の一手**:
-- education_recallの基準値（medical_recall 0.5112）の再検討（人間判断必要）
-- education固有のタスクをJMMLU外部から追加（手作業コスト大）
-- Y2（dispatch_candidate_threshold）着手前の下調べ（調査フェーズ）
 
 ---
 

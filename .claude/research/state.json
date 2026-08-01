@@ -2,23 +2,22 @@
   "repo": "expert-mesh",
   "iteration": "Iter40",
   "iteration_name": "embedding_adaptationの調査とSetFitによる教育ドメイン埋め込み適応の実装計画",
-  "phase": "investigate",
+  "phase": "experiment",
   "status": "running",
-  "current_lever": null,
+  "current_lever": "embedding_adaptation=setfit_education_finetune",
   "experiment_deadline": null,
-  "updated_at": 1785618400,
+  "updated_at": 1785620769,
   "iteration_thread_ts": "1785618318.788499",
   "notion_toggle_created": true,
   "next_iteration_brief": {
     "must_read_first": [
+      ".claude/research/journal.md (Iteration 40: SetFit full-parameter fine-tune, rejected)",
       ".claude/research/journal.md (Iteration 39: 手動sample_weight, rejected)",
       ".claude/research/journal.md (Iteration 38: hybrid proxy approach, rejected)",
-      ".claude/research/journal.md (Iteration 37: history_cultureからjapanese_civics再割当, invalid)",
-      ".claude/research/backlog.md (B60)",
-      ".claude/research/backlog.md (B61)"
+      ".claude/research/backlog.md (B62)"
     ],
-    "planned_lever": null,
-    "note": "Iter39（class_weight_adjustment=none_manual_sample_weight）はrejected確定。education_recall=0.4588で不変。config.ymlの全leversを試し切り済み。next lever: `embedding_adaptation`を新規追加（Iter39 reflectorが自律判断で追記）。Iter40は調査フェーズから開始。rc-investigatorは Tavily search で (1) SetFitによるnomic-embed-textのeducationドメイン適応のfeasibility, (2) SDJC/JCSE等の日本語ドメイン適応手法の詳細, (3) education_recallの根本原因（embedding空間の分離不足）の定量評価, (4) JMMLU外部の教育固有タスク（再調査） を重点調査すること。"
+    "planned_lever": "embedding_adaptation=embedding_adapter_only_lora",
+    "note": "Iter40（embedding_adaptation=setfit_education_finetune）はrejected確定。全パラメータfine-tuningは単一レバー原則と両立しない（argmax flip rate 52.56%）。Iter41はembeddingレベルのadapter-only fine-tuning（LoRAスタイル）を検証する。rc-plannerは計画フェーズで詳細設計を確定すること。既存のWAFL-PEFTインフラ（domain_lora, Iter18 adopted）のLoRAフックを活用する案が有望。"
   },
   "e37_results": {
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
@@ -731,5 +730,83 @@
     },
     "judgment": "rejected",
     "note": "manual sample_weight reproduction of class_weight balanced REJECTED as a hypothesis for improving education_recall. Key findings: (1) education_recall unchanged: 0.4588->0.4588 (identical). (2) medical_recall unchanged: 0.5112->0.5112 (identical). (3) top1_accuracy +0.0100 (0.6056->0.6156) but McNemar p=0.0848, not significant at alpha=0.05. (4) 75/1600 rows (4.7%) changed predictions, concentrated in history_culture (+10.12pt recall) and minor shifts elsewhere. (5) ECE slightly worsened (0.0712->0.0807). (6) Brier score slightly improved (0.6068->0.6000). (7) No BH-significant regressions or improvements in 20 per-domain metrics. Root cause: manual sample_weight with class_weight=None produces functionally equivalent effective weights to class_weight=balanced (both yield domain_weight = n_samples/(n_classes*n_domain_samples)). The 75 changed predictions are numerical noise from the solver, not a systematic improvement. The hypothesis that removing class_weight=balanced would improve education_recall is not supported by this experiment. Next steps: (A) investigate why education_recall is stuck at 0.4588 despite balanced weighting, (B) consider fundamentally different education proxy tasks or handmade education problems beyond what Iter35 tested, (C) re-evaluate whether education_recall 0.5112 is the right benchmark."
+  },
+  "experiment_dir": "models/sentence-transformer-edu/",
+  "e40_results": {
+    "lever": "embedding_adaptation=setfit_education_finetune",
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.4894,
+    "top1_accuracy_diff": -0.1162,
+    "mcnemar_top1": {
+      "discordant_a_only": 373,
+      "discordant_b_only": 187,
+      "chi2": 60.46,
+      "p_value": 0.0
+    },
+    "education_recall_before": 0.4588,
+    "education_recall_after": 0.6529,
+    "education_recall_diff": 0.1941,
+    "education_recall_mcnemar": {
+      "a_only": 12,
+      "b_only": 47,
+      "chi2": 18.46,
+      "p_value": 1.74e-05
+    },
+    "medical_recall_before": 0.5112,
+    "medical_recall_after": 0.309,
+    "medical_recall_diff": -0.2022,
+    "medical_recall_mcnemar": {
+      "a_only": 40,
+      "b_only": 10,
+      "chi2": 15.68,
+      "p_value": 7.5e-05
+    },
+    "ece_before": 0.071201,
+    "ece_after": 0.033546,
+    "ece_diff": -0.037655,
+    "flip_rate": 0.5256,
+    "flip_count": 841,
+    "flip_total": 1600,
+    "bh_significant_regressions_20_metrics": 13,
+    "bh_significant_regressions_details": [
+      "business_economics_recall: p=4.69e-09, q=4.69e-08 (regression, delta=-47)",
+      "social_science_recall: p=2.39e-08, q=1.19e-07 (regression, delta=-47)",
+      "general_recall: p=5.74e-07, q=1.91e-06 (regression, delta=-42)",
+      "computer_science_recall: p=3.72e-06, q=9.29e-06 (regression, delta=-36)",
+      "natural_science_recall: p=6.80e-05, q=1.13e-04 (regression, delta=-31)",
+      "medical_recall: p=7.50e-05, q=1.07e-04 (regression, delta=-30)",
+      "business_economics_precision: p~0, q~0 (regression, delta=-0.0765)",
+      "social_science_precision: p=4.92e-14, q=9.83e-14 (regression, delta=-0.0052)",
+      "education_precision: p=2.80e-06, q=4.67e-06 (regression, delta=-0.2218)",
+      "history_culture_precision: p=7.83e-05, q=1.12e-04 (regression, delta=-0.1976)",
+      "computer_science_precision: p=8.94e-03, q=1.12e-02 (regression, delta=-0.1486)",
+      "mathematics_precision: p=1.03e-02, q=1.14e-02 (regression, delta=-0.1357)",
+      "legal_precision: p=3.00e-02, q=3.00e-02 (regression, delta=-0.1169)"
+    ],
+    "bh_significant_improvements_20_metrics": 4,
+    "bh_significant_improvements_details": [
+      "education_recall: p=1.74e-05, q=3.48e-05 (improvement, delta=+35)",
+      "history_culture_recall: p=4.55e-02, q=5.69e-02 (improvement direction, not BH-significant)",
+      "natural_science_precision: p=3.14e-28, q=1.57e-27 (improvement, delta=+0.1187)",
+      "medical_precision: p=5.54e-22, q=1.85e-21 (improvement, delta=+0.0242)",
+      "general_precision: p=9.24e-15, q=2.31e-14 (improvement, delta=+0.0434)"
+    ],
+    "per_domain_recall_ci": {},
+    "per_domain_recall_ci_lower_drop": [],
+    "judgment": "rejected",
+    "data_used": {
+      "train_data": "data/classifier_train.jsonl (1427 rows, same as Iter31)",
+      "before_results": "results/iter31_calibrated_predictions.jsonl (1600 rows, temperature calibrated)",
+      "after_results": "results/iter40_calibrated_predictions.jsonl (1600 rows, newly generated with fine-tuned embedding)",
+      "classifier_model": "models/domain_classifier_iter40.joblib (trained on fine-tuned embeddings)",
+      "embedding_model": "models/sentence-transformer-edu/ (SetFit fine-tuned nomic-embed-text-v1, 3 epochs)"
+    },
+    "single_lever_violation": {
+      "note": "Argmax flip rate 52.56% (841/1600) massively exceeds <15% threshold. Full embedding model fine-tuning restructured ALL domain embeddings, not just education. 8/10 domains showed BH-significant recall regression.",
+      "flip_rate": 0.5256,
+      "flip_count": 841,
+      "flip_total": 1600
+    },
+    "note": "embedding_adaptation=setfit_education_finetune REJECTED. Key findings: (1) education_recall improved 0.4588→0.6529 (+0.1941, McNemar p=1.74e-05), but medical_recall dropped 0.5112→0.3090 (-0.2022, McNemar p=7.50e-05). (2) 14/40 (35%) of medical questions that flipped from correct to wrong now go directly to education, proving embedding space restructuring brought education and medical closer. (3) 13/20 per-domain metrics showed BH-significant regression. (4) argmax flip rate 52.56% confirms this is NOT a single-lever change. (5) ECE improved (0.0712→0.0335) but this reflects probability extremization, not calibration improvement. Root cause: SetFit/SentenceTransformer full-parameter fine-tuning cannot be confined to a single domain. Next steps: (A) adapter-only fine-tuning (LoRA-style, preserving existing infrastructure), (B) linear projection on embedding output only, (C) re-evaluate education_recall benchmark."
   }
 }

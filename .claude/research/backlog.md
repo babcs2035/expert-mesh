@@ -3,6 +3,21 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B63 [auto-decided 2026-08-02] Iter40: embedding_adaptation=setfit_education_finetune rejected。次レバー=embedding_adapter_only_lora
+
+- 状況: Iter40（embedding_adaptation=setfit_education_finetune）の rc-analyst 判定（rejected）を rc-reflector が検証・確定させた。
+- **判定: rejected（確定）**。argmax flip rate 52.56%（閾値<15%の3.5倍超）。top1_accuracy 有意悪化（McNemar chi2=60.46, p<0.0001）。BH補正後有意退行 13/20指標。medical_recall -0.2022（iter31正解40件中14件が直接educationに切り替わった）。
+- **決定的な学び**:
+  1. **SetFit/SentenceTransformerの全パラメータfine-tuningは単一レバー原則と両立しない**: contrastive learningは全重み（全ドメインの埋め込み空間）を更新するため、argmax flip rate 52.56%は構造的制約。ハイパラチューリングで回避できない。
+  2. **education_recall改善はmedical_recall崩壊の裏返し**: 医療質問14件（35%）が直接educationに切り替わった。埋め込み空間でeducationとmedicalが接近した直接的な証拠。
+  3. **先行研究（SDJC/JCSE）との違い**: 検索タスクでは埋め込み空間の全体変化が許容されたが、分類器ベースのルーティングでは決定境界の直接変化に帰結するため、単一レバー原則を維持できない。
+  4. **embedding適応にはadapter-onlyが必須**: LoRA/adapterのような低ランク更新のみ、または埋め込み出力への線形変換のみが単一レバーで実現可能。
+- **config.yml の変更**: `embedding_adaptation` レバーの `values` に `embedding_adapter_only_lora` を追記済み。
+- **次の一手: Iter41 で `embedding_adaptation=embedding_adapter_only_lora` を検証**。rc-plannerは計画フェーズでLoRAフックの詳細設計を確定すること。既存のWAFL-PEFTインフラ（domain_lora, Iter18 adopted）のLoRAフックが参考になる。
+- **要人間判断**: (1) education_recall の基準値（medical_recall 0.5112）の再検討。(2) Y2（`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認は引き続き必要。
+
+---
+
 ## B62 [auto-decided 2026-08-02] Iter40: 調査フェーズから開始，次レバー=embedding_adaptation
 
 - **自動選択**: 次イテレーション（Iter40）を調査フェーズから開始。`current_lever=null`。

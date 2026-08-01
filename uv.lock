@@ -432,6 +432,8 @@ lora = [
 ]
 research = [
     { name = "numpy" },
+    { name = "sentence-transformers" },
+    { name = "setfit" },
 ]
 
 [package.dev-dependencies]
@@ -454,6 +456,8 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "scikit-learn", specifier = ">=1.5" },
     { name = "scipy", specifier = ">=1.18" },
+    { name = "sentence-transformers", marker = "extra == 'research'", specifier = ">=3.0" },
+    { name = "setfit", marker = "extra == 'research'", specifier = ">=1.1" },
     { name = "torch", marker = "extra == 'lora'", specifier = ">=2.4" },
     { name = "transformers", marker = "extra == 'lora'", specifier = ">=4.45" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
@@ -465,6 +469,28 @@ dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.7" },
+]
+
+[[package]]
+name = "evaluate"
+version = "0.4.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "datasets" },
+    { name = "dill" },
+    { name = "fsspec", extra = ["http"] },
+    { name = "huggingface-hub" },
+    { name = "multiprocess" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pandas" },
+    { name = "requests" },
+    { name = "tqdm" },
+    { name = "xxhash" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ad/d0/0c17a8e6e8dc7245f22dea860557c32bae50fc4d287ae030cb0e8ab8720f/evaluate-0.4.6.tar.gz", hash = "sha256:e07036ca12b3c24331f83ab787f21cc2dbf3631813a1631e63e40897c69a3f21", size = 65716 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/af/3e990d8d4002bbc9342adb4facd59506e653da93b2417de0fa6027cb86b1/evaluate-0.4.6-py3-none-any.whl", hash = "sha256:bca85bc294f338377b7ac2f861e21c308b11b2a285f510d7d5394d5df437db29", size = 84069 },
 ]
 
 [[package]]
@@ -1872,6 +1898,49 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/86/5185061a1fcc41d18c5dc2463969b3a3964b31d9ac67b2fb05d4c7ff7670/scipy-1.18.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:9aac6192fac56bf2ca534389d24623f07b39ff83317d58287285e7fbd622ff76", size = 37472480 },
     { url = "https://files.pythonhosted.org/packages/31/8e/f04c68e39919a010d34f2ee1367fd705b0a25a02f609d755f0bfbc0a15fc/scipy-1.18.0-cp314-cp314t-win_amd64.whl", hash = "sha256:e40baea28ae7f5475c779741e2d90b1247c78531207b49c7030e698ff81cee3f", size = 37365390 },
     { url = "https://files.pythonhosted.org/packages/d5/19/969dc072906c84dd0a3b05dcf57ea750936087d7873549e408b35cfc3f97/scipy-1.18.0-cp314-cp314t-win_arm64.whl", hash = "sha256:368e0a705903c466aa5f08eefb39e6b1b6b2d659e7352a31fd9e2438365be0f8", size = 25279661 },
+]
+
+[[package]]
+name = "sentence-transformers"
+version = "5.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "transformers" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/75/80/573ab31b77bdfa8f18051188adff3405e928386287cd6f756eff5777dd82/sentence_transformers-5.6.1.tar.gz", hash = "sha256:16af5d682ef66672b076d58599a23905800e850ec2bfb1865938306bf684ad72", size = 452185 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c1/ad/8f73f512dc7ad4031d2b64cbb67f70bdfb355756afbe0db610a5146415c1/sentence_transformers-5.6.1-py3-none-any.whl", hash = "sha256:cefbb17b6325a982a4732c8c49fb013375392687049d1de3d435c4b04060680b", size = 596677 },
+]
+
+[package.optional-dependencies]
+train = [
+    { name = "accelerate" },
+    { name = "datasets" },
+]
+
+[[package]]
+name = "setfit"
+version = "1.1.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "datasets" },
+    { name = "evaluate" },
+    { name = "huggingface-hub" },
+    { name = "packaging" },
+    { name = "scikit-learn" },
+    { name = "sentence-transformers", extra = ["train"] },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/f5/5dbca5ff076524daccf6a63062f8903d97c0c56c4a631f17730ae5723b1f/setfit-1.1.3.tar.gz", hash = "sha256:db54a7b6e86118343275cc70c39749f71e10aa226fef510543bcd7c8b00b9f19", size = 84459 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7d/14/2e284bdb5e51052246235cc1e95658ea11855b99ca738492e06f7ec8512a/setfit-1.1.3-py3-none-any.whl", hash = "sha256:18affb2936cf4158885c49a1a828f4225f8d96b28224c13193ab268ab35ef76a", size = 75597 },
 ]
 
 [[package]]
