@@ -99,6 +99,9 @@ _DOMAIN_TASK_MAP: dict[str, list[str]] = {
     ],
     "education": [
         "japanese_civics",
+        "sociology",
+        "high_school_psychology",
+        "moral_disputes",
     ],
     "business_economics": [
         "econometrics",
@@ -171,8 +174,11 @@ _DEFAULT_CLASSIFIER_TASK_SAMPLE_WEIGHT = 1.0
 # 95.7%使い切るため，案Aが不成立の場合のresampling系余地は尽きる。
 _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES: dict[str, int] = {
     "japanese_civics": 150,
+    "sociology": 50,
+    "high_school_psychology": 50,
+    "moral_disputes": 50,
 }
-assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE
+assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE * 2
 
 # Iter35 (classifier_training_data_composition=education_handmade_training_problems, Y5):
 # education_proxy_task_resampling（案A: sociology=90/high_school_psychology=30/moral_disputes=30）
@@ -1344,13 +1350,23 @@ def main() -> None:
         default=None,
         help="If set, also write E6 classifier training rows (disjoint from --output's questions) here",
     )
+    parser.add_argument(
+        "--domain-task-map-for-eval",
+        default=None,
+        help="Override _DOMAIN_TASK_MAP for eval dataset only (JSON string)",
+    )
     args = parser.parse_args()
+
+    eval_task_map = None
+    if args.domain_task_map_for_eval is not None:
+        import json as _json
+        eval_task_map = _json.loads(args.domain_task_map_for_eval)
 
     eval_rows = _build_rows(
         args.jmmlu_zip,
         args.domain_target_size,
         args.exclude_restricted_license_tasks,
-        _DOMAIN_TASK_MAP,
+        eval_task_map if eval_task_map is not None else _DOMAIN_TASK_MAP,
     )
     if args.output is None:
         for row in eval_rows:

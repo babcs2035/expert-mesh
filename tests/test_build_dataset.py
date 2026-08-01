@@ -329,10 +329,10 @@ def test_sample_domain_questions_without_task_target_sizes_preserves_existing_be
 
 def test_education_proxy_task_train_target_sizes_static_integrity() -> None:
     """Static integrity: _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES keys must match
-    _DOMAIN_TASK_MAP['education'] and values must sum to _DOMAIN_TARGET_SIZE (150)."""
+    _DOMAIN_TASK_MAP['education'] and values must sum to _DOMAIN_TARGET_SIZE * 2 (300)."""
     education_tasks = set(_DOMAIN_TASK_MAP["education"])
     target_keys = set(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.keys())
     assert target_keys == education_tasks, (
         f"Keys mismatch: {target_keys} vs {education_tasks}"
     )
-    assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE
+    assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE * 2

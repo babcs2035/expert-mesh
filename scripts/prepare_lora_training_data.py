@@ -39,7 +39,7 @@ _DOMAIN_TASK_MAP: dict[str, list[str]] = {
         "professional_medicine", "medical_genetics",
     ],
     "legal": ["international_law", "jurisprudence"],
-    "education": ["japanese_civics"],
+    "education": ["japanese_civics", "sociology", "high_school_psychology", "moral_disputes"],
     "business_economics": [
         "econometrics", "high_school_microeconomics", "business_ethics",
         "marketing", "high_school_macroeconomics", "management",
