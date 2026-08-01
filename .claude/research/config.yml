@@ -227,6 +227,16 @@ levers:
             具体的な配分比率は次の計画フェーズで確定する（例: sociology 90・
             high_school_psychology 30・moral_disputes 30）。この変更も代理タスクの意味的
             ギャップという根本原因は解消しないという留保付き（journal.md「考察 (Iter32)」参照）。
+            【2026-08-01 Iter33考察・backlog B54で追記】`education_proxy_task_resampling`の
+            第一候補（案C: sociology=70/high_school_psychology=40/moral_disputes=40）は
+            **rejected（確定）**。education_recall 0.4412 < medical_recall基準 0.5112（70pt
+            ギャップ），McNemar p=0.1589 で top1_accuracy の有意改善なし．案C（70/40/40）の
+            変化幅では不十分．次は案A（sociology=90/high_school_psychology=30/moral_disputes=30）
+            を試す．案Aも不成立なら，education固有の手作り訓練問題の追加へ切り替える．
+            2イテレーション連続（Iter32 sample_weight, Iter33 resampling案C）でrejectedとなった
+            背景には，「教育ドメインの代理タスクが本質的にeducationの意味的ギャップを抱えて
+            いる」という根本原因がある．抽出比率の変更という表面的な最適化ではこの根本原因に
+            対処できない．案Aはconfig.yml noteでbacklog B53が既に例示済み．
             【Iter31時点でスコープを絞り込み
             済み】d0003 X8はeducation・legal双方のデータ不均衡是正を対象としていたが，Iter31の
             実測（journal.md「考察 (Iter31)」節）でlegalは既にX8の成功条件（他ドメイン下限
