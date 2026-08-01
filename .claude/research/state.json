@@ -7,7 +7,7 @@
   "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785606461,
+  "updated_at": 1785608610,
   "iteration_thread_ts": null,
   "notion_toggle_created": false,
   "next_iteration_brief": {
@@ -24,7 +24,7 @@
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
     "top1_accuracy_before": 0.6056,
     "top1_accuracy_after": 0.7156,
-    "top1_accuracy_diff": 0.1100,
+    "top1_accuracy_diff": 0.11,
     "mcnemar_top1": {
       "discordant_a_only": 256,
       "discordant_b_only": 432,
@@ -52,7 +52,7 @@
     "ece_before": 0.071201,
     "ece_after": 0.117635,
     "ece_diff": 0.046434,
-    "flip_rate": 0.5250,
+    "flip_rate": 0.525,
     "flip_count": 840,
     "flip_total": 1600,
     "flip_rate_note": "argmax一致ベース: 840/1600=52.5%. experimenter報告83.37%は確率分布ベースの定義(例: 確信度閾値を超えたargmax変化)を使用. いずれも単一レバー原則を大幅逸脱(<15%が基準). 確率変化>0.1の行数: 1509/1600=94.3%.",
@@ -66,18 +66,110 @@
       "general_recall: p=2.12e-03, q=1.06e-02 (improvement)"
     ],
     "per_domain_recall_ci": {
-      "business_economics": {"before": [0.4780, 0.6267], "after": [0.5334, 0.6782]},
-      "computer_science": {"before": [0.5083, 0.6566], "after": [0.5226, 0.6727]},
-      "education": {"before": [0.3857, 0.5338], "after": [0.8253, 0.9225]},
-      "general": {"before": [0.5325, 0.6856], "after": [0.6527, 0.7881]},
-      "history_culture": {"before": [0.6055, 0.7485], "after": [0.6356, 0.7718]},
-      "legal": {"before": [0.5047, 0.6529], "after": [0.7296, 0.8470]},
-      "mathematics": {"before": [0.5558, 0.7002], "after": [0.6418, 0.7772]},
-      "medical": {"before": [0.4383, 0.5837], "after": [0.3945, 0.5395]},
-      "natural_science": {"before": [0.5077, 0.6552], "after": [0.5027, 0.6522]},
-      "social_science": {"before": [0.5018, 0.6495], "after": [0.5985, 0.7390]}
+      "business_economics": {
+        "before": [
+          0.478,
+          0.6267
+        ],
+        "after": [
+          0.5334,
+          0.6782
+        ]
+      },
+      "computer_science": {
+        "before": [
+          0.5083,
+          0.6566
+        ],
+        "after": [
+          0.5226,
+          0.6727
+        ]
+      },
+      "education": {
+        "before": [
+          0.3857,
+          0.5338
+        ],
+        "after": [
+          0.8253,
+          0.9225
+        ]
+      },
+      "general": {
+        "before": [
+          0.5325,
+          0.6856
+        ],
+        "after": [
+          0.6527,
+          0.7881
+        ]
+      },
+      "history_culture": {
+        "before": [
+          0.6055,
+          0.7485
+        ],
+        "after": [
+          0.6356,
+          0.7718
+        ]
+      },
+      "legal": {
+        "before": [
+          0.5047,
+          0.6529
+        ],
+        "after": [
+          0.7296,
+          0.847
+        ]
+      },
+      "mathematics": {
+        "before": [
+          0.5558,
+          0.7002
+        ],
+        "after": [
+          0.6418,
+          0.7772
+        ]
+      },
+      "medical": {
+        "before": [
+          0.4383,
+          0.5837
+        ],
+        "after": [
+          0.3945,
+          0.5395
+        ]
+      },
+      "natural_science": {
+        "before": [
+          0.5077,
+          0.6552
+        ],
+        "after": [
+          0.5027,
+          0.6522
+        ]
+      },
+      "social_science": {
+        "before": [
+          0.5018,
+          0.6495
+        ],
+        "after": [
+          0.5985,
+          0.739
+        ]
+      }
     },
-    "per_domain_recall_ci_lower_drop": ["medical"],
+    "per_domain_recall_ci_lower_drop": [
+      "medical"
+    ],
     "ci_lower_drop_note": "medical CI lower bound: 0.4383->0.3945 (-0.0438). natural_science: 0.5077->0.5027 (-0.0050). Both marginal. All CIs overlap substantially.",
     "judgment": "invalid",
     "data_used": {
@@ -92,12 +184,12 @@
       "education_eval_total": 170,
       "japanese_civics_training_pool": 150,
       "overlap_estimate": "150/150 = 100% of pure education eval rows are in training data",
-      "pure_education_recall": 1.0000,
+      "pure_education_recall": 1.0,
       "note": "ALL 150 japanese_civics eval questions are used for BOTH training and evaluation. Pure education recall = 100% is definitive proof of memorization."
     },
     "single_lever_violation": {
       "note": "The classifier was fundamentally retrained with completely different training data (sociology+proxy -> japanese_civics). Argmax flip rate 52.5% (probability-based 83.37%) confirms this is NOT a single-lever change. Additionally, legal training data increased 77->150.",
-      "flip_rate": 0.5250,
+      "flip_rate": 0.525,
       "legal_training_increase": "77 -> 150",
       "legal_recall_delta": "+0.2167 (0.5778 -> 0.7944)"
     },
@@ -140,8 +232,14 @@
       "after": 0.3026
     },
     "education_wilson_ci": {
-      "before": [0.3857, 0.5338],
-      "after": [0.3405, 0.4869]
+      "before": [
+        0.3857,
+        0.5338
+      ],
+      "after": [
+        0.3405,
+        0.4869
+      ]
     },
     "data_used": {
       "train_data": "data/classifier_train_iter35_handmade.jsonl (1477 rows, education=200: proxy=150+handmade=50)",
@@ -266,10 +364,22 @@
       "precision_after": 0.8151260504201681,
       "recall_before": 0.5833333333333334,
       "recall_after": 0.5388888888888889,
-      "precision_ci_before": [0.6722461054834166, 0.814400794331877],
-      "precision_ci_after": [0.735920139042527, 0.87462291964938],
-      "recall_ci_before": [0.510305304279413, 0.6528787794003181],
-      "recall_ci_after": [0.46601427403432, 0.610138298895314],
+      "precision_ci_before": [
+        0.6722461054834166,
+        0.814400794331877
+      ],
+      "precision_ci_after": [
+        0.735920139042527,
+        0.87462291964938
+      ],
+      "recall_ci_before": [
+        0.510305304279413,
+        0.6528787794003181
+      ],
+      "recall_ci_after": [
+        0.46601427403432,
+        0.610138298895314
+      ],
       "recall_ci_lower_bound_regressed": true
     },
     "per_domain_education": {
@@ -277,10 +387,22 @@
       "precision_after": 0.4632768361581921,
       "recall_before": 0.40588235294117647,
       "recall_after": 0.4823529411764706,
-      "precision_ci_before": [0.3849579354501229, 0.5430720631845758],
-      "precision_ci_after": [0.39137613647671, 0.5367376927659099],
-      "recall_ci_before": [0.33493503930374724, 0.48098919294164666],
-      "recall_ci_after": [0.40846206851341693, 0.5570237250325943],
+      "precision_ci_before": [
+        0.3849579354501229,
+        0.5430720631845758
+      ],
+      "precision_ci_after": [
+        0.39137613647671,
+        0.5367376927659099
+      ],
+      "recall_ci_before": [
+        0.33493503930374724,
+        0.48098919294164666
+      ],
+      "recall_ci_after": [
+        0.40846206851341693,
+        0.5570237250325943
+      ],
       "recall_ci_lower_bound_regressed": false
     },
     "data_used": {
@@ -390,7 +512,7 @@
     "note": "Iter28（Y1）の事前根拠。分散版での再確認が Iter28 の目的。"
   },
   "last_slack_ts": "1785602477.232869",
-  "last_commit": "c6d77cb",
+  "last_commit": "4bfd1d8",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,
