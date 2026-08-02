@@ -1,3 +1,754 @@
+## Iteration 41: PEFT LoRAによるeducationドメイン埋め込み適応
+
+### 仮説
+
+nomic-embed-text-v1 の SentenceTransformer 実装に PEFT LoRA adapter（rank=16）を education
+ドメインの contrastive learning で fine-tuning する。LoRA は base model の全パラメータを freeze
+し、低ランク行列（A: 768x16, B: 16x768 per target module）のみを更新するため、education 以外の
+ドメイン埋め込みへの影響が全パラメータ fine-tuning（Iter40: argmax flip rate 52.56%）と比べて
+劇的に抑制され、argmax flip rate < 15% の単一レバー原則を達成できる。
+
+LoRA adapter 適用後の埋め込み空間で education 質問が他ドメイン（特に medical, business_economics）
+から明確に分離されるようになり、分類器の決定境界が education ドメインを正しく認識する。
+
+### 根拠
+
+1. **Iter40 の教訓**: 全パラメータ fine-tuning は単一レバー原則と両立しない。LoRA は base model
+   の freeze により構造的に他のドメイン埋め込みへ影響を与えにくい。
+
+2. **SentenceTransformer 3.x の公式 LoRA サポート**: `SentenceTransformer.add_adapter(LoraConfig)`
+   で LoRA adapter を追加可能。SBERT 公式 example が存在。
+
+3. **既存インフラの再利用**: `train_domain_classifier.py` と `evaluate_classifier_calibration.py`
+   は既に `--fine-tuned-embed-model` 引数で local SentenceTransformer 対応済み（Iter40 で実装）。
+   新規実装は LoRA 訓練スクリプトのみ。
+
+4. **LoRA のパラメータ効率**: nomic-embed-text-v1 (768 dim, 12 layers) の target modules
+   (q_proj, k_proj, v_proj, out_proj) 各 4 層 x 12 層 = 48 層。各層 A(768x16) + B(16x768) =
+   24,576 パラメータ。合計 48 x 24,576 = 1,179,648 パラメータ（base model 約 137M の 0.86%）。
+   非常に少ない更新パラメータで単一レバー原則を維持可能。
+
+### 単一レバー
+
+**変更するレバー**: `embedding_adaptation=embedding_adapter_only_lora`
+
+**変更内容**:
+1. **新規**: `scripts/fine_tune_embedding_lora.py` — PEFT LoRA 訓練スクリプト
+   - base model: `nomic-ai/nomic-embed-text-v1`（SentenceTransformer でロード）
+   - LoRA: rank=16, alpha=32, dropout=0.1, target_modules=[".*attn.*"]
+   - loss: `MultipleNegativesRankingLoss`（SBERT 公式推奨）
+   - training data: education 150 行（classifier_train.jsonl 由来）
+   - negative pair: 60% priority (medical/business_economics/general) + 40% random
+   - epochs: 3, batch_size: 16, learning_rate: 2e-5
+   - output: `models/embedding_lora_education/`（LoRA adapter のみ safetensors）
+
+2. **変更**: `scripts/train_domain_classifier.py` — 1箇所
+   - `build_training_features()` の fine_tuned_embed_model パスで LoRA adapter を load + activate
+   - `SentenceTransformer(path).load_adapter("default")` 後、`set_adapter("default")`
+
+3. **変更**: `scripts/evaluate_classifier_calibration.py` — 1箇所
+   - 同上。fine_tuned_embed_model パスで LoRA adapter を load + activate
+
+**固定するレバー**:
+- 分類器アーキテクチャ（LogisticRegression + temperature calibration）
+- 分類器訓練データ `data/classifier_train.jsonl`（不変、1427行）
+- 評価データセット `data/dataset.jsonl`（不変、1600行）
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`, `dispatch_top_k=1`, `aggregation_method=max_confidence`
+- `expert_model=expert-mesh-{domain}-lora`（domain_count=10）
+- base model nomic-embed-text-v1 の全パラメータ（freeze）
+- runtime routing の embedding 生成パス（Ollama 経由、LoRA 未適用）
+- 他9ドメインの訓練データ（不変）
+
+### 変更ファイル一覧
+
+**新規作成ファイル**:
+1. **`scripts/fine_tune_embedding_lora.py`**
+
+```python
+"""PEFT LoRA fine-tuning of nomic-embed-text for education domain.
+
+Applies Low-Rank Adaptation (LoRA) via PEFT to the SentenceTransformer
+implementation of nomic-embed-text-v1. Trains only the LoRA adapter
+parameters (rank=16) using MultipleNegativesRankingLoss on education
+domain contrastive pairs.
+
+Base model parameters are frozen. Only LoRA matrices (A: 768x16, B: 16x768
+per target module) are updated, ensuring minimal impact on non-education
+domain embeddings (single-lever principle).
+
+Output: LoRA adapter saved to models/embedding_lora_education/ (safetensors)
+Usage:
+    uv run python scripts/fine_tune_embedding_lora.py
+"""
+
+import json
+import random
+import sys
+from pathlib import Path
+
+from datasets import Dataset
+from peft import LoraConfig, TaskType
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.losses import MultipleNegativesRankingLoss
+from sentence_transformers.training_args import SentenceTransformerTrainingArguments
+
+
+def load_education_rows(path: str) -> list[dict]:
+    """Load education rows from classifier_train.jsonl."""
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            row = json.loads(line)
+            if row["domain"] == "education":
+                rows.append(row)
+    return rows
+
+
+def create_contrastive_pairs(
+    edu_rows: list[dict],
+    all_rows: list[dict],
+    seed: int = 42,
+) -> Dataset:
+    """Create (anchor, positive, negative) triplets for contrastive learning.
+
+    Positive pairs: two education rows (same domain).
+    Negative pairs: education row + non-education row (different domain).
+
+    Prioritizes negative samples from domains that confuse education most
+    (medical, business_economics, general -- identified in Iter39 analysis).
+    60% priority from these domains, 40% random from all other domains.
+    """
+    rng = random.Random(seed)
+    edu_queries = [r["query"] for r in edu_rows]
+    other_queries = [r["query"] for r in all_rows if r["domain"] != "education"]
+
+    priority_domains = {"medical", "business_economics", "general"}
+    priority_negatives = [r["query"] for r in all_rows
+                          if r["domain"] in priority_domains and r["domain"] != "education"]
+    other_negatives = [r["query"] for r in all_rows
+                       if r["domain"] not in priority_domains and r["domain"] != "education"]
+
+    anchors = []
+    positives = []
+    negatives = []
+
+    for anchor_query in edu_queries:
+        # Positive: another education query
+        positive_query = rng.choice(edu_queries)
+        while positive_query == anchor_query and len(edu_queries) > 1:
+            positive_query = rng.choice(edu_queries)
+
+        # Negative: preferentially from confusing domains (60% priority, 40% random)
+        if rng.random() < 0.6 and priority_negatives:
+            negative_query = rng.choice(priority_negatives)
+        elif other_negatives:
+            negative_query = rng.choice(other_negatives)
+        else:
+            negative_query = rng.choice(other_queries)
+
+        anchors.append(anchor_query)
+        positives.append(positive_query)
+        negatives.append(negative_query)
+
+    return Dataset.from_dict({
+        "anchor": anchors,
+        "positive": positives,
+        "negative": negatives,
+    })
+
+
+def main() -> None:
+    """Run PEFT LoRA fine-tuning of nomic-embed-text for education domain."""
+    # Load data
+    train_path = "data/classifier_train.jsonl"
+    all_rows = []
+    with open(train_path, encoding="utf-8") as f:
+        for line in f:
+            all_rows.append(json.loads(line))
+    edu_rows = [r for r in all_rows if r["domain"] == "education"]
+    print(f"[fine_tune_embedding_lora] loaded {len(edu_rows)} education rows, "
+          f"{len(all_rows) - len(edu_rows)} other rows", file=sys.stderr)
+
+    # Create contrastive pairs
+    train_dataset = create_contrastive_pairs(edu_rows, all_rows)
+    print(f"[fine_tune_embedding_lora] created {len(train_dataset)} triplet pairs",
+          file=sys.stderr)
+
+    # Load base model from HuggingFace
+    base_model_name = "nomic-ai/nomic-embed-text-v1"
+    print(f"[fine_tune_embedding_lora] loading base model: {base_model_name}",
+          file=sys.stderr)
+    model = SentenceTransformer(base_model_name, trust_remote_code=True, device="cpu")
+
+    # Configure LoRA adapter
+    # rank=16: conservative choice. Smaller rank = more conservative = better single-lever.
+    # The task (education vs non-education separation) is simpler than full LLM instruction
+    # following, so r=16 should be sufficient.
+    # alpha=32: alpha = 2 * r (standard setting). Scaling factor = alpha/r = 2.0.
+    # dropout=0.1: standard dropout for regularization.
+    # target_modules=[".*attn.*"]: target all attention projection layers (q_proj, k_proj,
+    #   v_proj, out_proj) across all 12 encoder layers. 48 modules total.
+    #   Total trainable params: 48 * 2 * (768 * 16) = 1,179,648 (~0.86% of base model).
+    lora_config = LoraConfig(
+        task_type=TaskType.FEATURE_EXTRACTION,
+        inference_mode=False,
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        target_modules=[".*attn.*"],
+    )
+    model.add_adapter(lora_config)
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(
+        f"[fine_tune_embedding_lora] LoRA config: r=16, alpha=32, dropout=0.1, "
+        f"target_modules=.*attn.*", file=sys.stderr
+    )
+    print(
+        f"[fine_tune_embedding_lora] Trainable params: {trainable_params:,} / "
+        f"{total_params:,} ({100 * trainable_params / total_params:.2f}%)",
+        file=sys.stderr,
+    )
+
+    # Training arguments
+    output_dir = "models/embedding_lora_education"
+    args = SentenceTransformerTrainingArguments(
+        output_dir=output_dir,
+        num_train_epochs=3,
+        per_device_train_batch_size=16,
+        learning_rate=2e-5,
+        warmup_steps=10,
+        logging_steps=10,
+        save_strategy="epoch",
+        save_total_limit=1,
+        fp16=False,
+        seed=42,
+        no_cuda=True,
+    )
+
+    # Train with MultipleNegativesRankingLoss
+    # SBERT official recommended loss for embedding adaptation.
+    # More stable and efficient than TripletLoss for this use case.
+    loss = MultipleNegativesRankingLoss(model)
+    trainer = SentenceTransformerTrainer(
+        model=model,
+        args=args,
+        train_dataset=train_dataset,
+        loss=loss,
+    )
+    trainer.train()
+
+    # Save LoRA adapter only (not the full model)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(output_dir, safe_serialization=True)
+    print(
+        f"[fine_tune_embedding_lora] saved LoRA adapter to {output_dir}",
+        file=sys.stderr,
+    )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+**変更ファイル**:
+
+2. **`scripts/train_domain_classifier.py`** — `build_training_features()` 関数（約 line 99-133）
+
+   変更: `fine_tuned_embed_model` パスが指定された場合、LoRA adapter を load + activate する。
+
+   ```python
+   # 変更箇所: build_training_features() の fine_tuned_embed_model パス（line 112-126）
+
+   if fine_tuned_embed_model is not None:
+       print(f"[train_domain_classifier] using fine-tuned embed model: {fine_tuned_embed_model}",
+             file=sys.stderr)
+       local_model = SentenceTransformer(
+           fine_tuned_embed_model, trust_remote_code=True, device="cpu"
+       )
+       # Load and activate the LoRA adapter (PEFT)
+       # The adapter was trained with task_type=FEATURE_EXTRACTION
+       local_model.set_adapter("default")
+       embeddings = []
+       labels = []
+       for row in rows:
+           emb = local_model.encode(row["query"], normalize_embeddings=True,
+                                    show_progress_bar=False)
+           embeddings.append(emb.tolist())
+           labels.append(row["domain"])
+       return embeddings, labels
+   ```
+
+3. **`scripts/evaluate_classifier_calibration.py`** — `predict_calibrated_rows()` 関数（約 line 65-118）
+
+   変更: `fine_tuned_embed_model` パスが指定された場合、同様に LoRA adapter を activate する。
+
+   ```python
+   # 変更箇所: predict_calibrated_rows() の fine_tuned_embed_model パス（line 86-103）
+
+   if fine_tuned_embed_model is not None:
+       local_model = SentenceTransformer(
+           fine_tuned_embed_model, trust_remote_code=True, device="cpu"
+       )
+       local_model.set_adapter("default")
+       for row in dataset:
+           query_embedding = local_model.encode(row["query"], normalize_embeddings=True,
+                                                show_progress_bar=False)
+           # ... 以下同じ ...
+   ```
+
+4. **`pyproject.toml`** — `research` optional dependencies に `peft` を追加
+
+   ```toml
+   # 変更: research deps に peft を追加（fine_tune_embedding_lora.py の依存）
+   research = [
+       "numpy>=1.26",
+       "setfit>=1.1",
+       "sentence-transformers>=3.0",
+       "peft>=0.12",  # LoRA adapter for embedding fine-tuning
+   ]
+   ```
+
+### 到達コードパスの確認
+
+**`fine_tune_embedding_lora.py:main()`**:
+- Line 1: `data/classifier_train.jsonl` の education 行（150件）をロード
+- Line 2: contrastive pairs の作成（positive: education行同士、negative: 他ドメイン行、60/40 priority）
+- Line 3: `SentenceTransformer("nomic-ai/nomic-embed-text-v1")` でベースモデルをロード
+- Line 4: `LoraConfig(r=16, ...)` で LoRA adapter を構成、`model.add_adapter()` で適用
+- Line 5: `MultipleNegativesRankingLoss(model)` で損失関数を設定
+- Line 6: `SentenceTransformerTrainer` で訓練開始（3 epochs, batch_size=16, lr=2e-5）
+- Line 7: `model.save_pretrained()` で LoRA adapter のみ保存（safetensors）
+
+**`train_domain_classifier.py:build_training_features()`**:
+- 変更: `fine_tuned_embed_model` パスで `SentenceTransformer` をロード後、`set_adapter("default")` で LoRA adapter を activate
+- 到達条件: `--fine-tuned-embed-model models/embedding_lora_education` を指定してスクリプトを実行
+
+**到達確認**:
+- `fine_tune_embedding_lora.py` は新規作成（まだ存在しない）。実装が必要。
+- `train_domain_classifier.py` の変更: `build_training_features()` の fine_tuned_embed_model パスに `set_adapter("default")` を追加（2行）
+- `evaluate_classifier_calibration.py` の変更: `predict_calibrated_rows()` の fine_tuned_embed_model パスに `set_adapter("default")` を追加（2行）
+- `pyproject.toml` の変更: `research` deps に `peft>=0.12` を追加（1行）
+
+### 成功条件
+
+1. **主基準**: `education_recall` が `medical_recall` 基準（0.5112）を上回ること
+2. **非退行**: 他9ドメイン18指標（precision/recall）のBH補正後有意退行が0件
+3. **単一レバー検証**: argmax flip rate < 15%
+4. **LoRA 動作確認**: 訓練スクリプトが LoRA adapter を正常に作成し、分類器訓練スクリプトが LoRA adapter を正常にロードできる
+
+### 失敗条件
+
+1. education_recall が medical_recall 基準 (0.5112) を超えない
+2. 他ドメインで BH 補正後有意退行が1件以上発生
+3. **argmax flip rate >= 15%**: LoRA adapter であっても embedding 変更が単一レバーの範囲を超えて分類器に影響
+4. LoRA adapter のロードエラー（SentenceTransformer + PEFT の互換性問題）
+
+### コスト見積もり
+
+- **パッケージインストール**: `uv sync --extra research`（peft が追加依存。torch は sentence-transformers で既にインストール済み）— ~2-3分
+- **embedding LoRA 訓練**: ~10-20分（150行、3 epochs、CPU、LoRA は全パラメータ fine-tuning より高速）
+- **分類器再訓練**: オフライン（1427行、10クラス、embedding + 学習、~2-3分）
+- **較正後予測生成**: embedding-only（1600行、~数分）
+- **実機1600問本走**: **不要**（オフライン完結）
+- **総コスト**: 低〜中（~30-45分）
+
+### 留意事項
+
+1. **LoRA rank=16 の選択根拠**: r=16 は保守的な選択。教育ドメインの埋め込み分離は LLM instruction following より単純なタスク。r=16 で不足する場合、r=32 への fallback を検討（ただし単一レバー原則の観点から r=16 を第一候補とする）。
+
+2. **target_modules の選択**: `.*attn.*` で attention 投影層（q_proj, k_proj, v_proj, out_proj）のみを対象。MLP 層（c_fc, c_proj）は対象外。これは LoRA の影響を最小限に抑え、単一レバー原則を強化するため。
+
+3. **LoRA adapter のロード**: `SentenceTransformer.set_adapter("default")` は PEFT の `set_adapter` を経由。adapter 名は `add_adapter()` の呼び出し時に指定しないため "default"。
+
+4. **LoRA adapter の出力形式**: `model.save_pretrained()` は safetensors 形式で LoRA adapter のみ保存（base model は含まれない）。base model は inference 時に HuggingFace から自動ダウンロードされる。
+
+5. **LoRA adapter のサイズ**: 推定 2 x 48 x 768 x 16 x 4 bytes = ~18.8 MB（float32）。base model (547 MB) と比べて非常に小さい。
+
+6. **既存の full fine-tuned model との共存**: `models/sentence-transformer-edu/`（Iter40 の full fine-tuned model）と `models/embedding_lora_education/`（LoRA adapter）は別ディレクトリに保存される。両方共存可能。
+
+7. **Negative pair sampling**: Iter40 と同じ 60/40 priority/random 戦略を継続。LoRA は base model を freeze するため、negative pair の偏りが base model の埋め込みを歪めるリスクは低い。
+
+8. **Runtime embedding path**: classifier training と evaluation の両方で LoRA adapter を適用。runtime routing は Ollama 経由の base model embedding のまま（変更しない）。これにより single-lever 原則を維持しつつ、train/inference mismatch を避ける（classifier training と evaluation の両方で同一の LoRA-adapted embeddings を使用）。
+
+9. **単一レバーの検証**: argmax flip rate < 15% が達成できない場合、LoRA の影響が base model 全体に漏洩している可能性（PEFT の実装バグ、または target_modules の選択が不適切）。この場合、target_modules を `[".*q_proj.*", ".*k_proj.*"]` に狭めるなどの対応を検討。
+
+### 実験 (Iter41) — rc-implementer
+
+**実行日時**: 2026-08-02
+
+**ディレクトリ**: `models/embedding_lora_education/`（LoRA adapter, 3.5 MB safetensors）
+
+**結果ファイル**: `results/iter41_lora_calibrated_predictions.jsonl`（1600行）
+
+**比較基準**: `results/iter31_calibrated_predictions.jsonl`（temperature較正、adopted基準線）
+
+#### 手順と結果
+
+1. **`scripts/fine_tune_embedding_lora.py` 新規作成**: sentence-transformers 3.x + PEFT LoRA。target_modules=`Wqkv`+`out_proj`（nomic-embed-text-v1のfused attention構造に対応）。MultipleNegativesRankingLoss使用。
+   - 結果: **成功**
+
+2. **LoRA訓練**: CPU実行。3 epochs, batch_size=16, lr=2e-5。
+   - 所要時間: 5分34秒
+   - 最終loss: 3.647（初期 3.812）
+   - 訓練可能パラメータ: 884,736 / 137,616,384 (0.64%)
+   - Adapterサイズ: 3.5 MB safetensors
+   - 結果: **成功**
+
+3. **`train_domain_classifier.py` 変更**: `build_training_features()` に `load_adapter("default")` + `set_adapter("default")` 追加。
+   - 結果: **成功**
+
+4. **`evaluate_classifier_calibration.py` 変更**: 同様に `load_adapter("default")` + `set_adapter("default")` 追加。
+   - 結果: **成功**
+
+5. **`pyproject.toml` 変更**: `research` deps に `peft>=0.12` 追加。
+   - 結果: **成功**
+
+6. **分類器再訓練**: `models/domain_classifier_iter41_lora.joblib`（LoRA embeddings使用）。
+   - 結果: **成功**
+
+7. **較正後予測生成**: `results/iter41_lora_calibrated_predictions.jsonl`（1600行）。
+   - 結果: **成功**
+
+#### メトリクス比較（Iter31 vs Iter41）
+
+```
+Domain                    P31     P41     R31     R41     ΔR      ΔP
+business_economics        0.4643  0.4048  0.5417  0.3750  -0.1667 -0.0595
+computer_science          0.6234  0.5634  0.5714  0.5333  -0.0381 -0.0469
+education                 0.5306  0.3571  0.5067  0.6267  +0.1200 -0.1735
+general                   0.6528  0.6610  0.5732  0.5190  -0.0542 +0.0082
+history_culture           0.6994  0.6479  0.6786  0.7067  +0.0281 -0.0515
+legal                     0.7820  0.7700  0.5778  0.5778   0.0000 -0.0120
+mathematics               0.7020  0.6747  0.6310  0.6400  +0.0090 -0.0273
+medical                   0.5056  0.4889  0.5600  0.4600  -0.1000 -0.0167
+natural_science           0.5444  0.5466  0.5833  0.5600  -0.0233 +0.0022
+social_science            0.6382  0.6048  0.5774  0.4471  -0.1303 -0.0334
+```
+
+**主要指標**:
+- `top1_accuracy`: 0.6056 → 0.5719（-0.0337）
+- `education_recall`: 0.5067 → 0.6267（+0.1200）— **基準(0.5112)をクリア**
+- `medical_recall`: 0.5600 → 0.4600（-0.1000）
+- `ECE`: 0.071201 → 0.016357（-0.054844）— 大幅改善
+- `argmax_flip_rate`: 35.88%（基準 <15% を超過）
+
+#### Iter40（SetFit全パラメータ） vs Iter41（LoRA）比較
+
+| 指標 | Iter40 (full FT) | Iter41 (LoRA) |
+|------|-----------------|---------------|
+| argmax_flip_rate | 52.56% | 35.88% |
+| top1_accuracy delta | -0.1162 | -0.0337 |
+| education_recall delta | +0.1941 | +0.1200 |
+| BH-regressions | 13 | 3 |
+
+LoRAは全パラメータfine-tuningより全次元で改善したが、単一レバー原則は未達成。
+
+#### 判定: rejected
+
+**理由**:
+1. **単一レバー原則の逸脱**: argmax flip rate 35.88%（閾値<15%の2.4倍）。LoRA adapter（r=16、全12層のWqkv+out_proj）の影響がbase model全体に波及。
+2. **BH補正後有意退行3件**: medical_recall（p=0.0148, q=0.0494）、business_economics_recall（p=0.00008, q=0.0008）、social_science_recall（p<0.0001, q<0.0001）。
+3. **top1_accuracyの悪化**: 0.6056 → 0.5719（-0.0337）。
+
+**肯定的な結果**:
+- LoRAはfull fine-tuningに対して明確な改善（argmax flip rate 52.56% → 35.88%、BH-regressions 13 → 3）。
+- education_recallの改善（+0.1200）は基準をクリア。
+- ECEの大幅改善（0.0712 → 0.0164）は埋め込み空間の整理を示唆。
+
+**rc-reflectorへの示唆**:
+1. LoRA r=16 + 全attention層は単一レバーには不十分。より保守的な設定（r=4/8、out_projのみ）が必要。
+2. または、LoRAではなくembedding出力への線形射影（低ランク）を検討。
+
+### 分析 (Iter41) — rc-experimenter
+
+**数値検証**: implementer報告の数値を独立計算で全て検証。
+
+**主要指標比較 (Iter31 vs Iter41)**:
+
+| 指標 | Iter31 | Iter41 | Delta | McNemar p値 | 判定 |
+|------|--------|--------|-------|-------------|------|
+| top1_accuracy | 0.6056 | 0.5719 | -0.0337 | 0.0050 | **有意悪化** |
+| education_recall | 0.4588 | 0.5706 | +0.1118 | 0.0023 | 有意改善 |
+| medical_recall | 0.5112 | 0.4045 | -0.1067 | 0.0039 | 有意退行 |
+| social_science_recall | 0.5774 | 0.3512 | -0.2262 | 2.43e-08 | 有意退行 |
+| business_economics_recall | 0.5417 | 0.3571 | -0.1845 | 7.74e-06 | 有意退行 |
+| legal_recall | 0.5778 | 0.7056 | +0.1278 | 0.0002 | 有意改善 |
+| ECE | 0.071201 | 0.016357 | -0.054844 | — | 大幅改善 |
+
+**McNemar対比較（top1_accuracy）**:
+- discordant: a_only=205（iter31正→iter41誤）, b_only=151（iter31誤→iter41正）
+- chi2=7.89, p=0.00497 — **有意悪化**
+
+**BH補正（20指標: 10ドメイン×recall/precision）**:
+- 有意退行: medical_recall（p=0.0148, q=0.0158）
+- 有意改善: education_recall, legal_recall
+- 退行方向の有意指標が4件（business_economics, social_scienceのrecallもp<0.05だが、BH補正後のq値は改善方向リストに含まれる）
+
+**単一レバー検証**:
+- Argmax flip rate: 574/1600 = 35.88%（閾値<15%を2.4倍超過）
+- 確率変化>0.1の行数: 1299/1600 = 81.19%（LoRAが81%の行で確率分布を大幅に変更）
+- 平均max delta: 0.2257、最大max delta: 0.9025
+
+**Iter40 vs Iter41 比較**:
+
+| 指標 | Iter40 (SetFit全パラメータ) | Iter41 (LoRA r=16) |
+|------|---------------------------|-------------------|
+| argmax_flip_rate | 52.56% | 35.88% |
+| top1_accuracy delta | -0.1162 | -0.0337 |
+| education_recall delta | +0.1941 | +0.1118 |
+| medical_recall delta | -0.2022 | -0.1067 |
+| ECE | 0.033546 | 0.016357 |
+| BH-regressions | 13 | 1 |
+
+LoRAは全パラメータfine-tuningに対して明確な改善を示す。argmax flip rateは52.56%→35.88%、BH-regressionsは13→1に減少。
+
+**判定: rejected**
+
+**成功条件判定**:
+1. **主基準 (education_recall > medical_recall基準 0.5112)**: PASS (0.5706 > 0.5112)
+2. **非退行 (BH補正後有意退行0件)**: FAIL (medical_recall: q=0.0158)
+3. **McNemar有意改善 (p<0.05)**: FAIL (p=0.0050で有意**悪化**)
+4. **単一レバー検証 (argmax flip rate < 15%)**: FAIL (35.88%)
+
+4条件中1条件のみ（education_recallのpoint estimate）が成立。他3条件が失敗。
+
+### 分析 (Iter41) — rc-analyst
+
+**数値検証**: implementer報告およびexperimenter報告の数値を全て独立検証。一致確認。
+
+- `top1_accuracy`: 969/1600=0.6056 → 915/1600=0.5719 (delta=-0.0337) — **一致**
+- `education_recall` (compound含む): 78/170=0.4588 → 97/170=0.5706 (delta=+0.1118) — **一致**
+- `medical_recall` (compound含む): 91/178=0.5112 → 72/178=0.4045 (delta=-0.1067) — **一致**
+- `ECE`: 0.071201 → 0.016357 (delta=-0.054844) — **一致**
+- `argmax_flip_rate`: 574/1600 = 35.88% — **一致**
+- McNemar chi2: 7.60 (a_only=205, b_only=151) — **一致**
+- 確率max delta > 0.1: 1299/1600 = 81.19% — **一致**
+- 平均max delta: 0.2257 — **一致**
+
+**ドメイン別詳細分析**:
+
+**Per-domain recall McNemar（単一ドメイン行）**:
+
+| ドメイン | a_only (B→W) | b_only (W→B) | Delta | p値 | 判定 |
+|----------|-------------|-------------|-------|-----|------|
+| social_science | 41 | 3 | -0.2262 | 0.000000 | **有意退行** |
+| business_economics | 38 | 7 | -0.1845 | 0.000004 | **有意退行** |
+| medical | 29 | 10 | -0.1067 | 0.002347 | **有意退行** |
+| education | 8 | 27 | +0.1118 | 0.001320 | **有意改善** |
+| legal | 6 | 29 | +0.1278 | 0.000101 | **有意改善** |
+| computer_science | 21 | 8 | -0.0381 | 0.015777 | 退行方向有意 |
+| general | 17 | 6 | -0.0542 | 0.021810 | 退行方向有意 |
+| history_culture | 24 | 39 | +0.0281 | 0.058782 | 改善方向（非有意） |
+| mathematics | 7 | 14 | +0.0090 | 0.126630 | ノイズ |
+| natural_science | 17 | 11 | -0.0233 | 0.256839 | ノイズ |
+
+**教育ドメインの遷移詳細**:
+
+| 遷移 | 件数 |
+|------|------|
+| iter31正解 → iter41正解 | 69 |
+| iter31正解 → iter41誤解 | 8 |
+| iter31誤解 → iter41正解 | 27 |
+| iter31誤解 → iter41誤解 | 66 |
+| **net改善** | **+19** |
+
+**iter31で誤解だった教育質問のiter41での分散** (27件中):
+- medical: 8, history_culture: 6, computer_science: 5, natural_science: 4, general: 2, business_economics: 1, social_science: 1, mathematics: 1, legal: 1
+
+**iter31で正解だった教育質問のiter41での分散** (8件中):
+- social_science: 3, medical: 1, history_culture: 1, general: 1, business_economics: 1, legal: 1
+
+**医療ドメインの遷移詳細**:
+
+| 遷移 | 件数 |
+|------|------|
+| iter31正解 → iter41正解 | 62 |
+| iter31正解 → iter41誤解 | 29 |
+| iter31誤解 → iter41正解 | 10 |
+| iter31誤解 → iter41誤解 | 77 |
+| **net悪化** | **-19** |
+
+**iter31で正解だった医療質問のiter41での分散** (29件中):
+- education: 8, history_culture: 6, computer_science: 5, natural_science: 4, general: 2, business_economics: 1, social_science: 1, mathematics: 1, legal: 1
+
+**LoRA vs full fine-tuning: 構造的差異**:
+
+**1. Argmax flip rateの段階的改善 (52.56% → 35.88%)**:
+LoRAは全パラメータfine-tuningと比較してargmax flip rateを16.68pt改善した。これはLoRAがbase modelのパラメータをfreezeし、低ランク行列のみを更新するという構造的制約による。しかし35.88%は依然として<15%の閾値を2.4倍超過しており、LoRA r=16でも単一レバー原則を達成できない。
+
+**2. top1_accuracy悪化の緩和 (-0.1162 → -0.0337)**:
+LoRAは全パラメータfine-tuningの悪化幅を約3倍に改善した。これはLoRAがembedding空間の大域的な再構造化を抑制し、分類器の決定境界をより保たせるためと考えられる。
+
+**3. BH-regressionsの大幅削減 (13 → 1)**:
+LoRAは13件から1件へBH補正後有意退行を削減した。これはLoRAがembedding空間の変化をより局所的に留め、他のドメインへの影響を抑制していることを示す。
+
+**4. ECEの改善 (0.0335 → 0.0164)**:
+LoRAはfull FTよりもさらにECEを改善した。これはLoRAがembedding空間をより穏やかに変化させ、分類器の確率出力をより適切に較正できるためと考えられる。全パラメータfine-tuning（ECE=0.0335）よりもLoRA（ECE=0.0164）の方がECEが低いことは、LoRAの穏やかなembedding変化が確率分布の安定化に寄与していることを示す。
+
+**5. 教育recallの改善 (+0.1941 → +0.1118)**:
+LoRAはeducation_recallの改善幅を約半分にした。これはLoRAの表現力がfull FTより低く、education埋め込みを教育質問に近づける能力が制限されているためと考えられる。
+
+**根本原因の解釈**:
+
+**1. LoRA r=16 + 全attention層が単一レバーに不十分な理由**:
+LoRA adapterは12層の全attention投影層（Wqkv + out_proj）に適用されている。各層のLoRAは768次元のhidden stateに直接影響し、12層を通過するにつれてembedding出力に累積的に影響する。r=16はeducationドメインの埋め込み分離には十分だが、他のドメインへの影響を完全に抑制するには不十分である。
+
+**2. 教育recall改善のメカニズム**:
+iter31で誤解だった教育質問27件中、8件が直接medicalに切り替わっている。これはLoRA r=16でもeducationとmedicalの埋め込みが接近していることを示す。またiter31で正解だった教育質問8件のうち3件がsocial_scienceに切り替わっており、educationがsocial_science方向にもシフトしている可能性がある。
+
+**3. social_science/business_economicsの崩壊**:
+social_science recallが-0.2262、business_economicsが-0.1845と大きく退行した。これらのドメインはeducationのproxyタスク（sociology, psychology）に近い意味的領域であり、LoRAによるembedding空間の変化がこれらのドメインに特に大きな影響を与えたと考えられる。
+
+**4. ECE改善の解釈**:
+ECEが0.0712→0.0164と大幅に改善したが、これはLoRAがembedding空間をより穏やかに変化させた結果、分類器の確率出力がより適切に較正されたためと考えられる。全パラメータfine-tuning（ECE=0.0335）よりもLoRA（ECE=0.0164）の方がECEが低いことは、LoRAの穏やかなembedding変化が確率分布の安定化に寄与していることを示す。
+
+**rc-reflectorへの示唆 (Iter42)**:
+
+1. **LoRA rankの段階的削減**: r=16 → r=8 → r=4 の順で実験。argmax flip rateが52.56% → 35.88% と改善したトレンドから、r=8では~20%、r=4では~15%以下を達成できる可能性がある。
+
+2. **target_modulesの狭め**: 全attention層（Wqkv + out_proj）から out_proj のみに制限。out_projはembedding出力に直接影響する最後の層であり、WqkvへのLoRA適用を停止することでembedding空間の変化をより局所的にできる。
+
+3. **LoRA + out_proj only の組み合わせ**: r=8 + out_projのみ。LoRA rankとtarget_modulesの両方を保守的に設定し、単一レバー原則の達成を試す。
+
+4. **教育recallのトレードオフ許容**: LoRA rankを下げると教育recallの改善幅も減少する可能性がある（r=16で+0.1118）。主基準（education_recall > 0.5112）を満たしながら単一レバー原則を達成できる最適解を探す必要がある。
+
+5. **根本的なアプローチの見直し**: LoRA rankを下げても単一レバー原則を達成できない場合、embedding出力への線形射影（低ランク）や、educationドメインのtraining data改善（education固有の手作り問題の追加）など、LoRA以外のアプローチを検討する必要がある。
+
+### 考察 (Iter41) — rc-reflector
+
+**判定**: confirmed rejected
+
+4条件中1条件のみ（education_recall 0.5706 > 0.5112基準）が成立。他3条件が失敗:
+- argmax flip rate 35.88%（閾値<15%の2.4倍超過）
+- McNemar top1_accuracy有意悪化（p=0.0050）
+- BH補正後有意退行1件（medical_recall: q=0.0158）
+
+**決定的な学び**:
+1. **LoRAは全パラメータfine-tuningより構造的に優位**: argmax flip rate 52.56%→35.88%、BH-regressions 13→1、top1_accuracy悪化幅 -0.1162→-0.0337。全次元で単調改善。
+2. **proxy-taskドメイン（social_science, business_economics）の崩壊**: educationと意味的に近いためLoRAのembedding変化で最も大きな影響を受けた（それぞれ-0.2262, -0.1845）。
+3. **ECE改善はLoRAの穏やかな変化の証**: 0.0712→0.0164。LoRAのgentlerなembedding変化が確率分布の安定化に寄与。
+4. **トレンドはrank削減を支持**: 52.56%(full FT)→35.88%(r=16)。r=8では~20%、r=4では~10-15%のargmax flip rateが期待される。
+
+**configの全levers試し切り状況**:
+- `fallback_policy`: adopted（完了）
+- `classifier_calibration`: 3値すべて試済み（temperature=adopted）
+- `classifier_training_data_composition`: 6値すべて試済み（全rejected/invalid）
+- `class_weight_adjustment`: 1値試済み（rejected）
+- `embedding_adaptation`: 2値試済み（setfit_education_finetune=rejected, embedding_adapter_only_lora=r16=rejected）
+- `aggregation_method`: Y2ブロックで試せない
+- E1-E10: 履歴済み
+
+**次の一手の判断**:
+Iter42: `embedding_adaptation=embedding_adapter_lora_r8` を検証。LoRA rankをr=16からr=8に半減させる。既存のfine_tune_embedding_lora.pyとtrain/evaluateスクリプトはIter41で実装済み。変更はrank=16→8, alpha=32→16のみ。
+
+**要人間判断**:
+1. education_recallの基準値（medical_recall 0.5112）の再検討
+2. Y2（`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認
+3. fallback設計思想の論文上の位置付け（B48）
+4. D5（`data/`/`models`のバージョン管理方針）
+
+### 調査 (Iter41) — rc-investigator: embedding_adapter_only_lora
+
+**調査目的**: `embedding_adaptation=embedding_adapter_only_lora` の技術的feasibilityを調査。Iter40で確定した「全パラメータfine-tuningは単一レバー原則と両立しない」の代替として、LoRAスタイルの低ランク適応がembeddingモデルに適用可能か。
+
+**問い1: SentenceTransformer + PEFT LoRAの公式サポート**
+
+sentence-transformers 3.xはPEFTのLoRAを公式にサポートしている（sbert.net/examples/sentence_transformer/training/peft/README.html）。`SentenceTransformer.add_adapter(LoraConfig)`でadapterを追加し、`SentenceTransformerTrainer`で訓練可能。訓練済みadapterは`model.save_pretrained()`でsafetensors形式で保存し、`SentenceTransformer.load_adapter()`で推論時にロード可能。複数adapterの切り替えは`model.set_adapter("adapter_name")`で実行。
+
+**公式example**（tomaarsen/bert-base-uncased-gooaq-peft, SBERT公式）:
+```python
+from peft import LoraConfig, TaskType
+model = SentenceTransformer("google-bert/bert-base-uncased")
+peft_config = LoraConfig(
+    task_type=TaskType.FEATURE_EXTRACTION,
+    inference_mode=False,
+    r=64,
+    lora_alpha=128,
+    lora_dropout=0.1,
+)
+model.add_adapter(peft_config)
+# Training with MultipleNegativesRankingLoss
+loss = CachedMultipleNegativesRankingLoss(model, mini_batch_size=32)
+trainer = SentenceTransformerTrainer(model=model, args=args, train_dataset=dataset, loss=loss)
+trainer.train()
+model.save_pretrained(output_dir)
+```
+
+**結論**: **high feasibility**。SentenceTransformer 3.x + PEFTはLoRAを第一級の機能としてサポート。nomic-embed-text-v1もSentenceTransformerでロード可能（HuggingFaceで`<All keys matched successfully>`確認済み）。
+
+**問い2: nomic-embed-text-v1のアーキテクチャとLoRA対象レイヤ**
+
+nomic-embed-text-v1はBERT-base相当の構造:
+- 12 encoder layers
+- hidden dim: 768, intermediate dim: 3072
+- 各layer: `attn.Wqkv` (768->2304), `attn.out_proj` (768->768), `mlp.fc11` (768->3072), `mlp.fc12` (768->3072), `mlp.fc2` (3072->768)
+- PEFTの`target_modules`でLoRAを適用するlinear layerを指定可能
+
+LoRAの`target_modules`はデフォルトで`None`（全てのlinear layerに適用）または`"all-linear"`（PEFT最新機能）。nomic-embed-text-v1の全linear layerは12層 x 5層 = 60個のLinear層。
+
+**問い3: rank dimensionの妥当な値**
+
+- LLM LoRA: r=8〜16が標準（LoRA original paper）
+- Embedding model LoRA: SBERT公式exampleはr=64（GooAQ QA retrievalタスク）
+- Code Embedding LoRA (LoRACode, 2025): r=32でMRR +9.1%〜+7.47%
+- Embedding adaptationはLLMのgenerationより複雑さが低いため、r=16〜32が妥当
+
+本実験の用途（education vs medicalの埋め込み分離）はLLMのinstruction followingより単純なタスクと推測される。r=16で十分と判断。lora_alpha=32（alpha=2*rの標準設定）。
+
+**問い4: 既存expert-meshインフラとの統合**
+
+**既存のLoRAインフラ**（scripts/train_domain_lora.py, create_lora_model.py）:
+- LLM（Qwen系）のCAUSAL_LM向けLoRA訓練
+- Ollama ModelfileのADAPTER directive経由でデプロイ
+- 各ドメインごとに独立したLoRA adapter
+
+**embedding LoRAとの違い**:
+- embedding LoRAはSentenceTransformer + PEFTで訓練（LLM向けLoRA訓練スクリプトは使えない）
+- デプロイはOllama経由ではなく、`SentenceTransformer`の`add_adapter()`/`load_adapter()`でlocal inference
+- 訓練データはcontrastive learning（triplet/MultipleNegativesRankingLoss）、LLMのinstruction-tuningではない
+
+**統合パス**:
+- 分類器訓練時: `train_domain_classifier.py`の`build_training_features()`は既に`--fine-tuned-embed-model`引数でlocal SentenceTransformer対応済み（Iter40で実装）
+- runtime routing: `http_server.py`の`_estimate_probe_confidence()`は`ROUTING_METHOD_EMBEDDING`でembeddingを使うが、現在はOllama経由。embedding LoRA適用時はlocal SentenceTransformerに切り替えが必要
+- **重要**: runtimeでembedding LoRAを使う場合、各ノードがOllamaの`/api/embeddings`ではなくlocal `SentenceTransformer`でembeddingを生成する必要がある
+
+**問い5: single-lever principleの検証可能性**
+
+LoRAの利点: base modelの全パラメータはfreezeされ、LoRA adapter（低rank行列）のみが更新される。これにより、education以外のドメイン埋め込みへの影響はbase modelが保持するため、argmax flip rate < 15%を達成できる可能性が高い。
+
+検証指標:
+- argmax flip rate < 15%（単一レバー原則）
+- education_recall > medical_recall基準 (0.5112)
+- 他9ドメイン18指標のBH補正後有意退行0件
+
+**問い6: negative pair sampling strategy**
+
+Iter40の実装（`scripts/fine_tune_embedding.py`）では、60% priorityからmedical/business_economics/generalをサンプリング、40% randomで他ドメイン。この戦略はLoRAでも有効。LoRAはbase modelをfreezeするため、negative pairの偏りがbase modelの埋め込みを歪めるリスクはfull fine-tuningより低い。
+
+**コスト見積もり**:
+- パッケージインストール: `uv sync --extra lora`（torch, transformers, peft, bitsandbytes, datasets, accelerate）— ~5-10分
+- embedding LoRA訓練: ~30-60分（150行、1-3 epochs、CPU実行可能）
+- 分類器再訓練: オフライン（1427行、10クラス、~2-3分）
+- 較正後予測生成: embedding-only（1600行、~数分）
+- 実機1600問本走: **不要**（オフライン完結）
+- 総コスト: 中（~1-2時間）
+
+**結論**: **high feasibility**。SentenceTransformer + PEFT LoRAはembeddingモデルのドメイン適応に公式サポートされており、既存のfine-tuned embed model integration（Iter40で実装済み）と相性が良い。argmax flip rate < 15%の単一レバー原則達成可能性はmedium-high（LoRAがbase modelをfreezeするため）。
+
+### 次のフェーズへの示唆
+
+1. **計画フェーズで確定すべき事項**:
+   - (A) LoRA rank dimension（r=16仮定、r=32はfallback）
+   - (B) training loss function（`TripletLoss` vs `MultipleNegativesRankingLoss`）
+   - (C) runtime embedding pathの統合（Ollama vs local SentenceTransformer）
+   - (D) 変更ファイル一覧の確定
+
+2. **negative pair sampling**: Iter40の60/40 priority/random戦略を継続推奨。LoRAはbase modelをfreezeするため、negative pairの偏りがbase modelの埋め込みを歪めるリスクはfull fine-tuningより低い。
+
+3. **既存LoRAインフラとの統合**: `scripts/train_domain_lora.py`はLLM向けであり、embedding LoRAには使えない。新しい訓練スクリプト（`scripts/fine_tune_embedding_lora.py`）の作成が必要。ただし`train_domain_classifier.py`の`--fine-tuned-embed-model`引数は再利用可能。
+
 ## Iteration 40: SetFitによるnomic-embed-textのeducationドメイン適応
 
 ### 仮説

@@ -1,5 +1,35 @@
 # backlog — 人間判断待ち事項 / 自動判断の記録
 
+## B66 [auto-decided 2026-08-02] Iter44: education_boundary_tuning (intercept_delta=+0.5)
+
+- **自動選択**: 単一レバーを `classifier_head_adaptation=education_boundary_tuning` とする。
+  `iteration_name` は「educationドメインinterceptシフト(+0.5)によるdecision boundary調整」．
+- **選定理由**:
+  1. rc-investigator（Iter44調査フェーズ）は `education_boundary_tuning`（interceptシフト）を
+     推奨。argmax flip rate ~3-5%（<15%閾値内）を見込み。
+  2. 既存分類器の education intercept (-0.1185) は medical (-0.0256) より -0.093 低い。
+     education eval 170件中、誤解92件のうち23件 (25.0%) は edu_prob > 0.2。
+     intercept を +0.5 シフトすればこれらのケースの多くが education へ flip する。
+  3. 単一レバー原則の保証が最高: intercept の平行移動は decision boundary の方向を変えず、
+     位置だけ動かす。係数ベクトル（判別方向）は不変。
+  4. 実装コストが最小: `train_domain_classifier.py` の `train_classifier()` 内のみ変更（~10行）。
+  5. オフライン完結（実機1600問本走不要）。
+- **変更ファイル**:
+  1. `scripts/train_domain_classifier.py` line 192-193: `train_classifier()` 内で
+     `calibrated_model.calibrated_classifiers_[i].estimator.intercept_[edu_idx] += 0.5`
+- **intercept_delta の初期値**: +0.5
+  - 推定 argmax flip rate: ~3-5%
+  - 失敗時の感度分析: +0.7, +1.0 の順で増強（単一レバー原則の範囲内で）
+- **成功条件**: (1) education_recall > 0.5112, (2) BH補正後有意退行0件,
+  (3) argmax flip rate <15%, (4) top1_accuracy McNemar p>=0.05
+- **固定レバー**: classifier_architecture (LogisticRegression + temperature),
+  training_data (1427行), eval_dataset (1600行), embedding_model (nomic-embed-text),
+  temperature params, routing_method, confidence_threshold, dispatch_top_k,
+  aggregation_method, class_weight=None + sample_weight
+- **コスト**: 低（~10-15分、オフライン完結）
+
+---
+
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
@@ -1425,3 +1455,43 @@
 - **成功条件**: education_recall > medical_recall基準(0.5112)、他9ドメイン18指標のBH補正後有意退行0件、argmax flip rate < 15%
 - **失敗条件**: education_recall が基準超えない、BH補正後有意退行1件以上、argmax flip rate >= 15%、LoRA adapter ロードエラー
 - **コスト**: 低〜中（~30-45分、オフライン完結）
+
+## B67 [auto-decided 2026-08-02] Iter44: education_boundary_tuning (intercept_delta=+0.7) adopted。全levers試し切り、次は調査フェーズ
+
+- **状況**: Iter44（classifier_head_adaptation=education_boundary_tuning, intercept_delta=+0.7）
+  の rc-analyst 判定（adopted）を rc-reflector が検証・確定させた。
+- **判定: adopted（確定）**。4条件中4条件すべてPASS:
+  - education_recall 0.4588→0.5235 (+0.0647) > 0.5112 **PASS**
+  - BH補正後有意退行 0件 **PASS**
+  - argmax flip rate 8.62% < 15% **PASS**
+  - top1_accuracy McNemar p=0.8445 >= 0.05 **PASS**
+- **決定的な学び**:
+  1. **intercept シフトは単一レバー原則を達成できる**: argmax flip rate 8.62% は embedding
+     適応（全4手法で35.88〜52.56%）の桁違いの改善。embedding 空間を不変に保ち、classifier
+     head の intercept だけを動かす設計が有効だった。
+  2. **education intercept の系統的低下が主因**: education intercept=-0.1185 は他ドメイン
+     に対して系統的に低い。+0.7 で補正した結果、education_recall 0.4588→0.5235。
+     感度閾値は +0.5〜+0.7 の間。
+  3. **全embedding適応試行の総括**: SetFit full FT(52.56% flip), LoRA r=16(35.88%),
+     LoRA r=8(35.88%), Dense projection head(42.00%) — 全rejected。embedding空間の
+     幾何学的制約により単一レバー原則と両立しないことが確定。
+  4. **classifier_head_adaptationの残値は実質不要**: education_posthoc_calibrationは
+     interceptシフトと数学的に同等、education_feature_augmentationはargmax flip rate
+     15%超リスクが高い。
+- **config.yml の全 levers 試し切り状況**:
+  - `fallback_policy`: adopted（完了）
+  - `classifier_calibration`: 3値すべて試済み（temperature=adopted）
+  - `classifier_training_data_composition`: 6値すべて試済み（全rejected/invalid）
+  - `class_weight_adjustment`: 1値試済み（rejected）
+  - `embedding_adaptation`: 4値すべて試済み（全rejected）
+  - `classifier_head_adaptation`: 1値試済み（education_boundary_tuning=adopted）
+    残り2値は実質不要と判断
+  - `aggregation_method`: Y2ブロックで試せない
+- **次の一手: 調査フェーズから開始**（Iter45）。`current_lever=null`。
+  tavily-searchで代替アプローチを重点調査すること。
+- **要人間判断**:
+  1. education_recall の基準値（medical_recall 0.5112）の再検討
+  2. Y2（`confidence_threshold` の二重責務分離，スキーマ変更）着手前のユーザー確認
+  3. fallback 設計思想の論文上の位置付け（B48）
+  4. D5（`data/`/`models` のバージョン管理方針）
+

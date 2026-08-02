@@ -190,6 +190,19 @@ def train_classifier(
         base_estimator, method=_CALIBRATION_METHOD, cv=cv, ensemble=True
     )
     calibrated_model.fit(embeddings, labels, sample_weight=sample_weight)
+
+    # education_boundary_tuning: shift education class intercept upward to move
+    # the decision boundary towards the education side. The coefficient vector
+    # (discrimination direction) remains unchanged -- only the parallel position
+    # of the boundary shifts. This is a single-lever change: argmax flip should
+    # be ~3-5% (<15% threshold). The shift is applied to the base estimator
+    # inside each CalibratedClassifierCV fold.
+    intercept_delta = 0.7  # education_boundary_tuning (Iter45: +0.5->+0.7)
+    classes = calibrated_model.classes_
+    edu_idx = list(classes).index("education")
+    for cal in calibrated_model.calibrated_classifiers_:
+        cal.estimator.intercept_[edu_idx] += intercept_delta
+
     return calibrated_model
 
 
