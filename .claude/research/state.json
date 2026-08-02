@@ -1,12 +1,12 @@
 {
   "repo": "expert-mesh",
-  "iteration": 45,
-  "iteration_name": "代替ルータアプローチの調査とY2下調べ",
+  "iteration": 46,
+  "iteration_name": "aggregation_method変更による複数ノードdispatch時の集約方式比較",
   "phase": "plan",
   "status": "running",
-  "current_lever": "Y2_dispatch_candidate_threshold",
+  "current_lever": "aggregation_method",
   "experiment_deadline": null,
-  "updated_at": 1785647905,
+  "updated_at": 1785648669,
   "iteration_thread_ts": "1785646727.597639",
   "notion_toggle_created": true,
   "next_iteration_brief": {
@@ -15,8 +15,8 @@
       ".claude/research/journal.md (Iteration 43: embedding出力への線形射影(head)によるeducationドメイン適応)",
       ".claude/research/journal.md (Iteration 42: LoRA rank半減(r=8)によるembedding適応)"
     ],
-    "planned_lever": null,
-    "note": "config.ymlの全leversを試し切り済み。Iter44でeducation_boundary_tuning(intercept_delta=+0.7)がadopted確定。education_recall 0.4588->0.5235。次イテレーションは調査フェーズから開始。tavily-searchで関連研究・代替アプローチを重点調査すること。classifier_head_adaptationの残り2値(education_feature_augmentation, education_posthoc_calibration)は実質的に試す価値が低い（posthocはinterceptシフトと数学的に同等、feature_augmentationはargmax flip rate 15%超リスク）。"
+    "planned_lever": "aggregation_method (majority_vote / llm_judge vs max_confidence)",
+    "note": "Y2 (dispatch_candidate_threshold 新設) が Iter45 で完了。config.yml の全 levers を試し切り済み。次イテレーションは Y3: aggregation_method の比較実験（dispatch_top_k=2 の下で majority_vote / llm_judge を max_confidence と比較）。変更は config.yaml の 2 値のみ（dispatch_top_k: 1->2, aggregation_method: max_confidence->majority_vote）。コード変更不要。"
   },
   "e37_results": {
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
@@ -509,8 +509,8 @@
     },
     "note": "Iter28（Y1）の事前根拠。分散版での再確認が Iter28 の目的。"
   },
-  "last_slack_ts": "1785618318.788499",
-  "last_commit": "6af9775",
+  "last_slack_ts": "1785647954.026169",
+  "last_commit": "cf47bcd",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,

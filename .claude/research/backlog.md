@@ -1,5 +1,32 @@
 # backlog — 人間判断待ち事項 / 自動判断の記録
 
+## B68 [auto-decided 2026-08-02] Iter46: Y3 aggregation_method 比較実験（majority_vote vs max_confidence）
+
+- **状況**: Y2（dispatch_candidate_threshold 新設）が Iter45 で完了。config.yml の全 levers を試し切り済み。`aggregation_method` レバーの次値（majority_vote, llm_judge）を試すための前提条件が整った。
+- **自動選択**: 単一レバーを `aggregation_method=majority_vote` とする。`iteration_name` は「aggregation_method変更による複数ノードdispatch時の集約方式比較」。
+- **選定理由**:
+  1. Y2（dispatch_candidate_threshold 新設）により、2位ノードの dispatch が可能になった。
+  2. `dispatch_top_k=2` の下で、`majority_vote` が `max_confidence` を超える可能性がある。
+  3. 変更は `config.yaml` の 2 値のみ（dispatch_top_k: 1->2, aggregation_method: max_confidence->majority_vote）。コード変更不要。
+  4. 低コスト（実装~5分、実行~90-100分）。
+- **変更ファイル**:
+  1. `config.yaml` — line 57: `dispatch_top_k: 1` → `dispatch_top_k: 2`
+  2. `config.yaml` — line 68: `aggregation_method: max_confidence` → `aggregation_method: majority_vote`
+- **成功条件**: `compound_domain_set_recall` が `max_confidence` ベースラインを 5pt 以上上回る。`top1_accuracy` の有意悪化なし（McNemar p >= 0.05）。
+- **固定レバー**: routing_method, confidence_threshold, classifier_calibration, classifier_head_adaptation, dispatch_candidate_threshold=0.0, 分類器訓練データ、評価データセット、embedding model。
+- **到達コードパスの確認**:
+  - `node.py:195`: `aggregation_method` を config から取得
+  - `node.py:196`: `validate_aggregation_method()` で validation
+  - `node.py:217`: `dispatch_top_k=2` で `select_dispatch_targets()` を呼び出し
+  - `node.py:238`: `_dispatch_to_targets()` に `aggregation_method` を渡す
+  - `node.py:141-143`: `aggregation_method==majority_vote` で分岐
+  - `aggregator.py:98-125`: `select_best_dispatch_response_majority_vote()` を実行
+  - **no-op にならない確認**: `dispatch_candidate_threshold=0.0` のため、2位ノードの confidence は常に 0.0 以上（確率は負にならない）→ 2位ノードは必ず qualified → `aggregation_method` の分岐は必ず発火。
+- **コスト**: 実装~5分、実行~90-100分（1600問本走x1回）。オフライン完結なし。
+- **llm_judge の比較**: 次イテレーションで検討（judge_model の追加LLM呼び出しで~100-120分/回）。
+
+---
+
 ## B67 [auto-decided 2026-08-02] Iter45: Y2（dispatch_candidate_threshold 新設）の設計確定とユーザー確認待ち
 
 - **状況**: config.yml の全 levers を試し切り済み。`classifier_head_adaptation` の残り2値は実質的に試す価値が低い（`education_posthoc_calibration` は intercept シフトと数学的に同等、`education_feature_augmentation` は argmax flip rate 15%超のリスク）。`aggregation_method` は Y2 が完了するまで試せない。
