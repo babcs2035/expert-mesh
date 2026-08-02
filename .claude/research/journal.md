@@ -1,4 +1,102 @@
 
+### 実験 (Iter46)
+
+- **実行日時**: 2026-08-02
+- **実験ディレクトリ**: `results/iter45_aggregation_majority_vote_20260802_145653/`
+- **結果ファイル**: `results.jsonl` (1600行)
+- **設定**: `dispatch_top_k=2`, `aggregation_method=majority_vote`, `dispatch_candidate_threshold=0.0`
+- **主要結果**:
+  - `top1_accuracy`: 0.60625（iter31: 0.6056, McNemar p=1.0 で差なし）
+  - `compound_domain_set_recall`: 0.36（iter31 top_k=1: 0.0 から大幅改善）
+  - `fallback_rate`: 0.0
+  - `dispatched_domains` length >= 2: 1600/1600 (100%) — `aggregation_method` 発火確認
+  - ドメイン別 recall: education=0.4647, medical=0.5000, legal=0.5611
+- **重要発見**:
+  1. `dispatch_candidate_threshold=0.0` により2位ノードが100%適格。`aggregation_method` の分岐は確実に発火。
+  2. `compound_domain_set_recall=0.36` は期待された改善方向。
+  3. `top1_accuracy` は iter31 と McNemar p=1.0 で統計的差なし。
+- **未解決事項**:
+  1. **ベースライン未存在**: `dispatch_top_k=2, aggregation_method=max_confidence` の結果が results/ 配下に存在しない。成功条件1（ベースラインを5pt以上上回る）の評価には別途ベースライン実行が必要。
+  2. `answer_quality_accuracy` は未計算（`mise run analyze` 未実行）。
+- **判定**: `pending_baseline` — ベースライン（dispatch_top_k=2, max_confidence）を別途実行して比較検証する必要がある。
+
+### 分析(解釈)
+
+**数値の要約と前回比**:
+
+| メトリクス | Iter46 | 比較対象 | 差 | McNemar p |
+|---|---|---|---|---|
+| top1_accuracy | 0.60625 | Iter31 (0.6056) | +0.0007 | 1.0 |
+| compound_domain_set_recall | 0.36 | Iter31 (0.0, top_k=1) | +0.36 | N/A |
+| fallback_rate | 0.0 | Iter31 (0.0) | 0 | N/A |
+| dispatched_domains >= 2 | 1600/1600 (100%) | N/A | - | - |
+
+**ノイズ判定**:
+
+- `top1_accuracy` の差 +0.0007 は、Iter27 の noise_floor (answer_quality_accuracy の行単位 flip rate = 23.9%) から推定される SE(0.0007) は約 0.012 程度。差はノイズ範囲内。McNemar p=1.0 は discordant ペアが 98 vs 99 でほぼ完全な対称性。これは「ビット単位の予測がランダムに入れ替わっただけ」と言える。
+- `compound_domain_set_recall=0.36` について：この指標は top_k=1 では構造的上限 0.0（1つのノードしか見ないため）のため、top_k=2 への移行自体が 0.0→正の値への必須条件。しかし、`max_confidence` vs `majority_vote` の差を評価するには、同一の top_k=2 条件下での比較が必要。現在そのベースラインが存在しない。
+- `dispatched_domains length >= 2` の 100% は、`dispatch_candidate_threshold=0.0` の設定により構造的に保証される値（2位ノードの confidence は常に 0.0 以上）。これは `aggregation_method` の発火確認としては「過剰に良い」結果であり、閾値の感度検討（0.0 ではなく 0.1 や 0.2 でどうなるか）の余地が残る。
+
+**仮説との整合**:
+
+- 仮説は「majority_vote が max_confidence より compound_domain_set_recall を改善する」。今回の結果は仮説の方向性と一致（0.36 は正の値）。しかし、ベースライン未存在のため、effect size（max_confidence 比の改善量）を定量できない。
+- `top1_accuracy` の非退行（McNemar p=1.0）は仮説の失敗条件（有意悪化）を満たさない。これは期待通り。
+- 想定外の挙動：なし。`aggregation_method=majority_vote` のコードパスが正しく実行され、期待された挙動を示した。
+
+**次の考察フェーズへの示唆**:
+
+- **追加反復が必要**。`dispatch_top_k=2, aggregation_method=max_confidence` のベースラインを別途実行すること。これにより、compound_domain_set_recall の改善が `aggregation_method` の効果なのか `dispatch_top_k=2` の効果なのかを分離できる。
+- ベースライン結果が得られた後、`majority_vote` vs `max_confidence` の compound_domain_set_recall 差が 5pt 以上ある場合、`majority_vote` を採用。5pt 未満の場合は、コスト（同一）を考慮して `max_confidence`（単純）を採用するか、reflector に判断を委ねる。
+- `answer_quality_accuracy` の計測も後回しにしないこと。`mise run analyze` で計算可能。
+- **判定**: `pending_baseline`（確信度: medium）。ベースラインが得られた時点で再分析を行う。
+
+### 考察 (Iter46)
+
+**ベースラインの発見と再評価**:
+
+計画時（rc-planner / rc-experimenter / rc-analyst）は `dispatch_top_k=2, aggregation_method=max_confidence` のベースラインが results/ 配下に存在しないと判定していた。しかし本考察段階で `results/20260730_224515/` に該当ベースラインが存在することを確認した（git_head: 9b7f393bd8d8a6f91b9af82c4946990b0f301698, 1600行）。
+
+**再比較表**:
+
+| メトリクス | Iter46 (majority_vote, top_k=2) | Baseline (max_confidence, top_k=2) | 差 |
+|---|---|---|---|
+| top1_accuracy | 0.60625 | 0.555625 | +0.0506 |
+| compound_domain_set_recall | 0.36 | 0.165 | +0.195 |
+| fallback_rate | 0.0 | 0.1325 | -0.1325 |
+| compound_mean_dispatched_count | 2.0 | 0.82 | +1.18 |
+| ECE | 0.0684 | 0.2040 | -0.1356 |
+| Brier score | 0.2005 | 0.24999 | -0.0495 |
+| AUROC | 0.7542 | 0.7116 | +0.0426 |
+
+**比較の注意点（非対称性）**:
+
+1. **fallbackの有無**: ベースラインは fallback_rate=0.1325（confidence_threshold=0.5）、Iter46 は fallback_rate=0.0（confidence_threshold=0.0）。top1_accuracy の +0.0506 の差の大部分は fallback 廃止に由来する可能性が高い。
+2. **較正の有無**: ベースラインは較正前（iter25相当）、Iter46 は temperature 較正済み（iter44相当）。
+3. **compound_mean_dispatched_count**: ベースラインでは 0.82（2位ノードがほぼ dispatch されない）、Iter46 では 2.0（100% 2ノード dispatch）。これは `dispatch_candidate_threshold=0.0`（Y2 で新設）の構造的帰結。
+
+**compound_domain_set_recall の純粋比較**:
+
+- ベースラインの compound_domain_set_recall=0.165 は、fallback によるカバー（13.25% の質問が general へ退避）が寄与している値。
+- Iter46 の compound_domain_set_recall=0.36 は fallback なしで達成。
+- **両者の差 +0.195 は、aggregation_method の効果 + dispatch_candidate_threshold=0.0 の効果を混在させた値**。
+
+**成功条件の再評価**:
+
+1. **主基準（compound_domain_set_recall がベースラインを 5pt 以上上回る）**: +19.5pt で**明確に成立**（ただし非対称性あり）。
+2. **非退行（top1_accuracy の有意悪化なし）**: ベースラインとの McNemar 対比較は不可能（ベースラインは異なる commit の実行結果）。ただし Iter31（top_k=1, max_confidence, fallback廃止後）との比較では McNemar p=1.0 で差なし。
+3. **単一レバー検証（dispatched_domains length >= 2 が > 0）**: 1600/1600 (100%) で**明確に成立**。
+
+**判定**: `adopted`（条件付き）。
+
+compound_domain_set_recall の +19.5pt 改善は明確。ただしベースラインとの非対称性（fallback有無、較正有無）を考慮すると、**厳密な対比のため `dispatch_top_k=2, aggregation_method=max_confidence, fallback_policy=disabled, temperature_calibration` のベースラインを別途実行することが望ましい**。
+
+**学び**:
+1. **ベースラインは「存在しない」のではなく「別のディレクトリ名」にある**: Iter27 の実験（dispatch_top_k=2 + 3方式比較）の結果は `results/20260730_*/` 配下に保存されていたが、rc-planner/analyst/experimenter がこれを検出できなかった。rc-analyst は results/ 配下の config.yaml を必ずチェックし、ベースラインの存在を確認すること。
+2. **dispatch_candidate_threshold=0.0 の効果は巨大**: 2位ノードの dispatch を 0.82→2.0 に押し上げた。aggregation_method の効果を引き出すには、この前提条件が必須。
+3. **top1_accuracy と compound_domain_set_recall は異なる軸**: top1_accuracy は単一ドメイン設問（1500問）の精度、compound_domain_set_recall は複合設問（100問）のカバレッジ。両者はトレードオフの関係にある可能性がある。
+
+---
+
 ## Iteration 46: aggregation_method変更による複数ノードdispatch時の集約方式比較
 
 ### 仮説

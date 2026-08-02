@@ -1,5 +1,22 @@
 # backlog — 人間判断待ち事項 / 自動判断の記録
 
+## B69 [auto-decided 2026-08-02] Iter46: majority_vote adopted（条件付き）。次は clean ベースライン取得 → llm_judge
+
+- **状況**: Iter46（aggregation_method=majority_vote, dispatch_top_k=2）の結果を考察。計画時はベースライン未存在と判定されたが、`results/20260730_224515/` に `dispatch_top_k=2, max_confidence` のベースラインが存在することを本考察で発見。
+- **判定**: `adopted`（条件付き）。compound_domain_set_recall: 0.36 (majority_vote) vs 0.165 (max_confidence) = **+19.5pt** で主基準（5pt以上）を明確に超過。
+- **条件付きの理由**: 比較の非対称性（ベースラインは fallback_rate=0.1325、Iter46は0.0；ベースラインは較正前、Iter46はtemperature較正済み）。厳密な対比のため clean ベースラインの再実行を推奨。
+- **決定的な学び**:
+  1. **ベースラインは「存在しない」のではなく「別のディレクトリ名」にある**: Iter27 の実験結果は `results/20260730_*/` 配下に保存されていたが、rc-planner/analyst/experimenter が検出できなかった。次回以降、results/ 配下の config.yaml を必ずチェックすること。
+  2. **dispatch_candidate_threshold=0.0 の効果は巨大**: compound_mean_dispatched_count を 0.82→2.0 に押し上げた。aggregation_method の効果を引き出すにはこの前提条件が必須。
+  3. **top1_accuracy と compound_domain_set_recall は異なる軸**: top1 は単一ドメイン設問（1500問）、compound は複合設問（100問）のカバレッジ。両者はトレードオフの可能性がある。
+- **次イテレーションの計画**:
+  1. **Iter47**: `dispatch_top_k=2, aggregation_method=max_confidence` の clean ベースライン（fallback廃止, temperature較正済み）。コスト: ~90-100分。
+  2. **Iter48**: `aggregation_method=llm_judge`（dispatch_top_k=2）。コスト: ~100-120分（judge_model追加呼び出し）。
+- **config.yml の levers 状態**: `aggregation_method` の values は `[majority_vote, llm_judge]`。majority_vote は adopted（条件付き）。次値は `llm_judge`。
+- **要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
 ## B68 [auto-decided 2026-08-02] Iter46: Y3 aggregation_method 比較実験（majority_vote vs max_confidence）
 
 - **状況**: Y2（dispatch_candidate_threshold 新設）が Iter45 で完了。config.yml の全 levers を試し切り済み。`aggregation_method` レバーの次値（majority_vote, llm_judge）を試すための前提条件が整った。

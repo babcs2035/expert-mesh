@@ -2,21 +2,21 @@
   "repo": "expert-mesh",
   "iteration": 46,
   "iteration_name": "aggregation_method変更による複数ノードdispatch時の集約方式比較",
-  "phase": "plan",
+  "phase": "reflect",
   "status": "running",
+  "updated_at": 1785663400,
   "current_lever": "aggregation_method",
-  "experiment_deadline": null,
-  "updated_at": 1785648669,
+  "experiment_deadline": 1785658384,
   "iteration_thread_ts": "1785646727.597639",
   "notion_toggle_created": true,
   "next_iteration_brief": {
     "must_read_first": [
+      ".claude/research/journal.md (Iteration 46: aggregation_method変更による複数ノードdispatch時の集約方式比較 - adopted (条件付き))",
       ".claude/research/journal.md (Iteration 44: educationドメインinterceptシフト(+0.7)によるdecision boundary調整 - adopted)",
-      ".claude/research/journal.md (Iteration 43: embedding出力への線形射影(head)によるeducationドメイン適応)",
-      ".claude/research/journal.md (Iteration 42: LoRA rank半減(r=8)によるembedding適応)"
+      ".claude/research/journal.md (Iteration 43: embedding出力への線形射影(head)によるeducationドメイン適応)"
     ],
-    "planned_lever": "aggregation_method (majority_vote / llm_judge vs max_confidence)",
-    "note": "Y2 (dispatch_candidate_threshold 新設) が Iter45 で完了。config.yml の全 levers を試し切り済み。次イテレーションは Y3: aggregation_method の比較実験（dispatch_top_k=2 の下で majority_vote / llm_judge を max_confidence と比較）。変更は config.yaml の 2 値のみ（dispatch_top_k: 1->2, aggregation_method: max_confidence->majority_vote）。コード変更不要。"
+    "planned_lever": "aggregation_method (dispatch_top_k=2, max_confidence の clean ベースライン取得 → llm_judge)",
+    "note": "Iter46 (majority_vote, top_k=2) は compound_domain_set_recall +19.5pt (vs 旧ベースライン 0.165→0.36) で adopted（条件付き）。ただし旧ベースラインは fallback あり・較正前のため、厳密な対比のため Iter47 で clean ベースライン（dispatch_top_k=2, max_confidence, fallback廃止, temperature較正）を実行。その後 Iter48 で llm_judge を検証。"
   },
   "e37_results": {
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
@@ -510,7 +510,7 @@
     "note": "Iter28（Y1）の事前根拠。分散版での再確認が Iter28 の目的。"
   },
   "last_slack_ts": "1785647954.026169",
-  "last_commit": "cf47bcd",
+  "last_commit": "8d18236",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,
@@ -730,7 +730,7 @@
     "judgment": "rejected",
     "note": "manual sample_weight reproduction of class_weight balanced REJECTED as a hypothesis for improving education_recall. Key findings: (1) education_recall unchanged: 0.4588->0.4588 (identical). (2) medical_recall unchanged: 0.5112->0.5112 (identical). (3) top1_accuracy +0.0100 (0.6056->0.6156) but McNemar p=0.0848, not significant at alpha=0.05. (4) 75/1600 rows (4.7%) changed predictions, concentrated in history_culture (+10.12pt recall) and minor shifts elsewhere. (5) ECE slightly worsened (0.0712->0.0807). (6) Brier score slightly improved (0.6068->0.6000). (7) No BH-significant regressions or improvements in 20 per-domain metrics. Root cause: manual sample_weight with class_weight=None produces functionally equivalent effective weights to class_weight=balanced (both yield domain_weight = n_samples/(n_classes*n_domain_samples)). The 75 changed predictions are numerical noise from the solver, not a systematic improvement. The hypothesis that removing class_weight=balanced would improve education_recall is not supported by this experiment. Next steps: (A) investigate why education_recall is stuck at 0.4588 despite balanced weighting, (B) consider fundamentally different education proxy tasks or handmade education problems beyond what Iter35 tested, (C) re-evaluate whether education_recall 0.5112 is the right benchmark."
   },
-  "experiment_dir": null,
+  "experiment_dir": "results/iter45_aggregation_majority_vote_20260802_145653",
   "e40_results": {
     "lever": "embedding_adaptation=setfit_education_finetune",
     "top1_accuracy_before": 0.6056,
@@ -1061,5 +1061,62 @@
       "overall": "PASS (all 4 conditions met) - ADOPTED"
     },
     "judgment": "adopted"
+  },
+  "e46_results": {
+    "lever": "aggregation_method=majority_vote + dispatch_top_k=2",
+    "top1_accuracy": 0.60625,
+    "top1_accuracy_wilson_ci": [
+      0.5820828409827515,
+      0.6299081872638946
+    ],
+    "cohens_kappa": 0.5762962962962963,
+    "compound_domain_set_recall": 0.36,
+    "compound_domain_coverage_ratio_mean": 0.36,
+    "compound_domain_jaccard_mean": 0.2466666666666665,
+    "compound_mean_dispatched_count": 2.0,
+    "fallback_rate": 0.0,
+    "dispatch_failure_rate": 0.0,
+    "mean_duration_ms": 4552.611875,
+    "ece": 0.06836425866373845,
+    "brier_score": 0.20051837472481457,
+    "auroc": 0.7541548028145967,
+    "per_domain_recall": {
+      "business_economics": 0.5595238095238095,
+      "computer_science": 0.5297619047619048,
+      "education": 0.4647058823529412,
+      "general": 0.5548780487804879,
+      "history_culture": 0.7440476190476191,
+      "legal": 0.5611111111111111,
+      "mathematics": 0.6190476190476191,
+      "medical": 0.5,
+      "natural_science": 0.5714285714285714,
+      "social_science": 0.6071428571428571
+    },
+    "mcnemar_vs_iter31": {
+      "discordant_a_only": 98,
+      "discordant_b_only": 99,
+      "total_discordant": 197,
+      "p_value": 1.0
+    },
+    "dispatched_domains_length_ge_2_count": 1600,
+    "dispatched_domains_length_ge_2_rate": 1.0,
+    "single_lever_check": {
+      "note": "dispatch_top_k changed 1->2 AND aggregation_method changed max_confidence->majority_vote. Two config values changed. Single-lever principle NOT satisfied.",
+      "levers_changed": [
+        "dispatch_top_k",
+        "aggregation_method"
+      ]
+    },
+    "baseline_available": false,
+    "baseline_note": "No baseline with dispatch_top_k=2, aggregation_method=max_confidence exists. The current config was changed to majority_vote before any max_confidence with top_k=2 baseline was run.",
+    "analyst_verification": {
+      "note": "Independent analysis: top1_accuracy diff +0.0007 vs iter31 is within noise (McNemar p=1.0, discordant 98/99 symmetric). compound_domain_set_recall=0.36 is promising but cannot be attributed to aggregation_method without the missing baseline (dispatch_top_k=2, max_confidence). dispatched_domains=100% is structural guarantee of dispatch_candidate_threshold=0.0. Single-lever violation confirmed: both dispatch_top_k (1->2) and aggregation_method (max_confidence->majority_vote) changed.",
+      "noise_assessment": "top1_accuracy: within noise (SE~0.012, diff=0.0007). compound_domain_set_recall: cannot assess noise without baseline.",
+      "hypothesis_match": "direction consistent (0.36 > 0), but effect size unquantifiable without baseline.",
+      "anomalies": "none",
+      "recommendation": "run baseline (dispatch_top_k=2, max_confidence), then re-analyze"
+    },
+    "judgment": "adopted (conditional)",
+    "note": "majority_vote with dispatch_top_k=2: compound_domain_set_recall=0.36 vs baseline (dispatch_top_k=2, max_confidence) 0.165 = +19.5pt improvement, exceeding the 5pt threshold. ADOPTED (conditional). NOTE: baseline comparison has asymmetry (baseline had fallback_rate=0.1325, Iter46 had 0.0; baseline was pre-calibration, Iter46 was temperature-calibrated). Clean baseline re-run recommended for strict comparison. The baseline was found at results/20260730_224515/ (commit 9b7f393), not previously detected by planner/analyst/experimenter. Single-lever violation noted but documented as prerequisite change in plan."
   }
 }
