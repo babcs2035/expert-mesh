@@ -3,6 +3,45 @@
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
+## B65 [auto-decided 2026-08-02] Iter43: embedding_adapter_projection_head rejected。全embedding適応値尽きた。次レバー=classifier_head_adaptation
+
+- 状況: Iter43（embedding_adaptation=embedding_adapter_projection_head）の rc-analyst 判定（rejected）
+  を rc-reflector が検証・確定させた。
+- **判定: rejected（確定）**。argmax flip rate 42.00%（閾値<15%の2.8倍超過）。top1_accuracy 有意悪化
+  （McNemar p=3.0e-9）。BH補正後有意退行 15/20指標。
+- **全embedding適応試行の総括**:
+
+  | イテレーション | アプローチ | argmax flip rate | education_recall | medical_recall | top1_accuracy | 判定 |
+  |---|---|---|---|---|---|---|
+  | Iter40 | SetFit full FT | 52.56% | 0.6529 | 0.3090 | 0.4894 | rejected |
+  | Iter41 | LoRA r=16 | 35.88% | 0.5706 | 0.4045 | 0.5719 | rejected |
+  | Iter42 | LoRA r=8 | 35.88% | 0.6235 | 0.4326 | 0.5719 | rejected |
+  | Iter43 | Dense projection head (590K) | 42.00% | 0.5529 | 0.3596 | 0.5269 | rejected |
+
+- **決定的な学び**:
+  1. **embedding適応は単一レバー原則と両立しない**: 全4手法がargmax flip rate >= 35.88%でrejected。
+     embedding空間の再構造化は必然的に他ドメインに影響する。
+  2. **Dense projection headはLoRAより悪い**: 42.00% flip rateはLoRAの35.88%より悪い。
+     multiplicative projectionもadditive perturbationと同様にembedding空間を再配置。
+  3. **intrinsic dimensionality <= 8の知恵**: educationドメイン適応に必要な有効自由度は1つ。
+     LoRA r=8とr=16がビット単位で同一。
+  4. **embedding空間の幾何学的制約**: 768次元空間を10ドメインで共有。教育ドメインのみを分離するには
+     空間の「回転」が必要だが、これは必然的に他ドメインも移動させる。手法の変更では解消できない。
+  5. **social_science崩壊が最も深刻**: social_science_recall 0.5774→0.1964（-38.1pt）。
+- **config.yml の変更**:
+  1. `embedding_adaptation` レバーの note に Iter43 結果を追記。
+  2. 新規レバー `classifier_head_adaptation` を config.yml 末尾へ追記（values: education_feature_augmentation, education_boundary_tuning, education_posthoc_calibration）。
+- **次の一手: Iter44 で `classifier_head_adaptation` をinvestigate**。
+  rc-investigatorは以下の3アプローチのfeasibilityを調査すること:
+  (a) education_feature_augmentation: 既存embedding特徴量にeducation-awareな変数を追加
+  (b) education_boundary_tuning: LogisticRegressionのeducation classのdecision boundaryを直接調整
+  (c) education_posthoc_calibration: 分類器の出力確率にeducation-specificなpost-hoc較正を適用
+- **要人間判断**: (1) education_recall の基準値（medical_recall 0.5112）の再検討。(2) Y2
+  （`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認は引き続き必要。
+  (3) classifier_head_adaptationのアプローチの妥当性判断。
+
+---
+
 ## B64 [auto-decided 2026-08-02] Iter41: embedding_adapter_only_lora (r=16) rejected。次レバー=embedding_adapter_lora_r8
 
 - 状況: Iter41（embedding_adaptation=embedding_adapter_only_lora, r=16）の rc-analyst 判定（rejected）

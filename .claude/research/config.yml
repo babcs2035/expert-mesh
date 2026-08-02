@@ -341,7 +341,37 @@ levers:
             試して単一レバー原則未達。次値 `embedding_adapter_projection_head` は、
             LoRAのadditive perturbation（attention層への追加）ではなく、embedding出力への
             線形射影（W_proj * embedding + b）により、embedding変形をeducationドメインに
-            局所化するアプローチ。"}
+            局所化するアプローチ。
+            [2026-08-02 Iter43 reflector追記] Dense projection headはrejected確定（argmax flip
+            rate 42.00%）。LoRA (35.88%) よりも悪い。全4値（setfit, LoRA r=16, LoRA r=8,
+            projection head）尽きた。embedding適応はembedding空間の幾何学的制約により単一
+            レバー原則と両立しないことが確定。次レバーは`classifier_head_adaptation`へ。"}
+
+  # --- classifier_head_adaptation: 【2026-08-02 Iter43 reflector追記】embeddingはfreezeし、
+  #     classifier head（LogisticRegression）のみを変更してeducationドメインを分離。
+  #     embedding空間の幾何学的制約を迂回するアプローチ。 ---
+  - {name: classifier_head_adaptation,
+     values: [education_feature_augmentation, education_boundary_tuning, education_posthoc_calibration],
+     note: "[2026-08-02 Iter43 reflector追記] `embedding_adaptation` は全4値尽きた（全rejected）。
+            embedding空間の幾何学的制約（768次元を10ドメインで共有。教育ドメインのみを分離するには
+            空間の回転が必要だが、これは必然的に他ドメインも移動させる）により、embeddingレベルの
+            適応は単一レバー原則(<15% argmax flip)に到達不可能。
+            **classifier-level適応のアプローチ**:
+            (a) `education_feature_augmentation`: 既存embedding特徴量にeducation-awareな変数を追加
+            （例: educationドメインのtraining dataとのcosine similarity、education classのmean
+            embeddingとの距離等）。LogisticRegressionの入力次元を増やし、educationをより分離可能に。
+            (b) `education_boundary_tuning`: LogisticRegressionのeducation classのdecision boundary
+            を直接調整（education classのinterceptをシフト、またはeducation classの係数ベクトルを
+            特徴量エンジニアリングで強化）。
+            (c) `education_posthoc_calibration`: 分類器の出力確率にeducation-specificなpost-hoc
+            較正を適用（education classの確率にbiasを付与する）。argmax flip rateを低く抑えながら
+            education_recallを改善可能。
+            **単一レバーの保証**: embedding空間は不変（base model freeze）。classifier training /
+            evaluation のみで完結。runtime routing（http_server.py）は変更不要。
+            **コスト**: 低（オフライン完結、~10-15分）。
+            **成功条件**: education_recall > medical_recall基準(0.5112)、
+            他9ドメイン18指標のBH補正後有意退行0件、argmax flip rate <15%、
+            top1_accuracy McNemar p>=0.05"}
 
   - {name: class_weight_adjustment,
      values: [none_manual_sample_weight],

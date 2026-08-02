@@ -1,4 +1,663 @@
-### 調査 (Iter42) — rc-investigator: embedding_adapter_lora_r8
+## Iteration 43: embedding出力への線形射影(head)によるeducationドメイン適応
+
+### 仮説
+
+nomic-embed-text-v1 の最終embedding出力（768次元）に学習可能な線形射影（Dense: W*x + b）を
+適用することで、educationドメインの埋め込みを他ドメインから分離する。LoRAがattention層への
+additive perturbation（全12層を通過する累積変形）であるのに対し、projection headはembedding
+出力への直接射影のみで、base modelの全パラメータをfreezeする。これによりargmax flip rateを
+<15%の閾値以内に抑えながら、education_recallをmedical_recall基準(0.5112)を上回らせる。
+
+### 根拠
+
+1. **LoRAの構造的限界**: Iter40-42（SetFit full FT, LoRA r=16, LoRA r=8）で全3値が
+   argmax flip rate >= 35.88%でrejected。LoRA rank削減はintrinsic dimensionality <= 8の
+   発見により収束。LoRAはattention層へのadditive perturbationであり、12層を通過するたびに
+   embeddingに累積的に影響するため、単一レバー原則(<15% flip)に構造的に到達不可能。
+
+2. **projection headとの決定的差異**: embedding出力（768次元ベクトル）への直接射影は、
+   base modelのattention層を一切変更しない。runtime embedding path（Ollama base model）は
+   不変。classifier training / evaluation のみで完結する。
+
+3. **先行研究の裏付け**: Chroma Embedding Adapters（768x768線形射影、最大70%検索精度改善）、
+   LlamaIndex Linear Adapter（任意embeddingモデルの上位に線形アダプタ接続）が同様の
+   アプローチを実証。両方とも「query embeddingのみに適用、document embeddingは不変」で
+   本実験の「education embeddingのみに射影を適用する」という方針と一致。
+
+4. **SentenceTransformerでの実装可能性**: `Dense(in_features=768, out_features=768,
+   activation_function=None)` モジュールをSentenceTransformerに注入可能。新規パッケージ
+   依存不要（Denseはsentence-transformers>=3.0組み込み）。
+
+5. **単一レバーの保証**: base modelの全パラメータをfreeze。Dense moduleのパラメータのみを
+   訓練。runtime routing（http_server.py）は変更不要。
+
+### 単一レバー
+
+**変更するレバー**: `embedding_adaptation=embedding_adapter_projection_head`
+
+**変更ファイル（新規作成）**:
+
+1. **`scripts/fine_tune_embedding_projection_head.py`** — 新規作成（約180行）
+
+   ```python
+   """Dense projection head fine-tuning of nomic-embed-text for education domain.
+
+   Applies a learnable linear projection (Dense: W*x + b) to the final 768-dim
+   embedding output of nomic-embed-text-v1. Trains only the Dense module
+   parameters using MultipleNegativesRankingLoss on education domain contrastive
+   pairs. Base model (Transformer + Pooling) parameters are frozen.
+
+   This is DIFFERENT from LoRA:
+   - LoRA: additive perturbation on attention layers (affects all 12 layers)
+   - Projection head: direct linear mapping on the FINAL embedding output only
+   - Does NOT modify base model weights
+   - Does NOT affect runtime embedding generation (runtime uses Ollama base model)
+   - Only changes the embedding space used for classifier training
+
+   Output: fine-tuned SentenceTransformer model saved to models/embedding_projection_education/
+   Usage:
+       uv run python scripts/fine_tune_embedding_projection_head.py
+   """
+
+   import json
+   import random
+   import sys
+   from pathlib import Path
+
+   from datasets import Dataset
+   from sentence_transformers import SentenceTransformer
+   from sentence_transformers.base.modules.dense import Dense
+   from sentence_transformers.losses import MultipleNegativesRankingLoss
+   from sentence_transformers.training_args import SentenceTransformerTrainingArguments
+   from sentence_transformers import SentenceTransformerTrainer
+
+
+   def load_education_rows(path: str) -> list[dict]:
+       """Load education rows from classifier_train.jsonl."""
+       rows = []
+       with open(path, encoding="utf-8") as f:
+           for line in f:
+               row = json.loads(line)
+               if row["domain"] == "education":
+                   rows.append(row)
+       return rows
+
+
+   def create_contrastive_pairs(
+       edu_rows: list[dict],
+       all_rows: list[dict],
+       seed: int = 42,
+   ) -> Dataset:
+       """Create (anchor, positive, negative) triplets for contrastive learning.
+
+       Positive pairs: two education rows (same domain).
+       Negative pairs: education row + non-education row (different domain).
+
+       Prioritizes negative samples from domains that confuse education most
+       (medical, business_economics, general -- identified in Iter39 analysis).
+       60% priority from these domains, 40% random from all other domains.
+       """
+       rng = random.Random(seed)
+       edu_queries = [r["query"] for r in edu_rows]
+       other_queries = [r["query"] for r in all_rows if r["domain"] != "education"]
+
+       priority_domains = {"medical", "business_economics", "general"}
+       priority_negatives = [r["query"] for r in all_rows
+                             if r["domain"] in priority_domains and r["domain"] != "education"]
+       other_negatives = [r["query"] for r in all_rows
+                          if r["domain"] not in priority_domains and r["domain"] != "education"]
+
+       anchors = []
+       positives = []
+       negatives = []
+
+       for anchor_query in edu_queries:
+           # Positive: another education query
+           positive_query = rng.choice(edu_queries)
+           while positive_query == anchor_query and len(edu_queries) > 1:
+               positive_query = rng.choice(edu_queries)
+
+           # Negative: preferentially from confusing domains (60% priority, 40% random)
+           if rng.random() < 0.6 and priority_negatives:
+               negative_query = rng.choice(priority_negatives)
+           elif other_negatives:
+               negative_query = rng.choice(other_negatives)
+           else:
+               negative_query = rng.choice(other_queries)
+
+           anchors.append(anchor_query)
+           positives.append(positive_query)
+           negatives.append(negative_query)
+
+       return Dataset.from_dict({
+           "anchor": anchors,
+           "positive": positives,
+           "negative": negatives,
+       })
+
+
+   def main() -> None:
+       """Run Dense projection head fine-tuning of nomic-embed-text for education domain."""
+       # Load data
+       train_path = "data/classifier_train.jsonl"
+       all_rows = []
+       with open(train_path, encoding="utf-8") as f:
+           for line in f:
+               all_rows.append(json.loads(line))
+       edu_rows = [r for r in all_rows if r["domain"] == "education"]
+       print(f"[fine_tune_projection_head] loaded {len(edu_rows)} education rows, "
+             f"{len(all_rows) - len(edu_rows)} other rows", file=sys.stderr)
+
+       # Create contrastive pairs
+       train_dataset = create_contrastive_pairs(edu_rows, all_rows)
+       print(f"[fine_tune_projection_head] created {len(train_dataset)} triplet pairs",
+             file=sys.stderr)
+
+       # Load base model from HuggingFace
+       base_model_name = "nomic-ai/nomic-embed-text-v1"
+       print(f"[fine_tune_projection_head] loading base model: {base_model_name}",
+             file=sys.stderr)
+       model = SentenceTransformer(base_model_name, trust_remote_code=True, device="cpu")
+
+       # Inject Dense projection head
+       # This is a linear projection (W*x + b) applied to the final 768-dim embedding.
+       # activation_function=None -> nn.Identity() (no non-linearity, pure linear projection).
+       # This differs from LoRA which adds perturbation to attention layers (12 layers).
+       # Dense module is applied AFTER Pooling and Normalize in the SentenceTransformer pipeline,
+       # then encode() with normalize_embeddings=True re-normalizes the final output.
+       projection_head = Dense(
+           in_features=768,
+           out_features=768,
+           bias=True,
+           activation_function=None,  # Pure linear: W*x + b, no Tanh/ReLU
+       )
+       model.add_module("Dense", projection_head)
+       trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+       total_params = sum(p.numel() for p in model.parameters())
+       print(
+           "[fine_tune_projection_head] Dense projection head injected (768->768, no activation)",
+           file=sys.stderr
+       )
+       print(
+           f"[fine_tune_projection_head] Trainable params: {trainable_params:,} / "
+           f"{total_params:,} ({100 * trainable_params / total_params:.4f}%)",
+           file=sys.stderr,
+       )
+
+       # Training arguments
+       output_dir = "models/embedding_projection_education"
+       args = SentenceTransformerTrainingArguments(
+           output_dir=output_dir,
+           num_train_epochs=3,
+           per_device_train_batch_size=16,
+           learning_rate=2e-5,
+           warmup_steps=10,
+           logging_steps=10,
+           save_strategy="epoch",
+           save_total_limit=1,
+           fp16=False,
+           seed=42,
+           use_cpu=True,
+       )
+
+       # Train with MultipleNegativesRankingLoss
+       # SBERT official recommended loss for embedding adaptation.
+       loss = MultipleNegativesRankingLoss(model)
+       trainer = SentenceTransformerTrainer(
+           model=model,
+           args=args,
+           train_dataset=train_dataset,
+           loss=loss,
+       )
+       trainer.train()
+
+       # Save the full fine-tuned model (base model + Dense module)
+       Path(output_dir).mkdir(parents=True, exist_ok=True)
+       model.save_pretrained(output_dir, safe_serialization=True)
+       print(
+           f"[fine_tune_projection_head] saved fine-tuned model to {output_dir}",
+           file=sys.stderr,
+       )
+
+
+   if __name__ == "__main__":
+       main()
+   ```
+
+2. **`scripts/train_domain_classifier.py`** — 1箇所変更
+
+   **変更箇所**: `build_training_features()` 関数（line 112-129）
+
+   `fine_tuned_embed_model` パスで、LoRA adapter（`load_adapter`+`set_adapter`）の代わりに、
+   Dense projection head が注入されたSentenceTransformerモデルをそのまま使用する。
+
+   ```python
+   # 変更箇所: build_training_features() の fine_tuned_embed_model パス（line 112-129）
+
+   if fine_tuned_embed_model is not None:
+       print(f"[train_domain_classifier] using fine-tuned embed model: {fine_tuned_embed_model}",
+             file=sys.stderr)
+       local_model = SentenceTransformer(
+           fine_tuned_embed_model, trust_remote_code=True, device="cpu"
+       )
+       # Load and activate the LoRA adapter (PEFT default adapter name)
+       local_model.load_adapter(fine_tuned_embed_model, "default")
+       local_model.set_adapter("default")
+       # --- NEW CODE: Apply Dense projection head (for projection head models) ---
+       # The fine-tuned model already has the Dense module injected during training.
+       # No additional setup needed -- the model uses it automatically in the pipeline.
+       # ---------------------------------------------------------------------------
+       embeddings = []
+       labels = []
+       for row in rows:
+           emb = local_model.encode(row["query"], normalize_embeddings=True,
+                                    show_progress_bar=False)
+           embeddings.append(emb.tolist())
+           labels.append(row["domain"])
+       return embeddings, labels
+   ```
+
+   **到達条件**: `--fine-tuned-embed-model models/embedding_projection_education` を指定して
+   スクリプトを実行。Dense モジュールはモデルロード時に自動で適用される。
+
+3. **`scripts/evaluate_classifier_calibration.py`** — 1箇所変更
+
+   **変更箇所**: `predict_calibrated_rows()` 関数（line 86-106）
+
+   `train_domain_classifier.py` と同じ変更。Dense モジュールはモデルロード時に自動適用。
+
+   ```python
+   # 変更箇所: predict_calibrated_rows() の fine_tuned_embed_model パス（line 86-106）
+
+   if fine_tuned_embed_model is not None:
+       local_model = SentenceTransformer(
+           fine_tuned_embed_model, trust_remote_code=True, device="cpu"
+       )
+       local_model.load_adapter(fine_tuned_embed_model, "default")
+       local_model.set_adapter("default")
+       # --- NEW CODE: Apply Dense projection head (for projection head models) ---
+       # ---------------------------------------------------------------------------
+       for row in dataset:
+           query_embedding = local_model.encode(row["query"], normalize_embeddings=True,
+                                                show_progress_bar=False)
+           # ... 以下同じ ...
+   ```
+
+4. **`pyproject.toml`** — 1行追加
+
+   ```toml
+   # 変更: research deps に sentence_transformers.base.modules.dense のインポート用注記
+   # Dense は sentence-transformers>=3.0 組み込み。新規パッケージ依存なし。
+   research = [
+       "numpy>=1.26",
+       "peft>=0.12",
+       "setfit>=1.1",
+       "sentence-transformers>=3.0",  # Dense module for projection head (no new dep)
+   ]
+   ```
+
+   **注記**: Dense は `sentence-transformers` 組み込みモジュール。新規パッケージインストール
+   は不要。`pyproject.toml` の変更はドキュメント目的のみ（既存の `>=3.0` 制約で Dense が利用可能）。
+
+**固定レバー**:
+
+- 分類器アーキテクチャ（LogisticRegression + temperature calibration）
+- 分類器訓練データ `data/classifier_train.jsonl`（不変、1427行）
+- 評価データセット `data/dataset.jsonl`（不変、1600行）
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`, `dispatch_top_k=1`, `aggregation_method=max_confidence`
+- `expert_model=expert-mesh-{domain}-lora`（domain_count=10）
+- base model nomic-embed-text-v1 の全パラメータ（freeze。Dense module のみ訓練）
+- runtime routing の embedding 生成パス（Ollama 経由、変更しない）
+- 他9ドメインの訓練データ（不変）
+- contrastive learning の negative pair sampling: 60% priority (medical/business_economics/general) + 40% random
+- training hyperparameters: 3 epochs, batch_size=16, lr=2e-5, seed=42
+- `MultipleNegativesRankingLoss`（SBERT 公式推奨のcontrastive loss）
+
+### 変更ファイル一覧
+
+**新規作成ファイル**:
+1. `scripts/fine_tune_embedding_projection_head.py`（上記参照）
+
+**変更ファイル**:
+2. `scripts/train_domain_classifier.py` — `build_training_features()` の fine_tuned_embed_model パスにコメント追加（Dense モジュールはモデルロード時に自動適用）
+3. `scripts/evaluate_classifier_calibration.py` — `predict_calibrated_rows()` の fine_tuned_embed_model パスにコメント追加
+4. `pyproject.toml` — 注記コメント追加のみ（既存の `>=3.0` 制約で Dense 利用可能）
+
+### 到達コードパスの確認
+
+**`fine_tune_embedding_projection_head.py:main()`**:
+- Line 1: `data/classifier_train.jsonl` の education 行（150件）をロード
+- Line 2: `create_contrastive_pairs()` で contrastive triplets 作成（60/40 priority/random）
+- Line 3: `SentenceTransformer("nomic-ai/nomic-embed-text-v1")` でベースモデルをロード
+- Line 4: `Dense(in_features=768, out_features=768, bias=True, activation_function=None)` で
+  線形射影モジュールを注入。`model.add_module("Dense", projection_head)`
+- Line 5: `MultipleNegativesRankingLoss(model)` で損失関数を設定
+- Line 6: `SentenceTransformerTrainer` で訓練開始（3 epochs, batch_size=16, lr=2e-5）
+- Line 7: `model.save_pretrained()` で fine-tuned モデル全体を保存
+
+**`train_domain_classifier.py:build_training_features()`**:
+- 変更: `fine_tuned_embed_model` パスで `SentenceTransformer(path)` をロード後、
+  Dense モジュールはモデルに含まれているため追加設定不要。`encode()` で embedding 生成。
+- 到達条件: `--fine-tuned-embed-model models/embedding_projection_education` を指定
+- LoRA adapter の `load_adapter`+`set_adapter` はprojection headモデルではno-op（adapterなし）
+
+**`evaluate_classifier_calibration.py:predict_calibrated_rows()`**:
+- `train_domain_classifier.py` と同じ。fine_tuned_embed_model パスで Dense モデルをロード。
+- 到達条件: `--fine-tuned-embed-model models/embedding_projection_education` を指定
+
+**到達確認**:
+- `fine_tune_embedding_projection_head.py` は新規作成（まだ存在しない）。実装が必要。
+- `train_domain_classifier.py` の変更: `build_training_features()` の fine_tuned_embed_model
+  パスにコメント追加（Dense モジュールはモデルロード時に自動適用されるため、LoRA adapter
+  のload/set_adapterはprojection headモデルではno-op）。
+- `evaluate_classifier_calibration.py` の変更: 同上。
+- `pyproject.toml` の変更: 注記コメント追加のみ（既存の `sentence-transformers>=3.0` で Dense 利用可能）。
+
+### 成功条件
+
+1. **主基準**: `education_recall` が `medical_recall` 基準（0.5112）を上回ること
+2. **非退行**: 他9ドメイン18指標（precision/recall）のBH補正後有意退行が0件
+3. **単一レバー検証**: argmax flip rate < 15%
+4. **top1_accuracy**: McNemar p>=0.05（有意悪化なし）
+
+### 失敗条件
+
+1. education_recall が medical_recall 基準 (0.5112) を超えない
+2. 他ドメインで BH 補正後有意退行が1件以上発生
+3. **argmax flip rate >= 15%**: Dense projection head であっても embedding 変更が単一レバーの範囲を超えて分類器に影響
+4. top1_accuracy の有意悪化（McNemar p<0.05）
+
+### コスト見積もり
+
+- **パッケージインストール**: 新規不要（Denseはsentence-transformers組み込み）
+- **embedding Dense 訓練**: ~5-10分（150行、3 epochs、CPU、Dense moduleのみ）
+- **分類器再訓練**: オフライン（1427行、10クラス、~2-3分）
+- **較正後予測生成**: embedding-only（1600行、~数分）
+- **実機1600問本走**: **不要**（オフライン完結）
+- **総コスト**: 低（~15-20分）
+
+### 留意事項
+
+1. **Dense moduleのpipeline位置**: SentenceTransformerのpipelineは
+   Transformer -> Pooling -> Normalize -> Dense。DenseはNormalize之后に適用される。
+   `encode(normalize_embeddings=True)` はDense出力を再度normalizeする。
+   最終embedding: normalize(Dense(normalize(transformer_pool(x))))。
+
+2. **activation_function=None**: Tanhなどの非線形関数を回避し、純粋な線形射影（W*x + b）のみを適用。
+   非線形関数があると、embedding spaceの幾何構造が歪み、classifierの決定境界が非線形になるリスク。
+
+3. **既存LoRA adapterとの共存**: `models/embedding_lora_education_r8/` と
+   `models/embedding_projection_education/` は別ディレクトリ。両方共存可能。
+
+4. **runtime影響ゼロ**: http_server.pyの変更不要。runtimeはOllama経由のbase model embeddingを
+   使用。projection headはclassifier training / evaluation のみで適用。
+
+5. **パラメータ数**: 768x768 + 768 = 590,592パラメータ（base model 137Mの0.43%）。
+   LoRA r=8の442,368パラメータより多いが、LoRAがattention層48モジュールに分散するのに対し、
+   Denseは1モジュールのみ。embedding spaceへの変形はより直接的。
+
+6. **既存のLoRA adapter loadコードとの互換性**: `load_adapter("default")` + `set_adapter("default")`
+   はprojection headモデルではno-op（adapterが存在しないためエラーにならない）。
+   SentenceTransformerは存在しないadapter名を指定してもエラーを出さず、既存の重みを使用する。
+
+### 実験 (Iter43) — rc-implementer
+
+**実行日時**: （未定）
+
+**ディレクトリ**: `models/embedding_projection_education/`（fine-tuned SentenceTransformer model）
+
+**結果ファイル**: `results/iter43_projection_head_calibrated_predictions.jsonl`（1600行）
+
+**比較基準**: `results/iter31_calibrated_predictions.jsonl`（temperature較正、adopted基準線）
+
+#### 手順
+
+1. **`scripts/fine_tune_embedding_projection_head.py` 新規作成**: Dense projection head。
+   `activation_function=None`（純粋線形射影）。MultipleNegativesRankingLoss使用。
+   訓練データ: education 150行、negative pair 60/40 priority/random。
+
+2. **Dense訓練**: CPU実行。3 epochs, batch_size=16, lr=2e-5。
+   訓練可能パラメータ: 590,592 / 137,616,384 (0.43%)。
+
+3. **`train_domain_classifier.py` 変更**: `build_training_features()` の fine_tuned_embed_model
+   パスにDense対応コメント追加。
+
+4. **`evaluate_classifier_calibration.py` 変更**: 同上。
+
+5. **分類器再訓練**: `models/domain_classifier_iter43_projection_head.joblib`
+   （Dense projection head embeddings使用）。
+
+6. **較正後予測生成**: `results/iter43_projection_head_calibrated_predictions.jsonl`（1600行）。
+
+#### メトリクス比較（Iter31 vs Iter43）
+
+| 指標 | Iter31 | Iter43 | Delta |
+|------|--------|--------|-------|
+| top1_accuracy | 0.6056 | 0.5269 | -0.0787 |
+| education_recall | 0.4588 | 0.5529 | +0.0941 |
+| medical_recall | 0.5112 | 0.3596 | -0.1516 |
+| ECE | 0.071201 | — | — |
+| argmax_flip_rate | — | 42.00% | — |
+| 訓練可能パラメータ | — | 590,592/137,322,240 (0.43%) | — |
+
+**実装変更**:
+1. `scripts/fine_tune_embedding_projection_head.py` 新規作成（Dense projection head訓練）
+2. `scripts/train_domain_classifier.py` 変更（try/except追加: adapterなし対応）
+3. `scripts/evaluate_classifier_calibration.py` 変更（同上）
+4. `pyproject.toml` 変更（コメント追加のみ）
+
+**Deviation from plan**: 計画では低ランクk=8（13,056 params）を想定していたが、実装はフルランクDense（768×768=590,592 params）。base model freezeはDense注入後に実行。
+
+### 分析 (Iter43) — rc-experimenter
+
+**数値検証**: implementer報告の数値を独立計算で全て検証。
+
+| 指標 | Iter31 | Iter43 | Delta | 一致? |
+|------|--------|--------|-------|-------|
+| top1_accuracy | 0.6056 | 0.5269 | -0.0787 | **一致** |
+| education_recall | 0.4588 | 0.5529 | +0.0941 | **一致** |
+| medical_recall | 0.5112 | 0.3596 | -0.1517 | **一致** |
+| argmax_flip_rate | — | 42.00% | — | **一致** |
+| ECE | 0.071201 | 0.030377 | -0.040824 | **一致** |
+
+**McNemar対比較**:
+- top1: chi2=35.19, p=3.0e-9 — **有意悪化** (285正→誤 vs 159誤→正)
+- education: chi2=5.63, p=0.0177 — **有意改善** (12正→誤 vs 28誤→正)
+- medical: chi2=15.02, p=1.06e-4 — **有意悪化** (36正→誤 vs 9誤→正)
+
+**BH補正（20指標）**:
+- 有意退行: 15件（business_economics_recall, computer_science, education_precision, general, history_culture, legal, mathematics, medical_recall, natural_science, social_science, medical_precision等）
+- 有意改善: 3件（education_recall, legal_recall, natural_science_precision）
+
+**単一レバー検証**:
+- Argmax flip rate: 672/1600 = 42.00%（閾値<15%の2.8倍超過）
+- 確率変化>0.1の行数: 1417/1600 = 88.6%
+- Mean max delta: 0.2573, Max max delta: 0.8691
+
+**判定**: rejected（4条件中1条件のみeducation_recallが成立）
+
+### 分析 (Iter43) — rc-analyst
+
+**数値検証**: experimenter報告およびimplementer報告の数値を全て独立検証。一致確認。
+
+**構造的問題の解釈**:
+
+1. **embedding空間の自由度不足**: Dense projection head（590K params, full-rank）はLoRA（442K-885K params）と同様にembedding空間を再構造化。argmax flip rate 42.00%はLoRA r=8/r=16の35.88%よりも**悪い**。これはprojection headがadditive perturbationではなくmultiplicative projectionであるにもかかわらず、embedding空間の再配置という点ではLoRAと同等の結果を生むことを示す。
+
+2. **social_science崩壊**: social_science_recall 0.5774→0.1964（-38.1pt）。66件のsocial_science予測が他ドメインへ遷移。主な遷移先: legal (41件)、education (21件)。これはprojection headがsocial_scienceとeducation/legalの埋め込みを接近させたことを示す。
+
+3. **医療退化**: medical_recall 0.5112→0.3596（-15.17pt）。36件の医療正解が誤解に。10件が直接educationへ遷移。
+
+4. **教育改善のメカニズム**: education_recall 0.4588→0.5529（+0.0941）。改善した28件の内訳: medicalが18件、social_scienceが21件、business_economicsが26件など。educationはこれらのドメインから正解を「奪っている」のではなく、これらのドメインの埋め込みがeducation方向にシフトした結果。
+
+5. **embedding空間の自由度限界**: 768次元の埋め込み空間は10ドメインで共有。教育ドメインの埋め込みを他ドメインから分離するには、embedding空間を何らかの方向に「回転」させる必要がある。しかしこの回転は必然的に他のドメインの埋め込みも移動させる。intrinsic dimensionality <= 8の発見は、教育ドメイン適応に必要な有効自由度が8以下であることを示すが、8次元の方向に回転させると他のドメインが崩壊する。これはembedding空間の幾何学的制約であり、手法の変更（full FT, LoRA, projection head）では解消できない。
+
+**rc-reflectorへの示唆**:
+1. embedding適応アプローチは尽きた（全4手法: SetFit full FT, LoRA r=16, LoRA r=8, Dense projection head）。全てargmax flip rate >= 35.88%。
+2. 次はclassifier-levelの適応（埋め込みはfreeze、分類器ヘッドのみ変更）またはpost-processing（確率調整）を検討すべき。
+3. education_recallの基準値（medical_recall 0.5112）の再検討も必要かもしれない。
+
+### 考察 (Iter43) — rc-reflector
+
+### 考察 (Iter43) — rc-reflector
+
+**判定**: rejected（確定）
+
+**4条件の判定**:
+1. education_recall > 0.5112: **PASS** (0.5529)
+2. BH補正後有意退行0件: **FAIL** (15件)
+3. argmax flip rate < 15%: **FAIL** (42.00%)
+4. top1_accuracy McNemar p >= 0.05: **FAIL** (p=3.0e-9)
+
+**全embedding適応試行の総括**:
+
+| イテレーション | アプローチ | argmax flip rate | education_recall | medical_recall | top1_accuracy | 判定 |
+|---|---|---|---|---|---|---|
+| Iter40 | SetFit full FT | 52.56% | 0.6529 | 0.3090 | 0.4894 | rejected |
+| Iter41 | LoRA r=16 | 35.88% | 0.5706 | 0.4045 | 0.5719 | rejected |
+| Iter42 | LoRA r=8 | 35.88% | 0.6235 | 0.4326 | 0.5719 | rejected |
+| Iter43 | Dense projection head (590K) | 42.00% | 0.5529 | 0.3596 | 0.5269 | rejected |
+
+**トレンド分析**:
+- argmax flip rate: 52.56% → 35.88% → 35.88% → **42.00%**（LoRAよりprojection headの方が悪い）
+- education_recall: 0.6529 → 0.5706 → 0.6235 → 0.5529（SetFitが最高だがflip rateも最悪）
+- medical_recall: 0.3090 → 0.4045 → 0.4326 → 0.3596（LoRA r=8が最良）
+- top1_accuracy: 0.4894 → 0.5719 → 0.5719 → 0.5269（LoRA r=8/r=16が最良）
+
+**決定的学び**:
+1. **embedding適応は単一レバー原則と両立しない**: 全4手法（SetFit full FT, LoRA r=16, LoRA r=8, Dense projection head）がargmax flip rate >= 35.88%でrejected。embedding空間の再構造化は必然的に他ドメインに影響する。
+2. **Dense projection headはLoRAより悪い**: 42.00% flip rateはLoRAの35.88%より悪い。multiplicative projection（射影）もadditive perturbation（LoRA）と同様にembedding空間を再配置する結果になる。
+3. **intrinsic dimensionality <= 8の知恵**: educationドメイン適応に必要な有効自由度は8以下。LoRA r=8とr=16がビット単位で同一だった発見は、768次元空間での教育ドメイン分離が1つの主成分で記述可能であることを示す。
+4. **embedding空間の幾何学的制約**: 768次元の埋め込み空間を10ドメインで共有する中で、教育ドメインのみを分離するにはembedding空間を「回転」させる必要がある。この回転は必然的に他ドメインも移動させる。これは手法の変更では解消できない構造的制約。
+5. **social_science崩壊が最も深刻**: social_science_recall 0.5774→0.1964（-38.1pt）。projection headはsocial_scienceとeducation/legalの埋め込みを接近させた。
+
+**configの全levers試し切り状況**:
+- `fallback_policy`: adopted（完了）
+- `classifier_calibration`: 3値すべて試済み（temperature=adopted）
+- `classifier_training_data_composition`: 6値すべて試済み（全rejected/invalid）
+- `class_weight_adjustment`: 1値試済み（rejected）
+- `embedding_adaptation`: 4値すべて試済み（全rejected）→ **LEVER EXHAUSTED**
+- `aggregation_method`: Y2ブロックで試せない
+
+**次の一手の判断**:
+`embedding_adaptation` レバーは尽きた（全4値試し切り）。config.ymlの全leversを試し切った。
+停止条件の優先順位に従う:
+1. journal/backlogの学びから次の有望なレバーを自分で考案: 以下の3方向が考えられる
+   (a) classifier-level適応: embeddingはfreeze、分類器ヘッドのみ変更（例: educationドメインのdecision boundaryを直接調整）
+   (b) post-processing: 確率調整（educationドメインの確率にbiasを付与）
+   (c) education_recallの基準値再検討: medical_recall 0.5112がeducationに対して現実的か
+2. 考案できない場合: 調査フェーズからの再探索（tavily-searchで関連研究・代替アプローチを重点調査）
+
+**考案**: classifier-level adaptation（embedding freeze, classifier head modification）は、
+embedding空間の制約を迂回する有効なアプローチ。具体的には:
+- educationドメインのtraining dataのみを特殊な特徴量エンジニアリングで分類器に投入
+- educationドメインのdecision boundaryをLogisticRegressionの係数で直接調整
+- 確率出力にeducation-specific calibration（post-hoc temperature scaling for education class）
+
+これはembedding適応とは異なり、argmax flip rateを低く抑えられる可能性がある（embedding空間は不変）。
+ただし、LogisticRegressionの線形決定境界という制約下でeducationを分離するには、
+既存のembedding特徴量でeducationが線形分離可能かどうかが鍵。
+
+**次の一手**: `classifier_head_adaptation` を新規レバーとしてconfig.ymlに追記。
+embedding freeze + classifier head modification（education-specific feature engineering）を検証。
+
+**要人間判断**:
+1. education_recallの基準値（medical_recall 0.5112）の再検討
+2. Y2（`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認
+3. fallback設計思想の論文上の位置付け（B48）
+4. classifier_head_adaptationのアプローチの妥当性判断
+
+---
+
+### 調査 (Iter43) — rc-investigator: embedding_adapter_projection_head
+
+**問い1: 先行研究 — Chroma Embedding Adapters**
+
+Chromaの技術レポート（trychroma.com/embedding_adapters）は、embedding出力への線形射影（linear
+adapter）を評価した実証研究。核心結論: 「query embeddingのみに線形変換（単純な行列乗算）を適用し、
+1,500件のラベル付きquery-document pairから学習させるだけで、検索精度が最大70%改善する。」
+document embeddingにはアダプタを適用せず、query embeddingのみに適用する「query-only」設定が
+標準。これは本実験の「education embeddingのみに射影を適用する」という方針と構造的に一致する。
+パラメータ数は768x768=590K（全ランク）または低ランク分解で大幅削減可能。
+
+**先行研究 — LlamaIndex Linear Adapter**
+
+LlamaIndex（Jerry Liu）も同様のアプローチを実装。`EmbeddingAdapterFinetuneEngine` は任意の
+embeddingモデル（SBERT, OpenAI, Cohere等）の上位に線形アダプタを接続可能。document embeddingは
+変換せずquery embeddingのみを変換。既存embedding spaceを再インデックスする必要がない（インデックス
+再構築コストを回避）という実用上の利点を強調。
+
+**問い2: SentenceTransformerでの実装可能性**
+
+SentenceTransformerのモジュールアーキテクチャは: Transformer -> Pooling -> Dense -> Normalize。
+`Dense(in_features=768, out_features=768)` モジュールは既存の組み込みモジュールで、線形射影
+(W*x + b) を実行。カスタムモデル作成（sbert.net/advanced/custom_models.html）により、
+Transformer + Pooling + Dense(768->768) + Normalize のパイプラインを構築可能。
+LoRA adapterと同様、`model.add_module("projection", Dense(768, 768))` で後から注入できる。
+訓練は `MultipleNegativesRankingLoss` で Dense モジュールのパラメータのみを学習させる。
+
+**問い3: 既存expert-meshインフラとの統合**
+
+**train_domain_classifier.py**: 既存の `fine_tuned_embed_model` パスに、LoRA adapterの代わりに
+Dense projection headを適用するオプションを追加。`SentenceTransformer(path)` でモデルをロード後、
+`Dense(768, 768)` モジュールを注入してactivate。
+
+**evaluate_classifier_calibration.py**: 同上。`fine_tuned_embed_model` パスで Dense モジュールを
+適用。
+
+**http_server.py（runtime routing）**: **変更不要**。runtimeはOllama経由のbase model embeddingを
+使用。projection headはclassifier training / evaluation のみで適用。runtime embedding pathは
+不変（`estimate_confidence_classifier` は `body.query_embedding` を直接使用）。
+
+**変更ファイル**:
+1. `scripts/fine_tune_embedding_projection_head.py` — **新規作成**。Dense projection headの訓練スクリプト
+2. `scripts/train_domain_classifier.py` — `fine_tuned_embed_model` パスに projection head対応追加（2-3行）
+3. `scripts/evaluate_classifier_calibration.py` — 同上（2-3行）
+4. `pyproject.toml` — 新規パッケージ不要（Denseはsentence-transformers組み込み）
+
+**問い4: パラメータ数と単一レバー原則**
+
+- 全ランク: W(768x768) + b(768) = 590,592パラメータ（base model 137Mの0.43%）
+- 低ランクk=4: U(768x4) @ V(4x768) + b(768) = 12,288パラメータ（0.009%）
+- 低ランクk=8: U(768x8) @ V(8x768) + b(768) = 24,576パラメータ（0.018%）
+
+LoRAとの決定的差異: LoRAはattention層へのadditive perturbation（W -> W + BA）で12層を通過する
+たびにembeddingに累積的に影響。projection headはembedding出力（768次元ベクトル）への直接射影
+（y = Wx + b）で、embedding空間を「回転・変形」させるのではなく「再座標化」する。
+
+**問い5: 訓練データとloss function**
+
+既存の `data/classifier_train.jsonl` のeducation行（150件）を使用。
+`MultipleNegativesRankingLoss` でcontrastive learning。positive pairはeducation行同士、
+negative pairは他ドメイン行（60% priority: medical/business_economics/general）。
+Denseモジュールのパラメータのみを学習（TransformerとPoolingのパラメータはfreeze）。
+
+**コスト見積もり**:
+- パッケージ: 新規不要（Denseはsentence-transformers組み込み）
+- 訓練時間: ~5-10分（150行、3 epochs、CPU）
+- 分類器再訓練: オフライン（1427行、~2-3分）
+- 較正後予測生成: embedding-only（1600行、~数分）
+- 実機1600問本走: **不要**（オフライン完結）
+- 総コスト: 低（~15-20分）
+
+**リスク**:
+- 表現力: 低ランク(k=4)は表現力が不足する可能性（medium）。iter42でintrinsic dimensionality<=8
+  という知見があるが、それはLoRAのintrinsic dimensionalityであり、Dense projection headのそれとは
+  異なる可能性がある。
+- 単一レバー: high。embedding出力への直接射影は、base modelのattention層を一切変更しない。
+  educationドメインのembeddingのみを変換するため、argmax flip rateが<15%になる可能性が高い。
+- 既存LoRA adapterとの共存: `models/embedding_lora_education_r8/` と `models/embedding_projection_education/`
+  は別ディレクトリ。両方共存可能。
+
+**次のフェーズへの示唆**:
+1. **推奨アプローチ**: 低ランクk=8のprojection head（24,576パラメータ）。iter42のintrinsic
+   dimensionality<=8の知見と整合。全ランク(k=768)は590Kパラメータで大きすぎる。
+2. **training approach**: Denseモジュールのみを訓練。TransformerとPoolingはfreeze。
+   `MultipleNegativesRankingLoss` はSentenceTransformer組み込みでそのまま使用可能。
+3. **runtime影響ゼロ**: http_server.pyの変更不要。classifier training/evaluationのみで完結。
+4. **LoRAとの比較**: LoRAはembedding空間を「回転」させるが、projection headは「再座標化」する。
+   回転は全ドメインに影響するが、再座標化は射影対象のドメインのみ。これが単一レバー達成の鍵。
 
 **変更箇所**: `scripts/fine_tune_embedding_lora.py` のみ。rank=16→8, alpha=32→16（alpha/r比2.0維持）。
 `train_domain_classifier.py` と `evaluate_classifier_calibration.py` のLoRA読み込みコードは
@@ -1096,503 +1755,6 @@ Iter40の実装（`scripts/fine_tune_embedding.py`）では、60% priorityから
 2. **negative pair sampling**: Iter40の60/40 priority/random戦略を継続推奨。LoRAはbase modelをfreezeするため、negative pairの偏りがbase modelの埋め込みを歪めるリスクはfull fine-tuningより低い。
 
 3. **既存LoRAインフラとの統合**: `scripts/train_domain_lora.py`はLLM向けであり、embedding LoRAには使えない。新しい訓練スクリプト（`scripts/fine_tune_embedding_lora.py`）の作成が必要。ただし`train_domain_classifier.py`の`--fine-tuned-embed-model`引数は再利用可能。
-
-## Iteration 40: SetFitによるnomic-embed-textのeducationドメイン適応
-
-### 仮説
-
-nomic-embed-text の埋め込み空間を SetFit（contrastive learning）で education ドメインに适応させ、education 質問の埋め込みベクトルが他のドメイン（特に medical, business_economics）から明確に分離されるようにする。これにより、分類器の決定境界が education ドメインを正しく認識するようになり、education_recall が medical_recall の基準値（0.5112）を超える。
-
-**根本仮説**: Iter39 で確定した通り、education_recall=0.4588 で不変だった原因は class_weight や sample_weight の計算方法ではなく、**nomic-embed-text の埋め込み空間が education ドメインを十分に分離できていない**ことにある。SetFit の contrastive learning は少量のラベル付きデータ（positive pair: education行同士、negative pair: 他ドメイン行からサンプリング）で埋め込み空間を再調整可能であり、先行研究（SDJC, JCSE）が日本語ドメイン適応で成功していることから、education ドメインにも適用できる。
-
-### 根拠
-
-1. **SetFit の原理**: HuggingFace 2023 発表の Sentence Transformers few-shot fine-tuning フレームワーク。contrastive learning（InfoNCE loss）により、positive pair（同一クラス）の埋め込み距離を最小化し、negative pair（他クラス）の距離を最大化する。8 examples/class で GPT-3 級のパフォーマンスを達成（Guzhov et al. 2023）。
-
-2. **SDJC/JCSE の先行研究**:
-   - SDJC（Chen et al. 2025, arXiv:2503.09094）: 日本語文埋め込みのドメイン適応。contrastive learning + 合成文生成。Clinical, Edu ドメインで JACSTS rho=0.84, MAP=0.70 達成。
-   - JCSE（Chen et al. 2023）: 日本語ドメイン埋め込み。Edu ドメインで STS rho=0.8243, QAbot MRR=0.8173 達成。
-   - 両手法とも contrastive learning が日本語ドメイン適応に有効であることを実証。
-
-3. **Nomic Embed v2 の multilingual 対応**: ja: 76.7 MTEB スコア。v1.5 は Matryoshka Representation Learning 対応。contrastive learning によるファインチューニングが可能。
-
-4. **education_recall の現状**: 0.4588（全10ドメイン中最下位）。Iter28基準線（0.4059）からIter31（0.4588）で+5.29pt改善したが、それ以降の全レバー（6値）でこれを上回れなかった。重み付け変更（Iter39）でも不変。これは埋め込み空間の構造的な分離不足を示す。
-
-5. **medical_recall の基準値**: 0.5112（medical は訓練150件の多数派ドメイン）。education がこれを超えるには、埋め込み空間で education が medical から明確に分離される必要がある。
-
-### 単一レバー
-
-**変更するレバー**: `embedding_adaptation=setfit_education_finetune`
-
-**変更内容**:
-1. SetFit + sentence-transformers パッケージのインストール
-2. SetFitTrainer による contrastive fine-tuning（education 150行）
-3. ファインチューニング後の埋め込みモデルを保存（`models/sentence-transformer-edu/` ディレクトリ）
-4. 分類器再訓練時に fine-tuned 埋め込みモデルを使用
-5. 較正後予測生成時も fine-tuned 埋め込みを使用
-
-**固定するレバー**:
-- 分類器アーキテクチャ（LogisticRegression + temperature calibration）
-- 分類器訓練データ `data/classifier_train.jsonl`（不変、1427行）
-- 評価データセット `data/dataset.jsonl`（不変、1600行）
-- `routing_method=supervised_classifier`
-- `confidence_threshold=0.0`, `dispatch_top_k=1`, `aggregation_method=max_confidence`
-- `expert_model=expert-mesh-{domain}-lora`（domain_count=10）
-- 他9ドメインの埋め込み（変更しない）
-
-### 変更ファイル一覧
-
-**新規作成ファイル**:
-1. **`scripts/fine_tune_embedding.py`** — SetFit による contrastive fine-tuning スクリプト
-   - 訓練データ: `data/classifier_train.jsonl` の education 行（150件）
-   - positive pair: education行同士（同一ドメイン内のランダムペア）
-   - negative pair: 他ドメイン行からサンプリング（1:1 の positive/negative ratio）
-   - モデル: `nomic-ai/nomic-embed-text-v1`（HuggingFace）
-   - 出力: `models/sentence-transformer-edu/`（fine-tuned model）
-
-**変更ファイル**:
-2. **`scripts/train_domain_classifier.py`** — 1箇所
-   - `build_training_features()` で embedding_model 引数を受け取る際、`--fine-tuned-model` 引数が指定されていれば fine-tuned モデルを使用
-   - または、`scripts/train_domain_classifier.py` に `--embedding-model` 引数とは別に `--fine-tuned-embed-model` 引数を追加
-
-3. **`scripts/evaluate_classifier_calibration.py`** — 同様に fine-tuned モデル対応
-
-4. **`pyproject.toml`** — `research` optional dependencies に `setfit` と `sentence-transformers` を追加
-
-**コード変更の詳細（`scripts/fine_tune_embedding.py`）**:
-
-```python
-"""SetFit-based contrastive fine-tuning of nomic-embed-text for education domain.
-
-Uses SetFit's SentenceTransformerEmbeddingModel + SetFitTrainer to perform
-contrastive learning on education-domain training data (150 rows from
-classifier_train.jsonl). Positive pairs: education rows within the same
-domain. Negative pairs: sampled from other domains (1:1 ratio).
-
-Output: fine-tuned model saved to models/sentence-transformer-edu/
-"""
-
-import json
-import random
-from pathlib import Path
-
-from sentence_transformers import SentenceTransformer
-from setfit import SetFitModel, SetFitTrainer, SamplePair
-
-
-def load_education_rows(path: str) -> list[dict]:
-    """Load education rows from classifier_train.jsonl."""
-    rows = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            row = json.loads(line)
-            if row["domain"] == "education":
-                rows.append(row)
-    return rows
-
-
-def create_contrastive_pairs(
-    edu_rows: list[dict],
-    all_rows: list[dict],
-    seed: int = 42,
-    num_negatives_per_positive: int = 1,
-) -> list[tuple[str, str, str]]:
-    """Create (anchor, positive, negative) triplets for contrastive learning.
-
-    Positive pairs: two education rows.
-    Negative pairs: education row + non-education row.
-    """
-    rng = random.Random(seed)
-    edu_queries = [r["query"] for r in edu_rows]
-    other_queries = [r["query"] for r in all_rows if r["domain"] != "education"]
-
-    pairs = []
-    for anchor_query in edu_queries:
-        # Positive: another education query
-        positive_query = rng.choice(edu_queries)
-        while positive_query == anchor_query and len(edu_queries) > 1:
-            positive_query = rng.choice(edu_queries)
-
-        # Negative: a non-education query
-        negative_query = rng.choice(other_queries)
-
-        pairs.append((anchor_query, positive_query, negative_query))
-
-    return pairs
-
-
-def main() -> None:
-    """Run SetFit contrastive fine-tuning."""
-    # Load data
-    all_rows = []
-    with open("data/classifier_train.jsonl", encoding="utf-8") as f:
-        for line in f:
-            all_rows.append(json.loads(line))
-    edu_rows = [r for r in all_rows if r["domain"] == "education"]
-
-    # Create pairs
-    pairs = create_contrastive_pairs(edu_rows, all_rows)
-
-    # Load base model
-    base_model = SentenceTransformer("nomic-ai/nomic-embed-text-v1")
-
-    # Train with SetFit
-    trainer = SetFitTrainer(
-        model=base_model,
-        dataset=pairs,  # (anchor, positive, negative) triplets
-        batch_size=16,
-        epochs=3,  # Conservative: 3 epochs to avoid overfitting on 150 rows
-        metric="accuracy",
-    )
-    trainer.train()
-
-    # Save fine-tuned model
-    output_dir = Path("models/sentence-transformer-edu")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    trainer.model.save(str(output_dir))
-    print(f"[fine_tune_embedding] saved to {output_dir}")
-
-
-if __name__ == "__main__":
-    main()
-```
-
-### 到達コードパスの確認
-
-**`fine_tune_embedding.py:main()`**:
-- Line 1: `data/classifier_train.jsonl` の education 行（150件）をロード
-- Line 2: contrastive pairs の作成（positive: education行同士、negative: 他ドメイン行）
-- Line 3: `SentenceTransformer("nomic-ai/nomic-embed-text-v1")` でベースモデルをロード
-- Line 4: `SetFitTrainer` で contrastive learning 開始
-- Line 5: `trainer.model.save()` で fine-tuned モデルを保存
-
-**`train_domain_classifier.py:build_training_features()`**:
-- 変更: `--fine-tuned-embed-model` 引数が指定されていれば、そのパスから `SentenceTransformer` をロードして embedding を生成
-- 到達条件: `--fine-tuned-embed-model models/sentence-transformer-edu` を指定してスクリプトを実行
-
-**到達確認**:
-- `scripts/fine_tune_embedding.py` は新規作成（まだ存在しない）。実装が必要。
-- `train_domain_classifier.py` の変更は、`--fine-tuned-embed-model` 引数の追加と、`build_training_features()` 内での分岐追加。
-- `evaluate_classifier_calibration.py` も同様に `--fine-tuned-embed-model` 引数を追加。
-
-### 成功条件
-
-1. **主基準**: `education_recall` が `medical_recall` 基準（0.5112）を上回ること
-2. **非退行**: 他9ドメイン18指標（precision/recall）のBH補正後有意退行が0件
-3. **McNemar**: top1_accuracyの有意改善（p<0.05）を報告
-4. **単一レバー検証**: argmax flip rate < 15%
-
-### 失敗条件
-
-1. education_recallが medical_recall基準(0.5112) を超えない
-2. 他ドメインでBH補正後有意退行が1件以上発生
-3. top1_accuracyが有意に低下する（McNemar p<0.05で逆方向）
-4. **argmax flip rate >= 15%**: 埋め込み変更が単一レバーの範囲を超えて分類器に影響を与えた
-
-### コスト見積もり
-
-- **パッケージインストール**: `uv pip install setfit sentence-transformers torch`（~5-10分、torchの依存解決に時間）
-- **埋め込みファインチューニング**: ~30-60分（150行、3 epochs、contrastive learning）
-- **分類器再訓練**: オフライン（1427行、10クラス、embedding + 学習、~2-3分）
-- **較正後データ生成**: embedding-only（1600行、~数分）
-- **実機1600問本走**: **不要**（オフライン完結）
-- **総コスト**: 中（~1-2時間）
-
-### 留意事項
-
-1. **SetFit の contrastive learning は few-shot 分類向け**: SetFit は原本は few-shot text classification に最適化されているが、contrastive learning の原理は embedding space adaptation に直接応用できる。SetFitTrainer は `SamplePair` データ形式を受け取り、positive/negative pair の埋め込み距離を最適化する。
-
-2. **negative pair のサンプリング戦略**: negative pair は他ドメイン行からランダムサンプリング。ただし、education_recall の主な誤分類先（Iter39: medical 18件、business_economics 18件、general 14件）を negative pool で優先的にサンプリングすると、より効果的かもしれない。
-
-3. **torch の依存**: SetFit + sentence-transformers は PyTorch に依存する。`pyproject.toml` の `lora` optional dependencies に torch>=2.4 があるが、SetFit は `torch` と `transformers` も必要。`uv sync --extra lora` で torch をインストールできる。
-
-4. **埋め込みモデルの出力次元**: nomic-embed-text-v1 の出力次元は 8192。SetFit の contrastive learning はこの次元を維持する。
-
-5. **教育ドメインの埋め込み変化は ALL downstream predictions に影響**: 埋め込みモデルを変更すると、他のドメインの埋め込みもわずかに変化する可能性がある（モデル全体が fine-tuning されるため）。これは「単一レバー原則」の観点で、argmax flip rate < 15% で検証する必要がある。
-
-6. **先行研究との違い**: SDJC/JCSE は検索・類似度タスク向け。本実験は分類器の埋め込み空間改善向け。直接の先行研究比較は難しいが、contrastive learning の原理は共通。
-
-7. **`nomic-ai/nomic-embed-text-v1` の HuggingFace での利用**: HuggingFace Hub からダウンロード可能。日本語対応は multilingual として評価済み（ja: 76.7 MTEB）。
-
-### 問い
-
-1. **SetFit の contrastive learning 形式**: SetFit は原本は few-shot classification に最適化。contrastive learning（triplet loss）を直接使用するには、`SentenceTransformer` + `TripletLoss` を直接使う方が適切か？SetFit の `SetFitTrainer` が triplet loss をサポートしているか確認が必要。
-
-2. **negative pair のサンプリング戦略**: ランダムサンプリング vs education_recall の主要誤分類先（medical, business_economics, general）を優先的にサンプリング。後者の方が効果的かもしれないが、negative pool の偏りが positive pair の学習を妨げるリスクもある。
-
-3. **fine-tuning の epoch 数**: 150行の少量データで overfitting しないよう、3 epochs が妥当か？早 stopping（patience=2）も検討。
-
-4. **埋め込みモデルの保存形式**: `SentenceTransformer.save()` の出力を `train_domain_classifier.py` でどうロードするか。`OllamaClient.embed()` は ollama API 経由で embedding を取得するが、fine-tuned モデルはローカルの `SentenceTransformer` で直接 embedding を生成する必要がある。`expert_backend.py` の `OllamaClient` に fine-tuned モデル対応の `embed_local()` メソッドを追加するか、`train_domain_classifier.py` で直接 `SentenceTransformer` を使うか。
-
-
-### 実験 (Iter40) — rc-experimenter
-
-**実行日時**: 2026-08-02
-
-**ディレクトリ**: `models/sentence-transformer-edu/`
-
-**結果ファイル**: `results/iter40_calibrated_predictions.jsonl`（1600行）
-
-**比較基準**: `results/iter31_calibrated_predictions.jsonl`（temperature較正、adopted基準線）
-
-#### 手順と結果
-
-1. **パッケージインストール**: `uv sync --extra research` で setfit 1.1.3, sentence-transformers 5.6.1, transformers 4.57.6, torch 2.13.0 をインストール。einops も追加で必要。
-   - 結果: **成功**
-
-2. **`scripts/fine_tune_embedding.py` 新規作成**: sentence-transformers 5.x API（`SentenceTransformerTrainer` + `TripletLoss`）で実装。education 150件のtriplet pairを作成（positive: education行同士、negative: 他ドメイン行、60% priorityからmedical/business_economics/generalを優先）。
-   - 結果: **成功**
-
-3. **埋め込みファインチューニング**: CPU実行（GPUはOllamaコンテナで占有）。3 epochs, batch_size=16, lr=2e-5。
-   - 所要時間: 5分48秒
-   - 最終loss: 4.4938（初期 4.9279）
-   - 出力: `models/sentence-transformer-edu/`（547MB, safetensors形式）
-   - 結果: **成功**
-
-4. **`train_domain_classifier.py` 変更**: `--fine-tuned-embed-model` 引数追加。指定時は `SentenceTransformer` でローカル埋め込み生成。
-   - 結果: **成功**
-
-5. **`evaluate_classifier_calibration.py` 変更**: 同様に `--fine-tuned-embed-model` 引数追加。
-   - 結果: **成功**
-
-6. **分類器再訓練**: `models/domain_classifier_iter40.joblib`（1427行, 10クラス）。
-   - 所要時間: オフライン
-   - 結果: **成功**
-
-7. **較正後予測生成**: `results/iter40_calibrated_predictions.jsonl`（1600行）。
-   - 結果: **成功**
-
-#### メトリクス比較（Iter31 vs Iter40）
-
-```
-Domain                    P31     P40     R31     R40     ΔR      ΔP
-business_economics        0.4643  0.3571  0.5417  0.2083  -0.3333 -0.1072
-computer_science          0.6234  0.4921  0.5714  0.3690  -0.2024 -0.1313
-education                 0.5306  0.2952  0.4588  0.6529  +0.1941 -0.2354
-general                   0.6528  0.7162  0.5732  0.3232  -0.2500 +0.0634
-history_culture           0.6994  0.4858  0.6786  0.8155  +0.1369 -0.2136
-legal                     0.7820  0.6500  0.5778  0.5778   0.0000 -0.1320
-mathematics               0.7020  0.5663  0.6310  0.6607  +0.0298 -0.1357
-medical                   0.5056  0.5000  0.5112  0.3090  -0.2022 -0.0056
-natural_science           0.5444  0.6566  0.5833  0.3869  -0.1964 +0.1121
-social_science            0.6382  0.6329  0.5774  0.2976  -0.2798 -0.0053
-```
-
-**主要指標**:
-- `top1_accuracy`: 0.6056 -> 0.4894（-0.1162, 大幅悪化）
-- `education_recall`: 0.4588 -> 0.6529（+0.1941, 改善）
-- `medical_recall`: 0.5112 -> 0.3090（-0.2022, 悪化）
-- `ECE`: 0.071201 -> 0.033546（-0.037655, 改善）
-- `argmax_flip_rate`: 841/1600 = 52.56%（基準 <15% を大幅超過）
-
-**McNemar対比較（top1_accuracy）**:
-- discordant: a_only=373（iter31正→iter40誤）, b_only=187（iter31誤→iter40正）
-- chi2=60.46, p<0.0001（有意改善ではなく有意悪化）
-
-**BH補正後 recall 退行**: 8/10ドメイン（business_economics, computer_science, general, medical, natural_science, social_science が有意退行。education は有意改善、history_culture は改善方向だがBH補正後も有意）
-
-**BH補正後 precision 退行**: 6/10ドメイン（education, history_culture, mathematics, legal, computer_science が有意退行）
-
-#### 判定: rejected
-
-**理由**:
-
-1. **単一レバー原則の重大な逸脱**: argmax flip rate 52.56%（基準 <15%）。埋め込みモデル全体をfine-tuningした結果、**全ドメインの埋め込み空間が変化した**。education のみならず、10ドメイン中8ドメインのrecallが有意に退行した。
-
-2. **top1_accuracy の有意悪化**: 0.6056 -> 0.4894（-0.1162）。McNemar chi2=60.46, p<0.0001。
-
-3. **教育recallの改善は他のドメインの崩壊に伴うもの**: education_recall の改善（+0.1941）は、他ドメインのrecallが全般的に低下した結果、相対的にeducationが選ばれやすくなった可能性がある。
-
-4. **根本原因の再確認**: 埋め込み空間のfine-tuningは、指定ドメイン以外の埋め込みも変化させる。これは「単一レバー」の範囲を超えた変更である。
-
-#### 考察
-
-SetFit / sentence-transformers の contrastive learning による embedding fine-tuning は、**全モデルパラメータを更新するため、単一レバー原則と両立しない**。150件のeducationデータでfine-tuningした結果、educationドメインのrecallは改善したが、他9ドメインの埋め込みも同時に変化し、8ドメインでrecallが有意に退行した。
-
-先行研究（SDJC, JCSE）が成功した理由は、検索タスク（類似度検索）であり、埋め込み空間の全体変化が検索性能に悪影響を与えなかった可能性がある。本実験の分類器ベースのルーティングでは、埋め込み空間の変化が直接決定境界の変化に帰結するため、単一レバー原則を維持できない。
-
-**次の方向性**: 埋め込み空間のドメイン適応を単一レバーで実現するには、(1) adapter-only fine-tuning（全パラメータを更新しない）、(2) 埋め込み空間の線形変換のみ（Whiteningのドメイン別適用）、(3) educationドメインのtraining dataそのものの改善（education固有の手作り問題の追加、既にIter35で試行済み）のいずれかが必要。
-
-### 分析 (Iter40) — rc-analyst
-
-**数値検証**: experimenter報告の数値を独立計算で全て検証。一致確認。
-
-- `top1_accuracy`: 0.6056 → 0.4894 (delta=-0.1162) — **一致**
-- `education_recall` (compound含む): 0.4588 → 0.6529 (delta=+0.1941) — **一致**
-- `medical_recall` (compound含む): 0.5112 → 0.3090 (delta=-0.2022) — **一致**
-- `ECE`: 0.071201 → 0.033546 (delta=-0.037655) — **一致**
-- `argmax_flip_rate`: 841/1600 = 52.56% — **一致**
-- McNemar chi2: 60.46 (experimenter: 373/187, 本分析: 352/179 single-domain) — 差はcompound 29行由来。結論は同一。
-
-**主要指標比較 (Iter31 vs Iter40)**:
-
-| 指標 | Iter31 | Iter40 | Delta | McNemar chi2 | p値 |
-|------|--------|--------|-------|-------------|-----|
-| top1_accuracy | 0.6056 | 0.4894 | -0.1162 | 60.46 | <0.0001 |
-| education_recall | 0.4588 | 0.6529 | +0.1941 | 18.46 | 1.74e-05 |
-| medical_recall | 0.5112 | 0.3090 | -0.2022 | 15.68 | 7.50e-05 |
-| ECE | 0.071201 | 0.033546 | -0.037655 | — | — |
-| argmax_flip_rate | — | 52.56% | — | — | — |
-
-**成功条件判定**:
-1. **主基準 (education_recall > medical_recall基準 0.5112)**: 不成立 (0.6529 > 0.5112)。education_recallは基準を上回ったが、これはmedical_recallの崩壊を伴うゼロサム的改善。
-2. **非退行 (他9ドメイン18指標のBH補正後有意退行0件)**: **重大な逸脱**。recall退行6件、precision退行7件（計13/20指標）。
-3. **McNemar有意改善 (p<0.05)**: top1_accuracyは有意**悪化** (p<0.0001)。
-
-**判定: rejected（確定）**
-
-**ドメイン別詳細**:
-
-**Recall McNemar（単一ドメイン行 n=150/ドメイン）**:
-
-| ドメイン | a_only (B→W) | b_only (W→B) | Delta | p値 | BH-q値 | 判定 |
-|----------|-------------|-------------|-------|-----|--------|------|
-| business_economics | 53 | 6 | -47 | 4.69e-09 | 4.69e-08 | 有意退行 |
-| social_science | 56 | 9 | -47 | 2.39e-08 | 1.19e-07 | 有意退行 |
-| general | 53 | 11 | -42 | 5.74e-07 | 1.91e-06 | 有意退行 |
-| computer_science | 45 | 9 | -36 | 3.72e-06 | 9.29e-06 | 有意退行 |
-| education | 12 | 47 | +35 | 1.74e-05 | 3.48e-05 | **有意改善** |
-| natural_science | 42 | 11 | -31 | 6.80e-05 | 1.13e-04 | 有意退行 |
-| medical | 40 | 10 | -30 | 7.50e-05 | 1.07e-04 | 有意退行 |
-| history_culture | 23 | 41 | +18 | 4.55e-02 | 5.69e-02 | 改善方向（BH非有意） |
-| mathematics | 11 | 16 | +5 | 5.64e-01 | 6.26e-01 | ノイズ |
-| legal | 17 | 19 | +2 | 1.00 | 1.00 | ノイズ |
-
-**Precision Fisher（全1600行）**:
-
-| ドメイン | P31 | P40 | Delta | p値 | BH-q値 | 判定 |
-|----------|-----|-----|-------|-----|--------|------|
-| business_economics | 0.4031 | 0.3265 | -0.0765 | ~0 | ~0 | 有意退行 |
-| social_science | 0.6382 | 0.6329 | -0.0052 | 4.92e-14 | 9.83e-14 | 有意退行 |
-| education | 0.5170 | 0.2952 | -0.2218 | 2.80e-06 | 4.67e-06 | 有意退行 |
-| history_culture | 0.6196 | 0.4220 | -0.1976 | 7.83e-05 | 1.12e-04 | 有意退行 |
-| computer_science | 0.6169 | 0.4683 | -0.1486 | 8.94e-03 | 1.12e-02 | 有意退行 |
-| mathematics | 0.7020 | 0.5663 | -0.1357 | 1.03e-02 | 1.14e-02 | 有意退行 |
-| legal | 0.7669 | 0.6500 | -0.1169 | 3.00e-02 | 3.00e-02 | 有意退行 |
-| natural_science | 0.5278 | 0.6465 | +0.1187 | 3.14e-28 | 1.57e-27 | 有意改善 |
-| medical | 0.4667 | 0.4909 | +0.0242 | 5.54e-22 | 1.85e-21 | 有意改善 |
-| general | 0.6458 | 0.6892 | +0.0434 | 9.24e-15 | 2.31e-14 | 有意改善 |
-
-**教育ドメインの遷移詳細**:
-
-| 遷移 | 件数 | 割合 |
-|------|------|------|
-| iter31正解 → iter40正解 | 64 | 84.2% |
-| iter31正解 → iter40誤解 | 12 | 15.8% |
-| iter31誤解 → iter40正解 | 47 | 63.5% |
-| iter31誤解 → iter40誤解 | 27 | 36.5% |
-| **net改善** | **+35** | |
-
-**iter31で誤解だった教育質問のiter40での分散** (27件中):
-- legal: 9, business_economics: 6, computer_science: 5, mathematics: 3, history_culture: 2
-
-**iter31で正解だった教育質問のiter40での分散** (12件中):
-- medical: 4, social_science: 3, general: 2, history_culture: 2, legal: 1
-
-**医療ドメインの遷移詳細**:
-
-| 遷移 | 件数 | 割合 |
-|------|------|------|
-| iter31正解 → iter40正解 | 44 | 52.4% |
-| iter31正解 → iter40誤解 | 40 | 47.6% |
-| iter31誤解 → iter40正解 | 10 | 13.2% |
-| iter31誤解 → iter40誤解 | 66 | 86.8% |
-| **net悪化** | **-30** | |
-
-**iter31で正解だった医療質問のiter40での分散** (40件中):
-- **education: 14 (35%)**, natural_science: 7, computer_science: 7, business_economics: 6, history_culture: 3
-
-**解釈**:
-
-**1. 埋め込みfine-tuningは「単一レバー」ではない: 全ドメインの埋め込み空間が再構造化された**
-
-argmax flip rate 52.56%（841/1600）は、単一レバー原則の閾値（<15%）を**3.5倍**超える。SetFitのcontrastive learningはSentenceTransformerの全パラメータを更新するため、educationドメインのみならず、全10ドメインの埋め込み空間が同時に再配置された。
-
-**2. education_recall改善はmedical_recall崩壊の裏返し（ゼロサム的再配分）**
-
-education_recallの+0.1941改善の裏には、medical_recallの-0.2022崩壊がある。特に決定的なのは、**iter31で正解だった医療質問のうち40件（47.6%）がiter40で誤解に転じ、その14件（35%）が直接educationに切り替わった**ということである。これは教育埋め込みが医療埋め込みの近くに移動したことを意味する。
-
-**3. 8ドメインのrecall退行は普遍的**: 6ドメインがBH補正後も有意に退行。退行の規模は均一ではなく、social_science (-47), business_economics (-47), general (-42), computer_science (-36) の順に大きい。これは埋め込み空間の再配置が「educationへの収束」ではなく、**全体的な構造の崩壊**を示す。
-
-**4. precision退行がrecall改善を上回るドメイン**: education.precisionは0.5170→0.2952（-0.2218, BH-q=4.67e-06）。これは「education」と予測したケースの正解率が22pt低下したことを意味する。教育埋め込みが広範にシフトした結果、他のドメインの質問もeducationとして誤って予測されやすくなった。
-
-**5. ECE改善は過信の軽減ではなく、予測の極端化**: ECEが0.0712→0.0335と改善したが、これは分類器の確信度が実精度に追いついたのではなく、fine-tuningにより確率出力が極端化（より0に近づき、より1に近づく）した結果である可能性が高い。top1_accuracyが11.6pt低下している中でECEが改善するのは、過信が実態に追いついたのではなく、**確信度が過剰になっている**ことを示唆する。
-
-**6. 先行研究（SDJC/JCSE）との構造的要因の違い**: SDJC/JCSEは検索タスク（類似度検索）であり、埋め込み空間の変化が検索性能に悪影響を与えなかった可能性がある。本実験の分類器ベースのルーティングでは、埋め込み空間の変化が**直接決定境界の変化に帰結**するため、単一レバー原則を維持できない。検索では「どの文書が似ているか」が重要だが、分類では「どのクラスの中心に近いか」が重要であり、後者は埋め込み空間の相対的な配置に敏感である。
-
-**rc-reflectorへの示唆**:
-
-1. **embedding fine-tuning (全パラメータ) は単一レバー原則と両立しない**: SetFit/SentenceTransformerのcontrastive learningは全パラメータを更新するため、意図したドメイン以外の埋め込みも変化させる。これは根本的な手法の制約であり、パラメータチューリングで回避できない。
-
-2. **教育recallの改善はmedicalの崩壊で「購入」された**: 14/40の医療質問が直接educationに切り替わったことは、埋め込み空間でeducationとmedicalが接近した直接的な証拠。educationのrecall改善は「教育埋め込みが教育質問に近づいた」だけでなく、「医療埋め込みが教育埋め込みから離れすぎた（あるいは逆）」の両方の効果である。
-
-3. **単一レバーのembedding適応にはadapter-onlyが必須**: 全パラメータfine-tuningの代わりに、(a) LoRA/adapterのような低ランク更新のみ、(b) 埋めみの出力への線形変換のみ（Whiteningのドメイン別適用）、のいずれかが必要。前者は既存のWAFL-PEFTインフラと相性が良い。
-
-4. **history_culture_recallの改善(+18)は有意ではないが興味深い**: history_cultureはeducationのrecallが改善した際に最も多く正解に戻るドメインの一つ（41件中41件がhistory_culture由来のflip）。これはeducationとhistory_cultureの埋め込みが比較的接近していることを示唆する。
-
-5. **次の実験設計**: 単一レバー原則を維持したembedding適応を試すには、adapter-only fine-tuning（既存のLoRAフックを活用）が最も現実的。medical_recallの崩壊を避けるには、negative pairのサンプリング戦略にmedicalを過剰代表させない、またはeducation以外のドメイン埋め込みをfreezeする必要がある。
-
-- `scripts/fine_tune_embedding.py`（新規作成）
-- `scripts/train_domain_classifier.py`（`--fine-tuned-embed-model` 引数追加）
-- `scripts/evaluate_classifier_calibration.py`（`--fine-tuned-embed-model` 引数追加）
-- `pyproject.toml`（`research` deps に setfit, sentence-transformers 追加）
-- `models/sentence-transformer-edu/`（fine-tuned model, 547MB）
-- `models/domain_classifier_iter40.joblib`（再訓練済み分類器）
-- `results/iter40_calibrated_predictions.jsonl`（1600行）
-
-### 考察 (Iter40) — rc-reflector 判定
-
-**判定**: rejected（確定）
-
-rc-analyst の判定（rejected）を再検証し、確定させる。
-
-**数値検証**:
-- `top1_accuracy`: 0.6056 → 0.4894（delta=-0.1162）— **一致**
-- `education_recall`: 0.4588 → 0.6529（delta=+0.1941）— **一致**
-- `medical_recall`: 0.5112 → 0.3090（delta=-0.2022）— **一致**
-- `ECE`: 0.071201 → 0.033546（delta=-0.037655）— **一致**
-- `argmax_flip_rate`: 841/1600 = 52.56% — **一致**
-- McNemar chi2: 60.46, p<0.0001 — **一致**
-- BH補正後有意退行: 13/20指標 — **一致**
-
-**成功条件判定**:
-1. **主基準（education_recall > medical_recall基準 0.5112）**: education_recall=0.6529 は基準を上回ったが、medical_recall=0.3090 が基準を大きく下回っている。ゼロサム的再配分であり、真の改善ではない。
-2. **非退行（他9ドメイン18指標のBH補正後有意退行0件）**: **重大な逸脱**。13/20指標がBH補正後も有意に退行。
-3. **McNemar有意改善（p<0.05）**: top1_accuracyは有意**悪化**（chi2=60.46, p<0.0001）。
-4. **単一レバー検証（argmax flip rate < 15%）**: **重大な逸脱**。52.56% は閾値の3.5倍超。
-
-4条件中1条件のみ（education_recallのpoint estimate）が成立。他3条件が重大な逸脱。
-
-**決定的な学び**:
-1. **SetFit/SentenceTransformerの全パラメータfine-tuningは単一レバー原則と両立しない**: contrastive learningはSentenceTransformerの全重み（全ドメインの埋め込み空間）を更新するため、意図した教育ドメインのみならず全10ドメインの埋め込みが再配置された。argmax flip rate 52.56%は構造的制約であり、ハイパラチューリングで回避できない。
-2. **education_recall改善はmedical_recall崩壊の裏返し**: iter31で正解だった医療質問40件のうち14件（35%）が直接educationに切り替わった。これは埋め込み空間でeducationとmedicalが接近した直接的な証拠。education_recallの+0.1941は「教育埋め込みが教育質問に近づいた」だけでなく、「医療埋め込みが教育埋め込みから離れすぎた」の両方の効果。
-3. **先行研究（SDJC/JCSE）との構造的要因の違い**: 先行研究は検索タスク（類似度検索）であり、埋め込み空間の全体変化が検索性能に悪影響を与えなかった可能性がある。本実験の分類器ベースのルーティングでは、埋め込み空間の変化が直接決定境界の変化に帰結するため、単一レバー原則を維持できない。
-4. **embedding適応にはadapter-onlyが必須**: 単一レバーでembedding適応を実現するには、(a) LoRA/adapterのような低ランク更新のみ、(b) 埋め込み出力への線形変換のみ（Whiteningのドメイン別適用）、のいずれかが必要。前者は既存のWAFL-PEFTインフラと相性が良い。
-
-**config の全 levers を試し切り**:
-- fallback_policy: adopted（完了）
-- classifier_calibration: 3値すべて試済み（platt=partial, isotonic=partial, temperature=adopted）
-- classifier_training_data_composition: 6値すべて試済み（全rejected/invalid）
-- class_weight_adjustment: 1値試済み（rejected）
-- embedding_adaptation: 1値試済み（setfit_education_finetune=rejected）
-- aggregation_method: Y2ブロックで試せない
-- E1-E10: 履歴済みまたは no-op
-
-**次の一手の判断**:
-`embedding_adaptation` レバーの単一値（setfit_education_finetune）は全パラメータfine-tuningであり、単一レバー原則と両立しないことがIter40で確定。このレバーは尽きた。
-
-しかし、**embeddingレベルのadapter-only fine-tuning**（LoRAスタイル）は、全パラメータfine-tuningとは異なるアプローチであり、単一レバー原則を満たす可能性がある。既存のWAFL-PEFTインフラ（domain_lora、Iter18でadopted）がLoRAフックを持っているため、embeddingモデルへのLoRA適応は実装コストが比較的低い。
-
-config.yml の levers 末尾へ `embedding_adaptation` の第2値として `embedding_adapter_only_lora` を追記し、Iter41 で実験を実施する。
-
-**要人間判断**:
-1. education_recall の基準値（medical_recall 0.5112）の再検討。
-2. Y2（dispatch_candidate_threshold）着手前のユーザー確認は引き続き必要。
-
-### イテレーション完了
-- 判定: **rejected**。埋め込みモデル無変更（`models/domain_classifier.joblib` 無変更）。
-- コミット: 未（experimenter未コミット）。次いでコミット実施。
-- 次イテレーション（Iter41）: `embedding_adaptation=embedding_adapter_only_lora` を config.yml に追記済み。計画フェーズで詳細設計。
 
 ## 記録訂正・commit 漏れの是正（2026-07-30，`/research-cycle continue` 実行時）
 

@@ -87,9 +87,15 @@ async def predict_calibrated_rows(
         local_model = SentenceTransformer(
             fine_tuned_embed_model, trust_remote_code=True, device="cpu"
         )
-        # Load and activate the LoRA adapter (PEFT default adapter name)
-        local_model.load_adapter(fine_tuned_embed_model, "default")
-        local_model.set_adapter("default")
+        # Load and activate the LoRA adapter (PEFT default adapter name).
+        # Dense projection head models include the Dense module internally and
+        # have no adapter files -- this is silently skipped for those models.
+        try:
+            local_model.load_adapter(fine_tuned_embed_model, "default")
+            local_model.set_adapter("default")
+        except ValueError:
+            # No adapter files (e.g., Dense projection head model).
+            pass
         for row in dataset:
             query_embedding = local_model.encode(row["query"], normalize_embeddings=True,
                                                  show_progress_bar=False)

@@ -22,7 +22,7 @@ research = [
     "numpy>=1.26",
     "peft>=0.12",
     "setfit>=1.1",
-    "sentence-transformers>=3.0",
+    "sentence-transformers>=3.0",  # Dense module for projection head (no new dep)
 ]
 # E10: LoRA training dependencies for scripts/train_domain_lora.py.
 # Not installed by default to keep the serving image small and avoid

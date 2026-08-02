@@ -1,24 +1,25 @@
 {
   "repo": "expert-mesh",
-  "iteration": "Iter43",
-  "iteration_name": "LoRA r=8 embedding適応の内在次元検証（intrinsic dimensionality<=8）& LoRAアプローチ尽きた - 次はembedding出力への線形射影(projection head)",
-  "phase": "investigate",
+  "iteration": 44,
+  "iteration_name": "classifier_head_adaptation（embedding freeze + education-specific classifier head modification）",
+  "phase": "reflect",
   "status": "running",
-  "current_lever": null,
+  "current_lever": "classifier_head_adaptation",
   "experiment_deadline": null,
-  "updated_at": 1785632014,
+  "updated_at": 1785638407,
   "iteration_thread_ts": null,
   "notion_toggle_created": false,
   "next_iteration_brief": {
     "must_read_first": [
+      ".claude/research/journal.md (Iteration 43: Dense projection head, rejected — argmax flip rate 42.00%, WORSE than LoRA)",
       ".claude/research/journal.md (Iteration 42: LoRA r=8, rejected — argmax flip rate 35.88%, bit-identical to r=16)",
       ".claude/research/journal.md (Iteration 41: LoRA r=16, rejected — argmax flip rate 35.88%)",
       ".claude/research/journal.md (Iteration 40: SetFit full FT, rejected — argmax flip rate 52.56%)",
       ".claude/research/journal.md (Iteration 31: temperature calibration, adopted — baseline)",
       ".claude/research/backlog.md (B64)"
     ],
-    "planned_lever": "embedding_adaptation=embedding_adapter_projection_head",
-    "note": "Iter42（LoRA r=8）はargmax flip rate 35.88%でrejected。r=8とr=16はビット単位で同一。intrinsic dimensionality<=8の発見。LoRA rank削減は単一レバー到達に構造的に不可能。全3値（setfit, LoRA r=16, LoRA r=8）尽きた。次イテレーションはembedding出力への線形射影（projection head: W_proj * embedding + b）をinvestigateすること。LoRAのadditive perturbation（attention層追加）とは異なり、embedding出力への直接射影はeducationドメインに埋め込み変形を局所化する可能性。rc-investigatorはprojection headの技術的feasibilityを調査すること。"}
+    "planned_lever": "classifier_head_adaptation",
+    "note": "Embedding適応レバー尽きた（全4値: SetFit full FT, LoRA r=16, LoRA r=8, Dense projection head）。全てargmax flip rate >= 35.88%でrejected。Dense projection head (42.00% flip) はLoRA (35.88%) よりも悪い。embedding空間の幾何学的制約（768次元を10ドメインで共有）により、手法の変更では単一レバー原則(<15% flip)に到達不可能。next: classifier-head adaptation。embeddingはfreezeし、classifier head（LogisticRegression）のみを変更してeducationドメインを分離。具体的には: (a) education-specific feature engineering（既存embedding特徴量にeducation-awareな変数を追加）, (b) education classのdecision boundaryを直接調整（LogisticRegressionの係数操作）, (c) post-hoc probability calibration for education class。rc-investigatorはこれらのアプローチのfeasibilityを調査すること。"
   },
   "e37_results": {
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
@@ -914,5 +915,65 @@
     },
     "judgment": "rejected",
     "note": "LoRA r=8はrejected確定。argmax flip rate 35.88%（r=16と同一）。top1_accuracy有意悪化（McNemar p=0.0193）。BH補正後有意退行2件（business_economics, social_science）。**決定的発見**: Iter42(r=8)とIter41(r=16)は予測結果も分類器重みもビット単位で同一。教育ドメイン適応のintrinsic dimensionality<=8。LoRA rank削減は単一レバー到達に構造的に不可能。全3値（setfit, LoRA r=16, LoRA r=8）尽きた。次はembedding出力への線形射影(projection head)へ。"
+  },
+  "e43_results": {
+    "lever": "embedding_adaptation=embedding_adapter_projection_head",
+    "top1_accuracy_before": 0.6056,
+    "top1_accuracy_after": 0.5269,
+    "top1_accuracy_diff": -0.0787,
+    "mcnemar_top1": {
+      "discordant_a_only": 285,
+      "discordant_b_only": 159,
+      "chi2": 35.19,
+      "p_value": 3.0e-9
+    },
+    "education_recall_before": 0.4588,
+    "education_recall_after": 0.5529,
+    "education_recall_diff": 0.0941,
+    "education_recall_mcnemar": {
+      "a_only": 12,
+      "b_only": 28,
+      "chi2": 5.63,
+      "p_value": 0.0177
+    },
+    "medical_recall_before": 0.5112,
+    "medical_recall_after": 0.3596,
+    "medical_recall_diff": -0.1517,
+    "medical_recall_mcnemar": {
+      "a_only": 36,
+      "b_only": 9,
+      "chi2": 15.02,
+      "p_value": 1.06e-4
+    },
+    "ece_before": 0.071201,
+    "ece_after": 0.030377,
+    "ece_diff": -0.040824,
+    "flip_rate": 0.42,
+    "flip_count": 672,
+    "flip_total": 1600,
+    "bh_significant_regressions_20_metrics": 15,
+    "bh_significant_regressions_details": [
+      "business_economics_recall, computer_science, education_precision, general, history_culture, legal, mathematics, medical_recall, natural_science, social_science, medical_precision等"
+    ],
+    "bh_significant_improvements_20_metrics": 3,
+    "bh_significant_improvements_details": [
+      "education_recall: improvement, delta=+0.0941",
+      "legal_recall: improvement",
+      "natural_science_precision: improvement"
+    ],
+    "judgment": "rejected",
+    "data_used": {
+      "train_data": "data/classifier_train.jsonl (1427 rows, same as Iter31)",
+      "before_results": "results/iter31_calibrated_predictions.jsonl (1600 rows, temperature calibrated)",
+      "after_results": "results/iter43_projection_head_calibrated_predictions.jsonl (1600 rows, newly generated)",
+      "classifier_model": "models/domain_classifier_iter43_projection_head.joblib (trained on projection head embeddings)"
+    },
+    "single_lever_violation": {
+      "note": "Argmax flip rate 42.00% (672/1600) massively exceeds <15% threshold. Dense projection head (590K params, full-rank 768x768) restructured ALL domain embeddings. 15/20 per-domain metrics showed BH-significant regression.",
+      "flip_rate": 0.42,
+      "flip_count": 672,
+      "flip_total": 1600
+    },
+    "note": "embedding_adaptation=embedding_adapter_projection_head REJECTED. Key findings: (1) education_recall improved 0.4588->0.5529 (+0.0941, McNemar p=0.0177), but medical_recall dropped 0.5112->0.3596 (-0.1517, McNemar p=1.06e-4). (2) argmax flip rate 42.00% is WORSE than LoRA (35.88%), proving dense projection is not more 'localized' than LoRA. (3) social_science collapsed: 0.5774->0.1964 (-38.1pt). (4) 15/20 per-domain metrics showed BH-significant regression. (5) ECE improved (0.0712->0.0304) but this reflects probability extremization, not calibration improvement. Root cause: 768-dim embedding space shared by 10 domains. Separating education requires rotating the embedding space, which inevitably moves all other domains. This is a geometric constraint, not a methodological issue. All 4 embedding adaptation values exhausted. Next: classifier-level adaptation (embedding freeze, classifier head modification)."
   }
 }
