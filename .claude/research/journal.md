@@ -500,8 +500,6 @@ additive perturbation（全12層を通過する累積変形）であるのに対
 
 ### 考察 (Iter43) — rc-reflector
 
-### 考察 (Iter43) — rc-reflector
-
 **判定**: rejected（確定）
 
 **4条件の判定**:
