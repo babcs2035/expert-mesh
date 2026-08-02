@@ -1,5 +1,32 @@
 # backlog — 人間判断待ち事項 / 自動判断の記録
 
+## B70 [auto-decided 2026-08-03] Iter47: aggregation_method=max_confidence vs majority_vote 比較結果。実質差なし。次イテレーションは llm_judge 検証へ
+
+- **状況**: Iter47（aggregation_method=max_confidence, dispatch_top_k=2）の結果を考察。Iter46（majority_vote）との厳密な対比（同一 classifier, 同一条件）。
+- **比較結果**:
+  - top1_accuracy: 0.603125 vs 0.60625（差 -0.003125, SE~0.0125, ノイズ範囲内）
+  - compound_domain_set_recall: 0.345 vs 0.36（差 -0.015, SE~0.03, ノイズ範囲内）
+  - ECE: 0.0630 vs 0.0684（差 -0.0054, ノイズ範囲内）
+  - Brier score: 0.2036 vs 0.2005（差 +0.0031, ノイズ範囲内）
+  - cohens_kappa: 0.5733 vs 0.5763（差 -0.0030, ノイズ範囲内）
+- **判定**: `max_confidence adopted`（aggregation_method レバー収束方向）。
+  - 5pt の成功条件は未達成（effect size ~1.5pt）。
+  - 統計的有意性なし（Wilson CI 大幅に重なる）。
+  - max_confidence は単純・低コスト。これをベースラインとして採用。
+- **aggregation_method レバーの総括**:
+  - max_confidence: top1=0.6031, compound_recall=0.345
+  - majority_vote: top1=0.6063, compound_recall=0.360
+  - 差は実質ゼロ。aggregation_method の選択は compound_domain_set_recall に二次的な影響のみ。
+- **次イテレーション（Iter48）の計画**:
+  - `aggregation_method=llm_judge` を試す（コスト ~100-120分/回）。
+  - 理論的には majority_vote より高性能だが、コストが高い。
+  - majority_vote が +1.5pt しか改善しないなら、llm_judge が 5pt を超える可能性は低い。
+  - 5pt 条件不達成なら、max_confidence を正式採用してレバーを閉じる。
+- **config.yml の levers 状態**: `aggregation_method` の values は `[majority_vote, llm_judge]`。majority_vote は試済み。次値は `llm_judge`。
+- **要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
 ## B69 [auto-decided 2026-08-02] Iter46: majority_vote adopted（条件付き）。次は clean ベースライン取得 → llm_judge
 
 - **状況**: Iter46（aggregation_method=majority_vote, dispatch_top_k=2）の結果を考察。計画時はベースライン未存在と判定されたが、`results/20260730_224515/` に `dispatch_top_k=2, max_confidence` のベースラインが存在することを本考察で発見。

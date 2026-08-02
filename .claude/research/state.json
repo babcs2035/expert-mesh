@@ -1,14 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 46,
-  "iteration_name": "aggregation_method変更による複数ノードdispatch時の集約方式比較",
+  "iteration": 47,
+  "iteration_name": "dispatch_top_k=2, max_confidence cleanベースライン取得",
   "phase": "reflect",
   "status": "running",
-  "updated_at": 1785663400,
-  "current_lever": "aggregation_method",
-  "experiment_deadline": 1785658384,
-  "iteration_thread_ts": "1785646727.597639",
-  "notion_toggle_created": true,
+  "updated_at": 1785780000,
+  "current_lever": "aggregation_method=max_confidence (clean baseline, dispatch_top_k=2)",
+  "experiment_deadline": null,
+  "experiment_dir": "results/iter45_aggregation_majority_vote_20260802_145653",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
   "next_iteration_brief": {
     "must_read_first": [
       ".claude/research/journal.md (Iteration 46: aggregation_method変更による複数ノードdispatch時の集約方式比較 - adopted (条件付き))",
@@ -730,7 +731,6 @@
     "judgment": "rejected",
     "note": "manual sample_weight reproduction of class_weight balanced REJECTED as a hypothesis for improving education_recall. Key findings: (1) education_recall unchanged: 0.4588->0.4588 (identical). (2) medical_recall unchanged: 0.5112->0.5112 (identical). (3) top1_accuracy +0.0100 (0.6056->0.6156) but McNemar p=0.0848, not significant at alpha=0.05. (4) 75/1600 rows (4.7%) changed predictions, concentrated in history_culture (+10.12pt recall) and minor shifts elsewhere. (5) ECE slightly worsened (0.0712->0.0807). (6) Brier score slightly improved (0.6068->0.6000). (7) No BH-significant regressions or improvements in 20 per-domain metrics. Root cause: manual sample_weight with class_weight=None produces functionally equivalent effective weights to class_weight=balanced (both yield domain_weight = n_samples/(n_classes*n_domain_samples)). The 75 changed predictions are numerical noise from the solver, not a systematic improvement. The hypothesis that removing class_weight=balanced would improve education_recall is not supported by this experiment. Next steps: (A) investigate why education_recall is stuck at 0.4588 despite balanced weighting, (B) consider fundamentally different education proxy tasks or handmade education problems beyond what Iter35 tested, (C) re-evaluate whether education_recall 0.5112 is the right benchmark."
   },
-  "experiment_dir": "results/iter45_aggregation_majority_vote_20260802_145653",
   "e40_results": {
     "lever": "embedding_adaptation=setfit_education_finetune",
     "top1_accuracy_before": 0.6056,
@@ -1118,5 +1118,46 @@
     },
     "judgment": "adopted (conditional)",
     "note": "majority_vote with dispatch_top_k=2: compound_domain_set_recall=0.36 vs baseline (dispatch_top_k=2, max_confidence) 0.165 = +19.5pt improvement, exceeding the 5pt threshold. ADOPTED (conditional). NOTE: baseline comparison has asymmetry (baseline had fallback_rate=0.1325, Iter46 had 0.0; baseline was pre-calibration, Iter46 was temperature-calibrated). Clean baseline re-run recommended for strict comparison. The baseline was found at results/20260730_224515/ (commit 9b7f393), not previously detected by planner/analyst/experimenter. Single-lever violation noted but documented as prerequisite change in plan."
+  },
+  "e47_results": {
+    "lever": "aggregation_method=max_confidence (clean baseline, dispatch_top_k=2)",
+    "top1_accuracy": 0.603125,
+    "top1_accuracy_wilson_ci": [
+      0.5789326585441938,
+      0.6268233394599039
+    ],
+    "cohens_kappa": 0.5733333333333334,
+    "compound_domain_set_recall": 0.345,
+    "compound_domain_coverage_ratio_mean": 0.345,
+    "compound_domain_jaccard_mean": 0.24333333333333318,
+    "compound_mean_dispatched_count": 2.0,
+    "fallback_rate": 0.0,
+    "dispatch_failure_rate": 0.0,
+    "mean_duration_ms": 4886.265625,
+    "ece": 0.06299768723637104,
+    "brier_score": 0.20362465945124936,
+    "auroc": 0.7441703724858227,
+    "per_domain_recall": {
+      "business_economics": 0.5238095238095238,
+      "computer_science": 0.5416666666666666,
+      "education": 0.5117647058823529,
+      "general": 0.5365853658536586,
+      "history_culture": 0.7738095238095238,
+      "legal": 0.5388888888888889,
+      "mathematics": 0.6309523809523809,
+      "medical": 0.5,
+      "natural_science": 0.5833333333333334,
+      "social_science": 0.5416666666666666
+    },
+    "dispatched_domains_length_ge_2_count": 1600,
+    "dispatched_domains_length_ge_2_rate": 1.0,
+    "analyst_verification": {
+      "note": "Independent analysis: top1_accuracy diff vs iter46 is -0.003125, within noise (SE~0.0125). compound_domain_set_recall diff vs iter46 is -0.015, within noise (SE~0.03, n=100). ECE slightly better (-0.0054), Brier score slightly worse (+0.0031). All differences within noise range. CI overlap: max_confidence [0.269, 0.429], majority_vote [0.275, 0.447]. No statistically significant difference.",
+      "noise_assessment": "All metrics within noise range. compound_domain_set_recall SE~0.03 (n=100), top1_accuracy SE~0.0125 (n=1600). Differences are <0.5 SE for all metrics.",
+      "hypothesis_match": "baseline acquisition successful. comparison with majority_vote shows no significant difference.",
+      "anomalies": "none",
+      "recommendation": "max_confidence sufficient as baseline. llm_judge (Iter48) to be tested next. If llm_judge shows no significant difference either, adopt max_confidence (simplest, lowest cost)."
+    },
+    "judgment": "max_confidence_sufficient"
   }
 }

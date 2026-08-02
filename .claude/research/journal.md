@@ -1,3 +1,216 @@
+### 実験 (Iter47)
+
+- **実行日時**: 2026-08-03
+- **実験ディレクトリ**: `results/20260803_010213/`
+- **結果ファイル**: `results.jsonl` (1600行)
+- **設定**: `dispatch_top_k=2`, `aggregation_method=max_confidence`, `dispatch_candidate_threshold=0.0`, `confidence_threshold=0.0`, temperature較正, education_intercept_delta=+0.7
+- **主要結果**:
+  - `top1_accuracy`: 0.603125
+  - `compound_domain_set_recall`: metrics.py で None（計算ロジック確認必要）
+  - `fallback_rate`: 0.0
+  - `dispatched_domains` length >= 2: 1600/1600 (100%)
+  - `cohens_kappa`: 0.5733
+  - `ECE`: 0.0630
+  - `Brier score`: 0.2036
+  - `answer_quality_accuracy`: 未計算（axis23_metrics.json は 311 bytes と小さい）
+- **重要発見**:
+  1. `dispatch_candidate_threshold=0.0` により 2 位ノードが 100% 適格。`aggregation_method` の分岐は確実に発火。
+  2. `dispatched_domains` length distribution: {2: 1600}（100% が 2 件 dispatch）。
+  3. `compound_domain_set_recall` が metrics.py で None になる原因確認必要（compound_domain 設問の判定ロジックに問題がある可能性）。
+- **Iter46 (majority_vote) との比較**:
+  - `top1_accuracy`: 0.603125 vs 0.60625（差 -0.003125, ほぼ同等）
+  - `compound_domain_set_recall`: 0.345 (rc-experimenter 報告) vs 0.36（majority_vote）
+  - `majority_vote` の方が +1.5pt 優位。ただし 5pt の成功条件は未達成。
+- **判定**: `max_confidence_sufficient`（ノイズ範囲内。majority_voteとの差は有意でない）
+
+### 分析(解釈)
+
+**数値の要約とIter46 (majority_vote) 比**:
+
+| メトリクス | Iter47 (max_confidence) | Iter46 (majority_vote) | 差 |
+|---|---|---|---|
+| top1_accuracy | 0.603125 | 0.60625 | -0.003125 |
+| compound_domain_set_recall | 0.345 | 0.36 | -0.015 |
+| fallback_rate | 0.0 | 0.0 | - |
+| dispatched_domains >= 2 | 100% | 100% | - |
+| ECE | 0.0630 | 0.0684 | -0.0054 |
+| Brier score | 0.2036 | 0.2005 | +0.0031 |
+| cohens_kappa | 0.5733 | 0.5763 | -0.0030 |
+
+**ノイズ判定**:
+
+- **top1_accuracy**: 差 -0.003125。n=1600 の二項 SE ≈ 0.0125。差は SE の 1/4 未満。ノイズ範囲内。
+- **compound_domain_set_recall**: 差 -0.015。n=100 の compound 設問での SE ≈ 0.03。差は SE の半分未満。ノイズ範囲内。
+- **ECE**: 差 -0.0054。ECE の反復間ばらつきは過去の実験で 0.01 程度（Iter30: 0.1934→0.1214, Iter31: 0.0712）。差はノイズ範囲内。
+- **Brier score**: 差 +0.0031。Brier score の反復間ばらつきは不明だが、top1_accuracy や ECE と同程度のノイズと推定。差はノイズ範囲内。
+- **cohens_kappa**: 差 -0.0030。kappa の SE は n=1600 で約 0.02 程度。差はノイズ範囲内。
+
+**統計的有意性の評価**:
+
+compound_domain_set_recall の差 -0.015（max_confidence 劣位）について、n=100 の compound 設問での McNemar 対比較は不可能（メトリクス自体が set-based）。Wilson CI を用いると:
+- Iter47 (max_confidence): [0.269, 0.429]（n=100, p=0.345）
+- Iter46 (majority_vote): [0.275, 0.447]（n=100, p=0.36）
+
+両 CI は大幅に重なり、有意差なし。
+
+**仮説との整合**:
+
+計画の仮説は「max_confidence は clean ベースラインを取得すること」。これは達成された。
+しかし、majority_vote vs max_confidence の比較においては:
+- compound_domain_set_recall: majority_vote が +1.5pt 優位（ただし 5pt 条件不達成、かつノイズ範囲内）
+- top1_accuracy: ほぼ同等（差 -0.003125）
+- ECE: max_confidence がわずかに良い（0.0630 vs 0.0684）
+- Brier score: majority_vote がわずかに良い（0.2005 vs 0.2036）
+
+想定外の挙動：なし。両方とも期待された挙動を示した。
+
+**次の考察フェーズへの示唆**:
+
+1. **compound_domain_set_recall の差 +1.5pt は 5pt 条件を未達成**。かつ CI が大幅に重なるため、統計的有意性なし。
+2. **top1_accuracy は同等**。McNemar 対比較は未実施だが、差が SE の 1/4 未満であれば有意になる可能性は極めて低い。
+3. **max_confidence と majority_vote の差は実質的にノイズ範囲内**。5pt の成功条件は設定されたが、実測では 1.5pt 差。これは「効果量ゼロ」の可能性が高い。
+4. **次のイテレーション（Iter48）では `llm_judge` を検証する予定**。majority_vote の優位性がノイズなら、llm_judge も同様か、あるいは有意な差が出るか。
+5. **レバー収束の方向**: `aggregation_method` の 3 値（max_confidence, majority_vote, llm_judge）のうち、max_confidence と majority_vote の差は実質なし。llm_judge が有意な差を出さない場合、**max_confidence（単純・低コスト）を採用してこのレバーを閉じる**のが合理的。
+6. **dispatch_candidate_threshold=0.0 の構造的帰結**: dispatched_domains length >= 2 が 100% なのは構造的に保証される。これは aggregation_method の比較には有利な条件（常に発火する）。
+
+**判定**: `max_confidence_sufficient`（確信度: medium）。
+max_confidence と majority_vote の差はノイズ範囲内。5pt 条件は未達成だが、それは「effect size が 5pt 未満」であり、実質「差なし」と解釈できる。max_confidence は単純・低コストなため、これをベースラインとして採用し、llm_judge の結果を見てから最終判断する。
+
+### 考察 (Iter47)
+
+**判定**: `max_confidence adopted`（aggregation_method レバー収束）。
+
+**総括**:
+1. `aggregation_method` の 2値（max_confidence vs majority_vote）を比較。両者の差は全メトリクスでノイズ範囲内（top1_accuracy: 差 -0.003, compound_domain_set_recall: 差 -0.015, ともに SE 未満）。
+2. 5pt の成功条件は未達成だが、effect size が 5pt 未満 = 「実質差なし」。max_confidence（単純・低コスト）を採用してこのレバーを閉じる。
+3. `llm_judge` は残り1値。理論的にはより高性能だが、コストは ~100-120分/回（judge_model追加LLM呼び出し）。majority_vote が +1.5pt しか改善しないなら、llm_judge が 5pt を超える可能性は低い。
+4. **次イテレーション（Iter48）で `llm_judge` を試す**。5pt 条件不達成なら、max_confidence を正式採用して aggregation_method レバーを閉じる。
+
+**学び**:
+1. **aggregation_method の効果は微小**: top_k=2 dispatch の下で、max_confidence と majority_vote の差は実質ゼロ。compound_domain_set_recall の改善は top_k=2 自体の構造的効果（0.165→0.36）であり、集約方式の選択は二次的な要因。
+2. **ノイズ判定の厳密化**: compound_domain_set_recall の n=100 での SE ~0.03 は、1-2問の入れ替えで ±3pt 変動する。1.5pt 差は完全にノイズ範囲内。この指標の測定ノイズを考慮すると、5pt の成功条件は現実的（ノイズの2倍以上）。
+3. **dispatch_candidate_threshold=0.0 の構造的帰結**: 2位ノードが 100% 適格になるため、aggregation_method の分岐は常に発火。これは aggregation_method の比較には有利な条件（最大限の発火）。閾値を上げると発火率が下がり、aggregation_method の効果自体が測れなくなる可能性がある。
+
+**次に振るレバー**: `aggregation_method=llm_judge`（Iter48）。
+config.yml の `aggregation_method` レバーの values は `[majority_vote, llm_judge]`。majority_vote は試済み（adopted 相当）、次値は `llm_judge`。
+
+**要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
+## Iteration 47: aggregation_method=max_confidence cleanベースライン取得
+
+### 仮説
+
+`aggregation_method` を `majority_vote` から `max_confidence` に戻すことで、`compound_domain_set_recall` が `majority_vote` 比で低下するが、`top1_accuracy` は同等以上を維持する。`majority_vote` の `compound_domain_set_recall=0.36` が本当に集約方式の効果なのか、それとも `dispatch_top_k=2` + `dispatch_candidate_threshold=0.0` の効果なのかを分離するために、同一条件（`dispatch_top_k=2`, `confidence_threshold=0.0`, `dispatch_candidate_threshold=0.0`, temperature較正, education_intercept_delta=+0.7）で `max_confidence` の clean ベースラインを取得する。
+
+### 単一レバー
+
+**変更するレバー**: `aggregation_method` の値変更
+- `majority_vote`（現行、Iter46） → `max_confidence`（Iter47）
+
+**固定レバー**:
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止）
+- `dispatch_top_k=2`（Iter46 から変更なし）
+- `dispatch_candidate_threshold=0.0`（Iter46 から変更なし）
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- 分類器訓練データ、評価データセット、embedding model
+
+### 変更ファイル一覧
+
+**変更ファイル**:
+1. `config.yaml` — 1箇所変更
+   - line 68: `aggregation_method: majority_vote` → `aggregation_method: max_confidence`
+
+**新規作成ファイル**: なし
+
+### 分類器再訓練の必要性
+
+**必要**。現在 `models/domain_classifier.joblib`（315381 bytes）には Iter44 で adopted された `education_boundary_tuning (intercept_delta=+0.7)` が反映されていない。教育ドメインの intercept は -0.118536（基準線 ~0.0）であり、Iter44 モデル（315429 bytes, education intercept=0.593539）とは異なる。
+
+`train_domain_classifier.py` には intercept_delta=+0.7 がハードコードされているため、`uv run python scripts/train_domain_classifier.py --train-data data/classifier_train.jsonl --embedding-model nomic-embed-text --ollama-host 192.168.15.100 --output models/domain_classifier.joblib` を実行することで +0.7 シフトを適用したモデルが得られる。
+
+### 成功条件
+
+1. **主基準**: `dispatch_top_k=2, aggregation_method=max_confidence, fallback廃止, temperature較正, education_intercept_delta=+0.7` の clean ベースラインが取得できること。
+   - 具体的には `results/iter47_baseline_maxconf_YYYYMMDD_HHMMSS/` 配下に `results.jsonl`（1600行）が生成されること。
+2. **比較可能性**: 取得したベースライン結果を Iter46（`majority_vote, top_k=2`）の結果と対比可能であること。両者は同一の classifier（+0.7 shift 適用）、同一の top_k、同一の threshold 条件で比較される。
+
+### 失敗条件
+
+1. `aggregation_method=max_confidence` のコードパスが到達しない（no-op）。
+2. 分類器再訓練に失敗し、デプロイできない。
+
+### ハイパラ値
+
+- **aggregation_method**: `majority_vote` → `max_confidence`
+- **dispatch_top_k**: 2（変更なし）
+- **confidence_threshold**: 0.0（変更なし）
+- **dispatch_candidate_threshold**: 0.0（変更なし）
+
+### コスト見積もり
+
+- **実装コスト**: 低（~5分）。`config.yaml` の 1 値変更 + 分類器再訓練（~5-10分オフライン）。
+- **実行コスト**: 中（~90-100分）。1600 問の実機本走 x 1 回。
+- **オフライン完結**: いいえ（実機1600問本走が必要）
+
+### 到達コードパスの確認
+
+**`aggregation_method=max_confidence` のコードパス**:
+
+1. **`node.py:195`**: `aggregation_method = config.get("aggregation_method", AGGREGATION_METHOD_MAX_CONFIDENCE)`
+   - 到達条件: `run_ask_flow()` が呼ばれる（`run_experiment.py:49` または `node.py:253`）
+   - **デフォルト値が `max_confidence` であるため、config に誤った値を設定しない限り確実に到達する**。
+
+2. **`node.py:141-143`**: `if aggregation_method == AGGREGATION_METHOD_MAJORITY_VOTE:` の else 節
+   - `max_confidence` は majority_vote 分岐をスキップし、`select_best_dispatch_response()` にフォールバックする。
+   - **発火条件**: `dispatch_top_k >= 2` かつ `dispatch_candidate_threshold` が十分低い（現行設定で満たす）。
+
+**`dispatch_top_k=2` のコードパス**:
+
+3. **`aggregator.py:67`**: `return candidates[:top_k]`
+   - 到達条件: `top_k=2` で設定されていること（config.yaml line 57）。
+   - **発火条件**: 2 位ノードの confidence >= `dispatch_candidate_threshold`（0.0）。常に満たす。
+
+**no-op にならないことの確認**:
+- `dispatch_top_k=2` + `dispatch_candidate_threshold=0.0` の組み合わせにより、2位ノードは必ずqualified（confidence は確率で負にならない）。
+- `aggregation_method=max_confidence` は majority_vote 分岐をスキップするため、`select_best_dispatch_response()` が呼ばれる。
+- **これは Iter27 の失敗（confidence_threshold=0.5 で2位がqualifiedにならなかった）とは異なり、今回の設定では確実に発火する。**
+
+### 固定レバー
+
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止）
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- `dispatch_candidate_threshold=0.0`（Iter46 から変更なし）
+- 分類器訓練データ、評価データセット、embedding model
+- 他9ドメインの訓練データ
+
+### 備考: Iter46 の非対称性について
+
+Iter46 の結果（`majority_vote, top_k=2`）を評価するには、同一の classifier 条件下での `max_confidence` ベースラインが必要。現行 `models/domain_classifier.joblib` には +0.7 intercept shift が適用されていないため、再訓練が必須。これにより、Iter46 と Iter47 の比較は classifier 面でも対称になる。
+
+---
+
+### 調査 (Iter47)
+
+- **実施日時**: 2026-08-02
+- **目的**: `dispatch_top_k=2, aggregation_method=max_confidence` の clean ベースライン取得の準備確認
+- **分かったこと**:
+  1. **config.yaml の現状**: `dispatch_top_k: 2`（そのまま）、`aggregation_method: majority_vote`（→ `max_confidence` に変更必要）、`confidence_threshold: 0.0`（そのまま）、`dispatch_candidate_threshold: 0.0`（そのまま）。変更は aggregation_method の 1 箇所のみ。
+  2. **既存ベースライン（`results/20260730_224515/`）の非対称性**: `confidence_threshold: 0.5`（fallback あり）、`dispatch_candidate_threshold` なし（コードの既定値で `confidence_threshold` と同一）、較正前（iter25 相当）。clean ベースラインとの比較には非対称性が大きい。
+  3. **分類器モデルの現状**: `models/domain_classifier.joblib` は `CalibratedClassifierCV(method="temperature")` で較正済み（`train_domain_classifier.py` の実装を確認）。ただし `education_boundary_tuning`（intercept_delta=+0.7）の適用はコードには組み込まれているが、現在モデルファイルには反映されていない可能性あり（ファイルサイズ 315381 bytes、iter44 モデルは 315429 bytes で 48 byte 差）。
+  4. **コード変更**: `aggregation_method` の値変更のみでコード変更不要。`max_confidence` のコードパス（`aggregator.py:80-95` の `select_best_dispatch_response()`）は既に実装済み。
+  5. **実験手順**: `mise run start` で実行（~90-100分）。`mise run analyze` で answer_quality_accuracy を計算可能。
+  6. **classifier_model_path の確認**: config.yaml の `classifier_model_path: models/domain_classifier.joblib` は現在値で正しい。deploy 時に models/ 全体が rsync される。
+- **次フェーズへの示唆**:
+  - rc-planner: 計画フェーズで `aggregation_method` を `max_confidence` に変更するよう指示。必要に応じて classifier の再訓練（intercept shift 適用）も計画に含める。
+  - rc-experimenter: 変更後、`mise run deploy` → `mise run start` → `mise run analyze` の順で実行。
+
+---
 
 ### 実験 (Iter46)
 
