@@ -312,7 +312,7 @@ levers:
   # --- embedding_adaptation: 【2026-08-02 Iter39追加】nomic-embed-textのSetFit fine-tuning
   #     によりeducationドメインの埋め込み空間を改善。根本原因（embedding分離不足）に直接対処。 ---
   - {name: embedding_adaptation,
-     values: [setfit_education_finetune, embedding_adapter_only_lora, embedding_adapter_lora_r8],
+     values: [setfit_education_finetune, embedding_adapter_only_lora, embedding_adapter_lora_r8, embedding_adapter_projection_head],
      note: "[2026-08-02 Iter39 / backlog B61] `class_weight_adjustment` はrejected確定。
             education_recall=0.4588で不変だった。根本原因はembedding空間の分離不足。
             **SetFit**（HuggingFace 2023）はSentence Transformersのfew-shot fine-tuning。
@@ -334,7 +334,14 @@ levers:
             到達可能性を検証。r=8もrejectedの場合、LoRAアプローチは構造的限界の可能性が高い。
             [2026-08-02 Iter41 reflector追記] LoRA r=16→r=8の段階的削減を検証。
             単一レバー<15%到達がr=8でも不可能な場合、embedding出力への線形射影（projection head）
-            や、LoRA以外の根本的に異なるアプローチへ移行する。"}
+            や、LoRA以外の根本的に異なるアプローチへ移行する。
+            [2026-08-02 Iter42 reflector追記] LoRA r=8はrejected確定（argmax flip rate
+            35.88%、r=16とビット単位で同一）。intrinsic dimensionality <= 8の発見により、
+            LoRA rank削減は単一レバー到達に構造的に不可能。全3値（setfit, LoRA r=16, LoRA r=8）
+            試して単一レバー原則未達。次値 `embedding_adapter_projection_head` は、
+            LoRAのadditive perturbation（attention層への追加）ではなく、embedding出力への
+            線形射影（W_proj * embedding + b）により、embedding変形をeducationドメインに
+            局所化するアプローチ。"}
 
   - {name: class_weight_adjustment,
      values: [none_manual_sample_weight],

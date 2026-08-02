@@ -2,14 +2,14 @@
 
 Applies Low-Rank Adaptation (LoRA) via PEFT to the SentenceTransformer
 implementation of nomic-embed-text-v1. Trains only the LoRA adapter
-parameters (rank=16) using MultipleNegativesRankingLoss on education
+parameters (rank=8) using MultipleNegativesRankingLoss on education
 domain contrastive pairs.
 
-Base model parameters are frozen. Only LoRA matrices (A: 768x16, B: 16x768
+Base model parameters are frozen. Only LoRA matrices (A: 768x8, B: 8x768
 per target module) are updated, ensuring minimal impact on non-education
 domain embeddings (single-lever principle).
 
-Output: LoRA adapter saved to models/embedding_lora_education/ (safetensors)
+Output: LoRA adapter saved to models/embedding_lora_education_r8/ (safetensors)
 Usage:
     uv run python scripts/fine_tune_embedding_lora.py
 """
@@ -115,21 +115,21 @@ def main() -> None:
     model = SentenceTransformer(base_model_name, trust_remote_code=True, device="cpu")
 
     # Configure LoRA adapter
-    # rank=16: conservative choice. Smaller rank = more conservative = better single-lever.
+    # rank=8: halved from r=16 (Iter41) to reduce argmax flip rate below 15%.
     # The task (education vs non-education separation) is simpler than full LLM instruction
-    # following, so r=16 should be sufficient.
-    # alpha=32: alpha = 2 * r (standard setting). Scaling factor = alpha/r = 2.0.
+    # following, so r=8 should be sufficient while maintaining single-lever behavior.
+    # alpha=16: alpha = 2 * r (standard setting). Scaling factor = alpha/r = 2.0.
     # dropout=0.1: standard dropout for regularization.
     # target_modules=["Wqkv", "out_proj"]: target all attention projection layers
     # across all 12 encoder layers. nomic-embed-text-v1 uses fused Wqkv (768->3072) and
     # out_proj (768->768) instead of separate q/k/v projections. 24 modules total (2 per
-    # layer x 12 layers). Total trainable params: 24 * 2 * (768 * 16 + 768 * 16) = 943,712
-    # (~0.69% of base model).
+    # layer x 12 layers). Total trainable params: 24 * 2 * (768 * 8 + 768 * 8) = 471,856
+    # (~0.34% of base model).
     lora_config = LoraConfig(
         task_type=TaskType.FEATURE_EXTRACTION,
         inference_mode=False,
-        r=16,
-        lora_alpha=32,
+        r=8,
+        lora_alpha=16,
         lora_dropout=0.1,
         target_modules=["Wqkv", "out_proj"],
     )
@@ -137,8 +137,8 @@ def main() -> None:
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     print(
-        "[fine_tune_embedding_lora] LoRA config: r=16, alpha=32, dropout=0.1, "
-        "target_modules=Wqkv+out_proj (24 modules, ~0.69% of base)", file=sys.stderr
+        "[fine_tune_embedding_lora] LoRA config: r=8, alpha=16, dropout=0.1, "
+        "target_modules=Wqkv+out_proj (24 modules, ~0.34% of base)", file=sys.stderr
     )
     print(
         f"[fine_tune_embedding_lora] Trainable params: {trainable_params:,} / "
@@ -147,7 +147,7 @@ def main() -> None:
     )
 
     # Training arguments
-    output_dir = "models/embedding_lora_education"
+    output_dir = "models/embedding_lora_education_r8"
     args = SentenceTransformerTrainingArguments(
         output_dir=output_dir,
         num_train_epochs=3,
