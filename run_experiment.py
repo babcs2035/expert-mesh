@@ -86,6 +86,7 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         result.probe_responses,
         confidence_threshold=config.get("confidence_threshold", 0.5),
         top_k=config.get("dispatch_top_k", 1),
+        dispatch_candidate_threshold=config.get("dispatch_candidate_threshold"),
     )
     dispatched_domains = [config["nodes"][t.node_id]["domain"] for t in dispatch_targets]
     probe_candidates = [

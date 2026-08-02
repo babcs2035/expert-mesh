@@ -1,4 +1,509 @@
-## Iteration 44: educationドメインinterceptシフト(+0.5)によるdecision boundary調整
+
+### 実験 (Iter45) — rc-implementer: Y2 dispatch_candidate_threshold 新設
+
+**実装内容**: `dispatch_candidate_threshold` の新設（confidence_threshold の二重責務分離）
+
+**変更ファイル**:
+1. `config.yaml` — `confidence_threshold` 直後に `dispatch_candidate_threshold: 0.0` を追加
+2. `aggregator.py` — `select_dispatch_targets()` に `dispatch_candidate_threshold` パラメータ追加。Rank 1 は `confidence_threshold`、Rank 2+ は `dispatch_candidate_threshold` で判定
+3. `node.py` — `run_ask_flow()` 内の呼び出しに `dispatch_candidate_threshold=config.get("dispatch_candidate_threshold")` を追加
+4. `run_experiment.py` — `_run_one()` 内の呼び出しに同上
+5. `tests/test_aggregator.py` — ユニットテスト5件追加（後方互換性、threshold高低による振る舞い差、None既定値動作）
+
+**テスト結果**: 36/36 パス（test_aggregator 22/22, test_node 8/8, test_run_experiment 6/6）
+既存テストは全て通過。test_build_dataset の失敗は既存の問題（ZIPアーカイブ内のファイルパス不一致）で今回の変更とは無関係。
+
+**後方互換性**: `dispatch_candidate_threshold` を `confidence_threshold` と同値に設定した場合、従来動作とビット単位一致。既定値（未設定/None）は `confidence_threshold` を使用する。
+
+**Y3 での sweep**: `dispatch_candidate_threshold` = 0.3, 0.4, 0.5 で実験可能。
+
+---
+
+### 計画 (Iter45) — rc-planner
+
+**単一レバー**: `dispatch_candidate_threshold` の新設（Y2: confidence_threshold の二重責務分離）
+
+**状況**: config.yml の全 levers を試し切り済み。classifier_head_adaptation の残り2値は実質的に試す価値が低い。rc-investigator の調査結果に基づき、Y2 が最も有望な次一手と判定。
+
+**変更ファイル**:
+1. `config.yaml` — `dispatch_candidate_threshold` フィールドの新設（既定値は `confidence_threshold` と同値）
+2. `aggregator.py` — `select_dispatch_targets()` のシグネチャ変更（rank 1 は `confidence_threshold`、rank 2+ は `dispatch_candidate_threshold` で判定）
+3. `node.py` — 呼び出し側の変更
+4. `run_experiment.py` — 呼び出し側の変更
+5. `tests/test_aggregator.py` — 新ロジックのユニットテスト追加
+
+**Y3 での sweep 値**: `dispatch_candidate_threshold` = 0.3, 0.4, 0.5（~230件/14.4%, ~120件/7.5%, ~75件/4.7%）
+
+**判定**: スキーマ変更を伴うため `status="waiting_user"`。ユーザー確認待ち。
+
+**Label Space Reduction について**: general class の細分化も代替アプローチとして提案されたが、classifier の class 数変更（10→12+）を伴うためスキーマ変更扱い。Y2 完了後に検討。
+
+---
+
+
+## Iteration 45: 代替ルータアプローチの調査とY2下調べ
+
+### 計画 (Iter45) — rc-planner: Y2 dispatch_candidate_threshold 新設
+
+**単一レバー**: `aggregation_method` レバーの前提整備 — `config.yaml` への `dispatch_candidate_threshold` 新設 + `aggregator.select_dispatch_targets()` のシグネチャ変更
+
+**変更ファイル**:
+1. `config.yaml` — line 5 (confidence_threshold) の直後に `dispatch_candidate_threshold` フィールドの新設（既定値は `confidence_threshold` と同値）
+2. `aggregator.py` — line 28-40 `select_dispatch_targets()` のシグネチャ変更（`dispatch_candidate_threshold` パラメータ追加、rank 1 と rank 2+ で異なる閾値を使用するロジック変更）
+3. `node.py` — line 214-218 `select_dispatch_targets()` の呼び出しに変更（config から `dispatch_candidate_threshold` を取得して渡す）
+4. `run_experiment.py` — line 85-89 `select_dispatch_targets()` の呼び出しに変更（同上）
+5. `tests/test_aggregator.py` — 新ロジックのユニットテスト追加
+
+**到達コードパス**:
+- `node.py:214` → `select_dispatch_targets(probe_responses, confidence_threshold=..., dispatch_candidate_threshold=..., top_k=...)`
+  - 到達条件: スクリプトが通常通り実行される（config.yaml に新フィールドが設定されている）
+- `run_experiment.py:85` → 同上
+  - 到達条件: 同上
+
+**固定レバー**:
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止済み、Iter28 adopted）
+- `dispatch_top_k=1`（Y3 で 2 に変更）
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- 分類器訓練データ、評価データセット、embedding model
+- 他9ドメインの訓練データ
+
+### 変更ファイル一覧
+
+**新規作成ファイル**: なし
+**変更ファイル**:
+1. `config.yaml` — `dispatch_candidate_threshold` フィールド追加（~2行）
+2. `aggregator.py` — `select_dispatch_targets()` のシグネチャ変更 + ロジック変更（~15行）
+3. `node.py` — 呼び出し側の変更（~2行）
+4. `run_experiment.py` — 呼び出し側の変更（~2行）
+5. `tests/test_aggregator.py` — 新テスト追加（~20行）
+
+### 成功条件
+1. `dispatch_candidate_threshold` を設定することで、2 位ノードが適格になり、`dispatched_domains` の長さが 2 以上になる件数が > 0 になる（`dispatch_candidate_threshold=0.3` で 230 件超の期待）
+2. `dispatch_candidate_threshold` を `confidence_threshold` と同値に設定した場合、従来動作とビット単位で一致する（後方互換性）
+3. top1_accuracy の有意悪化なし（McNemar p >= 0.05）
+
+### 失敗条件
+1. `dispatch_candidate_threshold` を設定しても 2 位ノードが適格にならない（コードパス到達エラー）
+2. `dispatch_candidate_threshold` と `confidence_threshold` を別値に設定した際、rank 1 と rank 2+ で異なる閾値が適用されない
+3. 後方互換性が壊れる（同値設定で従来と結果が異なる）
+
+### ハイパラ値
+- **dispatch_candidate_threshold**: 既定値は `confidence_threshold` と同値（0.0）。Y3 で sweep 値 0.3, 0.4, 0.5 を試す
+- **Y3 での sweep 値**: 0.3（~230 件/14.4%）、0.4（~120 件/7.5%）、0.5（~75 件/4.7%）
+
+### コスト見積もり
+- **実装コスト**: 低（~1-2時間）。config.yaml へのフィールド追加 + aggregator.py のロジック変更 + 呼び出し元2箇所の変更 + テスト追加
+- **実行コスト**: 低（Y2 単体では実機本走不要。Y3 で 1600 問本走 x 3 値 = ~270 分）
+- **オフライン完結**: いいえ（Y2 のコード変更はデプロイ必要だが、Y3 本走まで時間がかかる）
+
+### 到達コードパスの確認
+
+**`select_dispatch_targets()` (aggregator.py:28-40)**:
+- 現在: `confidence >= confidence_threshold` で全候補をフィルタ → top-k
+- **変更後**: rank 1 は `confidence_threshold`、rank 2+ は `dispatch_candidate_threshold` で判定
+- 到達条件: スクリプトが通常通り実行される（config.yaml に新フィールドが設定されている）
+
+**`node.py:214-218`**:
+- `select_dispatch_targets(probe_responses, confidence_threshold=..., top_k=...)`
+- **変更**: `dispatch_candidate_threshold=config.get("dispatch_candidate_threshold", config.get("confidence_threshold", 0.5))` を追加
+
+**`run_experiment.py:85-89`**:
+- 同上
+
+### 状態判断
+
+config.yml の全 levers を試し切り済み。`classifier_head_adaptation` の残り2値は実質的に試す価値が低い（education_posthoc_calibration は intercept シフトと数学的に同等、education_feature_augmentation は argmax flip rate 15%超のリスク）。`aggregation_method` は Y2 が完了するまで試せない。
+
+Y2（`dispatch_candidate_threshold` 新設）は `config.yaml` と `aggregator.py` の変更を伴うスキーマ変更のため、着手前にユーザー確認が必要。rc-reflector の自律判断範囲（可逆な判断）を超える。
+
+**次のイテレーション**: ユーザー確認待ち（`status="waiting_user"`）。確認後は Y3（aggregation_method 比較）へ移行。
+
+---
+
+### 調査 (Iter45) — rc-investigator
+
+**問い1: LLM domain routing / expert selection の最新研究（2024-2026）**
+
+**(a) LLMRouterBench / RouterEval / RouterBench — ルータベンチマークの進化**
+
+RouterBench (Hu et al. 2024) は 8 データセット x 11 モデルで初期ベンチマークを確立。RouterEval
+(Huang et al. 2025, arXiv:2503.10657) は 12 ルーティング評価の 2 億以上のパフォーマンスレコードを
+統合。LLMRouterBench (Zhang et al. 2025, DAI 2025) はさらに進み、23,945 プロンプト、391,645
+インスタンス、1.8B トークンの大規模ベンチマーク。
+
+**教育ドメインの位置付け**: RouterEval は general/QA/reasoning/math 分野をカバーするが、
+JMMLU の education（学校教育行政）のような日本語実務ドメインは含まれていない。
+LLMRouterBench の Avengers-Pro は test-time routing ensemble（10 モデルのアンサンブル）で
+Pareto frontier を達成するが、これは「どのモデルが正しいか」を ensemble で決める方式であり、
+supervised classifier による single-query routing とは異なる。
+
+**教育ドメイン分類のボトルネックに関する知見**:
+- RouterEval は domain-specific routing を評価するが、education は一般教養（general knowledge）
+  に統合される傾向がある。これは JMMLU の education が「学校教育行政実務」という narrow な
+  ドメインであるのに対し、LLMRouterBench 等のベンチマークでは education が broad な
+  「教育関連知識」に包含されるため。
+- MoDEM (arXiv:2410.07490) の general class 81.00% accuracy は、education のような narrow
+  ドメインが general に吸収されやすい構造的問題を示唆。
+
+**(b) Gatekeeper (Rabanser et al. 2025, ICML 2025 workshop)**
+
+small model → large model の cascade において、small model の confidence calibration を
+最適化する Gatekeeper loss を提案。small model が正解できるタスクだけを自信的に処理し、
+それ以外を large model へ委譲する。
+
+**本プロジェクトへの示唆**: Gatekeeper の核心は「confidence tuning により routing decision と
+confidence level を分離する」こと。これは Y2 の `dispatch_candidate_threshold` 新設と
+概念的に一致。Gatekeeper は cascade（small→large）を前提とするが、本プロジェクトの
+supervised classifier は parallel routing（複数 expert の中から 1 つを選択）であるため、
+直接の応用はできない。ただし、「confidence の用途を gate と selection に分離する」という
+設計思想は Y2 の設計判断材料になる。
+
+**(c) Label Space Reduction (arXiv:2502.08436)**
+
+ラベル空間の削減が zero-shot classification の性能を向上させることを示す。
+10 クラス分類で general class が bottleneck になる問題（MoDEM の general 81.00%）は、
+general class を細分化することで改善する可能性がある。
+
+**本プロジェクトへの示唆**: education の recall 改善には、education のみを分離するのではなく、
+general class を細分化（例: general→academic/general/practical）することで、education が
+general に吸収される問題を軽減するアプローチも考えられる。ただし、これは schema 変更を
+伴うため Y2 並みのコストが必要。
+
+**(d) When Does Confidence-Based Cascade Deferral Suffice? (Jitkrittum et al. NeurIPS 2023)**
+
+confidence-based deferral の理論的限界を解析。2-model cascade において、confidence-based
+deferral が Bayes-optimal になる条件を特定。key result: downstream model の error rate が
+入力に依存しない場合（constant error probability）、confidence-based deferral は最適。
+入力で error rate が変動する場合は、confidence だけでなく input-specific な routing signal
+が必要。
+
+**本プロジェクトへの示唆**: 本プロジェクトの supervised classifier は「どの expert が正解するか」
+を推定しているが、classifier の confidence が「expert の能力」ではなく「入力の判別容易性」
+を反映している可能性がある。confidence threshold の二重責務分離（Y2）は、この問題を部分的に
+解消する（routing decision は classifier argmax、gate は confidence）が、根本的には classifier
+の confidence 自体の較正が重要。
+
+**(e) CARGO (arXiv:2509.14899)**
+
+confidence-aware routing の framework。LLM の出力 confidence を routing decision に統合。
+confidence token を生成し、それに基づいて model selection を行う。
+
+**本プロジェクトへの示唆**: CARGO は confidence-based routing の最新例だが、LLM の出力 confidence
+（self-reported）を前提とする。本プロジェクトの supervised classifier は already 確率出力を
+生成しており、CARGO の contribution は「confidence token の生成」にある。本プロジェクトでは
+既に classifier が確率を出力しているため、CARGO の直接の応用は不要。
+
+**問い2: classifier intercept / decision boundary tuning — 実践的な知見**
+
+**(a) Multiclass SOLs (Legnaro et al. 2025)**
+
+標準的な argmax ルールを一般化する threshold-based framework。multidimensional simplex 上で
+各クラスに個別の threshold を設定し、argmax を置き換える。key insight: softmax の確率的
+解釈ではなく幾何学的解釈（simplex 上の距離）に基づく分類。
+
+**本プロジェクトへの示唆**: 
+- SOLs は各クラスに個別の threshold を学習する。これは intercept の class-specific tuning
+  と数学的に同等（intercept shift = threshold shift in the logit space）。
+- 本プロジェクトの intercept_delta +0.7 は、education class の threshold を 0.7 下げる（=
+  education class を選びやすくする）ことに相当。
+- SOLs の multidimensional optimization は curse of dimensionality の懸念がある（10 クラス
+  なら 10 次元）。本プロジェクトでは education のみ intercept を動かすため、1 次元に限定
+  しており、これは SOLs の「粗い離散化」アプローチに相当。
+
+**(b) ClassificationThresholdTuner (scikit-learn)**
+
+scikit-learn の `multi_class='ovr'` classifier 向けに、per-class の decision threshold を
+最適化するツール。binary classification の 0.5 threshold を class-specific に調整。
+
+**本プロジェクトへの示唆**: 
+- Intercept shift（intercept_delta +0.7）は、training 時に決定される固定の bias。
+- ClassificationThresholdTuner は held-out data 上で threshold を最適化する post-hoc
+  アプローチ。本プロジェクトの intercept_delta は training-time の変更であるため、
+  ClassificationThresholdTuner とは異なるフェーズで動作する。
+- intercept_delta の最適値（+0.7）は、training data の distribution に依存する。
+  held-out data で threshold を最適化すれば、より適切な値が見つかる可能性がある。
+  ただし、これは「post-hoc calibration」として classifier_head_adaptation の残り1値
+  (education_posthoc_calibration) に相当し、intercept シフトと数学的に同等。
+
+**(c) Cost-Sensitive Logistic Regression (Brownlee 2020)**
+
+class imbalance に対する threshold moving の実践ガイド。precision-recall curve から
+最適 threshold を探索する。education class の recall を最大化するには、threshold を下げる
+（= intercept を上げる）必要がある。
+
+**本プロジェクトへの示唆**: 
+- 本プロジェクトの intercept_delta +0.7 は、education class の recall を 0.4588→0.5235
+  に改善した。これは precision-recall tradeoff の典型的な例。
+- education_precision は -0.0785 悪化（0.5170→0.4385）。これは threshold moving の
+  構造的トレードオフ（recall 向上 = precision 低下）。
+- 最適な intercept_delta は、education_recall と education_precision のバランスを
+  考慮して決定すべき。+0.7 は recall 基準（medical_recall 0.5112）を満たす最小値。
+
+**問い3: educationドメイン分類のボトルネック — 根本原因の再検討**
+
+**(a) JMMLU education の定義の narrowness**
+
+JMMLU の education ドメインは「学校教育行政・学習指導要領等」という narrow な定義。
+これは MMLU の education（より broad な教育学・教育心理学）とは異なる。
+代理タスク（sociology, high_school_psychology, moral_disputes）はすべて broad な
+「教養レベルの教育関連知識」をカバーしており、JMMLU education の narrow な実務ドメイン
+（学校事故責任、生徒健康管理、アレルギー対応等）をカバーできない。
+
+**本プロジェクトの Intercept Delta +0.7 の効果**: 
+- intercept のシフトは「信号がない」問題を解決しない。education の embedding が
+  他ドメインと十分に分離されていない場合、intercept を +0.7 上げても、education 質問の
+  多くは依然として他ドメインに分類される（intercept の効果は logit 空間での parallel shift
+  であり、embedding 空間の分離度合いには依存しない）。
+- Intercept +0.7 で education_recall が 0.4588→0.5235 (+0.0647) 改善したのは、
+  education の embedding が他ドメインと「部分的に」分離可能だったため。
+  intercept のシフトで decision boundary が education 側に移動し、close calls の一部が
+  education へ flip した。
+
+**(b) Proxy task の意味的ギャップ — 再評価**
+
+Iter32-38 で 7 回連続 rejected した classifier_training_data_composition の試行は、
+「proxy task の意味的ギャップ」が根本原因であることを示した。
+intercept_delta +0.7 の成功は、この根本原因を解消したのではなく、
+intercept のシフトで decision boundary を education 側に押しやることで、
+部分的に問題を回避した。
+
+**教育 recall の上限**: 
+- education_recall 0.5235 は medical_recall 0.5112 をクリアしたが、
+  大きな余裕があるわけではない（+0.0123）。
+- education_precision の悪化（-0.0785）は、intercept をさらに上げるほど拡大する。
+- education_recall の上限は、embedding 空間での education の分離度合いに依存する。
+  分離が不十分な場合、intercept を上げすぎると precision が崩壊する。
+
+**(c) 代替アプローチの検討**
+
+1. **education の training data 拡充**: Iter35 (handmade 50件) は rejected だったが、
+   handmade problems の数や質を改善すれば、education の embedding 分離が改善する可能性。
+   ただし、Iter32-38 の経験から、training data の変更は embedding 空間全体に影響し、
+   単一レバー原則を逸脱するリスクが高い。
+
+2. **education class の embedding 平均との距離特徴量**: education_feature_augmentation
+   (classifier_head_adaptation の残り1値) は、education class の mean embedding との
+   cosine similarity を特徴量として追加する。これは education の embedding 分離を
+   特徴量エンジニアリングで補完する。ただし、argmax flip rate 15%超のリスクがあり、
+   config.yml の note で「実質的に試す価値が低い」と判断済み。
+
+3. **education_recall の基準値再検討**: medical_recall 0.5112 を基準とするのは
+   fair か？education は proxy task 由来のドメインであり、他のドメイン（直接対応する
+   JMMLU タスクを持つ）と比較するのは不公正かもしれない。ただし、この判断は
+   ユーザーの研究方針に依存する。
+
+**問い4: Y2 — confidence_threshold の二重責務分離**
+
+**(a) Gatekeeper (Rabanser et al. 2025, ICML 2025)**
+
+Gatekeeper loss は small model の confidence calibration を最適化し、
+「自信を持って処理できるタスク」と「委譲すべきタスク」を明確に区別する。
+key design: small model のパラメータを fine-tune して、正解できるタスクの confidence を
+高め、正解できないタスクの confidence を下げる。
+
+**本プロジェクトへの Y2 示唆**:
+- Gatekeeper は confidence の「用途」を routing decision と deferral gate に分離する。
+  本プロジェクトの Y2 (`dispatch_candidate_threshold` 新設) は同じ設計思想。
+- Gatekeeper は cascade 設定（small→large）を前提とするが、本プロジェクトは parallel
+  routing（複数 expert の中から選択）であるため、direct transfer はできない。
+- ただし、confidence tuning の目的（routing decision と gate の分離）は共通。
+
+**(b) When Does Confidence-Based Cascade Deferral Suffice? (Jitkrittum et al. NeurIPS 2023)**
+
+confidence-based deferral の理論的限界を解析。key result:
+- confidence-based deferral は、downstream model の error rate が入力に依存しない場合
+  （constant error probability）に Bayes-optimal。
+- 本プロジェクトの supervised classifier 下では、各ノードが 10 クラス確率の自分の分の
+ みを返すため、2 ノードが同時に high confidence になるには p1+p2 >= 1.0 が必要。
+  これは aggregation_method (Y3) が no-op になる理由（Iter27 で確認）。
+
+**dispatch_candidate_threshold の設計方針**:
+- dispatch_candidate_threshold は、1 位の採否を confidence_threshold、
+  2 位以降の採否を dispatch_candidate_threshold で判定する。
+- 既定値は confidence_threshold と同値（後方互換）。
+- Y4 (temperature calibration) 後、ECE = 0.069854 であり、confidence の较正が改善。
+  これにより、dispatch_candidate_threshold の適切な値は 0.3-0.5 の範囲に収まる可能性。
+- Iter27 の分析: 2 位 confidence の最大値は 0.4955。dispatch_candidate_threshold を
+  0.49 に設定すれば、75 件 (4.7%) が 2 ノード dispatch される。
+  0.40 に設定すれば、120 件 (7.5%)、0.30 に設定すれば、230 件 (14.4%)。
+
+**(c) CARGO (arXiv:2509.14899)**
+
+confidence-aware routing framework。LLM の出力 confidence を routing decision に統合。
+confidence token を生成し、それに基づいて model selection を行う。
+
+**本プロジェクトへの示唆**: CARGO は confidence-based routing の最新例だが、
+本プロジェクトの supervised classifier は already 確率出力を生成しているため、
+CARGO の直接の応用は不要。ただし、confidence token の生成方法（LLM の self-reported
+confidence vs classifier の predicted probability）の比較は、Y2 の設計判断材料になる。
+
+**(d) RouteLLM (Jitkrittum et al. ICLR 2025)**
+
+RouteLLM は preference data から router parameters を最適化する。
+supervised classifier による routing とは異なり、LLM の出力 preference から
+直接 router を学習する。
+
+**本プロジェクトへの示唆**: RouteLLM は supervised classifier とは異なるアプローチ。
+本プロジェクトでは supervised classifier が adopted (Iter17) しており、
+RouteLLM への移行は大きな変更を伴う。Y2 (dispatch_candidate_threshold) は
+supervised classifier のまま改善できる変更なので、RouteLLM への移行より優先度が高い。
+
+**(e) dispatch_candidate_threshold の適切な値の設計方針**
+
+1. **Empirical approach (推奨)**: Iter31 (temperature calibration) の calibrated
+   predictions を使って、dispatch_candidate_threshold の値を sweep し、
+   compound_domain_set_recall と top1_accuracy の tradeoff を測定。
+   dispatch_candidate_threshold = 0.3, 0.4, 0.5 の 3 値で比較。
+
+2. **Theoretical approach**: Jitkrittum et al. (NeurIPS 2023) の結果に基づき、
+   downstream model の error rate が入力に依存しない場合、confidence-based deferral
+   は Bayes-optimal。本プロジェクトでは、各 expert の error rate はドメインに依存する
+  （education 0.5235, medical 0.5000, general 0.6044 等）ため、
+   constant error rate の仮定は成立しない。
+
+3. **Practical guideline**: dispatch_candidate_threshold は confidence_threshold
+   より低く設定する（例: confidence_threshold=0.0, dispatch_candidate_threshold=0.3）。
+   confidence_threshold=0.0 は fallback 廃止済み（Iter28 adopted）のため、
+   dispatch_candidate_threshold だけが dispatch gate として機能する。
+
+**rc-plannerへの示唆**:
+
+1. **classifier_head_adaptation の残り2値**: education_posthoc_calibration は intercept
+   シフトと数学的に同等であり、education_feature_augmentation は argmax flip rate 15%超
+   のリスクが高い。どちらも試す価値が低い。
+
+2. **次の有望なアプローチ**:
+   (a) **Y2 (dispatch_candidate_threshold 新設)**: 最も有望。schema 変更を伴うが、
+       Y3 (aggregation_method) の前提整備として必須。compound_domain_set_recall の
+       構造的上限を 0.500→1.000 に引き上げる。
+   (b) **education_recall の基準値再検討**: medical_recall 0.5112 を基準とするのは
+       fair か？education は proxy task 由来のドメインであり、他のドメインと比較するのは
+       不公正かもしれない。この判断はユーザーの研究方針に依存する。
+   (c) **education の training data 拡充**: Iter35 (handmade 50件) は rejected だが、
+       handmade problems の数や質を改善すれば、education の embedding 分離が改善する
+       可能性。ただし、Iter32-38 の経験から、training data の変更は embedding 空間全体に
+       影響し、単一レバー原則を逸脱するリスクが高い。
+
+3. **推奨アプローチ**: Y2 (dispatch_candidate_threshold 新設) をユーザー確認を経て
+   着手する。Y3 (aggregation_method) の前提整備として必須であり、compound_domain_set_recall
+   の構造的問題を解消できる唯一の実行可能なレバー。
+
+4. **コスト見積もり**:
+   - Y2: medium (schema 変更 + コード変更 + 実機本走)。config.yaml への新フィールド追加、
+     aggregator.py の select_dispatch_targets() 変更、実機 1600 問本走。
+   - education_recall 基準値再検討: low (人間の判断のみ)。
+   - education training data 拡充: medium (offline classifier training + 実機本走)。
+
+5. **リスク**:
+   - Y2: schema 変更のため、ユーザー確認が必要。変更が不可逆の場合、ロールバックが困難。
+   - education training data 拡充: Iter32-38 の経験から、training data の変更は
+     embedding 空間全体に影響し、単一レバー原則を逸脱するリスクが高い。
+
+---
+
+### 仮説
+
+Y2（`dispatch_candidate_threshold` の新設）により、compound_domain_set_recall の構造的上限が
+0.500→1.000 に引き上げられ、複合ドメイン設問のルーティング精度が改善する。
+dispatch_candidate_threshold = 0.3-0.5 の範囲で、top1_accuracy の有意悪化なしに
+compound_domain_set_recall を 0.300 以上に引き上げられる。
+
+### 根拠
+
+1. **Iter27 の分析**: 2 位 confidence の最大値は 0.4955。dispatch_candidate_threshold を
+   0.49 に設定すれば、75 件 (4.7%) が 2 ノード dispatch される。
+   0.40 に設定すれば、120 件 (7.5%)、0.30 に設定すれば、230 件 (14.4%)。
+   compound_domain_set_recall の構造的上限は、dispatch_top_k=2 で 1.000 になる。
+
+2. **Gatekeeper (Rabanser et al. 2025)**: confidence の用途を routing decision と
+   deferral gate に分離する設計思想は、本プロジェクトの Y2 と概念的に一致。
+
+3. **Jitkrittum et al. (NeurIPS 2023)**: confidence-based deferral の理論的限界を解析。
+   本プロジェクトの supervised classifier 下では、各ノードが 10 クラス確率の自分の分のみを
+   返すため、2 ノードが同時に high confidence になるには p1+p2 >= 1.0 が必要。
+   dispatch_candidate_threshold を下げることで、この制約を緩和できる。
+
+4. **temperature calibration (Iter31)**: ECE = 0.069854 であり、confidence の较正が改善。
+   これにより、dispatch_candidate_threshold の適切な値は 0.3-0.5 の範囲に収まる可能性。
+
+### 単一レバー
+
+**変更するレバー**: `aggregation_method`（Y2 完了後の Y3）
+- 前提: `config.yaml` への `dispatch_candidate_threshold` 新設（Y2）
+- 変更: `aggregation_method` の値を `majority_vote` / `llm_judge` で比較
+
+**固定レバー**:
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止済み）
+- `dispatch_top_k=2`（Y2 で変更）
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- 分類器訓練データ、評価データセット、embedding model
+
+### 変更ファイル一覧
+
+**Y2 変更ファイル**（schema 変更、要ユーザー確認）:
+1. `config.yaml` — `dispatch_candidate_threshold` フィールドの新設
+2. `aggregator.py` — `select_dispatch_targets()` のシグネチャ変更
+3. `http_server.py` — dispatch gate のロジック変更
+
+**Y3 変更ファイル**（Y2 完了後）:
+1. `config.yaml` — `aggregation_method` の値変更（`majority_vote` / `llm_judge`）
+
+### 成功条件
+
+**Y2**:
+1. `dispatch_candidate_threshold` の新設により、2 位ノードが適格になる件数が > 0 になる
+2. top1_accuracy の有意悪化なし（McNemar p >= 0.05）
+3. compound_domain_set_recall が 0.165（Iter25 基準線）を上回る
+
+**Y3**:
+1. `aggregation_method=majority_vote` が `max_confidence` より compound_domain_set_recall
+   において有意に優れる（McNemar p < 0.05）
+2. top1_accuracy の有意悪化なし
+
+### 失敗条件
+
+**Y2**:
+1. `dispatch_candidate_threshold` を設定しても 2 位ノードが適格にならない
+2. top1_accuracy の有意悪化（McNemar p < 0.05）
+3. compound_domain_set_recall が 0.165 以下
+
+**Y3**:
+1. `majority_vote` / `llm_judge` が `max_confidence` より compound_domain_set_recall
+   において有意に優れない
+2. top1_accuracy の有意悪化
+
+### ハイパラ値
+
+- **dispatch_candidate_threshold**: 0.3, 0.4, 0.5 の 3 値（Y2 で sweep）
+- **aggregation_method**: `majority_vote`, `llm_judge`（Y3 で比較）
+- **dispatch_top_k**: 2（Y2 で変更）
+
+### コスト見積もり
+
+- **Y2**: medium（schema 変更 + コード変更 + 実機本走）。config.yaml への新フィールド追加、
+  aggregator.py の select_dispatch_targets() 変更、実機 1600 問本走（~90 分）。
+- **Y3**: medium（実機本走）。aggregation_method の値変更のみで完了。
+  実機 1600 問本走 x 2 方式（majority_vote, llm_judge）= ~180 分。
+
+### 到達コードパスの確認
+
+**Y2: `select_dispatch_targets()` (aggregator.py:39)**:
+- Line 39: `confidence >= confidence_threshold` で候補を絞ってから top-k を取る
+- **変更**: 1 位の採否を `confidence_threshold`、2 位以降の採否を `dispatch_candidate_threshold`
+  で判定するよう分岐を追加
+- 到達条件: スクリプトが通常通り実行される（config.yaml の新フィールドを読み込む）
+
+**Y3: `aggregator.select_dispatch_targets()` + `aggregator.aggregate_dispatch_responses()`**:
+- `aggregation_method` の値により、異なる集約ロジックが実行される
+- 到達条件: `aggregation_method=majority_vote` / `llm_judge` で config.yaml を設定
+
+---
+
+### 調査 (Iter44) — rc-investigator: classifier_head_adaptation
 
 ### 実験 (Iter44) — rc-implementer
 

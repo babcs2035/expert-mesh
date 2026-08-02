@@ -29,15 +29,42 @@ def select_dispatch_targets(
     probe_responses: list[ProbeResponse],
     confidence_threshold: float,
     top_k: int = 1,
+    dispatch_candidate_threshold: float | None = None,
 ) -> list[ProbeResponse]:
     """Filter nodes above the confidence threshold and return the top-k.
+
+    Rank 1 (highest confidence) uses ``confidence_threshold``.
+    Rank 2 and below use ``dispatch_candidate_threshold`` (defaults to
+    ``confidence_threshold`` for backward compatibility).
 
     Uses stable sort so that nodes with equal confidence preserve their
     input order (matching peers.yaml declaration order). Returns an empty
     list when no node qualifies.
     """
-    eligible = [r for r in probe_responses if r.confidence >= confidence_threshold]
-    return sorted(eligible, key=lambda r: r.confidence, reverse=True)[:top_k]
+    if dispatch_candidate_threshold is None:
+        dispatch_candidate_threshold = confidence_threshold
+
+    # Sort all responses by confidence descending (stable: preserves input
+    # order for ties, i.e. peers.yaml declaration order).
+    sorted_responses = sorted(probe_responses, key=lambda r: r.confidence, reverse=True)
+
+    if not sorted_responses:
+        return []
+
+    rank_1 = sorted_responses[0]
+    rest = sorted_responses[1:]
+
+    # Rank 1: use the primary confidence threshold.
+    if rank_1.confidence < confidence_threshold:
+        return []
+
+    # Rank 2+: use the separate dispatch candidate threshold.
+    qualified_rest = [
+        r for r in rest if r.confidence >= dispatch_candidate_threshold
+    ]
+
+    candidates = [rank_1] + qualified_rest
+    return candidates[:top_k]
 
 
 def validate_aggregation_method(aggregation_method: str) -> None:

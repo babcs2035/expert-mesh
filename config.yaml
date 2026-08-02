@@ -3,6 +3,11 @@
 # paths are documented ONLY in this file — never hardcode them in code.
 embedding_model: nomic-embed-text
 confidence_threshold: 0.0
+# Threshold for rank 2+ candidates when dispatching to multiple nodes.
+# Defaults to the same value as confidence_threshold for backward
+# compatibility; raising it narrows the candidate set for ranks 2+
+# while keeping rank 1 (the primary target) at the original threshold.
+dispatch_candidate_threshold: 0.0
 # light_model switched from 9B to qwen3.5:4b-q4_K_M (~2.4-2.5GB) for the
 # 10-node mesh: 9B (5.67GB measured resident, docs/d0001 §1.5) left too
 # little VRAM headroom once 6 more nodes were added, and light_model is

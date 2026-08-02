@@ -62,6 +62,93 @@ def test_select_dispatch_targets_tiebreaks_by_input_order() -> None:
     assert [t.node_id for t in targets] == ["first"]
 
 
+def test_select_dispatch_targets_dispatch_candidate_threshold_higher_filters_rank2() -> None:
+    """When dispatch_candidate_threshold > confidence_threshold, rank 2 is excluded."""
+    responses = [
+        _probe_response("A", 0.9),  # rank 1, above both thresholds
+        _probe_response("B", 0.6),  # rank 2, above confidence_threshold but below dispatch_candidate_threshold
+        _probe_response("C", 0.4),  # rank 3, below both
+    ]
+    targets = select_dispatch_targets(
+        responses,
+        confidence_threshold=0.5,
+        dispatch_candidate_threshold=0.7,
+        top_k=3,
+    )
+    assert [t.node_id for t in targets] == ["A"]
+
+
+def test_select_dispatch_targets_dispatch_candidate_threshold_lower_includes_rank2() -> None:
+    """When dispatch_candidate_threshold < confidence_threshold, rank 2 is included."""
+    responses = [
+        _probe_response("A", 0.9),  # rank 1, above both thresholds
+        _probe_response("B", 0.4),  # rank 2, below confidence_threshold but above dispatch_candidate_threshold
+        _probe_response("C", 0.1),  # rank 3, below dispatch_candidate_threshold
+    ]
+    targets = select_dispatch_targets(
+        responses,
+        confidence_threshold=0.5,
+        dispatch_candidate_threshold=0.2,
+        top_k=3,
+    )
+    assert [t.node_id for t in targets] == ["A", "B"]
+
+
+def test_select_dispatch_targets_dispatch_candidate_threshold_none_uses_confidence() -> None:
+    """When dispatch_candidate_threshold is None (default), use confidence_threshold for all ranks."""
+    responses = [
+        _probe_response("A", 0.9),
+        _probe_response("B", 0.4),
+    ]
+    targets = select_dispatch_targets(
+        responses,
+        confidence_threshold=0.5,
+        dispatch_candidate_threshold=None,
+        top_k=3,
+    )
+    assert [t.node_id for t in targets] == ["A"]
+
+
+def test_select_dispatch_targets_rank1_below_threshold_with_different_thresholds() -> None:
+    """When rank 1 (highest confidence) is below confidence_threshold but rank 2+ qualifies,
+    rank 2+ are included. Note: after sorting by confidence, B (0.9) becomes rank 1 and is
+    included; A (0.3) is rank 2+ and above dispatch_candidate_threshold so also included."""
+    responses = [
+        _probe_response("A", 0.3),  # rank 2+ after sort, above dispatch_candidate_threshold
+        _probe_response("B", 0.9),  # rank 1 after sort, above confidence_threshold
+    ]
+    targets = select_dispatch_targets(
+        responses,
+        confidence_threshold=0.5,
+        dispatch_candidate_threshold=0.2,
+        top_k=3,
+    )
+    # B is rank 1 (highest confidence) so passes confidence_threshold;
+    # A is rank 2+ and above dispatch_candidate_threshold (0.3 >= 0.2).
+    assert [t.node_id for t in targets] == ["B", "A"]
+
+
+def test_select_dispatch_targets_backward_compatible_with_same_threshold() -> None:
+    """When both thresholds are equal, behavior matches the original single-threshold logic."""
+    responses = [
+        _probe_response("A", 0.9),
+        _probe_response("B", 0.6),
+        _probe_response("C", 0.3),
+    ]
+    # New API with same threshold
+    targets_new = select_dispatch_targets(
+        responses,
+        confidence_threshold=0.5,
+        dispatch_candidate_threshold=0.5,
+        top_k=2,
+    )
+    # Old behavior (single threshold)
+    targets_old = [
+        r for r in responses if r.confidence >= 0.5
+    ][:2]
+    assert [t.node_id for t in targets_new] == [t.node_id for t in targets_old]
+
+
 def test_select_best_dispatch_response_returns_none_for_empty_list() -> None:
     """Return None when every /dispatch call failed."""
     assert select_best_dispatch_response([]) is None

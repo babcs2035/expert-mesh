@@ -1,5 +1,29 @@
 # backlog — 人間判断待ち事項 / 自動判断の記録
 
+## B67 [auto-decided 2026-08-02] Iter45: Y2（dispatch_candidate_threshold 新設）の設計確定とユーザー確認待ち
+
+- **状況**: config.yml の全 levers を試し切り済み。`classifier_head_adaptation` の残り2値は実質的に試す価値が低い（`education_posthoc_calibration` は intercept シフトと数学的に同等、`education_feature_augmentation` は argmax flip rate 15%超のリスク）。`aggregation_method` は Y2 が完了するまで試せない。
+- **自動選択**: Y2（`dispatch_candidate_threshold` 新設）を次レバーとして設計確定。`config.yaml` への新フィールド追加 + `aggregator.select_dispatch_targets()` のシグネチャ変更を伴うスキーマ変更のため、ユーザー確認待ち状態とする。
+- **Y2 の設計**:
+  1. `config.yaml` へ `dispatch_candidate_threshold` フィールドを新設（既定値は `confidence_threshold` と同値）
+  2. `aggregator.py:select_dispatch_targets()` に `dispatch_candidate_threshold` パラメータを追加
+  3. rank 1 は `confidence_threshold` で判定、rank 2+ は `dispatch_candidate_threshold` で判定
+  4. `node.py:214` と `run_experiment.py:85` の呼び出し側を変更
+- **Y3 での sweep 値**: `dispatch_candidate_threshold` = 0.3, 0.4, 0.5（Iter27 の分析: 0.3→~230件/14.4%, 0.4→~120件/7.5%, 0.5→~75件/4.7%）
+- **Y3 の主指標**: `compound_domain_set_recall`（現状 0.165。dispatch_top_k=2 で構造的上限 1.000）
+- **変更ファイル**:
+  1. `config.yaml` — `dispatch_candidate_threshold` フィールド追加
+  2. `aggregator.py` — `select_dispatch_targets()` のシグネチャ変更
+  3. `node.py` — 呼び出し側の変更
+  4. `run_experiment.py` — 呼び出し側の変更
+  5. `tests/test_aggregator.py` — 新テスト追加
+- **実装コスト**: 低（~1-2時間）
+- **実行コスト**: Y3 本走 x 3 値 = ~270分
+- **要人間判断**: `config.yaml` への新フィールド追加および関数シグネチャ変更はスキーマ変更。確認を得てから着手。
+- **Label Space Reduction の検討**: rc-investigator は general class の細分化（general→general_tech/general_business/general_humanities）も代替アプローチとして提案。ただしこれは classifier の class 数変更（10→12+）を伴い、config.yaml の node 定義・router.py の GENERAL_DOMAIN 定数・build_dataset.py の _DOMAIN_TASK_MAP 等の変更を必要とするため、スキーマ変更扱い。Y2 完了後に検討する。
+
+---
+
 ## B66 [auto-decided 2026-08-02] Iter44: education_boundary_tuning (intercept_delta=+0.5)
 
 - **自動選択**: 単一レバーを `classifier_head_adaptation=education_boundary_tuning` とする。

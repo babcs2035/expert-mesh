@@ -1,14 +1,14 @@
 {
   "repo": "expert-mesh",
   "iteration": 45,
-  "iteration_name": null,
-  "phase": "investigate",
+  "iteration_name": "代替ルータアプローチの調査とY2下調べ",
+  "phase": "plan",
   "status": "running",
-  "current_lever": null,
+  "current_lever": "Y2_dispatch_candidate_threshold",
   "experiment_deadline": null,
-  "updated_at": 1785642930,
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
+  "updated_at": 1785647905,
+  "iteration_thread_ts": "1785646727.597639",
+  "notion_toggle_created": true,
   "next_iteration_brief": {
     "must_read_first": [
       ".claude/research/journal.md (Iteration 44: educationドメインinterceptシフト(+0.7)によるdecision boundary調整 - adopted)",
