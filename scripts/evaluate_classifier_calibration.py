@@ -69,6 +69,7 @@ async def predict_calibrated_rows(
     dataset: list[dict],
     fine_tuned_embed_model: str | None = None,
     education_logit_bias: float = 0.0,
+    education_threshold: float = 0.0,
 ) -> list[dict]:
     """Recompute (selected_domain, confidence) for every dataset row via the calibrated classifier.
 
@@ -111,6 +112,11 @@ async def predict_calibrated_rows(
                     logits_max = np.max(logits)
                     exp_logits = np.exp(logits - logits_max)
                     probabilities = exp_logits / np.sum(exp_logits)
+            # Apply per-class threshold to education class (lowers decision boundary)
+            if education_threshold > 0.0:
+                edu_idx = classes.index("education") if "education" in classes else -1
+                if edu_idx >= 0:
+                    probabilities[edu_idx] += education_threshold
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             rows.append(
                 {
@@ -135,6 +141,11 @@ async def predict_calibrated_rows(
                     logits_max = np.max(logits)
                     exp_logits = np.exp(logits - logits_max)
                     probabilities = exp_logits / np.sum(exp_logits)
+            # Apply per-class threshold to education class (lowers decision boundary)
+            if education_threshold > 0.0:
+                edu_idx = classes.index("education") if "education" in classes else -1
+                if edu_idx >= 0:
+                    probabilities[edu_idx] += education_threshold
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             rows.append(
                 {
@@ -157,6 +168,7 @@ async def _run(
     output: TextIO,
     fine_tuned_embed_model: str | None = None,
     education_logit_bias: float = 0.0,
+    education_threshold: float = 0.0,
 ) -> None:
     dataset = _read_jsonl(dataset_path)
     classifier = load_domain_classifier(classifier_path)
@@ -165,6 +177,7 @@ async def _run(
         ollama_client, embedding_model, classifier, dataset,
         fine_tuned_embed_model=fine_tuned_embed_model,
         education_logit_bias=education_logit_bias,
+        education_threshold=education_threshold,
     )
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -207,6 +220,12 @@ def main() -> None:
         help="Post-hoc logit bias for education class (applied after predict_proba)",
     )
     parser.add_argument(
+        "--education-threshold",
+        type=float,
+        default=0.0,
+        help="Per-class threshold addition for education class (added to probability before argmax; lowers decision boundary)",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write the calibrated-side JSONL to (default: stdout)",
@@ -224,6 +243,7 @@ def main() -> None:
                 sys.stdout,
                 fine_tuned_embed_model=args.fine_tuned_embed_model,
                 education_logit_bias=args.education_logit_bias,
+                education_threshold=args.education_threshold,
             )
         )
     else:
@@ -238,6 +258,7 @@ def main() -> None:
                     f,
                     fine_tuned_embed_model=args.fine_tuned_embed_model,
                     education_logit_bias=args.education_logit_bias,
+                    education_threshold=args.education_threshold,
                 )
             )
 

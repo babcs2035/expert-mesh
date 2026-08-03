@@ -1,4 +1,35 @@
 
+## B83 [rc-reflector 2026-08-03] Iter54 考察: education_soft_label_distillation 棄却、研究 converging
+
+- **判定**: `棄却`（実験実行せず、converged へ移行）
+- **理由**:
+  1. rc-planner が「実験実行せず converged へ」と推奨（single_lever_compatibility: 低）
+  2. 全 retraining 実験（Iter32-38, Iter40-43）の argmax flip rate は 20-53%
+  3. post-hoc 天井 (education_recall ~0.60) は medical_recall 基準 (0.5112) を既にクリア
+  4. single-lever 原則は研究の中核規約。これを逸脱する実験は行わない
+- **全 levers 試し切り状態**（最終）:
+  - fallback_policy: adopted (完了)
+  - classifier_calibration: 全3値試済み (temperature adopted)
+  - classifier_training_data_composition: 全6値 rejected
+  - class_weight_adjustment: rejected
+  - embedding_adaptation: 全4値 rejected
+  - classifier_head_adaptation: 2 adopted, 1 exhausted, 1 skip (**CLOSED**)
+  - aggregation_method: 全3値試済み (max_confidence adopted)
+- **post-hoc 天井の定量値**:
+  - Iter31: education_recall = 0.4588
+  - Iter44 (+ intercept_delta=+0.7): 0.5588 (+0.1000)
+  - Iter53 (+ threshold=0.05): 0.6000 (+0.0412)
+  - **合計 +0.1412 で education_recall = 0.6000 が post-hoc 天井**
+- **収束判定**: 全 levers を試し切り、post-hoc 天井に到達。**status="converged"**
+- **要人間判断**（3 項目）:
+  1. education_recall 基準値の再定義（medical_recall 0.5112 vs 教育固有基準）
+  2. classifier retraining への移行可否（research_frontier 相当の大規模変更）
+  3. JMMLU 外部の教育固有タスク追加の feasibility
+- **git commit**: （このイテレーションで実施）
+- **state.json**: status="converged", current_lever=null
+
+---
+
 ## B82 [user 2026-08-03] classifier retraining への移行検討結果
 
 - **背景**: Iter53 で全 levers 試し切り完了。post-hoc 手法の天花板（education_recall ~0.60）に到達。
