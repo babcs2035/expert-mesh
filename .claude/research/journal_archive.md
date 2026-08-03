@@ -1,3 +1,100 @@
+## Iteration 47: aggregation_method=max_confidence cleanベースライン取得
+
+### 仮説
+
+`aggregation_method` を `majority_vote` から `max_confidence` に戻すことで、`compound_domain_set_recall` が `majority_vote` 比で低下するが、`top1_accuracy` は同等以上を維持する。`majority_vote` の `compound_domain_set_recall=0.36` が本当に集約方式の効果なのか、それとも `dispatch_top_k=2` + `dispatch_candidate_threshold=0.0` の効果なのかを分離するために、同一条件（`dispatch_top_k=2`, `confidence_threshold=0.0`, `dispatch_candidate_threshold=0.0`, temperature較正, education_intercept_delta=+0.7）で `max_confidence` の clean ベースラインを取得する。
+
+### 単一レバー
+
+**変更するレバー**: `aggregation_method` の値変更
+- `majority_vote`（現行、Iter46） → `max_confidence`（Iter47）
+
+**固定レバー**:
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止）
+- `dispatch_top_k=2`（Iter46 から変更なし）
+- `dispatch_candidate_threshold=0.0`（Iter46 から変更なし）
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- 分類器訓練データ、評価データセット、embedding model
+
+### 変更ファイル一覧
+
+**変更ファイル**:
+1. `config.yaml` — 1箇所変更
+   - line 68: `aggregation_method: majority_vote` → `aggregation_method: max_confidence`
+
+**新規作成ファイル**: なし
+
+### 分類器再訓練の必要性
+
+**必要**。現在 `models/domain_classifier.joblib`（315381 bytes）には Iter44 で adopted された `education_boundary_tuning (intercept_delta=+0.7)` が反映されていない。教育ドメインの intercept は -0.118536（基準線 ~0.0）であり、Iter44 モデル（315429 bytes, education intercept=0.593539）とは異なる。
+
+`train_domain_classifier.py` には intercept_delta=+0.7 がハードコードされているため、`uv run python scripts/train_domain_classifier.py --train-data data/classifier_train.jsonl --embedding-model nomic-embed-text --ollama-host 192.168.15.100 --output models/domain_classifier.joblib` を実行することで +0.7 シフトを適用したモデルが得られる。
+
+### 成功条件
+
+1. **主基準**: `dispatch_top_k=2, aggregation_method=max_confidence, fallback廃止, temperature較正, education_intercept_delta=+0.7` の clean ベースラインが取得できること。
+   - 具体的には `results/iter47_baseline_maxconf_YYYYMMDD_HHMMSS/` 配下に `results.jsonl`（1600行）が生成されること。
+2. **比較可能性**: 取得したベースライン結果を Iter46（`majority_vote, top_k=2`）の結果と対比可能であること。両者は同一の classifier（+0.7 shift 適用）、同一の top_k、同一の threshold 条件で比較される。
+
+### 失敗条件
+
+1. `aggregation_method=max_confidence` のコードパスが到達しない（no-op）。
+2. 分類器再訓練に失敗し、デプロイできない。
+
+### ハイパラ値
+
+- **aggregation_method**: `majority_vote` → `max_confidence`
+- **dispatch_top_k**: 2（変更なし）
+- **confidence_threshold**: 0.0（変更なし）
+- **dispatch_candidate_threshold**: 0.0（変更なし）
+
+### コスト見積もり
+
+- **実装コスト**: 低（~5分）。`config.yaml` の 1 値変更 + 分類器再訓練（~5-10分オフライン）。
+- **実行コスト**: 中（~90-100分）。1600 問の実機本走 x 1 回。
+- **オフライン完結**: いいえ（実機1600問本走が必要）
+
+### 到達コードパスの確認
+
+**`aggregation_method=max_confidence` のコードパス**:
+
+1. **`node.py:195`**: `aggregation_method = config.get("aggregation_method", AGGREGATION_METHOD_MAX_CONFIDENCE)`
+   - 到達条件: `run_ask_flow()` が呼ばれる（`run_experiment.py:49` または `node.py:253`）
+   - **デフォルト値が `max_confidence` であるため、config に誤った値を設定しない限り確実に到達する**。
+
+2. **`node.py:141-143`**: `if aggregation_method == AGGREGATION_METHOD_MAJORITY_VOTE:` の else 節
+   - `max_confidence` は majority_vote 分岐をスキップし、`select_best_dispatch_response()` にフォールバックする。
+   - **発火条件**: `dispatch_top_k >= 2` かつ `dispatch_candidate_threshold` が十分低い（現行設定で満たす）。
+
+**`dispatch_top_k=2` のコードパス**:
+
+3. **`aggregator.py:67`**: `return candidates[:top_k]`
+   - 到達条件: `top_k=2` で設定されていること（config.yaml line 57）。
+   - **発火条件**: 2 位ノードの confidence >= `dispatch_candidate_threshold`（0.0）。常に満たす。
+
+**no-op にならないことの確認**:
+- `dispatch_top_k=2` + `dispatch_candidate_threshold=0.0` の組み合わせにより、2位ノードは必ずqualified（confidence は確率で負にならない）。
+- `aggregation_method=max_confidence` は majority_vote 分岐をスキップするため、`select_best_dispatch_response()` が呼ばれる。
+- **これは Iter27 の失敗（confidence_threshold=0.5 で2位がqualifiedにならなかった）とは異なり、今回の設定では確実に発火する。**
+
+### 固定レバー
+
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止）
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- `dispatch_candidate_threshold=0.0`（Iter46 から変更なし）
+- 分類器訓練データ、評価データセット、embedding model
+- 他9ドメインの訓練データ
+
+### 備考: Iter46 の非対称性について
+
+Iter46 の結果（`majority_vote, top_k=2`）を評価するには、同一の classifier 条件下での `max_confidence` ベースラインが必要。現行 `models/domain_classifier.joblib` には +0.7 intercept shift が適用されていないため、再訓練が必須。これにより、Iter46 と Iter47 の比較は classifier 面でも対称になる。
+
+---
+
 ## Iteration 48: aggregation_method=llm_judgeによる複合ドメイン集約方式比較
 
 ### 仮説

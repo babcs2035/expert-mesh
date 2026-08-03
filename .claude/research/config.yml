@@ -371,7 +371,17 @@ levers:
             **コスト**: 低（オフライン完結、~10-15分）。
             **成功条件**: education_recall > medical_recall基準(0.5112)、
             他9ドメイン18指標のBH補正後有意退行0件、argmax flip rate <15%、
-            top1_accuracy McNemar p>=0.05"}
+            top1_accuracy McNemar p>=0.05
+            [2026-08-03 Iter44 reflector追記] `education_boundary_tuning` (intercept_delta=+0.7)
+            は adopted 済み（education_recall +0.0647, p=0.00185, flip_rate 8.62%）。
+            [2026-08-03 Iter50 reflector追記] `education_posthoc_calibration` は exhausted。
+            logit_bias=+0.3 (Iter49, rejected) と +0.5 (Iter50, rejected) で両方 rejected。
+            logit_bias は intercept shift より構造的に劣る（top1_accuracy 有意悪化 p=0.0014,
+            medical_recall 有意退行 p=0.0133）。
+            [2026-08-03 Iter50 reflector追記] `education_feature_augmentation` は argmax flip rate
+            15-30% のリスクがあり単一レバー原則 (<15%) の危険域。試行せずレバークローズ。
+            **classifier_head_adaptation レバーはクローズ済み**（全3値: 1 adopted, 1 exhausted,
+            1 skip（flip rate risk））。"}
 
   - {name: class_weight_adjustment,
      values: [none_manual_sample_weight],

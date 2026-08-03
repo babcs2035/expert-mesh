@@ -182,6 +182,41 @@
 
 ---
 
+## B74 [auto-decided 2026-08-03] Iter50: education_posthoc_calibration (logit_bias=+0.5) rejected。classifier_head_adaptation レバークローズ。全 levers 試し切り済み、次イテレーションは調査フェーズ
+
+- **状況**: Iter50（education_posthoc_calibration, logit_bias=+0.5）の結果を考察。
+- **判定**: `rejected`（確信度: high）。education_recall 改善 (+0.0588) が McNemar p=0.2751 で有意ではない。top1_accuracy の有意悪化（p=0.0014）と medical_recall の有意退行（p=0.0133）を確認。
+- **決定的な学び**:
+  1. **post-hoc probability manipulation は training-time intercept adjustment より構造的に劣る**: logit_bias は temperature-scaled 確率を一旦 logit へ逆変換した上でのシフト。temperature scaling は logit を圧縮するため、同じ数値の bias でも raw logit 空間での intercept shift より効果が小さくなる。
+  2. **softmax 再正規化の波及効果**: logit_bias は確率分布全体に影響する。education class の確率が上昇すると、他 class の確率が均等に相対的に減少する（softmax の性質）。intercept shift は raw logit 空間での平行移動であり、他 class の相対的な順序は保たれる。このため、logit_bias は全9ドメインが同方向に退行する。
+  3. **学習済み分類器とのミスマッチ**: intercept_delta=+0.7 は分類器の訓練時に intercept をシフトして適用。分類器はシフト後の intercept で最適化された重みを持つ。logit_bias=+0.5 は訓練済み分類器の確率出力に対して post-hoc で適用。分類器は bias 適用前の確率分布を前提に学習しており、bias 適用後の確率分布は学習分布と異なる。
+  4. **dose-response は確認されたが統計的有意性には届かなかった**: +0.3 (0.5588) -> +0.5 (0.5824) で +0.0235 の改善。単調増加は確認されたが、McNemar 検定の検出力では不十分。
+  5. **medical_recall の有意退行は決定打**: McNemar a_only=0, b_only=8。全不整合ペアが悪化方向。post-hoc calibration の構造的帰結。
+- **classifier_head_adaptation レバーの総括**:
+
+  | 値 | イテレーション | education_recall | top1_accuracy | medical_recall | 判定 |
+  |---|---|---|---|---|---|
+  | education_boundary_tuning (intercept_delta=+0.7) | Iter44 | +0.0647 (p=0.00185) | -0.0012 (p=0.8445) | -0.0112 (p=0.1573) | adopted |
+  | education_posthoc_calibration (logit_bias=+0.3) | Iter49 | +0.0353 (p=0.5443) | -0.0125 (p=0.0500) | -0.0337 | rejected |
+  | education_posthoc_calibration (logit_bias=+0.5) | Iter50 | +0.0588 (p=0.2751) | -0.0219 (p=0.0014) | -0.0449 (p=0.0133) | rejected |
+  | education_feature_augmentation | 未試行 | -- | -- | -- | skip（flip rate 15-30% リスク） |
+
+- **config.yml の全 levers を試し切り済み**:
+  - fallback_policy: adopted（完了）
+  - classifier_calibration: 全3値試済み（temperature adopted）
+  - classifier_training_data_composition: 全6値 rejected
+  - class_weight_adjustment: rejected
+  - embedding_adaptation: 全4値 rejected
+  - classifier_head_adaptation: 1 adopted, 1 exhausted, 1 skip（レバークローズ）
+  - aggregation_method: 全3値試済み（max_confidence adopted）
+- **次の一手**: 調査フェーズから開始（`current_lever=null`）。rc-investigator は Tavily-search で以下の観点から調査すること:
+  1. education_recall の根本原因に対する代替アプローチ（embedding freeze + classifier head の新手法）
+  2. education_feature_augmentation の flip rate を正確に計測する手法
+  3. education_recall の基準値再検討の材料（medical_recall 0.5112 が education に対して現実的か）
+- **要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
 このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
 「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 

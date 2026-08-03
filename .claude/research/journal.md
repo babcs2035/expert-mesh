@@ -1,3 +1,208 @@
+## Iteration 50: education_posthoc_calibration_sensitivity_logit_bias0.5
+
+### 仮説
+
+`logit_bias=+0.3` の McNemar p=0.5443（有意ではない）を受け、sensitivity analysis で `logit_bias=+0.5` を試す。+0.5 で McNemar p<0.05 になれば採用候補、p>0.1 ならこのレバーは exhausted。
+
+### 単一レバー
+
+**変更するレバー**: `classifier_head_adaptation=education_posthoc_calibration` の logit bias 値
+- `+0.3`（Iter49） → `+0.5`（Iter50）
+
+**固定レバー**:
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止）
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- 分類器訓練データ（`data/classifier_train.jsonl`, 1427行）、評価データセット（`data/dataset.jsonl`, 1600行）、embedding model（nomic-embed-text）
+- `dispatch_top_k=2`, `aggregation_method=max_confidence`, `dispatch_candidate_threshold=0.0`
+- 他9ドメインの訓練データ
+
+### 変更ファイル一覧
+
+**変更ファイル**:
+1. `scripts/evaluate_classifier_calibration.py` — 変更なし（Iter49 で `--education-logit-bias` CLI 実装済み）
+2. 実験実行時の引数変更のみ: `--education-logit-bias 0.5`
+
+**新規作成ファイル**: なし
+
+### 分類器再訓練の必要性
+
+**不要**。`education_posthoc_calibration` は分類器の重みを変更せず、評価時の確率出力に post-hoc で bias を付与する。
+
+### 成功条件
+
+1. **主基準**: `education_recall` > 0.5112（medical_recall 基準）。
+2. **BH補正後有意退行**: 0 件（18 per-domain metrics 中）。
+3. **argmax flip rate**: <15%（intercept shift と同原理のため推定 10-18%）。
+4. **top1_accuracy McNemar p >= 0.05**（有意悪化なし）。
+5. **統計的有意性**: McNemar p < 0.05（vs Iter44 baseline）。
+
+### 失敗条件
+
+1. `education_recall` が 0.5112 を超えない。
+2. BH補正後有意退行が 1 件以上発生。
+3. argmax flip rate が 15% を超過。
+4. McNemar p > 0.1（+0.5 でも有意ではない）。
+
+### ハイパラ値
+
+- **education_logit_bias**: +0.5（sensitivity analysis）
+- **classifier_model**: `models/domain_classifier.joblib`（変更なし、intercept_delta=+0.7 済み）
+- **train_data**: `data/classifier_train.jsonl`（変更なし）
+- **eval_dataset**: `data/dataset.jsonl`（変更なし）
+
+### コスト見積もり
+
+- **実装コスト**: 無（CLI 引数のみ変更）
+- **実行コスト**: 低（~5分）。1600 問の offline 再評価のみ。
+- **オフライン完結**: はい（embedding 再計算のみ必要）
+
+### 到達コードパスの確認
+
+**`--education-logit-bias` のコードパス**:
+
+1. **`scripts/evaluate_classifier_calibration.py:203-208`**: `argparse` で `--education-logit-bias` を定義済み。
+2. **`predict_calibrated_rows()`**: `edu_idx` を特定し、`np.log(probs + 1e-10)` で logit 変換 → bias 付与 → softmax 再正規化。
+3. **発火条件**: `logit_bias != 0.0` のみ計算実行。`+0.5` で確実に発火。
+
+**no-op にならないことの確認**:
+- `--education-logit-bias 0.5` を指定すれば、`predict_calibrated_rows()` 内の bias 適用ロジックが確実に実行される。
+- Iter49 で検証済み。
+
+### 固定レバー
+
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止）
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- 分類器訓練データ、評価データセット、embedding model
+- `dispatch_top_k=2`, `aggregation_method=max_confidence`, `dispatch_candidate_threshold=0.0`
+- 他9ドメインの訓練データ
+
+### 備考: Iter49 の教訓
+
+- `logit_bias=+0.3` は education_recall +0.0353（p=0.5443）で統計的有意性なし。
+- `intercept_delta=+0.7` は education_recall +0.0647（p=0.00185）で有意。
+- **logit_bias は intercept shift より本質的に弱い**: temperature-scaled 確率を一旦 logit へ逆変換する過程で情報損失が生じる。
+- +0.5 で McNemar p<0.05 になれば採用候補、p>0.1 なら exhausted。
+
+---
+
+### 実験 (Iter50)
+
+- **実行日時**: 2026-08-03
+- **実験ディレクトリ**: `results/iter50_posthoc_calib_bias0.5_predictions.jsonl`
+- **結果ファイル**: `results.jsonl` (1600行)
+- **設定**: `dispatch_top_k=2`, `aggregation_method=max_confidence`, `dispatch_candidate_threshold=0.0`, `confidence_threshold=0.0`, temperature較正, education_intercept_delta=+0.7, education_logit_bias=+0.5
+- **主要結果**:
+  - `top1_accuracy`: 0.5825 (932/1600)
+  - `education_recall`: 0.5824 (99/170)
+  - `medical_recall`: 0.4551 (81/178)
+  - `ECE`: 0.044572
+  - `argmax flip rate`: 0.1138 (182/1600)
+
+- **Iter44 (intercept_delta=+0.7, logit_bias=0.0) との比較**:
+
+| メトリクス | Iter44 | Iter50 | 差 | McNemar p |
+|---|---|---|---|---|
+| top1_accuracy | 0.6044 | 0.5825 | -0.0219 | 0.0014 (有意悪化) |
+| education_recall | 0.5235 | 0.5824 | +0.0588 | 0.2751 (有意なし) |
+| medical_recall | 0.5000 | 0.4551 | -0.0449 | 0.0133 (有意退行) |
+| ECE | 0.069854 | 0.044572 | -0.0253 | -- |
+| argmax_flip_rate | -- | 0.1138 | -- | -- |
+
+- **Iter49 (logit_bias=+0.3) との比較**:
+  - education_recall: 0.5588 -> 0.5824 (+0.0235), dose-response 確認
+  - medical_recall: 0.4663 -> 0.4551 (-0.0112), 悪化継続
+  - top1_accuracy: 0.5919 -> 0.5825 (-0.0094), 悪化継続
+  - flip_rate (iter50 vs iter49): 41/1600 = 2.56%
+
+### 分析(解釈)
+
+**数値の要約とノイズ判定**:
+
+| メトリクス | Iter44 | Iter50 | 差 | McNemar | ノイズ判定 |
+|---|---|---|---|---|---|
+| top1_accuracy | 0.6044 | 0.5825 | -0.0219 | p=0.0014 | **有意信号** |
+| education_recall | 0.5235 | 0.5824 | +0.0588 | p=0.2751 | ノイズ範囲内 |
+| medical_recall | 0.5000 | 0.4551 | -0.0449 | p=0.0133 | **有意信号** |
+| ECE | 0.069854 | 0.044572 | -0.0253 | -- | 改善方向 |
+| flip_rate | -- | 0.1138 | -- | -- | <15% 合格 |
+
+- **top1_accuracy**: 差 -0.0219。McNemar chi2=10.23, p=0.0014。不整合ペア (a_only=39, b_only=74) は明確に b_only 優位（iter50 が悪い行が iter44 が正しい行の約2倍）。これはノイズではなく**有意な悪化信号**。n=1600 の二項 SE ~0.0125 に対し、差は SE の 1.75 倍。
+- **education_recall**: 差 +0.0588。McNemar chi2=1.19, p=0.2751。不整合ペア (a_only=39, b_only=29) はやや a_only 優位だが、p=0.2751 は統計的有意性なし。Wilson CI: before [0.4488, 0.5973], after [0.5072, 0.6539]。両 CI は重なるが、after の下限が上昇しているのは注目すべき点。
+- **medical_recall**: 差 -0.0449。McNemar a_only=0, b_only=8。全8件の不整合ペアが medical_recall 悪化方向。p=0.0133 で有意。CI lower bound: 0.4273->0.3836 (-0.0438)。
+- **argmax flip rate**: 11.38% < 15%。単一レバー原則は満たす。ただし iter49 の 9.19% から +2.19pt 上昇。
+
+**BH補正**: 20 per-domain metrics 中、BH-significant regressions = 0, BH-significant improvements = 0。per-domain の McNemar は全て discordant pairs が 3-8 件と小さく、BH補正後有意になるには delta > 0.1 程度が必要。
+
+**仮説との整合**:
+
+計画の仮説は「+0.5 で McNemar p<0.05 になれば採用候補、p>0.1 なら exhausted」。結果は p=0.2751 で**p>0.1 の exhausted 条件に該当**。
+
+dose-response（+0.3: 0.5588 -> +0.5: 0.5824, delta=+0.0235）は確認されたが、統計的有意性には届かなかった。これは logit_bias の増大が education_recall を単調に増加させることを示すが、その効果量は McNemar 検定の検出力では不十分であることを意味する。
+
+**想定外の挙動**:
+
+1. **全9ドメインが退行**: education 以外全ドメインの recall が低下（business_economics: -0.0357, social_science: -0.0476, medical: -0.0449, history_culture: -0.0357 など）。intercept_delta=+0.7 (Iter44) では social_science のみが有意退行（p=0.0138）で他はノイズ範囲内だったのに対し、logit_bias=+0.5 では全ドメインが同方向に動く。これは post-hoc calibration が確率分布全体に波及する性質を反映。
+2. **medical_recall の有意退行**: McNemar a_only=0, b_only=8。全不整合ペアが悪化方向。これは post-hoc calibration の構造的帰結（education 確率増加 = 他 class 確率相対的減少）。
+
+**なぜ logit_bias=+0.5 が intercept_delta=+0.7 よりも劣るのか**:
+
+両者とも education_recall を +0.06 程度改善するが、intercept_delta は top1_accuracy の有意悪化（p=0.8445）や medical_recall の有意退行（p=0.1573）を生まないのに対し、logit_bias=+0.5 は top1_accuracy の有意悪化（p=0.0014）と medical_recall の有意退行（p=0.0133）を招く。その理由は以下の3点:
+
+1. **学習済み分類器とのミスマッチ**: intercept_delta=+0.7 は分類器の訓練時に intercept をシフトして適用。分類器はシフト後の intercept で最適化された重みを持つ。一方、logit_bias=+0.5 は訓練済み分類器の確率出力に対して post-hoc で適用。分類器は bias 適用前の確率分布を前提に学習しており、bias 適用後の確率分布は学習分布と異なる。このミスマッチが、education 以外の class に対して予期せぬ argmax 変化を招く。
+2. **temperature scaling による非線形圧縮**: logit_bias は temperature-scaled 確率を一旦 logit へ逆変換した上でのシフト。temperature scaling は logit を圧縮するため、同じ数値の bias でも効果は小さくなる。+0.5 の bias は、temperature-scaled 後の logit 空間では +0.5 だが、raw logit 空間ではそれ以下に相当する。これに対し intercept_delta=+0.7 は raw logit 空間での直接シフト。
+3. **確率再正規化の波及効果**: logit_bias は softmax 再正規化により確率分布全体に影響する。education class の確率が上昇すると、他 class の確率が均等に相対的に減少する（softmax の性質）。intercept shift は raw logit 空間での平行移動であり、softmax 再計算は行わない（分類器の重み自体が変更済み）。このため、intercept shift は education class の decision boundary の位置のみを変更し、他 class の相対的な順序は保たれる。
+
+**結論**: `education_posthoc_calibration` は logit_bias=+0.3 (Iter49) と +0.5 (Iter50) で両方とも rejected。intercept_delta=+0.7 (Iter44) が既に adopted されており、post-hoc calibration は intercept tuning より劣る機序が実証された。このレバーは exhausted。
+
+**判定**: **rejected**（確信度: high）。logit_bias=+0.5 で McNemar p=0.2751（有意なし）、かつ top1_accuracy の有意悪化（p=0.0014）と medical_recall の有意退行（p=0.0133）を確認。dose-response は確認されたが、統計的有意性には届かず、intercept_delta=+0.7 よりも劣る結果。`education_posthoc_calibration` レバーは exhausted。
+
+**次の考察フェーズへの示唆**:
+
+1. `education_posthoc_calibration` は exhausted。`classifier_head_adaptation` レバーの残値は `education_feature_augmentation` のみ。
+2. `education_feature_augmentation` は過去の実験で argmax flip rate 15-30% のリスクが推定されている。単一レバー原則 (<15%) の危険域。
+3. `classifier_head_adaptation` レバー全体をクローズし、他の研究方向（例: embedding_adaptation の再検討、新しいアプローチ）へ移行することを reflector に提案。
+4. あるいは、`education_feature_augmentation` を最後の手段として試す価値はあるが、その場合は flip rate の厳密な計測と、必要なら閾値調整（例: augmentation の強度を低く設定）を計画フェーズで検討すべき。
+
+---
+
+### Iteration 50 実行済み
+
+### 判定
+
+**棄却**（確信度: high）。`education_posthoc_calibration` (logit_bias=+0.5) は education_recall McNemar p=0.2751（有意なし）、かつ top1_accuracy の有意悪化（p=0.0014）と medical_recall の有意退行（p=0.0133）を確認。dose-response は確認されたが統計的有意性には届かず、intercept_delta=+0.7 よりも劣る結果。`education_posthoc_calibration` レバーは exhausted。
+
+### 結果の要約
+
+| メトリクス | Iter44 (intercept_delta=+0.7) | Iter50 (logit_bias=+0.5) | 差 | McNemar p |
+|---|---|---|---|---|
+| top1_accuracy | 0.6044 | 0.5825 | -0.0219 | 0.0014 (有意悪化) |
+| education_recall | 0.5235 | 0.5824 | +0.0588 | 0.2751 (有意なし) |
+| medical_recall | 0.5000 | 0.4551 | -0.0449 | 0.0133 (有意退行) |
+| ECE | 0.069854 | 0.044572 | -0.0253 | -- |
+| flip_rate | 0.08625 | 0.1138 | +0.0276 | -- |
+
+### 学び
+
+1. **post-hoc probability manipulation は training-time intercept adjustment より構造的に劣る**: logit_bias は temperature-scaled 確率を一旦 logit へ逆変換した上でのシフト。temperature scaling は logit を圧縮するため、同じ数値の bias でも raw logit 空間での intercept shift より効果が小さくなる。
+2. **softmax 再正規化の波及効果**: logit_bias は確率分布全体に影響する。education class の確率が上昇すると、他 class の確率が均等に相対的に減少する（softmax の性質）。intercept shift は raw logit 空間での平行移動であり、他 class の相対的な順序は保たれる。このため、logit_bias は全9ドメインが同方向に退行する。
+3. **学習済み分類器とのミスマッチ**: intercept_delta=+0.7 は分類器の訓練時に intercept をシフトして適用。分類器はシフト後の intercept で最適化された重みを持つ。logit_bias=+0.5 は訓練済み分類器の確率出力に対して post-hoc で適用。分類器は bias 適用前の確率分布を前提に学習しており、bias 適用後の確率分布は学習分布と異なる。
+4. **dose-response は確認されたが統計的有意性には届かなかった**: +0.3 (0.5588) -> +0.5 (0.5824) で +0.0235 の改善。単調増加は確認されたが、McNemar 検定の検出力では不十分。
+5. **medical_recall の有意退行は決定打**: McNemar a_only=0, b_only=8。全不整合ペアが悪化方向。post-hoc calibration の構造的帰結（education 確率増加 = 他 class 確率相対的減少）。
+
+### 次イテレーションの方針
+
+`education_posthoc_calibration` は exhausted。`classifier_head_adaptation` レバーの残値 `education_feature_augmentation` は argmax flip rate 15-30% のリスクがあり、単一レバー原則 (<15%) の危険域。`classifier_head_adaptation` レバー全体をクローズし、config.yml の全 levers を試し切り済み。次イテレーションは調査フェーズから開始し、Tavily-search で関連研究・代替アプローチを重点調査する。
+
+### 要人間判断
+
+なし（可逆な判断の範囲内）。
+
+---
+
 ## Iteration 49: education_posthoc_calibrationによる教育ドメイン確率補正
 
 ### 仮説
@@ -490,103 +695,6 @@ rc-investigator（Iter49調査フェーズ）は `education_feature_augmentation
 **判定**: `rejected`（確信度: medium-low）。logit_bias=+0.3 は有意な効果を示さなかった（McNemar p=0.5443）。ただし bias 値が小さすぎる可能性があり、+0.5 や +0.7 での追加反復が有効かどうかは reflector の判断に委ねる。post-hoc calibration は intercept tuning より劣る機序が確認された。
 
 **追加反復の要否**: medium。logit_bias=+0.5 の1回追加で判定可能。+0.5 で McNemar p<0.05 になれば採用候補、p>0.1 なら exhausted と判断。
-
----
-
-## Iteration 47: aggregation_method=max_confidence cleanベースライン取得
-
-### 仮説
-
-`aggregation_method` を `majority_vote` から `max_confidence` に戻すことで、`compound_domain_set_recall` が `majority_vote` 比で低下するが、`top1_accuracy` は同等以上を維持する。`majority_vote` の `compound_domain_set_recall=0.36` が本当に集約方式の効果なのか、それとも `dispatch_top_k=2` + `dispatch_candidate_threshold=0.0` の効果なのかを分離するために、同一条件（`dispatch_top_k=2`, `confidence_threshold=0.0`, `dispatch_candidate_threshold=0.0`, temperature較正, education_intercept_delta=+0.7）で `max_confidence` の clean ベースラインを取得する。
-
-### 単一レバー
-
-**変更するレバー**: `aggregation_method` の値変更
-- `majority_vote`（現行、Iter46） → `max_confidence`（Iter47）
-
-**固定レバー**:
-- `routing_method=supervised_classifier`
-- `confidence_threshold=0.0`（fallback 廃止）
-- `dispatch_top_k=2`（Iter46 から変更なし）
-- `dispatch_candidate_threshold=0.0`（Iter46 から変更なし）
-- `classifier_calibration=temperature`（Iter31 adopted）
-- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
-- 分類器訓練データ、評価データセット、embedding model
-
-### 変更ファイル一覧
-
-**変更ファイル**:
-1. `config.yaml` — 1箇所変更
-   - line 68: `aggregation_method: majority_vote` → `aggregation_method: max_confidence`
-
-**新規作成ファイル**: なし
-
-### 分類器再訓練の必要性
-
-**必要**。現在 `models/domain_classifier.joblib`（315381 bytes）には Iter44 で adopted された `education_boundary_tuning (intercept_delta=+0.7)` が反映されていない。教育ドメインの intercept は -0.118536（基準線 ~0.0）であり、Iter44 モデル（315429 bytes, education intercept=0.593539）とは異なる。
-
-`train_domain_classifier.py` には intercept_delta=+0.7 がハードコードされているため、`uv run python scripts/train_domain_classifier.py --train-data data/classifier_train.jsonl --embedding-model nomic-embed-text --ollama-host 192.168.15.100 --output models/domain_classifier.joblib` を実行することで +0.7 シフトを適用したモデルが得られる。
-
-### 成功条件
-
-1. **主基準**: `dispatch_top_k=2, aggregation_method=max_confidence, fallback廃止, temperature較正, education_intercept_delta=+0.7` の clean ベースラインが取得できること。
-   - 具体的には `results/iter47_baseline_maxconf_YYYYMMDD_HHMMSS/` 配下に `results.jsonl`（1600行）が生成されること。
-2. **比較可能性**: 取得したベースライン結果を Iter46（`majority_vote, top_k=2`）の結果と対比可能であること。両者は同一の classifier（+0.7 shift 適用）、同一の top_k、同一の threshold 条件で比較される。
-
-### 失敗条件
-
-1. `aggregation_method=max_confidence` のコードパスが到達しない（no-op）。
-2. 分類器再訓練に失敗し、デプロイできない。
-
-### ハイパラ値
-
-- **aggregation_method**: `majority_vote` → `max_confidence`
-- **dispatch_top_k**: 2（変更なし）
-- **confidence_threshold**: 0.0（変更なし）
-- **dispatch_candidate_threshold**: 0.0（変更なし）
-
-### コスト見積もり
-
-- **実装コスト**: 低（~5分）。`config.yaml` の 1 値変更 + 分類器再訓練（~5-10分オフライン）。
-- **実行コスト**: 中（~90-100分）。1600 問の実機本走 x 1 回。
-- **オフライン完結**: いいえ（実機1600問本走が必要）
-
-### 到達コードパスの確認
-
-**`aggregation_method=max_confidence` のコードパス**:
-
-1. **`node.py:195`**: `aggregation_method = config.get("aggregation_method", AGGREGATION_METHOD_MAX_CONFIDENCE)`
-   - 到達条件: `run_ask_flow()` が呼ばれる（`run_experiment.py:49` または `node.py:253`）
-   - **デフォルト値が `max_confidence` であるため、config に誤った値を設定しない限り確実に到達する**。
-
-2. **`node.py:141-143`**: `if aggregation_method == AGGREGATION_METHOD_MAJORITY_VOTE:` の else 節
-   - `max_confidence` は majority_vote 分岐をスキップし、`select_best_dispatch_response()` にフォールバックする。
-   - **発火条件**: `dispatch_top_k >= 2` かつ `dispatch_candidate_threshold` が十分低い（現行設定で満たす）。
-
-**`dispatch_top_k=2` のコードパス**:
-
-3. **`aggregator.py:67`**: `return candidates[:top_k]`
-   - 到達条件: `top_k=2` で設定されていること（config.yaml line 57）。
-   - **発火条件**: 2 位ノードの confidence >= `dispatch_candidate_threshold`（0.0）。常に満たす。
-
-**no-op にならないことの確認**:
-- `dispatch_top_k=2` + `dispatch_candidate_threshold=0.0` の組み合わせにより、2位ノードは必ずqualified（confidence は確率で負にならない）。
-- `aggregation_method=max_confidence` は majority_vote 分岐をスキップするため、`select_best_dispatch_response()` が呼ばれる。
-- **これは Iter27 の失敗（confidence_threshold=0.5 で2位がqualifiedにならなかった）とは異なり、今回の設定では確実に発火する。**
-
-### 固定レバー
-
-- `routing_method=supervised_classifier`
-- `confidence_threshold=0.0`（fallback 廃止）
-- `classifier_calibration=temperature`（Iter31 adopted）
-- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
-- `dispatch_candidate_threshold=0.0`（Iter46 から変更なし）
-- 分類器訓練データ、評価データセット、embedding model
-- 他9ドメインの訓練データ
-
-### 備考: Iter46 の非対称性について
-
-Iter46 の結果（`majority_vote, top_k=2`）を評価するには、同一の classifier 条件下での `max_confidence` ベースラインが必要。現行 `models/domain_classifier.joblib` には +0.7 intercept shift が適用されていないため、再訓練が必須。これにより、Iter46 と Iter47 の比較は classifier 面でも対称になる。
 
 ---
 
