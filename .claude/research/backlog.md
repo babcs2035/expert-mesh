@@ -1,3 +1,28 @@
+
+## B73 [auto-decided 2026-08-03] Iter50: education_posthoc_calibration (logit_bias=+0.5) rejected。classifier_head_adaptation レバークローズ。全 levers 試し切り完了
+
+- **状況**: Iter50（logit_bias=+0.5）の結果を考察。education_recall 0.5824（+0.0588 vs Iter44）だが McNemar p=0.2751（有意でない）。top1_accuracy 有意悪化（p=0.0014）、medical_recall 有意退行（p=0.0133）。
+- **判定**: `rejected`（確信度: high）。
+- **dose-response 確認**: +0.3→+0.5 で +0.0235 改善（方向性は正しいが有意性不足）。
+- **intercept_delta=+0.7 の優位性確定**: 同程度の education_recall 改善（+0.0647）を有意に達成（p=0.00185）。top1_accuracy 変化なし（p=0.8445）、medical_recall 退行なし（p=0.1573）。
+- **`classifier_head_adaptation` レバークローズ確定**:
+  - education_boundary_tuning (intercept_delta=+0.7): **adopted** (Iter44)
+  - education_posthoc_calibration (logit_bias=+0.3, +0.5): **exhausted** (Iter49/50)
+  - education_feature_augmentation: **skip**（argmax flip rate 15-30% のリスク）
+- **全 levers 試し切り完了**:
+  - fallback_policy: adopted (完了)
+  - classifier_calibration: 全3値試済み (temperature adopted)
+  - classifier_training_data_composition: 全6値 rejected
+  - class_weight_adjustment: rejected
+  - embedding_adaptation: 全4値 rejected
+  - classifier_head_adaptation: 1 adopted, 1 exhausted, 1 skip (クローズ)
+  - aggregation_method: 全3値試済み (max_confidence adopted)
+- **次イテレーション（Iter51）の方針**: **調査フェーズから開始**（`current_lever=null`）。rc-investigator は Tavily-search で以下の観点から調査:
+  1. education_recall の根本原因に対する代替アプローチ
+  2. education_feature_augmentation の正確な flip rate 計測
+  3. education_recall 基準値再検討の材料
+- **要人間判断**: なし（可逆な判断の範囲内）。
+
 # backlog — 人間判断待ち事項 / 自動判断の記録
 
 ## B73 [auto-decided 2026-08-03] Iter49: education_posthoc_calibration (logit_bias=+0.3) rejected。次イテレーションは logit_bias=+0.5 で sensitivity analysis

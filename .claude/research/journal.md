@@ -1,3 +1,47 @@
+### 考察 (Iter50)
+
+**判定**: `rejected`（確信度: high）
+
+**総括**:
+1. `logit_bias=+0.5` で education_recall 0.5235→0.5824 (+0.0588) だが McNemar p=0.2751（有意でない）。
+2. **top1_accuracy 有意悪化**: p=0.0014（discordant 39 vs 74）。
+3. **medical_recall 有意退行**: p=0.0133（discordant a_only=0, b_only=8）。
+4. **dose-response 確認**: +0.3→+0.5 で +0.0235 改善（方向性は正しいが有意性不足）。
+5. **intercept_delta=+0.7 の優位性確定**: 同程度の education_recall 改善（+0.0647）を有意に達成（p=0.00185）。top1_accuracy 変化なし（p=0.8445）、medical_recall 退行なし（p=0.1573）。
+
+**学び**:
+1. **post-hoc probability manipulation は training-time intercept adjustment より構造的に劣る**: logit_bias は temperature-scaled 確率を一旦 logit へ逆変換した上でのシフト。temperature scaling は logit を圧縮するため、同じ数値の bias でも raw logit 空間での intercept shift より効果が小さくなる。
+2. **softmax 再正規化の波及効果**: logit_bias は確率分布全体に影響する。education class の確率が上昇すると、他 class の確率が均等に相対的に減少する。intercept shift は raw logit 空間での平行移動であり、他 class の相対的な順序は保たれる。
+3. **学習済み分類器とのミスマッチ**: intercept_delta=+0.7 は分類器の訓練時に intercept をシフトして適用。logit_bias=+0.5 は訓練済み分類器の確率出力に対して post-hoc で適用。分類器は bias 適用前の確率分布を前提に学習しており、bias 適用後の確率分布は学習分布と異なる。
+
+**レバー状況**:
+- `education_boundary_tuning` (intercept_delta=+0.7): **adopted** (Iter44)
+- `education_posthoc_calibration` (logit_bias=+0.3, +0.5): **exhausted** (Iter49/50)
+- `education_feature_augmentation`: **skip**（argmax flip rate 15-30% のリスク）
+- **`classifier_head_adaptation` レバークローズ確定**
+
+**全 levers 試し切り状態**:
+| レバー | 状況 |
+|---|---|
+| fallback_policy | adopted (完了) |
+| classifier_calibration | 全3値試済み (temperature adopted) |
+| classifier_training_data_composition | 全6値 rejected |
+| class_weight_adjustment | rejected |
+| embedding_adaptation | 全4値 rejected |
+| classifier_head_adaptation | 1 adopted, 1 exhausted, 1 skip (クローズ) |
+| aggregation_method | 全3値試済み (max_confidence adopted) |
+
+**全 levers を試し切り済み**。
+
+**次イテレーションの方針**: **調査フェーズから開始**（`current_lever=null`）。rc-investigator は Tavily-search で以下の観点から調査:
+1. education_recall の根本原因に対する代替アプローチ
+2. education_feature_augmentation の正確な flip rate 計測
+3. education_recall 基準値再検討の材料
+
+**要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
 ## Iteration 50: education_posthoc_calibration_sensitivity_logit_bias0.5
 
 ### 仮説
