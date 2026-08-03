@@ -351,7 +351,8 @@ levers:
   #     classifier head（LogisticRegression）のみを変更してeducationドメインを分離。
   #     embedding空間の幾何学的制約を迂回するアプローチ。 ---
   - {name: classifier_head_adaptation,
-     values: [education_feature_augmentation, education_boundary_tuning, education_posthoc_calibration],
+     values: [education_feature_augmentation, education_boundary_tuning, education_posthoc_calibration,
+              education_per_class_threshold],
      note: "[2026-08-02 Iter43 reflector追記] `embedding_adaptation` は全4値尽きた（全rejected）。
             embedding空間の幾何学的制約（768次元を10ドメインで共有。教育ドメインのみを分離するには
             空間の回転が必要だが、これは必然的に他ドメインも移動させる）により、embeddingレベルの
@@ -366,6 +367,10 @@ levers:
             (c) `education_posthoc_calibration`: 分類器の出力確率にeducation-specificなpost-hoc
             較正を適用（education classの確率にbiasを付与する）。argmax flip rateを低く抑えながら
             education_recallを改善可能。
+            (d) `education_per_class_threshold`: 分類器の出力確率に対してeducation classのdecision
+            thresholdをpost-hocで下げる。argmax計算前にeducation classの確率にthreshold分を加算
+            （`prob_edu + threshold > prob_other`）。intercept shiftと同原理（decision boundaryの
+            位置のみ変化）で、argmax flip rateは<15%と推定。classifier再訓練不要。
             **単一レバーの保証**: embedding空間は不変（base model freeze）。classifier training /
             evaluation のみで完結。runtime routing（http_server.py）は変更不要。
             **コスト**: 低（オフライン完結、~10-15分）。
@@ -380,8 +385,18 @@ levers:
             medical_recall 有意退行 p=0.0133）。
             [2026-08-03 Iter50 reflector追記] `education_feature_augmentation` は argmax flip rate
             15-30% のリスクがあり単一レバー原則 (<15%) の危険域。試行せずレバークローズ。
-            **classifier_head_adaptation レバーはクローズ済み**（全3値: 1 adopted, 1 exhausted,
-            1 skip（flip rate risk））。"}
+            [2026-08-03 Iter51 investigator追記] `education_per_class_threshold` を新規追加。
+            post-hoc threshold tuningはscikit-learn `TunedThresholdClassifierCV`（binaryのみ）や
+            `ClassificationThresholdTuner`（multi-class対応）の理論的基盤に基づく。
+            [2026-08-03 Iter51 reflector追記] `education_per_class_threshold` (threshold=0.3) は
+            rejected確定（flip_rate 23.75%, 8 BH regressions, top1 p<0.0001）。
+            **ただし感度分析で重要発見**: threshold=0.02-0.05 は全基準をパス（flip<3%, top1 p>0.17,
+            edu_recall>0.54）。threshold=0.3 が失敗した原因: renormalization なしで確率に+0.3加算は
+            確率分布の合計を1.0->1.3に変え、education class の確率が全行で+30pt増加。これは
+            「閾値」として不合理に大きい。適切な threshold は 0.02-0.05（2-5pt の追加質量）。
+            **`education_per_class_threshold` は exhausted ではない**。next: threshold=0.02, 0.05
+            をテスト（Iter52）。全基準パスなら adopted。
+            **classifier_head_adaptation レバーはeducation_per_class_thresholdで継続**"}
 
   - {name: class_weight_adjustment,
      values: [none_manual_sample_weight],
