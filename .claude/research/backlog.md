@@ -1,4 +1,38 @@
 
+## B82 [user 2026-08-03] classifier retraining への移行検討結果
+
+- **背景**: Iter53 で全 levers 試し切り完了。post-hoc 手法の天花板（education_recall ~0.60）に到達。
+  天花板突破には decision boundary の回転（classifier retraining）が必要。
+- **検討結果**:
+  1. **post-hoc 天花板の数学的確定**: intercept shift (+0.7) + threshold addition (0.05) で
+     education_recall ~0.60 が到達可能。これは boundary の**平行移動**のみで、方向は変えない。
+     boundary を越えない教育質問の誤分類は解消できない。
+  2. **既知のアプローチ全試行済み**:
+     - classifier_training_data_composition（6 値）: 全 rejected（sample_weight, resampling, handmade,
+       japanese_civics 置換/再割当/hybrid）。handmade 50 件追加で recall が -0.0471 悪化（埋め込み空間競合）。
+     - embedding_adaptation（4 値）: 全 rejected（SetFit full FT 52.56% flip, LoRA r=16/r=8 35.88% flip,
+       Dense projection head 42.00% flip）。embedding freeze の下では boundary 回転不可能。
+  3. **retraining が難しい理由**:
+     - 単一レバー原則 (<15% flip) と retraining は理論的に両立困難（retraining = boundary shift）
+     - embedding model（nomic-embed-text）は freeze 必須。embedding space を回転できない限り限界。
+     - japanese_civics（150 件）は eval ターゲットサイズと同一。訓練データに含めると label leakage。
+  4. **検討すべきアプローチ**:
+     - **A: 教育固有訓練データ追加**: handmade 50→200-300 件増強。リスク：Iter35 で 50 件追加で recall
+       悪化。200 件で同様の競合が起きるか？flip_rate 15% 超のリスク高い。
+     - **B: 訓練データ構成の根本変更**: japanese_civics + 旧 proxy tasks の hybrid（Iter38 で 0.4000 悪化）。
+     - **C: feature engineering**: embedding に education-aware features 追加。flip_rate 15-30% のリスク。
+     - **D: 別 embedding model への切り替え**: research_frontier 相当の大規模変更。
+- **推奨**:
+  1. **retraining 移行の条件**: (a) embedding model は freeze（nomic-embed-text 維持）(b) training data の
+     変更のみ（build_dataset.py, prepare_lora_training_data.py の変更）(c) flip_rate <15% を厳密に検証
+     (d) human judgment による承認
+  2. **次の一手**: Iter54+ で `classifier_training_data_composition` の新しい値を計画。重点調査：
+     より高品質な education training data の設計（handmade 問題の増強、または新しい proxy task 探索）。
+  3. **要人間判断**: (1) retraining 承認（training data 変更は decision boundary の移動を伴う）
+     (2) flip_rate 許容範囲の定義（<15% 厳守か <20% まで許容か）(3) education_recall 基準値の再定義
+- **git commit**: （未コミット）
+- **state.json**: status="converged" → "running" へ変更、phase="investigate" へ変更、iteration=54
+
 ## B81 [rc-reflector 2026-08-03] Iter53 考察: 全levers試し切り完了、研究収束判定
 
 - **判定**: `converged`（確定）。全 levers を試し切り完了。post-hoc 手法の天花板（education_recall ~0.60）に到達。

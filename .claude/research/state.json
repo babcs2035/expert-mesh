@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 53,
-  "iteration_name": "per_class_threshold_optimizationの正式採用(threshold=0.05)",
-  "phase": "reflect",
-  "status": "converged",
-  "updated_at": 1785759000,
+  "iteration": 54,
+  "iteration_name": null,
+  "phase": "investigate",
+  "status": "running",
+  "updated_at": 1785759600,
   "current_lever": null,
   "experiment_deadline": null,
   "experiment_dir": null,
-  "iteration_thread_ts": "1785752331.032489",
-  "notion_toggle_created": true,
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
   "e49_results": {
     "lever": "classifier_head_adaptation=education_posthoc_calibration (logit_bias=+0.3)",
     "top1_accuracy_before": 0.6044,
@@ -1684,7 +1684,7 @@
       "p_value": 0.1797
     },
     "education_recall_before": 0.5588,
-    "education_recall_after": 0.6000,
+    "education_recall_after": 0.6,
     "education_recall_diff": 0.0412,
     "education_recall_mcnemar": {
       "a_only": 0,
@@ -1713,12 +1713,24 @@
     "bh_significant_improvements_details": [],
     "per_domain_recall_ci": {
       "education": {
-        "before": [0.4837, 0.6313],
-        "after": [0.5249, 0.6706]
+        "before": [
+          0.4837,
+          0.6313
+        ],
+        "after": [
+          0.5249,
+          0.6706
+        ]
       },
       "medical": {
-        "before": [0.4549, 0.6001],
-        "after": [0.4328, 0.5782]
+        "before": [
+          0.4549,
+          0.6001
+        ],
+        "after": [
+          0.4328,
+          0.5782
+        ]
       }
     },
     "per_domain_recall_ci_lower_drop": [],

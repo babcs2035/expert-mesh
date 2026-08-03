@@ -365,6 +365,53 @@ post-hoc 手法の天花板（education_recall ~0.60）を突破するには **c
 
 3. **JMMLU 外部の教育固有タスク追加の feasibility**: japanese_civics が唯一の候補だが label leakage リスクが高い（Iter37 で確認）。JMMLU 外部の日本語教育実務固有の 4 択タスクの探索と、label leakage 回避策の検討。
 
+### classifier retraining への移行検討（2026-08-03）
+
+**背景**: post-hoc 天花板（education_recall ~0.60）の突破には decision boundary の回転が必要。retraining を検討。
+
+**post-hoc 天花板の数学的確定**:
+- intercept shift (+0.7) + threshold addition (0.05) で education_recall ~0.60 が到達可能
+- これは boundary の**平行移動**のみで、方向は変えない。boundary を越えない教育質問の誤分類は解消できない
+- 天花板突破には **classifier retraining（decision boundary の回転）** が必須
+
+**既知のアプローチ全試行済み**:
+- **classifier_training_data_composition**（6 値、全 rejected）:
+  - Iter32: sample_weight → 0.4412（悪化、sklearn の class_weight 結合バグ）
+  - Iter33: resampling 案 C（70/40/40）→ 0.4412
+  - Iter34: resampling 案 A（90/30/30）→ 0.4353
+  - Iter35: handmade 50 件追加 → 0.4118（悪化、埋め込み空間競合）
+  - Iter36: japanese_civics 置換 → 0.0529（崩壊、train/eval 不一致）
+  - Iter37: japanese_civics 再割当 → invalid（label leakage）
+  - Iter38: hybrid approach → 0.4000（japanese_civics 追加が recall を悪化）
+- **embedding_adaptation**（4 値、全 rejected）:
+  - Iter40: SetFit full FT → flip_rate 52.56%
+  - Iter41: LoRA r=16 → flip_rate 35.88%
+  - Iter42: LoRA r=8 → flip_rate 35.88%（r=16 と同一、intrinsic dimensionality <=8）
+  - Iter43: Dense projection head → flip_rate 42.00%
+
+**retraining が難しい理由**:
+1. **単一レバー原則との両立が困難**: retraining = training data 変更 = boundary shift。argmax flip rate <15% を保証できない
+2. **埋め込み空間の制約**: embedding model（nomic-embed-text）は freeze 必須。embedding space を回転させられない限り限界
+3. **label leakage リスク**: japanese_civics（150 件）は eval ターゲットサイズと同一。訓練データに含めると label leakage
+
+**検討すべきアプローチ**:
+- **A: 教育固有訓練データ追加（大規模）**: handmade 50→200-300 件増強。リスク：Iter35 で 50 件追加で recall 悪化。200 件で同様の競合が起きるか？flip_rate 15% 超のリスク高い
+- **B: 訓練データ構成の根本変更**: japanese_civics + 旧 proxy tasks の hybrid（Iter38 で 0.4000 悪化）
+- **C: feature engineering**: embedding に education-aware features 追加。flip_rate 15-30% のリスク（過去推定）
+- **D: 別 embedding model への切り替え**: research_frontier 相当の大規模変更
+
+**推奨**:
+1. **retraining 移行の条件**:
+   - (a) embedding model は freeze（nomic-embed-text 維持）
+   - (b) training data の変更のみ（build_dataset.py, prepare_lora_training_data.py の変更）
+   - (c) flip_rate <15% を厳密に検証
+   - (d) human judgment による承認
+2. **次の一手**: Iter54+ で `classifier_training_data_composition` の新しい値を計画。重点調査：より高品質な education training data の設計
+3. **要人間判断**:
+   - (1) retraining 承認（training data 変更は decision boundary の移動を伴う）
+   - (2) flip_rate 許容範囲の定義（<15% 厳守か <20% まで許容か）
+   - (3) education_recall 基準値の再定義（medical_recall 0.5112 は education に不公平）
+
 ---
 
 ## Iteration 52: education_per_class_threshold感度分析(0.02-0.05)
