@@ -1,4 +1,41 @@
 
+## B81 [rc-reflector 2026-08-03] Iter53 考察: 全levers試し切り完了、研究収束判定
+
+- **判定**: `converged`（確定）。全 levers を試し切り完了。post-hoc 手法の天花板（education_recall ~0.60）に到達。
+- **Iter53 最終結果**（rc-analyst 独立計算値）:
+  - education_recall: 0.5588→0.6000 (+0.0412, McNemar p=0.0082 **統計的に有意**)
+  - medical_recall: 0.5281→0.5056 (-0.0225, McNemar p=0.0455 境界的に有意)
+  - top1_accuracy: 0.6044→0.6006 (McNemar p=0.1797 有意でない)
+  - ECE: 0.0699→0.0615 (改善)
+  - argmax flip rate: 2.56% (単一レバー原則適合)
+  - BH-significant regressions: 0件
+  - 全 4 成功条件 **PASS**
+- **全 levers 試し切り状態**（最終）:
+  - fallback_policy: adopted (完了)
+  - classifier_calibration: 全3値試済み (temperature adopted)
+  - classifier_training_data_composition: 全6値 rejected
+  - class_weight_adjustment: rejected
+  - embedding_adaptation: 全4値 rejected
+  - classifier_head_adaptation: 2 adopted, 1 exhausted, 1 skip (**CLOSED**)
+  - aggregation_method: 全3値試済み (max_confidence adopted)
+- **post-hoc ceiling の定量値**:
+  - Iter31 (threshold=0.0, intercept=0.0): education_recall = 0.4588
+  - Iter44 (+ intercept_delta=+0.7): education_recall = 0.5588 (+0.1000)
+  - Iter53 (+ threshold=0.05): education_recall = 0.6000 (+0.0412 vs Iter44)
+  - **合計 +0.1412 で education_recall = 0.6000 が post-hoc 天井**
+- **天花板突破には classifier retraining（decision boundary の回転）が必要**:
+  - post-hoc 手法（intercept shift + threshold addition）は boundary の平行移動のみ
+  - boundary を越えない教育質問の誤分類は解消できない
+  - classifier retraining は research_frontier 相当の大規模変更
+- **要人間判断**（3 項目）:
+  1. **education_recall 基準値の再定義**: medical_recall 0.5112 は education に不公平。education 固有の基準値（例: 0.45 = proxy task 平均 recall）への再定義を検討。
+  2. **classifier retraining への移行可否**: decision boundary の回転を伴う大規模変更。embedding freeze + classifier head 再設計、または新しい訓練データセットの作成。
+  3. **JMMLU 外部の教育固有タスク追加**: japanese_civics が唯一の候補だが label leakage リスク高。JMMLU 外部の日本語教育実務固有 4 択タスク探索。
+- **git commit**: 8da944d（main へ push 済み）
+- **state.json**: status="converged", phase="reflect"
+
+---
+
 ## B80 [auto-decided 2026-08-03] Iter53: per_class_threshold_optimization (threshold=0.05) 計画確定。全 levers 試し切り完了後の最終レバー検証
 
 - **状況**: 全 levers を試し切り済み。config.yml の `classifier_head_adaptation` の未試行値 `per_class_threshold_optimization` が唯一の候補。
