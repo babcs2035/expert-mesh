@@ -83,13 +83,13 @@
   },
   "next_iteration_brief": {
     "must_read_first": [
+      ".claude/research/journal.md (Iteration 50: education_posthoc_calibration_sensitivity_logit_bias0.5 - rejected, lever exhausted)",
       ".claude/research/journal.md (Iteration 49: education_posthoc_calibrationによる教育ドメイン確率補正 - rejected)",
-      ".claude/research/journal.md (Iteration 48: aggregation_method=llm_judgeによる複合ドメイン集約方式比較 - rejected)",
-      ".claude/research/journal.md (Iteration 47: aggregation_method=max_confidence cleanベースライン取得)",
-      ".claude/research/journal.md (Iteration 44: educationドメインinterceptシフト(+0.7)によるdecision boundary調整 - adopted)"
+      ".claude/research/journal.md (Iteration 44: educationドメインinterceptシフト(+0.7)によるdecision boundary調整 - adopted)",
+      ".claude/research/backlog.md (B74: classifier_head_adaptation レバークローズ、全levers試し切り)"
     ],
-    "planned_lever": "classifier_head_adaptation=education_posthoc_calibration (logit_bias=+0.5)",
-    "note": "Iter49 (logit_bias=+0.3) は rejected（education_recall McNemar p=0.5443）。sensitivity analysis で logit_bias=+0.5 を試す（Iter50）。+0.5 でも有意にならなかった場合、education_posthoc_calibration レバーは exhausted。その後は education_feature_augmentation（flip rate 15-30% リスク）か、classifier_head_adaptation レバー全体をクローズするか判断。"
+    "planned_lever": null,
+    "note": "classifier_head_adaptation レバーをクローズ。config.yml の全 levers を試し切り済み。次イテレーションは調査フェーズから開始（current_lever=null）。rc-investigator は Tavily-search で以下の観点から調査すること: (1) education_recall の根本原因に対する代替アプローチ（embedding freeze + classifier head の新手法）, (2) education_feature_augmentation の flip rate を正確に計測, (3) education_recall の基準値再検討の材料。"
   },
   "e37_results": {
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
