@@ -1,5 +1,39 @@
 # backlog — 人間判断待ち事項 / 自動判断の記録
 
+## B73 [auto-decided 2026-08-03] Iter49: education_posthoc_calibration (logit_bias=+0.3) rejected。次イテレーションは logit_bias=+0.5 で sensitivity analysis
+
+- **状況**: Iter49（education_posthoc_calibration, logit_bias=+0.3）の結果を考察。
+- **判定**: `rejected`（確信度: medium-high）。education_recall 改善 (+0.0353) が McNemar p=0.5443 で有意ではない。top1_accuracy の有意悪化境界線 (p=0.0500)。medical_recall 悪化 (-0.0337) は intercept shift (-0.0112) より大きい。
+- **決定的な学び**:
+  1. **logit_bias は intercept shift より本質的に弱い**: intercept_delta=+0.7 は raw logit 空間でのシフト（+0.0647, p=0.00185）。logit_bias=+0.3 は temperature-scaled 確率を一旦 logit へ逆変換した上でのシフト（+0.0353, p=0.5443）。温度スケールによる圧縮により、同じ数値の bias でも効果が小さくなる。
+  2. **確率変換による情報損失**: 確率 -> logit -> bias付与 -> softmax -> 確率 の変換チェーンにおいて、softmax は non-linear な圧縮関数。education class の確率が低い領域（平均 ~0.3）での +0.3 シフトは確率空間では微小な変化に相当する。
+  3. **post-hoc calibration は classifier head の直接調整より劣る**: 確率空間での操作は、classifier の内部表現に直接介入する intercept shift よりも効果に限界がある。
+- **config.yml の levers 状態**: `classifier_head_adaptation` の values は `[education_feature_augmentation, education_boundary_tuning, education_posthoc_calibration]`。education_boundary_tuning は試済み（adopted）。education_posthoc_calibration は logit_bias=+0.3 で rejected。次値は logit_bias=+0.5 で sensitivity analysis。
+- **Iter50 の計画**: `education_posthoc_calibration` の logit_bias=+0.5 を試す。+0.5 で McNemar p<0.05 になれば採用候補、p>0.1 ならこのレバーは exhausted。
+- **exhausted の場合の次の手**: `education_feature_augmentation` は flip rate 15-30% のリスクがある（閾値超過）。最後の選択肢として試すか、classifier_head_adaptation レバー全体をクローズするか。
+- **要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
+## B72 [auto-decided 2026-08-03] Iter49: education_feature_augmentation から education_posthoc_calibration へ変更
+
+- **状況**: Iter49 の計画フェーズ。rc-investigator は `education_feature_augmentation` の argmax flip rate を 15-30% と推定（閾値<15%の危険域）。`education_posthoc_calibration` は intercept shift（Iter44, flip rate 8.62%）と数学的に同等の原理で、flip rate が低く抑えられると判定。
+- **自動選択**: `education_posthoc_calibration` (logit_bias=+0.3) を次イテレーションの単一レバーとする。`iteration_name` は「education_posthoc_calibrationによる教育ドメイン確率補正」。
+- **変更理由**:
+  1. `education_feature_augmentation` は decision boundary の**方向**を変える（特徴量追加 → 係数ベクトル回転）。flip rate 15-30% は単一レバー原則の閾値超過リスク。
+  2. `education_posthoc_calibration` は decision boundary の**位置**のみ平行移動（logit bias 付与）。Intercept shift（Iter44）と同一機序で、flip rate <15% を維持できると期待。
+  3. 実装コスト: feature_augmentation は 2ファイル変更 + 分類器再訓練 + 特徴量計算。posthoc_calibration は evaluate_classifier_calibration.py のみ 2箇所変更。分類器再訓練不要。
+- **変更ファイル**:
+  1. `scripts/evaluate_classifier_calibration.py` — `--education-logit-bias` CLI パラメータ追加 + `predict_calibrated_rows()` 内での logit bias 適用
+- **ハイパラ**: logit_bias=+0.3（初期値）。sensitivity analysis で調整可能（+0.5, +1.0 等）。
+- **成功条件**: (1) education_recall > 0.5112, (2) BH補正後有意退行0件, (3) argmax flip rate <15%, (4) top1_accuracy McNemar p>=0.05
+- **固定レバー**: classifier_model (intercept_delta=+0.7済み), train_data, eval_dataset, embedding_model, routing_method, confidence_threshold, classifier_calibration=temperature, aggregation_method=max_confidence, dispatch_top_k=2
+- **コスト**: 実装~10分、実行~5分（offline完結）。実機本走不要。
+- **config.yml の levers 状態**: `classifier_head_adaptation` の values は `[education_feature_augmentation, education_boundary_tuning, education_posthoc_calibration]`。education_boundary_tuning は試済み（adopted）。次値は education_feature_augmentation だが、investigator の推奨で education_posthoc_calibration を先に試す。
+- **要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
 ## B71 [auto-decided 2026-08-03] Iter48: aggregation_method=llm_judge rejected。全3値試し切り、max_confidence 採用でレバークローズ。次レバー=classifier_head_adaptation
 
 - **状況**: Iter48（aggregation_method=llm_judge, dispatch_top_k=2）の結果を考察。top1_accuracy 0.435 は max_confidence (0.6031) 比で -0.1681。極めて有意な悪化。
