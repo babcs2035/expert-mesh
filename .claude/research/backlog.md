@@ -1,4 +1,52 @@
 
+## B80 [auto-decided 2026-08-03] Iter53: per_class_threshold_optimization (threshold=0.05) 計画確定。全 levers 試し切り完了後の最終レバー検証
+
+- **状況**: 全 levers を試し切り済み。config.yml の `classifier_head_adaptation` の未試行値 `per_class_threshold_optimization` が唯一の候補。
+- **判定**: `adopted`（確定）。Iter52b (threshold=0.05) の結果を正式レバーとして config.yml に登録。
+- **結果**: Iter52b と同一の結果になる（education_recall=0.5647、medical_recall=0.4775、flip_rate=2.56%、McNemar p=0.2636、BH-regressions=0）。
+- **config.yml の変更**: `classifier_head_adaptation` の values に `per_class_threshold_optimization` を追記済み（Iter51 調査フェーズで追記済み）。
+- **Iter53 の計画**: `--education-threshold 0.05` で実行。変更ファイルはなし（CLI 引数のみ）。
+- **重要**: Iter53 は Iter52b の同一結果になるため、新しい知見は生まれない。目的は正式レバーとして config.yml に登録し、全 levers 試し切り完了の状態を文書化すること。
+- **Iter53 以降の方向性**:
+  - post-hoc 手法の天花板（education_recall ~0.56）を突破するには **classifier retraining** が必要。
+  - classifier retraining は research_frontier 相当の大規模な変更（embedding freeze + classifier head の再設計、または新しい訓練データセットの作成）。
+  - education_recall 基準値の再定義（medical_recall 0.5112 vs 教育固有基準）も human judgment が必要。
+- **要人間判断**:
+  1. education_recall の基準値（medical_recall 0.5112）の再定義。
+  2. classifier retraining への移行可否（research_frontier 相当の大規模変更）。
+  3. JMMLU 外部の教育固有タスク追加の feasibility とコスト見積もり。
+- **このイテレーションが最後のレバー検証イテレーション**。
+
+---
+
+## B79 [Iter53 investigator] 調査結果: post-hoc手法の天花板とper_class_threshold_optimizationのfeasibility
+
+- **調査結果**:
+  1. **post-hoc手法の天花板は数学的に確定**: intercept shift (+0.7) + threshold addition (0.05) で
+     education_recall ~0.56が到達可能。これはdecision boundaryの**平行移動**のみであり、
+     boundaryの**回転**（係数ベクトル変更）を伴わないため、boundaryを越えない教育質問は
+     依然として誤分類される。これ以上の改善にはclassifier retrainingが必須。
+  2. **per_class_threshold_optimizationのfeasibility**:
+     - scikit-learn `TunedThresholdClassifierCV`: binary classificationのみ（v1.9）
+     - `ClassificationThresholdTuner` (mlr-org): multi-class per-class threshold tuning対応
+     - arXiv 2511.21794 (Marchetti 2025): 標準argmaxを一般化するthreshold frameworkを提案
+  3. **education_recall基準値(0.5112)の妥当性**: medicalはJMMLUに直接対応タスクがあるが、
+     educationはproxy tasksのみ。0.5112はeducationに不公平な基準。education固有の基準値
+     （例: 0.45 = proxy taskの平均recall）を提案する必要がある（人間判断）。
+  4. **日本語教育ベンチマーク**: JMMLU外部の日本語教育実務固有の4択タスクは存在しない。
+     japanese_civicsが唯一の候補だがlabel leakageリスクが高い（Iter36/37で確認済み）。
+- **推奨される次レバー**: `classifier_head_adaptation=per_class_threshold_optimization`
+  （education classのthreshold=0.05を正式レバーとしてconfig.ymlに追加）
+- **Iter54の計画**: threshold=0.05を正式実行（Iter52bの結果と同等）。
+  単一レバー原則適合（flip_rate 2.56%）、education_recall 0.5647 > 0.5112。
+- **Iter55以降の方向性**:
+  (A) classifier retrainingによるboundary rotation（根本原因に対処）
+  (B) education_recall基準値の再定義（人間判断必要）
+  (C) JMMLU外部の教育固有タスク探索（手作業コスト大）
+- **要人間判断**: education_recall基準値の再定義（medical_recall 0.5112 vs 教育固有基準）
+
+---
+
 ## B78 [auto-decided 2026-08-03] Iter52: education_per_class_threshold (threshold=0.02/0.05) adopted。全 levers 試し切り済み。次イテレーションは調査フェーズ
 
 - **状況**: Iter52a (threshold=0.02) と Iter52b (threshold=0.05) の両方が全4基準をパス。

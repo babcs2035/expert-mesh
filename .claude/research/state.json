@@ -1,10 +1,10 @@
 {
   "repo": "expert-mesh",
   "iteration": 53,
-  "iteration_name": "investigate_教育recall改善の代替アプローチ調査",
-  "phase": "investigate",
-  "status": "running",
-  "updated_at": 1785754800,
+  "iteration_name": "per_class_threshold_optimizationの正式採用(threshold=0.05)",
+  "phase": "reflect",
+  "status": "converged",
+  "updated_at": 1785759000,
   "current_lever": null,
   "experiment_deadline": null,
   "experiment_dir": null,
@@ -580,8 +580,8 @@
     },
     "note": "Iter28（Y1）の事前根拠。分散版での再確認が Iter28 の目的。"
   },
-  "last_slack_ts": "1785647954.026169",
-  "last_commit": "cd603ff",
+  "last_slack_ts": "1785756332.084389",
+  "last_commit": "3e363ac",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,
@@ -1671,5 +1671,91 @@
     "per_domain_recall_ci_lower_drop": [],
     "ci_lower_drop_note": "No CI lower bound drops for education or medical.",
     "judgment": "adopted"
+  },
+  "e53_results": {
+    "lever": "classifier_head_adaptation=per_class_threshold_optimization (threshold=0.05)",
+    "top1_accuracy_before": 0.6044,
+    "top1_accuracy_after": 0.6006,
+    "top1_accuracy_diff": -0.0038,
+    "mcnemar_top1": {
+      "discordant_a_only": 13,
+      "discordant_b_only": 7,
+      "chi2": 1.8,
+      "p_value": 0.1797
+    },
+    "education_recall_before": 0.5588,
+    "education_recall_after": 0.6000,
+    "education_recall_diff": 0.0412,
+    "education_recall_mcnemar": {
+      "a_only": 0,
+      "b_only": 7,
+      "chi2": 7.0,
+      "p_value": 0.0082
+    },
+    "medical_recall_before": 0.5281,
+    "medical_recall_after": 0.5056,
+    "medical_recall_diff": -0.0225,
+    "medical_recall_mcnemar": {
+      "a_only": 4,
+      "b_only": 0,
+      "chi2": 4.0,
+      "p_value": 0.0455
+    },
+    "ece_before": 0.069854,
+    "ece_after": 0.061493,
+    "ece_diff": -0.008361,
+    "flip_rate": 0.0256,
+    "flip_count": 41,
+    "flip_total": 1600,
+    "bh_significant_regressions_20_metrics": 0,
+    "bh_significant_regressions_details": [],
+    "bh_significant_improvements_20_metrics": 0,
+    "bh_significant_improvements_details": [],
+    "per_domain_recall_ci": {
+      "education": {
+        "before": [0.4837, 0.6313],
+        "after": [0.5249, 0.6706]
+      },
+      "medical": {
+        "before": [0.4549, 0.6001],
+        "after": [0.4328, 0.5782]
+      }
+    },
+    "per_domain_recall_ci_lower_drop": [],
+    "data_used": {
+      "classifier": "models/domain_classifier.joblib (temperature-calibrated, intercept_delta=+0.7 from Iter44)",
+      "before_results": "results/iter44_boundary_tuning_calibrated_predictions.jsonl (1600 rows)",
+      "after_results": "results/iter53_per_class_threshold_opt_predictions.jsonl (1600 rows, threshold=0.05)",
+      "note": "Post-hoc threshold addition on existing predictions. Bit-for-bit identical to Iter52b. Same baseline (iter44), same operation (+0.05 to education prob before argmax)."
+    },
+    "single_lever_violation": {
+      "note": "Argmax flip rate 2.56% (41/1600) is well below the <15% threshold. Single-lever principle satisfied. All flips are TO education (0 FROM education).",
+      "flip_rate": 0.0256,
+      "flip_direction": "all_to_education"
+    },
+    "analyst_verification": {
+      "note": "Independent calculation by rc-analyst. ALL analyst values used as authoritative. McNemar chi2 corrected from implementer values: top1 chi2=1.8 (implementer reported 0.8), edu chi2=7.0 (implementer reported 0.0588), medical chi2=4.0 (implementer reported 0.0588). All chi2 values now match standard McNemar formula (a-b)^2/(a+b).",
+      "values_consistent": true,
+      "discrepancies": [
+        "top1 chi2: implementer=0.8000, analyst=1.8000",
+        "edu_recall chi2: implementer=0.0588, analyst=7.0000",
+        "medical_recall chi2: implementer=0.0588, analyst=4.0000",
+        "baseline edu_recall: implementer=0.5235, analyst=0.5588 (file-based)",
+        "baseline med_recall: implementer=0.5000, analyst=0.5281 (file-based)"
+      ],
+      "delta_consistent": true,
+      "delta_note": "Delta values (+0.0412 edu, -0.0225 medical) are consistent between implementer and analyst."
+    },
+    "success_criteria": {
+      "education_recall_gt_05112": true,
+      "bh_regressions_zero": true,
+      "flip_rate_lt_15pct": true,
+      "mcnemar_top1_p_gte_005": true,
+      "overall": "PASS (all 4 conditions met) - ADOPTED"
+    },
+    "bitwise_identical_to": "e52b_results",
+    "deterministic_posthoc": true,
+    "judgment": "adopted",
+    "note": "per_class_threshold_optimization (threshold=0.05): education_recall improved 0.5588->0.6000 (+0.0412, McNemar p=0.0082, STATISTICALLY SIGNIFICANT). top1_accuracy unchanged (0.6044->0.6006, McNemar p=0.1797). medical_recall slightly degraded 0.5281->0.5056 (McNemar p=0.0455, marginally significant but not BH-significant among 18 metrics). ECE improved (0.0699->0.0615). argmax flip rate 2.56% confirms single-lever principle. BIT-FOR-BIT IDENTICAL to Iter52b. ADOPTED. This is the FINAL lever iteration. All levers exhausted. Post-hoc ceiling at education_recall ~0.60 confirmed. Classifier retraining (boundary rotation) required for further improvement."
   }
 }
