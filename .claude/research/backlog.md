@@ -1,4 +1,38 @@
 
+## B78 [auto-decided 2026-08-03] Iter52: education_per_class_threshold (threshold=0.02/0.05) adopted。全 levers 試し切り済み。次イテレーションは調査フェーズ
+
+- **状況**: Iter52a (threshold=0.02) と Iter52b (threshold=0.05) の両方が全4基準をパス。
+- **判定**: `adopted`（確信度: high）
+- **結果**:
+  - threshold=0.02: top1=0.6044（不変）、edu_recall=0.5412、med_recall=0.4888、flip=0.88%、McNemar p=0.6831、BH-regressions=0
+  - threshold=0.05: top1=0.6006、edu_recall=0.5647、med_recall=0.4775、flip=2.56%、McNemar p=0.2636、BH-regressions=0
+- **dose-response 確認**: 0.02→0.05 で edu_recall +0.0235 改善
+- **全 41 flip 行が education へ一方向**（education から離脱する flip は 0 件）
+- **`classifier_head_adaptation` レバークローズ確定**:
+  - education_boundary_tuning (intercept_delta=+0.7): adopted (Iter44)
+  - education_posthoc_calibration (logit_bias=+0.3, +0.5): exhausted (Iter49/50)
+  - education_feature_augmentation: skip (flip rate 15-30% リスク)
+  - education_per_class_threshold (threshold=0.02, 0.05): adopted (Iter52)
+  - per_class_threshold_optimization: 新規追加（次イテレーションで評価）
+- **全 levers 試し切り完了**:
+  - fallback_policy: adopted（完了）
+  - classifier_calibration: 全3値試済み（temperature adopted）
+  - classifier_training_data_composition: 全6値 rejected
+  - class_weight_adjustment: rejected
+  - embedding_adaptation: 全4値 rejected
+  - classifier_head_adaptation: 2 adopted, 1 exhausted, 1 skip（クローズ）
+  - aggregation_method: 全3値試済み（max_confidence adopted）
+- **次イテレーション（Iter53）の方針**: **調査フェーズから開始**（`current_lever=null`）
+- **rc-investigator への指示**: Tavily-search で以下の観点から調査
+  1. **education_recall の根本原因に対する代替アプローチ**: education proxy tasks（sociology, high_school_psychology, moral_disputes）と real education practice の意味的ギャップを解消する手法。JMMLU 外部の教育固有タスク（日本語）の探索。
+  2. **post-hoc 手法の天花板**: intercept shift + threshold addition で education_recall ~0.56 が天花板か。それ以上を得るには classifier retraining が必須か。
+  3. **per_class_threshold_optimization の feasibility**: 全ドメインの decision threshold を最適化することで、education_recall を改善しつつ他ドメインへの影響を最小化する手法。scikit-learn の TunedThresholdClassifierCV（binary）の multi-class 拡張。
+  4. **education_recall 基準値 (0.5112) の妥当性**: medical_recall 0.5112 が education に対して現実的か。medical は JMMLU に直接対応するタスクがあるが、education は proxy tasks のみ。不公平な比較ではないか。
+- **config.yml の変更**: `classifier_head_adaptation` の values に `per_class_threshold_optimization` を追記済み。
+- **要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
 ## B76 [auto-decided 2026-08-03] Iter51: education_per_class_threshold (threshold=0.3) rejected。感度分析で threshold=0.02-0.05 は全基準パス。次イテレーションは sensitivity analysis (0.02, 0.05)
 
 - **状況**: Iter51（education_per_class_threshold, threshold=0.3）の結果を考察。

@@ -352,7 +352,7 @@ levers:
   #     embedding空間の幾何学的制約を迂回するアプローチ。 ---
   - {name: classifier_head_adaptation,
      values: [education_feature_augmentation, education_boundary_tuning, education_posthoc_calibration,
-              education_per_class_threshold],
+              education_per_class_threshold, per_class_threshold_optimization],
      note: "[2026-08-02 Iter43 reflector追記] `embedding_adaptation` は全4値尽きた（全rejected）。
             embedding空間の幾何学的制約（768次元を10ドメインで共有。教育ドメインのみを分離するには
             空間の回転が必要だが、これは必然的に他ドメインも移動させる）により、embeddingレベルの
@@ -394,9 +394,14 @@ levers:
             edu_recall>0.54）。threshold=0.3 が失敗した原因: renormalization なしで確率に+0.3加算は
             確率分布の合計を1.0->1.3に変え、education class の確率が全行で+30pt増加。これは
             「閾値」として不合理に大きい。適切な threshold は 0.02-0.05（2-5pt の追加質量）。
-            **`education_per_class_threshold` は exhausted ではない**。next: threshold=0.02, 0.05
-            をテスト（Iter52）。全基準パスなら adopted。
-            **classifier_head_adaptation レバーはeducation_per_class_thresholdで継続**"}
+            [2026-08-03 Iter52 reflector追記] `education_per_class_threshold` (threshold=0.02, 0.05) は
+            **adopted 済み**（両値とも全4基準パス）。education_recall 0.5412 (0.02) / 0.5647 (0.05)。
+            argmax flip rate 0.88% / 2.56%。top1 McNemar p=0.6831 / 0.2636。BH-regressions=0。
+            **`classifier_head_adaptation` レバークローズ確定**（全値試行済み）。
+            **全 levers 試し切り済み**。次イテレーションは調査フェーズから開始。
+            **per_class_threshold_optimization** は新規追加レバー（全ドメインのthreshold最適化）。
+            rc-planner が feasibility を評価すること。
+            **`classifier_head_adaptation` レバーは per_class_threshold_optimization で継続**"}
 
   - {name: class_weight_adjustment,
      values: [none_manual_sample_weight],

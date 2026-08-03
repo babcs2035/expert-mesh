@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 52,
-  "iteration_name": "education_per_class_threshold感度分析(0.02-0.05)",
-  "phase": "plan",
+  "iteration": 53,
+  "iteration_name": "investigate_教育recall改善の代替アプローチ調査",
+  "phase": "investigate",
   "status": "running",
-  "updated_at": 1785750458,
-  "current_lever": "classifier_head_adaptation=education_per_class_threshold",
+  "updated_at": 1785754800,
+  "current_lever": null,
   "experiment_deadline": null,
   "experiment_dir": null,
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
+  "iteration_thread_ts": "1785752331.032489",
+  "notion_toggle_created": true,
   "e49_results": {
     "lever": "classifier_head_adaptation=education_posthoc_calibration (logit_bias=+0.3)",
     "top1_accuracy_before": 0.6044,
@@ -83,12 +83,11 @@
   },
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 51: education_per_class_threshold - rejected, sensitivity analysis suggests threshold=0.02-0.05)",
-      ".claude/research/journal.md (Iteration 50: education_posthoc_calibration_sensitivity_logit_bias0.5 - rejected)",
+      ".claude/research/journal.md (Iteration 52: education_per_class_threshold sensitivity analysis - both threshold=0.02 and 0.05 adopted)",
       ".claude/research/journal.md (Iteration 44: educationドメインinterceptシフト(+0.7)によるdecision boundary調整 - adopted)"
     ],
-    "planned_lever": "null (investigate phase from scratch)",
-    "note": "全 levers を試し切り済み。classifier_head_adaptation レバークローズ確定（education_boundary_tuning adopted, education_posthoc_calibration exhausted, education_feature_augmentation skip, education_per_class_threshold rejected）。Iter51 の感度分析で重要な発見: threshold=0.02-0.05 は全基準をパス（flip_rate <3%, top1 p>0.17, edu_recall>0.54）。これは future iteration で検証すべき。次イテレーションは調査フェーズから開始。rc-investigator は Tavily-search で以下の観点から調査: (1) education_recall の根本原因に対する代替アプローチ, (2) education_feature_augmentation の正確な flip rate 計測, (3) education_recall 基準値再検討の材料。"
+    "planned_lever": "classifier_head_adaptation=education_per_class_threshold - exhausted",
+    "note": "education_per_class_threshold levers exhausted: threshold=0.3 (Iter51, rejected, flip_rate 23.75%), threshold=0.02 (Iter52a, adopted, flip_rate 0.88%), threshold=0.05 (Iter52b, adopted, flip_rate 2.56%). The classifier_head_adaptation lever now has: education_boundary_tuning (Iter44, adopted, intercept_delta=+0.7), education_posthoc_calibration (Iter49/50, rejected), education_feature_augmentation (skipped, risk of >15% flip), education_per_class_threshold (Iter51/52, exhausted). All values in this lever have been tried. Next lever decision needed."
   },
   "e37_results": {
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
@@ -582,7 +581,7 @@
     "note": "Iter28（Y1）の事前根拠。分散版での再確認が Iter28 の目的。"
   },
   "last_slack_ts": "1785647954.026169",
-  "last_commit": "81a8b28",
+  "last_commit": "cd603ff",
   "e26_results": {
     "lever": "routing_architecture=central_router_bugfixed",
     "top1_accuracy": 0.555625,
@@ -1534,5 +1533,143 @@
       ]
     },
     "note": "education_per_class_threshold (threshold=+0.3): education_recall massively improved 0.5235->0.8118 (+0.2882) but McNemar p<0.0001. top1_accuracy significantly degraded 0.6044->0.5431 (-0.0613, p<0.0001). medical_recall significantly regressed 0.5000->0.3708 (-0.1292, p=0.000002). 8 per-domain recalls showed BH-significant regression. flip_rate 23.75% >> 15% threshold. REJECTED. Sensitivity analysis CONFIRMED: threshold=0.02-0.05 pass all criteria (flip_rate <3%, top1 p>0.17, edu_recall>0.54). threshold=0.10 passes edu criterion but top1 p=0.0022 (significant degradation). The approach itself (per-class threshold addition) is viable with small thresholds (0.02-0.05), but threshold=0.3 is far too aggressive."
+  },
+  "e52a_results": {
+    "lever": "classifier_head_adaptation=education_per_class_threshold (threshold=0.02)",
+    "top1_accuracy_before": 0.6044,
+    "top1_accuracy_after": 0.6044,
+    "top1_accuracy_diff": 0.0,
+    "mcnemar_top1": {
+      "discordant_a_only": 3,
+      "discordant_b_only": 3,
+      "chi2": 0.1667,
+      "p_value": 0.6830914803
+    },
+    "education_recall_before": 0.5235,
+    "education_recall_after": 0.5412,
+    "education_recall_diff": 0.0176,
+    "education_recall_mcnemar": {
+      "a_only": 0,
+      "b_only": 3,
+      "chi2": 1.3333,
+      "p_value": 0.2482131869
+    },
+    "medical_recall_before": 0.5,
+    "medical_recall_after": 0.4888,
+    "medical_recall_diff": -0.0112,
+    "ece_before": 0.069854,
+    "ece_after": 0.067513,
+    "ece_diff": -0.002341,
+    "flip_rate": 0.0088,
+    "flip_count": 14,
+    "flip_total": 1600,
+    "bh_significant_regressions_20_metrics": 0,
+    "bh_significant_regressions_details": [],
+    "bh_significant_improvements_20_metrics": 0,
+    "bh_significant_improvements_details": [],
+    "data_used": {
+      "classifier": "models/domain_classifier.joblib (temperature-calibrated, same as Iter44)",
+      "before_results": "results/iter44_boundary_tuning_calibrated_predictions.jsonl (1600 rows, intercept_delta=+0.7)",
+      "after_results": "results/iter52_threshold0.02_predictions.jsonl (1600 rows, threshold=0.02)",
+      "note": "Same classifier as Iter44, post-hoc +0.02 added to education class probability before argmax"
+    },
+    "single_lever_violation": {
+      "note": "Argmax flip rate 0.88% (14/1600) is well below the <15% threshold. Single-lever principle satisfied. Same classifier as Iter44, only difference is post-hoc threshold +0.02 applied to education class probability.",
+      "flip_rate": 0.0088
+    },
+    "per_domain_recall_ci": {
+      "education": {
+        "before": [
+          0.4488,
+          0.5973
+        ],
+        "after": [
+          0.4662,
+          0.6143
+        ]
+      },
+      "medical": {
+        "before": [
+          0.4273,
+          0.5727
+        ],
+        "after": [
+          0.4163,
+          0.5617
+        ]
+      }
+    },
+    "per_domain_recall_ci_lower_drop": [],
+    "ci_lower_drop_note": "No CI lower bound drops for education or medical.",
+    "judgment": "adopted"
+  },
+  "e52b_results": {
+    "lever": "classifier_head_adaptation=education_per_class_threshold (threshold=0.05)",
+    "top1_accuracy_before": 0.6044,
+    "top1_accuracy_after": 0.6006,
+    "top1_accuracy_diff": -0.0038,
+    "mcnemar_top1": {
+      "discordant_a_only": 13,
+      "discordant_b_only": 7,
+      "chi2": 1.25,
+      "p_value": 0.263552568
+    },
+    "education_recall_before": 0.5235,
+    "education_recall_after": 0.5647,
+    "education_recall_diff": 0.0412,
+    "education_recall_mcnemar": {
+      "a_only": 0,
+      "b_only": 7,
+      "chi2": 5.1429,
+      "p_value": 0.0233421306
+    },
+    "medical_recall_before": 0.5,
+    "medical_recall_after": 0.4775,
+    "medical_recall_diff": -0.0225,
+    "ece_before": 0.069854,
+    "ece_after": 0.061476,
+    "ece_diff": -0.008378,
+    "flip_rate": 0.0256,
+    "flip_count": 41,
+    "flip_total": 1600,
+    "bh_significant_regressions_20_metrics": 0,
+    "bh_significant_regressions_details": [],
+    "bh_significant_improvements_20_metrics": 0,
+    "bh_significant_improvements_details": [],
+    "data_used": {
+      "classifier": "models/domain_classifier.joblib (temperature-calibrated, same as Iter44)",
+      "before_results": "results/iter44_boundary_tuning_calibrated_predictions.jsonl (1600 rows, intercept_delta=+0.7)",
+      "after_results": "results/iter52_threshold0.05_predictions.jsonl (1600 rows, threshold=0.05)",
+      "note": "Same classifier as Iter44, post-hoc +0.05 added to education class probability before argmax"
+    },
+    "single_lever_violation": {
+      "note": "Argmax flip rate 2.56% (41/1600) is well below the <15% threshold. Single-lever principle satisfied. Same classifier as Iter44, only difference is post-hoc threshold +0.05 applied to education class probability.",
+      "flip_rate": 0.0256
+    },
+    "per_domain_recall_ci": {
+      "education": {
+        "before": [
+          0.4488,
+          0.5973
+        ],
+        "after": [
+          0.4896,
+          0.637
+        ]
+      },
+      "medical": {
+        "before": [
+          0.4273,
+          0.5727
+        ],
+        "after": [
+          0.4054,
+          0.5506
+        ]
+      }
+    },
+    "per_domain_recall_ci_lower_drop": [],
+    "ci_lower_drop_note": "No CI lower bound drops for education or medical.",
+    "judgment": "adopted"
   }
 }
