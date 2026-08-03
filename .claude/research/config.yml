@@ -416,7 +416,16 @@ levers:
             **Y3 の主指標**: compound_domain_set_recall（現状 0.165．複合設問 100 問はすべて 2 ドメイン
             なので dispatch_top_k=1 では構造的上限が 0.500，top_k=2 で上限 1.000 になる）．
             全体 top1 は複合設問が 100/1600=6.25% しかなく改善をほとんど反映しないため，
-            非退行の確認にのみ使う"}
+            非退行の確認にのみ使う
+            [2026-08-03 Iter48 reflector追記] **全3値試し切り完了・レバークローズ確定**．
+            max_confidence (Iter47): top1=0.6031, compound_recall=0.345 → adopted
+            majority_vote (Iter46): top1=0.6063, compound_recall=0.360 → converged（実質同等）
+            llm_judge (Iter48): top1=0.435, compound_recall=0.345 → rejected（-0.1681）
+            **llm_judge の重大な失敗機序**: dispatched_domains からの選択で、judge_override
+            （max_confidence と異なる判断）604件のうち 84.1% が誤選択。低 confidence 選択時の
+            正解率 15.89%。hypothetical max_confidence accuracy 60.31% = Iter47 と同一。
+            dispatched_domains 自体は問題なく、judge の選択ロジックが壊れている。
+            **結論**: max_confidence を正式採用してこのレバーを閉じる。"}
 
   # =====================================================================
   # 以下 E1〜E10 は Iter15〜19 で試行済みの履歴である（順序は当時の優先度で，現在の優先度ではない）．

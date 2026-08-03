@@ -1,5 +1,28 @@
 # backlog — 人間判断待ち事項 / 自動判断の記録
 
+## B71 [auto-decided 2026-08-03] Iter48: aggregation_method=llm_judge rejected。全3値試し切り、max_confidence 採用でレバークローズ。次レバー=classifier_head_adaptation
+
+- **状況**: Iter48（aggregation_method=llm_judge, dispatch_top_k=2）の結果を考察。top1_accuracy 0.435 は max_confidence (0.6031) 比で -0.1681。極めて有意な悪化。
+- **判定**: `rejected`（確信度: high）。
+- **aggregation_method レバーの総括**:
+
+| 値 | イテレーション | top1_accuracy | compound_recall | 判定 |
+|---|---|---|---|---|
+| max_confidence | Iter47 | 0.6031 | 0.345 | adopted（基準） |
+| majority_vote | Iter46 | 0.6063 | 0.360 | converged（実質同等） |
+| llm_judge | Iter48 | 0.435 | 0.345 | rejected（-0.1681） |
+
+- **決定的な発見**: llm_judge の judge_override（max_confidence と異なる選択）604件のうち 84.1% が誤選択。低 confidence ドメイン選択時の正解率 15.89%。hypothetical max_confidence accuracy 60.31% = Iter47 と同一。dispatched_domains は問題なく、judge の選択ロジックが壊れている。
+- **aggregation_method レバーはクローズ**: max_confidence を正式採用。
+- **次イテレーションの計画**: `classifier_head_adaptation` レバーの未試行値へ移行。
+  - 現在 adopted: `education_boundary_tuning` (intercept_delta=+0.7, Iter44)
+  - 未試行: `education_feature_augmentation`, `education_posthoc_calibration`
+  - rc-planner がどちらを先に試すか判断すること。
+- **config.yml の levers 状態**: `aggregation_method` は全3値試し切り。`classifier_head_adaptation` の values は `[education_feature_augmentation, education_boundary_tuning, education_posthoc_calibration]`。education_boundary_tuning は試済み（adopted）。次値は education_feature_augmentation。
+- **要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
 ## B70 [auto-decided 2026-08-03] Iter47: aggregation_method=max_confidence vs majority_vote 比較結果。実質差なし。次イテレーションは llm_judge 検証へ
 
 - **状況**: Iter47（aggregation_method=max_confidence, dispatch_top_k=2）の結果を考察。Iter46（majority_vote）との厳密な対比（同一 classifier, 同一条件）。

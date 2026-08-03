@@ -195,6 +195,241 @@ Iter46 の結果（`majority_vote, top_k=2`）を評価するには、同一の 
 
 ---
 
+## Iteration 48: aggregation_method=llm_judgeによる複合ドメイン集約方式比較
+
+### 仮説
+
+`aggregation_method` を `max_confidence` から `llm_judge` に変更することで、`compound_domain_set_recall` が `max_confidence` 比で有意に改善する。`dispatch_top_k=2` の下で、2つの専門家の回答をLLM判定で比較し、正解に近い方を選ぶ `llm_judge` は、単にconfidenceが高い方を選ぶ `max_confidence` や多数決よりも、複合ドメイン設問のカバレッジを向上させる。
+
+### 単一レバー
+
+**変更するレバー**: `aggregation_method` の値変更
+- `max_confidence`（現行、Iter47） → `llm_judge`（Iter48）
+
+**固定レバー**:
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止）
+- `dispatch_top_k=2`
+- `dispatch_candidate_threshold=0.0`
+- `classifier_calibration=temperature`
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`
+- 分類器訓練データ、評価データセット、embedding model
+- `judge_model=schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m`（config.yaml:87 に設定済み）
+
+### 変更ファイル一覧
+
+**変更ファイル**:
+1. `config.yaml` — 1箇所変更
+   - line 68: `aggregation_method: max_confidence` → `aggregation_method: llm_judge`
+
+**新規作成ファイル**: なし
+
+### 分類器再訓練の必要性
+
+**不要**。現在 `models/domain_classifier.joblib` には Iter44 で adopted された `education_boundary_tuning (intercept_delta=+0.7)` が反映済み。`aggregation_method` の変更は分類器に依存しない。
+
+### 成功条件
+
+1. **主基準**: `dispatch_top_k=2, aggregation_method=llm_judge, fallback廃止, temperature較正, education_intercept_delta=+0.7` の clean ベースラインが取得できること。
+   - 具体的には `results/` 配下に `results.jsonl`（1600行）が生成されること。
+2. **比較可能性**: 取得した結果を Iter46/47 と対比可能であること。
+   - `compound_domain_set_recall` が `max_confidence`（0.345）を +5pt 以上上回る場合、`llm_judge` を採用。
+   - 5pt 条件不達成なら、`max_confidence`（単純・低コスト）を正式採用して `aggregation_method` レバーを閉じる。
+
+### 失敗条件
+
+1. `aggregation_method=llm_judge` のコードパスが到達しない（no-op）。
+2. judge_model のollama pullに失敗し、deploy/startできない。
+3. judge の解析に失敗し、max_confidence へのフォールバックが常時発火する。
+
+### ハイパラ値
+
+- **aggregation_method**: `max_confidence` → `llm_judge`
+- **dispatch_top_k**: 2（変更なし）
+- **confidence_threshold**: 0.0（変更なし）
+- **dispatch_candidate_threshold**: 0.0（変更なし）
+
+### コスト見積もり
+
+- **実装コスト**: 低（~5分）。`config.yaml` の 1 値変更のみ。コード変更不要。
+- **実行コスト**: 中〜高（~100-120分）。1600 問の実機本走 x 1 回。各 dispatch で `judge_model` の追加 LLM 呼び出しが発生するため、max_confidence より ~10-20 分程度遅くなる見込み。
+- **オフライン完結**: いいえ（実機1600問本走が必要）
+
+### 到達コードパスの確認
+
+**`aggregation_method=llm_judge` のコードパス**:
+
+1. **`node.py:195`**: `aggregation_method = config.get("aggregation_method", AGGREGATION_METHOD_MAX_CONFIDENCE)`
+   - 到達条件: `run_ask_flow()` が呼ばれる
+   - **config.yaml line 68 で `llm_judge` を設定すれば確実に到達**
+
+2. **`node.py:197-198`**: `validate_aggregation_method(aggregation_method)`
+   - 到達条件: 同上
+   - `llm_judge` は `VALID_AGGREGATION_METHODS` に含まれるので ValueError にならない
+   - **judge_model 未設定時のバリデーションも実装済み**（node.py:197-198）
+
+3. **`node.py:143-150`**: `if aggregation_method == AGGREGATION_METHOD_LLM_JUDGE:`
+   - 到達条件: `aggregation_method=llm_judge` で設定されていること
+   - **発火条件**: `dispatch_top_k >= 2` かつ `dispatch_candidate_threshold` が十分低い（現行設定で満たす）
+
+4. **`aggregator.py:153-181`**: `select_best_dispatch_response_llm_judge(dispatch_responses, judge_model)`
+   - 到達条件: 上記の分岐を通ること
+   - **内部ロジック**:
+     - `judge_model`（ollama 上の LLM）に 2 つの回答を提示し、どちらが正答に近いかを判定
+     - `_JUDGE_MAX_TOKENS=20`（JSON 1行分の短め生成）、`_JUDGE_TEMPERATURE=0.0`（決定論的）
+     - timeout は `dispatch_timeout_s=400.0` で保護
+   - **フォールバック**: judge の解析に失敗した場合、`select_best_dispatch_response()`（max_confidence）にフォールバック（aggregator.py:178-179）
+
+**no-op にならないことの確認**:
+- `dispatch_top_k=2` + `dispatch_candidate_threshold=0.0` の組み合わせにより、2位ノードは必ず qualified。
+- `aggregation_method=llm_judge` は `llm_judge` 分岐を通るため、`select_best_dispatch_response_llm_judge()` が呼ばれる。
+- **judge_model の pull 確認必要**: wafl500 上に `schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` が pull 済みか確認が必要。pull 未済みの場合は `ollama pull` で取得する必要がある（~5-10分）。
+
+### 固定レバー
+
+- `routing_method=supervised_classifier`
+- `confidence_threshold=0.0`（fallback 廃止）
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- `dispatch_candidate_threshold=0.0`（Iter46 から変更なし）
+- 分類器訓練データ、評価データセット、embedding model
+- 他9ドメインの訓練データ
+- `judge_model=schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m`（config.yaml:87 に設定済み）
+
+### 備考: `aggregation_method` レバーの総括
+
+`aggregation_method` レバーの values は `[majority_vote, llm_judge]`（config.yml line 401）。
+
+| 値 | イテレーション | compound_domain_set_recall | top1_accuracy | 判定 |
+|---|---|---|---|---|
+| max_confidence | Iter47 | 0.345 | 0.6031 | converged（ベースライン） |
+| majority_vote | Iter46 | 0.360 | 0.6063 | converged（max_confidence 実質同等） |
+| llm_judge | Iter48 | 未実験 | 未実験 | 検証中 |
+
+max_confidence と majority_vote の差は実質ゼロ（compound_domain_set_recall 差 -0.015, SE~0.03）。llm_judge が 5pt 以上の改善を示さない場合、`max_confidence`（単純・低コスト）を正式採用してこのレバーを閉じる。
+
+### 比較対象
+
+- Iter46 (majority_vote): compound_domain_set_recall=0.36
+- Iter47 (max_confidence): compound_domain_set_recall=0.345
+- llm_judge の結果が 0.36 を +5pt 以上上回る場合、llm_judge を採用
+
+### 注意点
+
+1. **judge_model の pull 状態**: wafl500 上で pull 済みか確認。`ollama list` で確認後、未 pull なら `ollama pull schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` を実行してから `mise run deploy`。
+2. **実験時間**: ~100-120分（各 dispatch で judge_model 追加 LLM 呼び出し）。
+3. **timeout**: `dispatch_timeout_s=400.0` で保護されるが、ollama の応答が遅い場合は注意。
+
+---
+
+### 調査 (Iter48)
+
+- **実施日時**: 2026-08-03
+- **目的**: `aggregation_method=llm_judge` の実装完了確認と実験準備
+- **分かったこと**:
+  1. **`llm_judge` の実装は完了済み**: `aggregator.py:153-181` に `select_best_dispatch_response_llm_judge()` が実装済み。`node.py:143-150` で `AGGREGATION_METHOD_LLM_JUDGE` 分岐から呼ばれる。`node.py:197-198` で `judge_model` 未設定時のバリデーションも実装済み。
+  2. **judge_model の設定**: `config.yaml:87` で `judge_model: schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` が設定済み。
+  3. **judge_model の呼び出し場所**: `OllamaClient` は `localhost:11434`（実験実行ノード wafl500 の ollama）に接続。judge_model の呼び出しは wafl500 上の ollama に対して行われる（expert ノードではない）。
+  4. **judge_model のパラメータ**: `_JUDGE_MAX_TOKENS=20`（JSON 1行分の短め生成）、`_JUDGE_TEMPERATURE=0.0`（決定論的）、`timeout_s=dispatch_timeout_s=400.0`（十分余裕）。
+  5. **フォールバック**: judge の解析に失敗した場合、`select_best_dispatch_response()`（max_confidence）にフォールバックする（aggregator.py:178-179）。
+  6. **コード変更**: `config.yaml` の `aggregation_method` を `max_confidence` → `llm_judge` に変更するのみ。コード変更不要。
+  7. **実験手順**: `mise run deploy` → `mise run start`（~100-120分）→ `mise run analyze`。
+  8. **judge_model の pull 確認必要**: wafl500 上に `schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` が pull 済みか確認が必要。pull 未済みの場合は `ollama pull` で取得する必要がある（~5-10分）。
+- **次フェーズへの示唆**:
+  - rc-planner: 計画フェーズで `config.yaml:aggregation_method` の変更のみを指示。judge_model の pull 確認を experimenter への指示に含める。
+  - rc-experimenter: `ollama -h 192.168.15.100 ps` または `ollama list -h 192.168.15.100` で judge_model の存在を確認。未 pull なら `ollama pull schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` を実行してから `mise run deploy` → `mise run start`。
+
+---
+
+### 実装 (Iter48)
+
+- **実施日時**: 2026-08-03
+- **変更ファイル**: `config.yaml` — 1箇所変更
+  - line 68: `aggregation_method: max_confidence` → `aggregation_method: llm_judge`
+- **judge_model の状態**: wafl500 (`expert-mesh-ollama-1`) 上に `schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` が pull 済み（6日前）。追加 pull 不要。
+- **YAML 検証**: `yaml.safe_load()` で構文有効確認済み。
+- **ruff lint**: Python ファイルに変更なし。既存の `scripts/analyze_iter43.py` の lint 警告は今回の変更と無関係。
+- **コード変更不要**: `llm_judge` のコードパスは既に実装済み（`aggregator.py:153-181`、`node.py:143-150`）。
+
+---
+
+### 分析(解釈) (Iter48)
+
+**数値の要約とIter47 (max_confidence) 比**:
+
+| メトリクス | Iter48 (llm_judge) | Iter47 (max_confidence) | 差 |
+|---|---|---|---|
+| top1_accuracy | 0.435 | 0.6031 | **-0.1681** |
+| compound_domain_set_recall | 0.345 | 0.345 | 0.0 |
+| fallback_rate | 0.0 | 0.0 | - |
+| dispatched_domains >= 2 | 1600/1600 (100%) | 1600/1600 (100%) | - |
+| ECE | 0.0502 | 0.0630 | -0.0128 |
+| Brier score | 0.1758 | 0.2036 | -0.0278 |
+| cohens_kappa | 0.38 | 0.5733 | -0.1933 |
+| mean_duration_ms | 6236 | 4886 | +1350 (+27.6%) |
+| answer_quality_accuracy | 0.5553 | 未計算 | - |
+
+**ノイズ判定**:
+
+- **top1_accuracy**: 差 -0.1681。n=1600 の二項 SE ≈ 0.0125。差は SE の 13.4 倍。**ノイズではない。極めて有意な低下**。
+- **compound_domain_set_recall**: 差 0.0。llm_judge は compound_domain_set_recall に何の影響も与えていない。
+- **cohens_kappa**: 差 -0.1933。kappa の SE は n=1600 で約 0.02 程度。差は SE の 10 倍。**極めて有意な低下**。
+- **ECE**: 差 -0.0128。改善しているが、top1_accuracy の低下と天秤にかけても価値がない。
+- **Brier score**: 差 -0.0278。同様に改善しているが、top1_accuracy の低下を補って余りある利点ではない。
+
+**llm_judge の選択挙動の詳細分析**（新規発見）:
+
+dispatched_domains の 2 件に対して、llm_judge がどちらを選択したかを解析:
+
+| 選択タイプ | 件数 | 正解率 |
+|---|---|---|
+| 高 confidence ドメインを選択 | 996 (62.2%) | 60.24% |
+| 低 confidence ドメインを選択 | 604 (37.8%) | 15.89% |
+
+- **高 confidence 選択時**: 60.24% accuracy。max_confidence (60.31%) と実質同一。
+- **低 confidence 選択時**: 15.89% accuracy。**極めて低い**。
+- **judge が max_confidence と異なる選択をした 604 件中、正解は 96 件 (15.89%)**。つまり、judge が confidence と異なる判断をした 84.1% は**誤選択**である。
+
+**hypothetical max_confidence accuracy**: 965/1600 = 60.31%（llm_judge の dispatched_domains に対して max_confidence を適用した場合）。これは Iter47 の 60.31% と完全に一致。
+
+**ECE/Brier score 改善の解釈**:
+
+probability calibration が改善している（ECE: 0.0630→0.0502, Brier: 0.2036→0.1758）が、これは paradoxical な現象である。llm_judge は「確信度は高いが間違っている」選択を 37.8% の割合で行っている。つまり、judge が下した誤選択は、その選択に対応する confidence 値をそのまま使用するため、ECE/Brier score の計算上は「そのドメインの確率が高い → 正解でなかった → 較正誤差」となる。この較正誤差は、top1_accuracy の低下に比べて相対的に小さく見えるが、本質的には**judge がシステムを壊している**ことを示す。
+
+**compound_domain_set_recall が 0.345 で不変の理由**:
+
+compound_domain_set_recall は dispatched_domains の set が expected_domains をカバーする割合であり、selected_domain の選択には依存しない。llm_judge は dispatched_domains の set には介入しない（dispatch は classifier の confidence 順）。したがって、dispatched_domains の set 自体は Iter47 と同一であり、compound_domain_set_recall は同一値になる。
+
+**mean_duration_ms +27.6% の解釈**:
+
+6236ms vs 4886ms (+1350ms)。59.6% の行で duration >= 5000ms であり、judge_model の LLM 呼び出しが確認された。これは設計予想通り（judge_model の追加 LLM 呼び出しによるオーバーヘッド）。
+
+**判定**: `rejected`（確信度: high）。
+
+理由:
+1. top1_accuracy が -0.1681 と**極めて有意に**悪化（SE の 13.4 倍）。
+2. cohens_kappa が -0.1933 と**極めて有意に**悪化。
+3. compound_domain_set_recall は同等（0.345）。改善なし。
+4. answer_quality_accuracy 0.5553 は majority_vote (0.568) よりも劣る。
+5. コストは +27.6% 高い（6236ms vs 4886ms）。
+6. **決定的発見**: llm_judge が max_confidence と異なる判断をした 604 件中、84.1% が誤選択。judge は「信頼できる判断」ではなく「信頼できないノイズ」を挿入している。
+
+**仮説との整合**:
+
+計画の仮説は「llm_judge が compound_domain_set_recall を有意に改善する」。これは完全に不成立。compound_domain_set_recall は 0.345 で max_confidence と同一。top1_accuracy も -0.1681 と大幅に悪化。
+
+想定外の挙動:
+1. **llm_judge が max_confidence より著しく劣る**: 設計予想では llm_judge が 2 回答のうち正解に近い方を選ぶはずだったが、実際には 84.1% のオーバーライドが誤選択だった。judge_model (schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m) の判断能力が、ドメイン選択タスクに対して不十分であることを示す。
+2. **ECE/Brier score の改善が paradoxical**: probability calibration が改善しているが、これは judge が「自信過剰な誤選択」をしているため。通常の較正改善とは異なり、システムが壊れていることを示す指標。
+
+**次の考察フェーズへの示唆**:
+
+1. **`aggregation_method` レバーは `max_confidence` 採用で確定**。llm_judge は rejected（top1_accuracy -0.1681, cohens_kappa -0.1933）。
+2. **`aggregation_method` レバーをクローズ**。3 値（majority_vote, max_confidence, llm_judge）すべて試行済み。max_confidence が最良（単純・低コスト・最高 accuracy）。
+3. **次のレバーへ移行**。config.yml の levers を再確認し、未実施のレバーへ進む。
+
+---
+
 ### 調査 (Iter47)
 
 - **実施日時**: 2026-08-02
@@ -434,3 +669,53 @@ compound_domain_set_recall の +19.5pt 改善は明確。ただしベースラ�
 ### 備考: llm_judge の比較について
 
 `llm_judge` は `majority_vote` より高コスト（各dispatchでjudge_modelの追加LLM呼び出しが必要）だが、理論的にはより高性能な可能性がある。本次第では `majority_vote` を第一候補とし、結果が期待以上であれば `llm_judge` も比較対象とする。`llm_judge` を試す場合は追加のイテレーションを要する（~100-120分/回、judge_modelの生成時間による）。
+
+---
+
+### Iteration 48 実行済み
+
+- **結果ファイル**: `results/20260803_092107/results.jsonl` (1600行)
+- **設定**: `dispatch_top_k=2`, `aggregation_method=llm_judge`, `dispatch_candidate_threshold=0.0`, `confidence_threshold=0.0`, temperature較正, education_intercept_delta=+0.7
+- **主要結果**:
+  - `top1_accuracy`: 0.435
+  - `compound_domain_set_recall`: 0.345
+  - `fallback_rate`: 0.0
+  - `dispatched_domains` length >= 2: 1600/1600 (100%)
+  - `cohens_kappa`: 0.38
+  - `ECE`: 0.0502
+  - `Brier score`: 0.1758
+  - `answer_quality_accuracy`: 0.5553
+
+### 考察 (Iter48)
+
+**判定**: `rejected`（確信度: high）
+
+**総括**:
+1. `aggregation_method=llm_judge` は `max_confidence` 比で top1_accuracy が -0.1681（0.6031→0.435）。SE~0.0125 の 13.4 倍の低下。ノイズ範囲を大幅に超える。
+2. `compound_domain_set_recall` は 0.345 で `max_confidence` と同一。改善なし。
+3. `cohens_kappa` が -0.1933（0.5733→0.38）。極めて有意な低下。
+4. **決定的な発見**: llm_judge の judge_override（max_confidence と異なる選択）が 604 件（37.8%）。そのうち 84.1% が誤選択。低 confidence ドメインを選択した場合の正解率は 15.89%（Random 10.1% よりわずかに良い程度）。
+5. **hypothetical max_confidence accuracy**（llm_judge の dispatched_domains に対して max_confidence を適用）は 60.31% で、Iter47 と完全に一致。dispatched_domains 自体は問題なく、judge の選択ロジックが壊れている。
+
+**aggregation_method レバーの総括**:
+
+| 値 | イテレーション | top1_accuracy | compound_recall | 判定 |
+|---|---|---|---|---|
+| max_confidence | Iter47 | 0.6031 | 0.345 | adopted（基準） |
+| majority_vote | Iter46 | 0.6063 | 0.360 | converged（max_confidence 実質同等） |
+| llm_judge | Iter48 | 0.435 | 0.345 | rejected（-0.1681, 重大な悪化） |
+
+**結論**: `max_confidence` を正式採用して `aggregation_method` レバーを閉じる。
+
+**学び**:
+1. **llm_judge は dispatched_domains からの正解選択ができない**: judge_model (schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m) の判断能力が、ドメイン選択タスクに対して不十分。高 confidence ドメインを選択した 996 件の正解率 60.24% は max_confidence (60.31%) と同等だが、低 confidence ドメインを選択した 604 件の正解率 15.89% が極めて低い。
+2. **ECE/Brier score 改善はparadoxical**: probability calibration が改善しているように見えるが、これは judge が「確信度は高いが間違っている」選択をしているため。通常の較正改善ではなく、システムが壊れていることを示す指標。
+3. **aggregation_method の効果は微小**: top_k=2 dispatch の下で、集約方式の選択は compound_domain_set_recall に二次的な影響のみ。top_k=2 自体が 0.165→0.36 の巨大効果をもたらしたが、集約方式の選択はその範囲内での微細な差異。
+4. **judge_model のフォールバックは実質 max_confidence**: judge の解析に失敗した場合のフォールバックは select_best_dispatch_response()（max_confidence 同等）。このフォールバックが頻発している可能性もあるが、主要な原因は judge が誤選択していること。
+
+**次に振るレバー**: `classifier_head_adaptation` の未試行値へ移行。
+- 現在 adopted: `education_boundary_tuning` (intercept_delta=+0.7, Iter44)
+- 未試行: `education_feature_augmentation`, `education_posthoc_calibration`
+- `aggregation_method` レバーは全3値試し切り。max_confidence 採用でクローズ。
+
+**要人間判断**: なし（可逆な判断の範囲内）。

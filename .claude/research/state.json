@@ -2,22 +2,22 @@
   "repo": "expert-mesh",
   "iteration": 48,
   "iteration_name": "aggregation_method=llm_judgeによる複合ドメイン集約方式比較",
-  "phase": "investigate",
+  "phase": "reflect",
   "status": "running",
-  "updated_at": 1785780100,
-  "current_lever": null,
-  "experiment_deadline": null,
-  "experiment_dir": null,
+  "updated_at": 1785781300,
+  "current_lever": "aggregation_method=llm_judge",
+  "experiment_deadline": 1785725331,
+  "experiment_dir": "results/20260803_092107/",
   "iteration_thread_ts": null,
   "notion_toggle_created": false,
   "next_iteration_brief": {
     "must_read_first": [
-      ".claude/research/journal.md (Iteration 46: aggregation_method変更による複数ノードdispatch時の集約方式比較 - adopted (条件付き))",
-      ".claude/research/journal.md (Iteration 44: educationドメインinterceptシフト(+0.7)によるdecision boundary調整 - adopted)",
-      ".claude/research/journal.md (Iteration 43: embedding出力への線形射影(head)によるeducationドメイン適応)"
+      ".claude/research/journal.md (Iteration 48: aggregation_method=llm_judgeによる複合ドメイン集約方式比較 - rejected)",
+      ".claude/research/journal.md (Iteration 47: aggregation_method=max_confidence cleanベースライン取得)",
+      ".claude/research/journal.md (Iteration 44: educationドメインinterceptシフト(+0.7)によるdecision boundary調整 - adopted)"
     ],
-    "planned_lever": "aggregation_method (dispatch_top_k=2, max_confidence の clean ベースライン取得 → llm_judge)",
-    "note": "Iter46 (majority_vote, top_k=2) は compound_domain_set_recall +19.5pt (vs 旧ベースライン 0.165→0.36) で adopted（条件付き）。ただし旧ベースラインは fallback あり・較正前のため、厳密な対比のため Iter47 で clean ベースライン（dispatch_top_k=2, max_confidence, fallback廃止, temperature較正）を実行。その後 Iter48 で llm_judge を検証。"
+    "planned_lever": "classifier_head_adaptation (education_feature_augmentation または education_posthoc_calibration)",
+    "note": "aggregation_method レバー全3値（majority_vote, max_confidence, llm_judge）試し切り完了。max_confidence 採用でクローズ。次レバーは classifier_head_adaptation の未試行値（education_feature_augmentation, education_posthoc_calibration）。education_boundary_tuning (intercept_delta=+0.7) は Iter44 で adopted済み（education_recall 0.4588→0.5235, medical_recall 0.5000 基準線未満）。"
   },
   "e37_results": {
     "lever": "classifier_training_data_composition=history_culture_japanese_civics_reassignment_to_education",
@@ -1159,5 +1159,40 @@
       "recommendation": "max_confidence sufficient as baseline. llm_judge (Iter48) to be tested next. If llm_judge shows no significant difference either, adopt max_confidence (simplest, lowest cost)."
     },
     "judgment": "max_confidence_sufficient"
+  },
+  "e48_results": {
+    "lever": "aggregation_method=llm_judge (dispatch_top_k=2)",
+    "top1_accuracy": 0.435,
+    "top1_accuracy_wilson_ci": [
+      0.4109,
+      0.4594
+    ],
+    "cohens_kappa": 0.38,
+    "compound_domain_set_recall": 0.345,
+    "fallback_rate": 0.0,
+    "dispatched_domains_ge_2_rate": 1.0,
+    "ece": 0.0502,
+    "brier_score": 0.1758,
+    "mean_duration_ms": 6236.0,
+    "answer_quality_accuracy": 0.5553,
+    "comparison_vs_iter47": {
+      "top1_accuracy_diff": -0.1681,
+      "cohens_kappa_diff": -0.1933,
+      "compound_domain_set_recall_diff": 0.0,
+      "ece_diff": -0.0128,
+      "brier_score_diff": -0.0278,
+      "duration_ms_diff": 1350
+    },
+    "llm_judge_behavior": {
+      "higher_confidence_selected": 996,
+      "higher_confidence_accuracy": 0.6024,
+      "lower_confidence_selected": 604,
+      "lower_confidence_accuracy": 0.1589,
+      "override_error_rate": 0.8411,
+      "note": "llm_judge overrode max_confidence in 37.8% of cases. Of those overrides, 84.1% were wrong. This is catastrophic."
+    },
+    "hypothetical_max_confidence_accuracy": 0.6031,
+    "note": "llm_judge REJECTED. top1_accuracy -0.1681 vs max_confidence. Judge override error rate 84.1%. compound_domain_set_recall unchanged (0.345). ECE/Brier improvement is illusory (judge makes overconfident wrong choices). aggregation_method lever CLOSED. max_confidence adopted.",
+    "judgment": "rejected"
   }
 }
