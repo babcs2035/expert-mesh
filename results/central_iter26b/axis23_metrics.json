@@ -1,0 +1,12 @@
+{
+  "answer_quality_accuracy": 0.49333333333333335,
+  "end_to_end_accuracy": 0.29125,
+  "latency_breakdown": {
+    "mean_duration_ms": 0.0,
+    "mean_dispatch_gen_time_ms": 0.0,
+    "mean_other_ms": 0.0,
+    "rows_with_dispatch_timing": 0
+  },
+  "graded_row_count": 1500,
+  "total_row_count": 1600
+}
