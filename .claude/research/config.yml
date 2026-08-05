@@ -491,52 +491,69 @@ levers:
             ECE は 0.7146→0.7388 と悪化）．linguistic 側は未実施のまま"}
 
   # --- E4: Iter11 の再試行．ただし文献の前提条件を満たす形で ---
-  - {name: confidence_signal_method, values: [self_consistency_semantic],
-     note: "[2026-07-26 p0001 F2] Iter11 は temperature=0.1・N=3 で実施し『効果なし』としたが，
-            Farquhar et al. Nature 2024 は temperature 0.1 を『点推定としての最良回答』の生成にのみ
-            使い，不確実性推定は T=1・nucleus P=0.9 で行うと明記している．Xiong et al. ICLR2024 も
-            T=0.7 を採用．つまり Iter11 は不確実性を消す設定で不確実性を測っており，手法の棄却根拠に
-            ならない．T=0.7〜1.0・N=5 とし，集約は平均ではなく意味クラスタの出現頻度エントロピー
-            （Discrete Semantic Entropy）にする．**着手前に必ずユニーク回答数を計測し多様性が出ることを
-            確認する**こと（省略すると Iter11 を再演する）．
-            [2026-07-29 d0002 §6-D，2026-07-30 追記で時系列を訂正] Iter21/22 は無効判定だが，理由は
-            「E4 が動いた上で E6 と衝突したから」ではない．Iter21 時点の HEAD では routing_method の
-            チェックが confidence_signal_method より先に return する順序だったため，E4 のコードパスは
-            1 度も実行されず，実際には E6 がそのまま動いていた．Iter22 でこの順序を入れ替える修正が
-            行われたがデプロイ漏れで反映されず，結局 Iter21/22 とも E4 は未実行のまま終わった．
-            **しかし現在の HEAD（`30e3627`）にはこの順序修正が実際に反映されている**．つまり今この状態
-            で config.yaml の confidence_signal_method を self_consistency_semantic に変更すると，
-            過去とは違い今度こそ E4 が実行され，E6（supervised_classifier）の分類器分岐に到達できなく
-            なる．「no-op」ではなく「E6を丸ごと上書きする」変更である点に注意．E6 を維持したまま較正
-            だけを試すなら X9（分類器の較正，CalibratedClassifierCV）の方が安価で先に試すべき．再設計
-            する場合は docs/d0003 X3-a（分類器の argmax はそのまま，confidence だけを semantic entropy
-            で補正する2段構成）を参照"}
+  - name: confidence_signal_method
+    values:
+    - self_consistency_semantic
+    - p_true
+    - stp
+    - multi_sample
+    - hidden_state
+    note: '[2026-08-05 統合] 元は name: confidence_signal_method の重複する 4 エントリ（E4, E5, Iter1-14 の2件）であり，rc-planner
+      が同名レバーを一意に読めるよう 1 エントリへ統合した．各提案の本文・出典は無編集でそのまま残す．いずれも routing_method=supervised_classifier （Iter17 採用）の分類器分岐を丸ごと上書きする変更であり，同時に両立しない．
+    
+    
+      [E4, self_consistency_semantic] [2026-07-26 p0001 F2] Iter11 は temperature=0.1・N=3 で実施し『効果なし』としたが， Farquhar
+      et al. Nature 2024 は temperature 0.1 を『点推定としての最良回答』の生成にのみ 使い，不確実性推定は T=1・nucleus P=0.9 で行うと明記している．Xiong
+      et al. ICLR2024 も T=0.7 を採用．つまり Iter11 は不確実性を消す設定で不確実性を測っており，手法の棄却根拠に ならない．T=0.7〜1.0・N=5 とし，集約は平均ではなく意味クラスタの出現頻度エントロピー
+      （Discrete Semantic Entropy）にする．**着手前に必ずユニーク回答数を計測し多様性が出ることを 確認する**こと（省略すると Iter11 を再演する）． [2026-07-29
+      d0002 §6-D，2026-07-30 追記で時系列を訂正] Iter21/22 は無効判定だが，理由は 「E4 が動いた上で E6 と衝突したから」ではない．Iter21 時点の HEAD では
+      routing_method の チェックが confidence_signal_method より先に return する順序だったため，E4 のコードパスは 1 度も実行されず，実際には E6 がそのまま動いていた．Iter22
+      でこの順序を入れ替える修正が 行われたがデプロイ漏れで反映されず，結局 Iter21/22 とも E4 は未実行のまま終わった． **しかし現在の HEAD（`30e3627`）にはこの順序修正が実際に反映されている**．つまり今この状態
+      で config.yaml の confidence_signal_method を self_consistency_semantic に変更すると， 過去とは違い今度こそ E4 が実行され，E6（supervised_classifier）の分類器分岐に到達できなく
+      なる．「no-op」ではなく「E6を丸ごと上書きする」変更である点に注意．E6 を維持したまま較正 だけを試すなら X9（分類器の較正，CalibratedClassifierCV）の方が安価で先に試すべき．再設計
+      する場合は docs/d0003 X3-a（分類器の argmax はそのまま，confidence だけを semantic entropy で補正する2段構成）を参照
+    
+    
+      [E5, p_true] [2026-07-26 p0001] 回答生成後に ''Is the proposed answer true? (A) True (B) False'' を投げ， top_logprobs
+      から P(''A'') を取る（Kadavath+ 2022 arXiv:2207.05221）．STP は生成系列全体の 平均トークン確率で長さバイアスがあり流暢さを測るのに対し，P(True) は単一位置の二値分類分布
+      であり測定対象が異なる．この区別を journal に明記してから実施すること． **前提: Ollama v0.12.11 以降が必要（logprobs / top_logprobs 対応）．実機のバージョンを
+      先に確認すること**．反証: Tian et al. Table 1 は gpt-3.5 で ''Is True'' が verbalized より 較正が悪いと報告．Kadavath の好結果は 52B
+      base + 20-shot 設定である． [2026-07-30] E4 と全く同じ分岐構造の問題を持つ．現在の HEAD（`30e3627`，E4 の分岐順序 修正が反映済み）で config.yaml
+      の confidence_signal_method を p_true に設定すると， E6（supervised_classifier）の分類器分岐に到達できなくなる．「no-op」ではなく 「E6を丸ごと上書きする」変更である
+    
+    
+      [Iter1-14, stp/multi_sample] [auto-decided 2026-07-22 B20] Iter10でconfig-onlyの3レバーを試し切り，probe-based
+      calibrated routingもlabel leakageでrejected（backlog B19）．次はconfidence信号の抽出方式自体を変える．stp=Surrogate Token
+      Probability（生成中のトークン確率をconfidence signalとして抽出，tokenizer logprobs抽出が必要で実装コスト高）．multi_sample=複数回probeしたconfidenceの分散を信頼度信号として使用（実装は簡単だがprobe複数回実行でlatency増）．rc-plannerがどちらを先に試すか判断すること
+    
+    
+      [Iter1-14, hidden_state] [auto-decided 2026-07-22 B24] config levers 全6本を試しまれた（B1-B23参照）．verbalized
+      self-report と token probabilities の両方が confidence signal として失敗したため、モデル生成に依存しない信号源へ移行。hidden_state=モデルの
+      hidden state（最終層活性化ベクトルまたは embedding 出力）から confidence signal を抽出する方式。Mahaut et al. 2024 由来。入力の内部表現とドメイン知識の一致度を測定し、self_report（言語的自信）や
+      STP（生成 fluency）とは異なる特性が期待される。expert_backend.py の変更が必要'
 
   # --- E5: logprobs ベース．STP とは測定対象が異なることを明文化してから実施 ---
-  - {name: confidence_signal_method, values: [p_true],
-     note: "[2026-07-26 p0001] 回答生成後に 'Is the proposed answer true? (A) True (B) False' を投げ，
-            top_logprobs から P('A') を取る（Kadavath+ 2022 arXiv:2207.05221）．STP は生成系列全体の
-            平均トークン確率で長さバイアスがあり流暢さを測るのに対し，P(True) は単一位置の二値分類分布
-            であり測定対象が異なる．この区別を journal に明記してから実施すること．
-            **前提: Ollama v0.12.11 以降が必要（logprobs / top_logprobs 対応）．実機のバージョンを
-            先に確認すること**．反証: Tian et al. Table 1 は gpt-3.5 で 'Is True' が verbalized より
-            較正が悪いと報告．Kadavath の好結果は 52B base + 20-shot 設定である．
-            [2026-07-30] E4 と全く同じ分岐構造の問題を持つ．現在の HEAD（`30e3627`，E4 の分岐順序
-            修正が反映済み）で config.yaml の confidence_signal_method を p_true に設定すると，
-            E6（supervised_classifier）の分類器分岐に到達できなくなる．「no-op」ではなく
-            「E6を丸ごと上書きする」変更である"}
 
   # --- E6: 教師ありルーター．中央ルーター無しの構造は維持できる ---
-  - {name: routing_method, values: [supervised_classifier],
-     note: "[2026-07-26 p0001 F4] Iter2 の embedding 失敗（cosine が [0.667,0.737] に潰れる）は
-            埋め込みの anisotropy という既知の幾何的現象であり『信号が無い』証明ではない．
-            Varangot-Reille+ JAIR2025 は similarity-based routing の失敗を unsupervised であることに
-            帰し，RouterDC (NeurIPS2024) は CosineClassifier に全タスクで勝利している．
-            SetFit / multilingual-e5 + logistic head を各ノードが持ち，自分のクラス確率のみ返せば
-            中央ルーター無しの構造は保てる．**必須条件: 訓練質問と評価質問を質問単位で完全分離し，
-            訓練データを probe 実行結果から作らない（Iter10 の label leakage の再演を防ぐ）**．
-            反証: MoDEM のルーター精度は 5 クラス 81.00% で現状の 0.87 より低く，Other クラスは 52.94%．
-            Iter4 の education 追加時 precision 低下と同じ構造で general ノードが共通のボトルネック"}
+  - name: routing_method
+    values:
+    - supervised_classifier
+    - self_report
+    - embedding
+    note: '[2026-08-05 統合] 元は name: routing_method の重複する 2 エントリ（E6, Iter1-14）であり，rc-planner が同名レバーを一意に読めるよう
+      1 エントリへ統合した．各提案の本文・出典は無編集でそのまま残す．supervised_classifier は Iter17 で採用され，以降の全実験（Iter17〜54）はこの値に固定されている．self_report/embedding
+      は採用前の代替案であり，現在は再試行対象ではない．
+    
+    
+      [E6, supervised_classifier] [2026-07-26 p0001 F4] Iter2 の embedding 失敗（cosine が [0.667,0.737] に潰れる）は
+      埋め込みの anisotropy という既知の幾何的現象であり『信号が無い』証明ではない． Varangot-Reille+ JAIR2025 は similarity-based routing の失敗を
+      unsupervised であることに 帰し，RouterDC (NeurIPS2024) は CosineClassifier に全タスクで勝利している． SetFit / multilingual-e5
+      + logistic head を各ノードが持ち，自分のクラス確率のみ返せば 中央ルーター無しの構造は保てる．**必須条件: 訓練質問と評価質問を質問単位で完全分離し， 訓練データを probe 実行結果から作らない（Iter10
+      の label leakage の再演を防ぐ）**． 反証: MoDEM のルーター精度は 5 クラス 81.00% で現状の 0.87 より低く，Other クラスは 52.94%． Iter4 の
+      education 追加時 precision 低下と同じ構造で general ノードが共通のボトルネック
+    
+    
+      [Iter1-14, self_report/embedding] Phase1実装済みの方式A(embedding)とB(self_report,既定)を比較．probeレイテンシと精度のトレードオフを定量比較'
 
   # --- E7: 安価な切り分け専用．これ単体で成果を期待しない ---
   - {name: embedding_postprocess, values: [whitening],
@@ -595,10 +612,7 @@ levers:
 
   # --- 以下は Iter1〜14 で試行済み（履歴．再実施の際は上記 E1 完了後に限る） ---
   - {name: dispatch_top_k, values: [1, 2, 3], note: "直近完走実験(results/20260709_214113)でmedical recallが0.79（legal 0.93, general 1.0）と低いことが判明．top_k>1の並行dispatchで改善するか検証．aggregator.select_best_dispatch_responseは対応済み・新規実装不要"}
-  - {name: routing_method, values: [self_report, embedding], note: "Phase1実装済みの方式A(embedding)とB(self_report,既定)を比較．probeレイテンシと精度のトレードオフを定量比較"}
   - {name: confidence_threshold, values: [0.3, 0.5, 0.7], note: "フォールバック率とのトレードオフ．直近実験ではfallback_rate=0.0のため効果が薄い可能性あり"}
-  - {name: confidence_signal_method, values: [stp, multi_sample], note: "[auto-decided 2026-07-22 B20] Iter10でconfig-onlyの3レバーを試し切り，probe-based calibrated routingもlabel leakageでrejected（backlog B19）．次はconfidence信号の抽出方式自体を変える．stp=Surrogate Token Probability（生成中のトークン確率をconfidence signalとして抽出，tokenizer logprobs抽出が必要で実装コスト高）．multi_sample=複数回probeしたconfidenceの分散を信頼度信号として使用（実装は簡単だがprobe複数回実行でlatency増）．rc-plannerがどちらを先に試すか判断すること"}
-  - {name: confidence_signal_method, values: [hidden_state], note: "[auto-decided 2026-07-22 B24] config levers 全6本を試しまれた（B1-B23参照）．verbalized self-report と token probabilities の両方が confidence signal として失敗したため、モデル生成に依存しない信号源へ移行。hidden_state=モデルの hidden state（最終層活性化ベクトルまたは embedding 出力）から confidence signal を抽出する方式。Mahaut et al. 2024 由来。入力の内部表現とドメイン知識の一致度を測定し、self_report（言語的自信）や STP（生成 fluency）とは異なる特性が期待される。expert_backend.py の変更が必要"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
