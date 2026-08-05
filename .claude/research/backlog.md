@@ -280,6 +280,42 @@ B 番号は journal / journal_archive から本文中で参照されているた
 
 ---
 
+## B74 [auto-decided 2026-08-03] Iter50: education_posthoc_calibration (logit_bias=+0.5) rejected。classifier_head_adaptation レバークローズ。全 levers 試し切り済み、次イテレーションは調査フェーズ
+
+- **状況**: Iter50（education_posthoc_calibration, logit_bias=+0.5）の結果を考察。
+- **判定**: `rejected`（確信度: high）。education_recall 改善 (+0.0588) が McNemar p=0.2751 で有意ではない。top1_accuracy の有意悪化（p=0.0014）と medical_recall の有意退行（p=0.0133）を確認。
+- **決定的な学び**:
+  1. **post-hoc probability manipulation は training-time intercept adjustment より構造的に劣る**: logit_bias は temperature-scaled 確率を一旦 logit へ逆変換した上でのシフト。temperature scaling は logit を圧縮するため、同じ数値の bias でも raw logit 空間での intercept shift より効果が小さくなる。
+  2. **softmax 再正規化の波及効果**: logit_bias は確率分布全体に影響する。education class の確率が上昇すると、他 class の確率が均等に相対的に減少する（softmax の性質）。intercept shift は raw logit 空間での平行移動であり、他 class の相対的な順序は保たれる。このため、logit_bias は全9ドメインが同方向に退行する。
+  3. **学習済み分類器とのミスマッチ**: intercept_delta=+0.7 は分類器の訓練時に intercept をシフトして適用。分類器はシフト後の intercept で最適化された重みを持つ。logit_bias=+0.5 は訓練済み分類器の確率出力に対して post-hoc で適用。分類器は bias 適用前の確率分布を前提に学習しており、bias 適用後の確率分布は学習分布と異なる。
+  4. **dose-response は確認されたが統計的有意性には届かなかった**: +0.3 (0.5588) -> +0.5 (0.5824) で +0.0235 の改善。単調増加は確認されたが、McNemar 検定の検出力では不十分。
+  5. **medical_recall の有意退行は決定打**: McNemar a_only=0, b_only=8。全不整合ペアが悪化方向。post-hoc calibration の構造的帰結。
+- **classifier_head_adaptation レバーの総括**:
+
+  | 値 | イテレーション | education_recall | top1_accuracy | medical_recall | 判定 |
+  |---|---|---|---|---|---|
+  | education_boundary_tuning (intercept_delta=+0.7) | Iter44 | +0.0647 (p=0.00185) | -0.0012 (p=0.8445) | -0.0112 (p=0.1573) | adopted |
+  | education_posthoc_calibration (logit_bias=+0.3) | Iter49 | +0.0353 (p=0.5443) | -0.0125 (p=0.0500) | -0.0337 | rejected |
+  | education_posthoc_calibration (logit_bias=+0.5) | Iter50 | +0.0588 (p=0.2751) | -0.0219 (p=0.0014) | -0.0449 (p=0.0133) | rejected |
+  | education_feature_augmentation | 未試行 | -- | -- | -- | skip（flip rate 15-30% リスク） |
+
+- **config.yml の全 levers を試し切り済み**:
+  - fallback_policy: adopted（完了）
+  - classifier_calibration: 全3値試済み（temperature adopted）
+  - classifier_training_data_composition: 全6値 rejected
+  - class_weight_adjustment: rejected
+  - embedding_adaptation: 全4値 rejected
+  - classifier_head_adaptation: 1 adopted, 1 exhausted, 1 skip（レバークローズ）
+  - aggregation_method: 全3値試済み（max_confidence adopted）
+- **次の一手**: 調査フェーズから開始（`current_lever=null`）。rc-investigator は Tavily-search で以下の観点から調査すること:
+  1. education_recall の根本原因に対する代替アプローチ（embedding freeze + classifier head の新手法）
+  2. education_feature_augmentation の flip rate を正確に計測する手法
+  3. education_recall の基準値再検討の材料（medical_recall 0.5112 が education に対して現実的か）
+- **要人間判断**: なし（可逆な判断の範囲内）。
+
+---
+
+
 ## B73 [auto-decided 2026-08-03] Iter50: education_posthoc_calibration (logit_bias=+0.5) rejected。classifier_head_adaptation レバークローズ。全 levers 試し切り完了
 
 - **状況**: Iter50（logit_bias=+0.5）の結果を考察。education_recall 0.5824（+0.0588 vs Iter44）だが McNemar p=0.2751（有意でない）。top1_accuracy 有意悪化（p=0.0014）、medical_recall 有意退行（p=0.0133）。
@@ -303,8 +339,6 @@ B 番号は journal / journal_archive から本文中で参照されているた
   2. education_feature_augmentation の正確な flip rate 計測
   3. education_recall 基準値再検討の材料
 - **要人間判断**: なし（可逆な判断の範囲内）。
-
-# backlog — 人間判断待ち事項 / 自動判断の記録
 
 ## B73 [auto-decided 2026-08-03] Iter49: education_posthoc_calibration (logit_bias=+0.3) rejected。次イテレーションは logit_bias=+0.5 で sensitivity analysis
 
@@ -458,6 +492,48 @@ B 番号は journal / journal_archive から本文中で参照されているた
 
 ---
 
+## B67 [auto-decided 2026-08-02] Iter44: education_boundary_tuning (intercept_delta=+0.7) adopted。全levers試し切り、次は調査フェーズ
+
+- **状況**: Iter44（classifier_head_adaptation=education_boundary_tuning, intercept_delta=+0.7）
+  の rc-analyst 判定（adopted）を rc-reflector が検証・確定させた。
+- **判定: adopted（確定）**。4条件中4条件すべてPASS:
+  - education_recall 0.4588→0.5235 (+0.0647) > 0.5112 **PASS**
+  - BH補正後有意退行 0件 **PASS**
+  - argmax flip rate 8.62% < 15% **PASS**
+  - top1_accuracy McNemar p=0.8445 >= 0.05 **PASS**
+- **決定的な学び**:
+  1. **intercept シフトは単一レバー原則を達成できる**: argmax flip rate 8.62% は embedding
+     適応（全4手法で35.88〜52.56%）の桁違いの改善。embedding 空間を不変に保ち、classifier
+     head の intercept だけを動かす設計が有効だった。
+  2. **education intercept の系統的低下が主因**: education intercept=-0.1185 は他ドメイン
+     に対して系統的に低い。+0.7 で補正した結果、education_recall 0.4588→0.5235。
+     感度閾値は +0.5〜+0.7 の間。
+  3. **全embedding適応試行の総括**: SetFit full FT(52.56% flip), LoRA r=16(35.88%),
+     LoRA r=8(35.88%), Dense projection head(42.00%) — 全rejected。embedding空間の
+     幾何学的制約により単一レバー原則と両立しないことが確定。
+  4. **classifier_head_adaptationの残値は実質不要**: education_posthoc_calibrationは
+     interceptシフトと数学的に同等、education_feature_augmentationはargmax flip rate
+     15%超リスクが高い。
+- **config.yml の全 levers 試し切り状況**:
+  - `fallback_policy`: adopted（完了）
+  - `classifier_calibration`: 3値すべて試済み（temperature=adopted）
+  - `classifier_training_data_composition`: 6値すべて試済み（全rejected/invalid）
+  - `class_weight_adjustment`: 1値試済み（rejected）
+  - `embedding_adaptation`: 4値すべて試済み（全rejected）
+  - `classifier_head_adaptation`: 1値試済み（education_boundary_tuning=adopted）
+    残り2値は実質不要と判断
+  - `aggregation_method`: Y2ブロックで試せない
+- **次の一手: 調査フェーズから開始**（Iter45）。`current_lever=null`。
+  tavily-searchで代替アプローチを重点調査すること。
+- **要人間判断**:
+  1. education_recall の基準値（medical_recall 0.5112）の再検討
+  2. Y2（`confidence_threshold` の二重責務分離，スキーマ変更）着手前のユーザー確認
+  3. fallback 設計思想の論文上の位置付け（B48）
+  4. D5（`data/`/`models` のバージョン管理方針）
+
+
+---
+
 ## B66 [auto-decided 2026-08-02] Iter44: education_boundary_tuning (intercept_delta=+0.5)
 
 - **自動選択**: 単一レバーを `classifier_head_adaptation=education_boundary_tuning` とする。
@@ -487,44 +563,6 @@ B 番号は journal / journal_archive から本文中で参照されているた
 - **コスト**: 低（~10-15分、オフライン完結）
 
 ---
-
-## B74 [auto-decided 2026-08-03] Iter50: education_posthoc_calibration (logit_bias=+0.5) rejected。classifier_head_adaptation レバークローズ。全 levers 試し切り済み、次イテレーションは調査フェーズ
-
-- **状況**: Iter50（education_posthoc_calibration, logit_bias=+0.5）の結果を考察。
-- **判定**: `rejected`（確信度: high）。education_recall 改善 (+0.0588) が McNemar p=0.2751 で有意ではない。top1_accuracy の有意悪化（p=0.0014）と medical_recall の有意退行（p=0.0133）を確認。
-- **決定的な学び**:
-  1. **post-hoc probability manipulation は training-time intercept adjustment より構造的に劣る**: logit_bias は temperature-scaled 確率を一旦 logit へ逆変換した上でのシフト。temperature scaling は logit を圧縮するため、同じ数値の bias でも raw logit 空間での intercept shift より効果が小さくなる。
-  2. **softmax 再正規化の波及効果**: logit_bias は確率分布全体に影響する。education class の確率が上昇すると、他 class の確率が均等に相対的に減少する（softmax の性質）。intercept shift は raw logit 空間での平行移動であり、他 class の相対的な順序は保たれる。このため、logit_bias は全9ドメインが同方向に退行する。
-  3. **学習済み分類器とのミスマッチ**: intercept_delta=+0.7 は分類器の訓練時に intercept をシフトして適用。分類器はシフト後の intercept で最適化された重みを持つ。logit_bias=+0.5 は訓練済み分類器の確率出力に対して post-hoc で適用。分類器は bias 適用前の確率分布を前提に学習しており、bias 適用後の確率分布は学習分布と異なる。
-  4. **dose-response は確認されたが統計的有意性には届かなかった**: +0.3 (0.5588) -> +0.5 (0.5824) で +0.0235 の改善。単調増加は確認されたが、McNemar 検定の検出力では不十分。
-  5. **medical_recall の有意退行は決定打**: McNemar a_only=0, b_only=8。全不整合ペアが悪化方向。post-hoc calibration の構造的帰結。
-- **classifier_head_adaptation レバーの総括**:
-
-  | 値 | イテレーション | education_recall | top1_accuracy | medical_recall | 判定 |
-  |---|---|---|---|---|---|
-  | education_boundary_tuning (intercept_delta=+0.7) | Iter44 | +0.0647 (p=0.00185) | -0.0012 (p=0.8445) | -0.0112 (p=0.1573) | adopted |
-  | education_posthoc_calibration (logit_bias=+0.3) | Iter49 | +0.0353 (p=0.5443) | -0.0125 (p=0.0500) | -0.0337 | rejected |
-  | education_posthoc_calibration (logit_bias=+0.5) | Iter50 | +0.0588 (p=0.2751) | -0.0219 (p=0.0014) | -0.0449 (p=0.0133) | rejected |
-  | education_feature_augmentation | 未試行 | -- | -- | -- | skip（flip rate 15-30% リスク） |
-
-- **config.yml の全 levers を試し切り済み**:
-  - fallback_policy: adopted（完了）
-  - classifier_calibration: 全3値試済み（temperature adopted）
-  - classifier_training_data_composition: 全6値 rejected
-  - class_weight_adjustment: rejected
-  - embedding_adaptation: 全4値 rejected
-  - classifier_head_adaptation: 1 adopted, 1 exhausted, 1 skip（レバークローズ）
-  - aggregation_method: 全3値試済み（max_confidence adopted）
-- **次の一手**: 調査フェーズから開始（`current_lever=null`）。rc-investigator は Tavily-search で以下の観点から調査すること:
-  1. education_recall の根本原因に対する代替アプローチ（embedding freeze + classifier head の新手法）
-  2. education_feature_augmentation の flip rate を正確に計測する手法
-  3. education_recall の基準値再検討の材料（medical_recall 0.5112 が education に対して現実的か）
-- **要人間判断**: なし（可逆な判断の範囲内）。
-
----
-
-このファイルは research-cycle が「本来は人間の判断が要るが，サイクルを止めないために暫定で自動選択した事項」と，
-「不可逆・危険なため停止して人間に委ねた事項」を記録する．新しいものを常に先頭に追記する（逆時系列）．
 
 ## B65 [auto-decided 2026-08-02] Iter43: embedding_adapter_projection_head rejected。全embedding適応値尽きた。次レバー=classifier_head_adaptation
 
@@ -592,6 +630,34 @@ B 番号は journal / journal_archive から本文中で参照されているた
   両方失敗した場合、rc-investigatorへ調査フェーズからの再探索を申し送る。
 - **要人間判断**: (1) education_recall の基準値（medical_recall 0.5112）の再検討。(2) Y2
   （`confidence_threshold`の二重責務分離，スキーマ変更）着手前のユーザー確認は引き続き必要。
+
+## B64 [auto-decided 2026-08-02] Iter41: embedding_adaptation=embedding_adapter_only_lora の計画
+
+- **自動選択**: 単一レバーを `embedding_adaptation=embedding_adapter_only_lora` とする。
+  `iteration_name` は「PEFT LoRAによるeducationドメイン埋め込み適応」．
+- **選定理由**:
+  1. Iter40（setfit_education_finetune）で全パラメータfine-tuningが単一レバー原則と両立しないことが確定（argmax flip rate 52.56%）
+  2. rc-investigator（Iter41調査フェーズ）は PEFT LoRA の feasibility が HIGH と判定
+  3. SentenceTransformer 3.x が LoRA を公式サポート
+  4. 既存の `--fine-tuned-embed-model` 統合（Iter40 で実装済み）を再利用可能
+  5. LoRA adapter の更新パラメータは base model の 0.86% のみ（rank=16, attention layers のみ）
+  6. オフライン完結（実機1600問本走不要、総コスト~30-45分）
+- **計画フェーズの決定事項**:
+  1. **Rank dimension**: r=16（保守的。単一レバー原則優先。r=32 は fallback）
+  2. **Training loss**: MultipleNegativesRankingLoss（SBERT 公式推奨、TripletLoss より安定）
+  3. **Runtime embedding path**: classifier training + evaluation で LoRA adapter 適用。runtime routing は base model のまま（単一レバー原則）。train/inference mismatch を避けるため、classifier training と evaluation で同一の LoRA-adapted embeddings を使用。
+  4. **Negative pair sampling**: 60/40 priority/random（Iter40 と同一）
+  5. **LoRA target modules**: `.*attn.*`（attention 投影層のみ。MLP 層は対象外）
+- **変更ファイル**:
+  1. `scripts/fine_tune_embedding_lora.py`（新規作成）— LoRA 訓練スクリプト
+  2. `scripts/train_domain_classifier.py`（`build_training_features()` に `set_adapter("default")` 追加）
+  3. `scripts/evaluate_classifier_calibration.py`（`predict_calibrated_rows()` に `set_adapter("default")` 追加）
+  4. `pyproject.toml`（`research` deps に `peft>=0.12` 追加）
+- **成功条件**: education_recall > medical_recall基準(0.5112)、他9ドメイン18指標のBH補正後有意退行0件、argmax flip rate < 15%
+- **失敗条件**: education_recall が基準超えない、BH補正後有意退行1件以上、argmax flip rate >= 15%、LoRA adapter ロードエラー
+- **コスト**: 低〜中（~30-45分、オフライン完結）
+
+---
 
 ## B63 [auto-decided 2026-08-02] Iter40: embedding_adaptation=setfit_education_finetune rejected。次レバー=embedding_adapter_only_lora
 
@@ -1910,69 +1976,4 @@ B 番号は journal / journal_archive から本文中で参照されているた
 - 要レビュー: success_criteria の数値基準が未確定（イテレーションを重ねてノイズ幅が分かってから rc-planner が
   数値化する設計）．research_frontier の各項目（ベースライン比較・回答品質評価等）は levers 探索後の着手を
   想定しているが，優先度を変えたい場合は config.yml の該当セクションを直接編集してよい．
-
-## B64 [auto-decided 2026-08-02] Iter41: embedding_adaptation=embedding_adapter_only_lora の計画
-
-- **自動選択**: 単一レバーを `embedding_adaptation=embedding_adapter_only_lora` とする。
-  `iteration_name` は「PEFT LoRAによるeducationドメイン埋め込み適応」．
-- **選定理由**:
-  1. Iter40（setfit_education_finetune）で全パラメータfine-tuningが単一レバー原則と両立しないことが確定（argmax flip rate 52.56%）
-  2. rc-investigator（Iter41調査フェーズ）は PEFT LoRA の feasibility が HIGH と判定
-  3. SentenceTransformer 3.x が LoRA を公式サポート
-  4. 既存の `--fine-tuned-embed-model` 統合（Iter40 で実装済み）を再利用可能
-  5. LoRA adapter の更新パラメータは base model の 0.86% のみ（rank=16, attention layers のみ）
-  6. オフライン完結（実機1600問本走不要、総コスト~30-45分）
-- **計画フェーズの決定事項**:
-  1. **Rank dimension**: r=16（保守的。単一レバー原則優先。r=32 は fallback）
-  2. **Training loss**: MultipleNegativesRankingLoss（SBERT 公式推奨、TripletLoss より安定）
-  3. **Runtime embedding path**: classifier training + evaluation で LoRA adapter 適用。runtime routing は base model のまま（単一レバー原則）。train/inference mismatch を避けるため、classifier training と evaluation で同一の LoRA-adapted embeddings を使用。
-  4. **Negative pair sampling**: 60/40 priority/random（Iter40 と同一）
-  5. **LoRA target modules**: `.*attn.*`（attention 投影層のみ。MLP 層は対象外）
-- **変更ファイル**:
-  1. `scripts/fine_tune_embedding_lora.py`（新規作成）— LoRA 訓練スクリプト
-  2. `scripts/train_domain_classifier.py`（`build_training_features()` に `set_adapter("default")` 追加）
-  3. `scripts/evaluate_classifier_calibration.py`（`predict_calibrated_rows()` に `set_adapter("default")` 追加）
-  4. `pyproject.toml`（`research` deps に `peft>=0.12` 追加）
-- **成功条件**: education_recall > medical_recall基準(0.5112)、他9ドメイン18指標のBH補正後有意退行0件、argmax flip rate < 15%
-- **失敗条件**: education_recall が基準超えない、BH補正後有意退行1件以上、argmax flip rate >= 15%、LoRA adapter ロードエラー
-- **コスト**: 低〜中（~30-45分、オフライン完結）
-
-## B67 [auto-decided 2026-08-02] Iter44: education_boundary_tuning (intercept_delta=+0.7) adopted。全levers試し切り、次は調査フェーズ
-
-- **状況**: Iter44（classifier_head_adaptation=education_boundary_tuning, intercept_delta=+0.7）
-  の rc-analyst 判定（adopted）を rc-reflector が検証・確定させた。
-- **判定: adopted（確定）**。4条件中4条件すべてPASS:
-  - education_recall 0.4588→0.5235 (+0.0647) > 0.5112 **PASS**
-  - BH補正後有意退行 0件 **PASS**
-  - argmax flip rate 8.62% < 15% **PASS**
-  - top1_accuracy McNemar p=0.8445 >= 0.05 **PASS**
-- **決定的な学び**:
-  1. **intercept シフトは単一レバー原則を達成できる**: argmax flip rate 8.62% は embedding
-     適応（全4手法で35.88〜52.56%）の桁違いの改善。embedding 空間を不変に保ち、classifier
-     head の intercept だけを動かす設計が有効だった。
-  2. **education intercept の系統的低下が主因**: education intercept=-0.1185 は他ドメイン
-     に対して系統的に低い。+0.7 で補正した結果、education_recall 0.4588→0.5235。
-     感度閾値は +0.5〜+0.7 の間。
-  3. **全embedding適応試行の総括**: SetFit full FT(52.56% flip), LoRA r=16(35.88%),
-     LoRA r=8(35.88%), Dense projection head(42.00%) — 全rejected。embedding空間の
-     幾何学的制約により単一レバー原則と両立しないことが確定。
-  4. **classifier_head_adaptationの残値は実質不要**: education_posthoc_calibrationは
-     interceptシフトと数学的に同等、education_feature_augmentationはargmax flip rate
-     15%超リスクが高い。
-- **config.yml の全 levers 試し切り状況**:
-  - `fallback_policy`: adopted（完了）
-  - `classifier_calibration`: 3値すべて試済み（temperature=adopted）
-  - `classifier_training_data_composition`: 6値すべて試済み（全rejected/invalid）
-  - `class_weight_adjustment`: 1値試済み（rejected）
-  - `embedding_adaptation`: 4値すべて試済み（全rejected）
-  - `classifier_head_adaptation`: 1値試済み（education_boundary_tuning=adopted）
-    残り2値は実質不要と判断
-  - `aggregation_method`: Y2ブロックで試せない
-- **次の一手: 調査フェーズから開始**（Iter45）。`current_lever=null`。
-  tavily-searchで代替アプローチを重点調査すること。
-- **要人間判断**:
-  1. education_recall の基準値（medical_recall 0.5112）の再検討
-  2. Y2（`confidence_threshold` の二重責務分離，スキーマ変更）着手前のユーザー確認
-  3. fallback 設計思想の論文上の位置付け（B48）
-  4. D5（`data/`/`models` のバージョン管理方針）
 
