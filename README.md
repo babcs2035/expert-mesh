@@ -68,7 +68,15 @@ Phase 0 では，同一 LAN 上のノート PC 3 台を用いる．各ノード�
 | wafl502 | legal   | 法律分野の専門家               |
 | wafl503 | medical | 医療分野の専門家               |
 
-各ノードは対等であり，マスターは存在しない．全ノードが expert と requester の両方の機能を同時に持つ点を図示すると次の通りである．
+> **現在の実機構成（research-cycle Iter15 以降）**：上記は Phase 0 の最小構成（3 ノード）であり，
+> 以降の図・表もこの構成で図示している．研究サイクルの実験は Iter15 で 10 ノード（wafl500〜509，
+> IP 192.168.15.100〜109）へ拡張され，education・legal・medical に加え business_economics・
+> computer_science・natural_science・mathematics・history_culture・social_science・general の
+> 10 ドメインが割り当てられている．confidence 判定用モデルも Iter19 で `qwen3.5:4b-q4_K_M` に
+> 軽量化し，本回答生成は Iter18 でノード固有のドメイン LoRA（`expert-mesh-{domain}-lora`）に
+> 置き換わっている．最新のノード一覧・モデル名は常に `config.yaml` の `nodes:` を正とする．
+
+各ノードは対等であり，マスターは存在しない．全ノードが expert と requester の両方の機能を同時に持つ点を図示すると次の通りである（Phase 0 の 3 ノード構成で図示，以降の 10 ノード構成も接続形態は同型）．
 
 ```mermaid
 graph TD
@@ -100,7 +108,11 @@ CPU のみのノート PC で動作させるため，Qwen3.5 系のモデル（A
 | 本回答生成（専門家モデル）        | `qwen3.5:9b`       | 実測で約 3 tok/s（CPU 推論）                                                                               |
 | 質問の埋め込み生成                | `nomic-embed-text` | 方式 A（意味的ルーティング）比較用に，全ノードで同一モデル・同一次元数を使用                               |
 
-confidence 判定と本回答生成に同一モデルを使う構成になっている点は，設計書が本来想定する「軽量モデルによる高速な足切り＋専門家モデルによる高品質な本回答」という 2 段構えの利点を薄めるが，実機検証で軽量モデル（2B 級）ではルーティング精度が不十分であることが判明したため，Phase 0 では精度を優先した．モデルサイズと判定精度のトレードオフの詳細な評価は Phase 1 以降の課題である．
+confidence 判定と本回答生成に同一モデルを使う構成になっている点は，設計書が本来想定する「軽量モデルによる高速な足切り＋専門家モデルによる高品質な本回答」という 2 段構えの利点を薄めるが，実機検証で軽量モデル（2B 級）ではルーティング精度が不十分であることが判明したため，Phase 0 では精度を優先した．
+
+> **現在の実機構成**：research-cycle では Iter18〜19 で 2 段構えが実現している．confidence 判定
+> （`light_model`）は `qwen3.5:4b-q4_K_M`，本回答生成（`expert_model`）はノードごとのドメイン LoRA
+> （`expert-mesh-{domain}-lora`）であり，`config.yaml` の `nodes:` に定義されている．
 
 ## 通信プロトコル
 
@@ -504,7 +516,7 @@ uv run python run_experiment.py --node-id wafl500 \
 uv run python metrics.py --results results.jsonl
 ```
 
-`build_dataset.py` は JMMLU（https://huggingface.co/datasets/nlp-waseda/JMMLU, CC BY-NC-ND 4.0）の56タスクを10メッシュドメインへ写像し，ドメインあたり最大150問（legalは実際のタスクプールが227問しかないためこれが上限）をサンプリングする．legal・educationの写像品質については `build_dataset.py` のモジュール docstring に既知の限界を明記している．複合ドメイン設問（医療×法律等）はJMMLUの四択形式では表現できないため手作りのまま維持している．評価軸②（回答品質）・③（End-to-End正答率）は，LLM-as-judge や人手評価を要するため未実装であり，Phase 2 以降の課題として残る．
+`build_dataset.py` は JMMLU（https://huggingface.co/datasets/nlp-waseda/JMMLU, CC BY-NC-ND 4.0）の56タスクを10メッシュドメインへ写像し，ドメインあたり最大150問（legalは実際のタスクプールが227問しかないためこれが上限）をサンプリングする．legal・educationの写像品質については `build_dataset.py` のモジュール docstring に既知の限界を明記している．複合ドメイン設問（医療×法律等）はJMMLUの四択形式では表現できないため手作りのまま維持している．評価軸②（回答品質）・③（End-to-End正答率）は `evaluation.py`（`judge_response_quality`・`compute_end_to_end_accuracy`）と，`results.jsonl` を事後処理する `scripts/evaluate_response_quality.py` として実装済みである．JMMLU由来の設問は正解記号との突き合わせで判定できるが，正解を持たない手作りの複合ドメイン設問は LLM-as-judge（1〜5 の Likert 評価）に頼るため，判定には稼働中の Ollama ノードへの到達性が必要である．research-cycle では Iter28（fallback 廃止の判定）で実際にこの軸を成功条件として用いている．
 
 `tools/show_logs.py` は，`mise run analyze` が収集した `results/<datetime>/logs/<node_id>/expert-mesh.log` から `logging_utils.py` が出力する構造化ログ行（`[LEVEL] {json}`）を抽出し，イベント種別ごとの件数・ローカル推論時間の平均/最大を集計する事後解析ツールである．
 
@@ -525,8 +537,8 @@ uv run ruff check .       # 静的解析
 
 - **ルーティング精度**：`qwen3.5:9b` への切り替えとプロンプト改善により，医療・法律・一般・複合ドメイン・無関係な質問を含む複数パターンで正しいノードが選定されることを実機で確認した．ただし，これは限られたテストケースでの確認であり，`data/` による体系的な精度評価は，実データセットの整備を待って本格的に行う必要がある．
 - **回答生成の言語**：複合ドメインの質問に対して，選定自体は正しいにもかかわらず，回答が日本語ではない言語（中国語）で生成される事例が確認されている．これは `qwen3.5` の多言語対応モデルとしての特性に起因すると考えられ，ルーティングの正確性とは独立した課題である．
-- **top-k dispatch の選定方式**：`dispatch_top_k` を1より大きくした場合の複数候補からの選定は，LLM-as-judge や多数決ではなく，各ノードが `/probe` で自己申告した confidence を再利用した単純な最大値選択（`aggregator.select_best_dispatch_response`）に留まる．追加の LLM 呼び出しなしで実装できる最小構成を優先した判断であり，より高度な集約方式は本フェーズのスコープ外である．
+- **top-k dispatch の選定方式**：`dispatch_top_k` を1より大きくした場合の複数候補からの選定は，`aggregation_method` で切り替え可能である．各ノードが `/probe` で自己申告した confidence を再利用する最大値選択（`max_confidence`）に加え，多数決（`majority_vote`）・LLM-as-judge（`llm_judge`）を実装し比較した（research-cycle Iter46〜48）．judge は override 時の誤選択率が 84.1% に達し棄却，majority_vote は max_confidence と実質的な差がなかったため，追加の LLM 呼び出しが不要な `max_confidence` を採用している．詳細は `docs/d0006_research_summary_iter28-54_2026-08.md` §2.5 を参照．
 - **評価用データセット**：`build_dataset.py` はJMMLU由来の10ドメイン単一ドメイン設問（設計書 4.3 節の階層1に相当）と，手作りの複合ドメイン相談設問（階層2）を組み合わせる．legal・educationはJMMLUに直接対応するタスクが無いための代理指標であり，写像の限界は `build_dataset.py` のdocstringに明記している．
-- **回答品質・End-to-End評価**：`metrics.py` はルーティング精度（評価軸①）のみを計算する．LLM-as-judge 等による回答品質（評価軸②）と，それを統合した End-to-End 評価（評価軸③）は未実装である．
-- **ベースライン比較**：`metrics.py` は Random／BestSingle／Oracle の3ベースラインと，Wilson信頼区間・McNemar検定・Cohen's kappa（chance-corrected指標）を実装済み．中央集権ルーターとの比較実験（設計書 4.2 節）は未実装である．
+- **回答品質・End-to-End評価**：ルーティング精度（評価軸①）は `metrics.py` が計算する．回答品質（評価軸②）と End-to-End 評価（評価軸③）は `evaluation.py` と `scripts/evaluate_response_quality.py` に実装済みで，Iter28 の fallback 廃止判定など一部の研究サイクル実験で成功条件として使われた．ただし Iter29 以降の主要な実験（分類器の較正・訓練データ構成・embedding 適応等）はルーティング精度と ECE のみを判定基準としており，回答品質を軸にした継続的な比較は行っていない．
+- **ベースライン比較**：`metrics.py` は Random／BestSingle／Oracle の3ベースラインと，Wilson信頼区間・McNemar検定・Cohen's kappa（chance-corrected指標）を実装済み．中央集権ルーターとの比較実験（設計書 4.2 節）は `scripts/run_central_experiment.py` として実装され，Iter26 で実施済みである（分散型 `supervised_classifier` との相対性能比較）．
 - **無線アドホック化・ネットワーク不安定性への対応**：設計書が Phase 3 として明示的に切り出している課題であり，本フェーズのスコープには含まれない．
