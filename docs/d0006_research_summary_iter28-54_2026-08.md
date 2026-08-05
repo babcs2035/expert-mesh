@@ -219,24 +219,20 @@ Iter53 で rc-analyst が予測ファイルから独立に再計算したとこ�
 
 ---
 
-## 7. 未解決の論点・要人間判断
+## 7. 要人間判断の最終確定（2026-08-05，backlog B84）
 
-`backlog.md` の B81・B82・B83 に記録された，人間の判断を要する事項である．
+`backlog.md` の B81・B82・B83 が残した 4 件の要人間判断は，ユーザーへ選択肢とメリット・デメリットを
+提示のうえ確認し，**全項目「現状維持」で確定した**．研究サイクルはこれをもって完全に終了する．
 
-1. **education_recall 基準値の再定義**: `medical_recall=0.5112` を基準にしているが，medical は JMMLU に
-   直接対応するタスク（college_medicine, professional_medicine）を持つ一方，education は代理タスク
-   （sociology, high_school_psychology, moral_disputes）しか持たない．代理タスク側の recall 上限は
-   sociology=0.625 / high_school_psychology=0.438 / moral_disputes=0.435 であり，そもそも同じ土俵に
-   乗せてよいかが疑わしい．
-2. **classifier retraining への移行可否**: 天井（§4）の突破には boundary の回転が必要であり，単一
-   レバー原則の緩和を承認するか否かの判断が要る．あわせて flip_rate の許容範囲（<15% 厳守か
-   <20% まで許容か）を定める必要がある．
-3. **JMMLU 外部の教育固有タスク追加の feasibility**: Iter53/54 の調査では，日本語の教育実務に固有の
-   4 択タスクは発見できなかった（EduBench・Pedagogy Benchmark・Dr.Academy はいずれも日本語未対応，
-   全国学力テストは教育行政を含まない）．`japanese_civics` が唯一の候補だが label leakage リスクが
-   高い．
-4. **B27 `[needs-human 2026-07-26]` の棚卸し**: 「作業ツリーに journal 未記録の変更が残っている」件が
-   解消された記録が見当たらない．
+| 論点 | 決定 |
+|---|---|
+| **education_recall 基準値の再定義**: `medical_recall=0.5112` を基準にしているが，medical は JMMLU に直接対応するタスク（college_medicine, professional_medicine）を持つ一方，education は代理タスク（sociology, high_school_psychology, moral_disputes）しか持たない．代理タスク側の recall 上限は sociology=0.625 / high_school_psychology=0.438 / moral_disputes=0.435 であり，そもそも同じ土俵に乗せてよいかが疑わしかった． | **現状維持**．medical と同一基準のまま． |
+| **classifier retraining への移行可否**: 天井（§4）の突破には boundary の回転が必要であり，単一レバー原則の緩和を承認するか否かの判断が要った．あわせて flip_rate の許容範囲（<15% 厳守か <20% まで許容か）も論点だった． | **移行しない**．education 精度改善はここで打ち止め．flip_rate は `<15%` を厳守．単一レバー原則は緩和しない． |
+| **JMMLU 外部の教育固有タスク追加の feasibility**: Iter53/54 の調査では，日本語の教育実務に固有の4択タスクは発見できなかった（EduBench・Pedagogy Benchmark・Dr.Academy はいずれも日本語未対応，全国学力テストは教育行政を含まない）．`japanese_civics` が唯一の候補だが label leakage リスクが高い． | **追加調査しない**． |
+| **B27 `[needs-human 2026-07-26]` の棚卸し**: 「作業ツリーに journal 未記録の変更が残っている」件が解消された記録が見当たらなかった． | **陳腐化と判断し解消**．config.yaml は Iter15〜54 で全面刷新済みのため，指摘対象の設定はもう存在しない． |
+
+詳細は `.claude/research/backlog.md` の B84 を参照．今後 `research-cycle continue` が呼ばれても，
+新規実験は開始せず，本節と B83・B84 を提示して終了済みである旨を報告すること．
 
 ---
 

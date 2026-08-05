@@ -17,15 +17,16 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 ## 現在オープンな要人間判断
 
-研究は Iteration 54 で `status="converged"` に到達した（B83）．継続中の判断待ちは以下．
+**2026-08-05，B84 にてすべて解消済み**．研究は Iteration 54 で `status="converged"` に到達し（B83），
+残っていた 5 件の要人間判断はユーザーが全て「現状維持」を選択したことで最終確定した．
 
-| 項目 | 出典 | 内容 |
+| 項目 | 出典 | 決定（2026-08-05） |
 |---|---|---|
-| education_recall 基準値の再定義 | B81, B82, B83 | `medical_recall=0.5112` は，JMMLU に直接対応するタスクを持つ medical と，代理タスクしか持たない education を同じ土俵に乗せており不公平．education 固有の基準値を定めるか，目的自体を組み替えるか． |
-| classifier retraining への移行可否 | B82, B83 | post-hoc 天井（education_recall=0.6000）の突破には decision boundary の回転が必要．単一レバー原則（argmax flip rate <15%）との両立が構造的に困難であり，原則の緩和を承認するか否か． |
-| flip_rate 許容範囲の定義 | B82 | `<15%` を厳守するか，`<20%` まで許容するか． |
-| JMMLU 外部の教育固有タスク追加 | B81, B83 | `japanese_civics` が唯一の候補だが label leakage リスクが高い（Iter37 で確認）． |
-| 作業ツリーの未記録変更 | B27 `[needs-human 2026-07-26]` | 解消された記録が後続エントリに見当たらない．**未解決の可能性がある**ので棚卸しが必要． |
+| education_recall 基準値の再定義 | B81, B82, B83, **B84** | 現状維持．`medical_recall=0.5112` と同一基準のまま． |
+| classifier retraining への移行可否 | B82, B83, **B84** | 移行しない．education 精度改善はここで打ち止め． |
+| flip_rate 許容範囲の定義 | B82, **B84** | 現状維持．`<15%` を厳守． |
+| JMMLU 外部の教育固有タスク追加 | B81, B83, **B84** | 追加調査しない． |
+| 作業ツリーの未記録変更 | B27 `[needs-human 2026-07-26]`, **B84** | 陳腐化と判断し解消．config.yaml は Iter15〜54 で全面刷新済みのため，指摘対象の Iter14 時点の設定はもう存在しない． |
 
 ## 採番の既知の乱れ（リナンバリングしないこと）
 
@@ -38,6 +39,26 @@ B 番号は journal / journal_archive から本文中で参照されているた
 - **仕様外のタグ**: skill が定義するのは `[auto-decided]` と `[needs-human]` の 2 種のみだが，実際には
   `[user-approved]`（8 件）・`[resolved]`・`[user]`・`[rc-reflector]`・`[Iter53 investigator]` が使われている
 - **サブ番号**: `B48-b` が 1 件
+
+---
+
+## B84 [user 2026-08-05] 研究の最終確定と B27 の解消
+
+- 状況: 研究は Iteration 54 で converged．B81/B82/B83 が残した 4 件の要人間判断（education_recall
+  基準値の再定義／classifier retraining への移行可否／flip_rate 許容範囲／JMMLU 外教育タスク追加）
+  について，選択肢と各々のメリット・デメリットを提示してユーザーに確認した．
+- 決定:
+  1. **education の精度改善は打ち止め**．post-hoc 天井（education_recall=0.6000，medical 基準
+     0.5112 を既にクリア）で研究を終える．classifier retraining へは進まない．
+  2. **flip_rate 許容範囲は現状維持**．`<15%` を厳守する．単一レバー原則を緩和しない．
+  3. **education_recall 基準値は medical と同一のまま**．education 固有の基準への見直しは行わない．
+  4. **JMMLU 外の教育固有タスク（japanese_civics 等）の追加調査はしない**．
+  5. **B27（Iter14 時点の未記録変更）は陳腐化と判断し解消**．config.yaml は Iter15〜54 で全面刷新
+     済みであり，指摘対象の設定はもう存在しない．
+- 根拠: いずれも「可逆性より安全性を優先する」「単一レバー原則という研究の中核規約を維持する」という
+  一貫した基準に基づく選択であり，ユーザーは全項目で推奨案（現状維持）を選んだ．
+- 要レビュー: なし．**研究サイクルはこれをもって完全に終了する**．今後 `research-cycle continue` が
+  呼ばれても新規実験は開始せず，本エントリと B83 を提示して終了済みである旨を報告すること．
 
 ---
 
@@ -1630,6 +1651,10 @@ B 番号は journal / journal_archive から本文中で参照されているた
   次段階としてユーザーの別途確認を要する（WAFL-PEFT が同一 GPU プールを使用中でないことの確認が前提）．
 
 ## B27 [needs-human 2026-07-26] 作業ツリーに journal 未記録の変更が残っている
+
+> **【2026-08-05 B84 にて解消】** config.yaml は Iter15〜54 で全面刷新されており，下記の指摘対象
+> （Iter13/14 時点の `stp`／`confidence_threshold`／`dispatch_top_k` の設定）はもう存在しない．
+> ユーザー確認の結果，陳腐化した記録として解消済みとする．
 
 - 状況: `git status` に，Iter1〜14 のどのイテレーションにも対応しない未コミット変更がある．
   - `config.yaml`: `confidence_threshold` 0.5→0.3，`dispatch_top_k` 1→2，`confidence_signal_method` stp→self_report

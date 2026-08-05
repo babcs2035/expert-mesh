@@ -135,7 +135,8 @@
 > 新しい値（`education_soft_label_distillation`）は Iter54 の計画フェーズで検討されたが，
 > **single_lever_compatibility が低いと評価され，実験を実行せずに棄却された**．研究は
 > `status="converged"` へ移行している．経緯は `docs/d0006_research_summary_iter28-54_2026-08.md` §2.6
-> を参照すること．§5.3 の要人間判断 3 項目は現在も未解決である．
+> を参照すること．§5.3 の要人間判断 3 項目は，2026-08-05 に backlog B84 で全て「現状維持」として
+> 確定した（`docs/d0006` §7 参照）．
 
 - **Iter54+**: `classifier_training_data_composition` の新しい値を計画フェーズで検討
 - **重点調査**: より高品質な education training data の設計（handmade 問題の増強、または新しい proxy task の探索）
