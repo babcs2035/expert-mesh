@@ -1053,7 +1053,7 @@ config.yml の `aggregation_method` レバーの values は `[majority_vote, llm
   4. **次の研究方向**: `classifier_head_adaptation` は尽きた。`class_weight_adjustment` (rejected, Iter39), `embedding_adaptation` (全4値rejected, Iter40-43), `classifier_training_data_composition` (全6値rejected, Iter32-38)。全レバー試し切り済み。次の一手は調査フェーズから開始し、教育recallの根本原因に対する新しいアプローチをTavily-searchで探索する。
   5. **教育recallの根本原因**: proxyタスク（sociology, high_school_psychology, moral_disputes）とreal education practiceの意味的ギャップ。intercept shiftやthreshold tuningはdecision boundaryの平行移動であり、boundaryを越えない教育質問は依然として誤分類される。根本解決には、education固有の訓練データ追加（handmade problems）またはproxyタスクの置換が必要。
 
-## Iteration 49: education_posthoc_calibrationによる教育ドメイン確率補正
+### Iteration 49: education_posthoc_calibrationによる教育ドメイン確率補正（続き）
 
 ### Iteration 49 実行済み
 
@@ -1942,6 +1942,216 @@ compound_domain_set_recall の +19.5pt 改善は明確。ただしベースラ�
 - `aggregation_method` レバーは全3値試し切り。max_confidence 採用でクローズ。
 
 **要人間判断**: なし（可逆な判断の範囲内）。
+## Iteration 45: dispatch_candidate_threshold 新設による集約方式比較の前提整備（Y2/Y3）
+
+> **【再構成された記録】** 本ブロックは journal ローテーション時に journal.md / journal_archive.md
+> の双方から失われていた記録を，`backlog.md`（B67）および git commit（`cf47bcd`, `8d18236`）から
+> 復元したものである（復元日: 2026-08-05）。`state.json` に `e45_results` は存在しなかった。
+> フェーズごとの詳細な一次記録は失われており，以下は要約のみである。
+
+### 仮説
+
+`confidence_threshold` が「fallback 判定」と「dispatch 候補の足切り」という二重の責務を持つため，
+`aggregation_method` の比較実験が前提条件を満たせない。責務を分離した
+`dispatch_candidate_threshold` を新設すれば，`dispatch_top_k >= 2` の設定が実際に複数ノードへの
+dispatch を発生させ，集約方式の比較が成立する。
+
+### 単一レバー
+
+本イテレーションは測定系の整備（Y2）であり，性能レバーの変更ではない。
+
+### 実装 (Iter45) — Y2
+
+- `config.yaml` に `dispatch_candidate_threshold` フィールドを追加
+- `aggregator.py`: `select_dispatch_targets()` を分離。rank 1 は `confidence_threshold`，
+  rank 2 以降は `dispatch_candidate_threshold` で判定する
+- `node.py` / `run_experiment.py` の呼び出し側を変更
+- `tests/test_aggregator.py` にユニットテスト 5 件を追加
+- **テスト結果: 36/36 パス**（既存 17 + 新規 5）。後方互換性を確保
+
+### 実装 (Iter45) — Y3
+
+- `aggregation_method` を `max_confidence` → `majority_vote` に変更
+- `dispatch_top_k` を 1 → 2 に変更（2 位ノードへの並列 dispatch を有効化）
+
+### 判定
+
+測定系整備として完了。ただし Y3 で **2 つの config 値（`aggregation_method` と `dispatch_top_k`）を
+同時に変更**しており，単一レバー原則を満たしていない。この点は Iter46 の
+`single_lever_check` で明示的に記録され，Iter47 で `max_confidence` の clean ベースラインを
+取り直すことで是正された。
+
+### 学び
+
+`confidence_threshold` の二重責務は，Iter27 の「集約方式比較が no-op で不成立」の直接の原因で
+あった。レバーを比較する前に，そのレバーを読むコードへ実行が到達する条件を整えることが必要で
+ある（d0004 §4 の教訓と同型）。
+
+---
+
+## Iteration 44: educationドメインintercept シフト(+0.7)による decision boundary 調整
+
+> **【再構成された記録】** 本ブロックは journal から失われていた記録を，`state.json` の
+> `e44_results`（現 `experiment_results.json`），`backlog.md`（B66/B67），git commit `137102e`
+> から復元したものである（復元日: 2026-08-05）。
+
+### 仮説
+
+embedding 空間の再構成（Iter40〜43，全 rejected）ではなく，学習済み分類器の education クラスの
+intercept のみを +0.7 シフトすれば，decision boundary を平行移動させて education_recall を
+medical_recall 基準（0.5112）まで引き上げつつ，argmax flip rate を単一レバー原則（<15%）の
+範囲に収められる。
+
+### 単一レバー
+
+`classifier_head_adaptation = education_boundary_tuning` (intercept_delta=+0.7)
+
+### 変更ファイル
+
+- `scripts/train_domain_classifier.py`: intercept シフト（+0.7）を追加
+- `results/iter44_boundary_tuning_calibrated_predictions.jsonl`: 較正後予測（1600 行）
+
+### Iteration 44 実行済み
+
+**ベースライン**: `results/iter31_calibrated_predictions.jsonl`（1600 行，temperature 較正済み）
+
+| メトリクス | Iter31 (before) | Iter44 (after) | 差 | McNemar |
+|---|---|---|---|---|
+| top1_accuracy | 0.6056 | 0.6044 | -0.0012 | chi2=0.0385, p=0.8445 |
+| education_recall | 0.4588 | 0.5235 | +0.0647 | a=0, b=11, chi2=9.6818, p=0.00185 |
+| medical_recall | 0.5112 | 0.5000 | -0.0112 | a=2, b=0, chi2=2.0, p=0.1573 |
+| ECE | 0.071201 | 0.069854 | -0.001347 | — |
+| argmax_flip_rate | — | 0.08625 (138/1600) | — | — |
+
+- **BH 補正後 有意退行**: 0 件
+- **BH 補正後 有意改善**: 1 件（education_recall: p=0.000911, q=0.018225, delta=+0.0647）
+- **Wilson 95% CI**: education before=[0.3857, 0.5338] → after=[0.4509, 0.5939]，
+  medical before=[0.4383, 0.5837] → after=[0.4273, 0.5727]。CI 下限が下がったドメインは無し
+
+**感度分析**: intercept_delta=+0.5 では education_recall=0.4941 で基準未達，+0.7 でクリア（0.5235）。
+
+### 判定
+
+**adopted**。4 成功条件（education_recall > 0.5112 / BH 補正後有意退行 0 件 /
+argmax flip rate < 15% / top1 McNemar p >= 0.05）をすべてパス。
+
+### 学び
+
+- **post-hoc な boundary の平行移動は単一レバー原則と両立する**。embedding 空間を再構成する
+  Iter40〜43 が flip rate >= 35.88% で軒並み rejected だったのに対し，intercept シフトは 8.62%
+  に収まった。boundary の「方向」を変えないことが flip rate を抑える鍵である。
+- **数値の注記**: 本イテレーションの education_recall / medical_recall は，Iter53 の rc-analyst が
+  予測ファイルから直接再計算した値（education 0.5588，medical 0.5281）と食い違う。差分
+  （+0.0412 等）は両者で一致するため，母数の取り方の違いと推測される。Iter53 以降の記述では
+  analyst の再計算値が正式値として採用されている。
+
+---
+
+## Iteration 43: Dense projection head による education ドメイン埋め込み適応
+
+> **【再構成された記録】** 本ブロックは journal から失われていた記録を，`state.json` の
+> `e43_results`（現 `experiment_results.json`），`backlog.md`（B65），git commit `9bdcf76`
+> から復元したものである（復元日: 2026-08-05）。
+
+### 仮説
+
+LoRA（Iter41/42）が rank に依らず flip rate 35.88% で頭打ちになったのは，低ランク制約が
+きつすぎるためである。590K パラメータの Dense projection head を embedding の後段に置けば，
+より柔軟な適応により education_recall を上げつつ flip rate を抑えられる。
+
+### 単一レバー
+
+`embedding_adaptation = embedding_adapter_projection_head`
+
+### Iteration 43 実行済み
+
+**ベースライン**: `results/iter31_calibrated_predictions.jsonl`（1600 行）
+**結果**: `results/iter43_projection_head_calibrated_predictions.jsonl`（1600 行）
+**分類器**: `models/domain_classifier_iter43_projection_head.joblib`
+
+| メトリクス | Iter31 (before) | Iter43 (after) | 差 | McNemar |
+|---|---|---|---|---|
+| top1_accuracy | 0.6056 | 0.5269 | -0.0787 | chi2=35.19, p=3e-09 |
+| education_recall | 0.4588 | 0.5529 | +0.0941 | a=12, b=28, chi2=5.63, p=0.0177 |
+| medical_recall | 0.5112 | 0.3596 | -0.1517 | a=36, b=9, chi2=15.02, p=0.000106 |
+| ECE | 0.071201 | 0.030377 | -0.040824 | — |
+| argmax_flip_rate | — | 0.4200 (672/1600) | — | — |
+
+- **BH 補正後 有意退行**: **15 件**（business_economics, computer_science, education_precision,
+  general, history_culture, legal, mathematics, medical_recall, natural_science, social_science,
+  medical_precision 等）
+- **BH 補正後 有意改善**: 3 件（education_recall, legal_recall, natural_science_precision）
+- **social_science の崩壊**: 0.5774 → 0.1964（-38.1pt）
+
+### 判定
+
+**rejected**。flip rate 42.00% は LoRA（35.88%）より悪く，単一レバー原則を大きく逸脱。
+top1_accuracy も有意に悪化（p=3e-09）。
+
+### 学び
+
+- **embedding 適応 4 手法すべてが rejected で出そろった**（SetFit full FT 52.56% / LoRA r=16
+  35.88% / LoRA r=8 35.88% / Dense projection head 42.00%）。表現力を上げても flip rate は
+  改善せず，むしろ悪化した。
+- **embedding 空間の幾何学的制約**: 768 次元を 10 ドメインで共有しているため，education
+  ドメインだけを分離するには空間の回転が必要だが，回転は必然的に他ドメインも動かす。
+- 次レバーとして `classifier_head_adaptation` を config.yml に新規追記した。
+
+---
+
+## Iteration 42: LoRA rank 半減（r=8）による education ドメイン埋め込み適応
+
+> **【再構成された記録】** 本ブロックは journal から失われていた記録を，`state.json` の
+> `e42_results`（現 `experiment_results.json`）および git commit `d57a1a6` から復元したもので
+> ある（復元日: 2026-08-05）。
+
+### 仮説
+
+Iter41 の LoRA r=16 は flip rate 35.88% で単一レバー原則（<15%）に届かなかった。rank を r=8 に
+半減して適応の自由度を絞れば，education_recall の改善を保ちつつ flip rate を下げられる。
+
+### 単一レバー
+
+`embedding_adaptation = embedding_adapter_lora_r8`（rank 16→8, alpha 32→16）
+
+### 変更ファイル
+
+- `fine_tune_embedding_lora.py`: rank=16→8, alpha=32→16
+- `config.yml`: `embedding_adaptation` に `projection_head` を追記（次イテレーション用）
+
+### Iteration 42 実行済み
+
+**ベースライン**: `results/iter31_calibrated_predictions.jsonl`（1600 行）
+**結果**: `results/iter42_lora_r8_calibrated_predictions.jsonl`（1600 行）
+**分類器**: `models/domain_classifier_iter42_lora_r8.joblib`
+**訓練データ**: `data/classifier_train.jsonl`（1427 行，Iter31 と同一）
+
+| メトリクス | Iter31 (before) | Iter42 (after) | 差 | McNemar |
+|---|---|---|---|---|
+| top1_accuracy | 0.6056 | 0.5719 | -0.0337 | chi2=7.89, p=0.0193 |
+| education_recall | 0.4588 | 0.6235 | +0.1647 | a=8, b=38, chi2=12.25, p=0.00045 |
+| medical_recall | 0.5112 | 0.4326 | -0.0786 | a=30, b=13, chi2=6.06, p=0.0138 |
+| ECE | 0.071201 | 0.016357 | -0.054844 | — |
+| argmax_flip_rate | — | 0.3588 (574/1600) | — | — |
+
+- **BH 補正後 有意退行**: 2 件（business_economics_recall: q=7.07e-04, delta=-0.1845 /
+  social_science_recall: q=2.06e-05, delta=-0.2262）
+- **BH 補正後 有意改善**: 1 件（education_recall: q=0.0299, delta=+0.1647）
+
+### 判定
+
+**rejected**。flip rate 35.88% は単一レバー原則（<15%）を大きく逸脱。
+
+### 学び
+
+- **r=8 と r=16 がビット単位で同一の結果に収束した**。これは education ドメイン適応に必要な
+  有効自由度が 1 主成分程度（**intrinsic dimensionality <= 8**）であることを意味する。
+- したがって **LoRA rank をこれ以上下げても flip rate は改善しない**。rank 削減という方向で
+  単一レバー原則に到達することは構造的に不可能であると，3 イテレーション（Iter40/41/42）で
+  確定した。
+
+---
+
 ## Iteration 41: PEFT LoRAによるeducationドメイン埋め込み適応
 
 ### 仮説
@@ -3940,7 +4150,7 @@ config の全 levers を試し切った。SKILL.md の停止条件に従う:
 
 ---
 
-## Iteration 40: SetFitによるnomic-embed-textのeducationドメイン適応
+### Iteration 40: SetFitによるnomic-embed-textのeducationドメイン適応（続き）
 
 ### 計画 (2026-08-02)
 
@@ -6419,7 +6629,7 @@ Iter33調査で確認済みのプールサイズ:
 4. **案Aが不成立の場合の次の一手は唯一**: sociologyのpool cap（94）を95.7%使い切るため，resamplingで sociologyをさらに増やす余地は残4件だけ．案Aがrejectedの場合，education固有の手作り訓練問題追加へ直ちに切り替える．
 5. **学習信号喪失リスクの受容**: 弱い2タスクの削減幅（-45%）は案Cより大きく，他ドメインとの境界学習が弱まる可能性がある．これはrc-plannerが受容すべきトレードオフとして明記すること．
 
-## Iteration 34: education代理タスク抽出比率の再配分（案A）による訓練データ構成変更
+### Iteration 34: education代理タスク抽出比率の再配分（案A）による訓練データ構成変更（続き）
 
 ### 計画 (Iter34)
 
@@ -6602,6 +6812,10 @@ Iter33調査で確認済みのプールサイズ:
 4. 次イテレーション（Iter35）はeducation固有の手作り訓練問題の追加へ切り替える．
 
 **gitコミット**: 実施済み（後述）
+
+## Iteration 33: education代理タスク抽出比率の再配分（案C: 70/40/40）による訓練データ構成変更
+
+> **【見出しを補完】** 本イテレーションは `## Iteration N:` 見出しを欠いており，直前のイテレーションのブロックに埋没していた（`rotate_journal.sh` が参照する見出しの欠落）。本文には手を加えず，見出しのみ 2026-08-05 に補完した。
 
 ### 実装 (Iter33)
 
@@ -12311,6 +12525,10 @@ AFTER:
 | config.yaml (expert-mesh, 30-31行) | `confidence_signal_method: self_consistency_semantic`, `routing_method: supervised_classifier` |
 | measure_semantic_diversity.py (expert-mesh) | E4 着手前の多様性チェックスクリプト |
 
+## Iteration 21: confidence_signal_method=self_consistency_semantic による不確実性推定
+
+> **【見出しを補完】** 本イテレーションは `## Iteration N:` 見出しを欠いており，直前のイテレーションのブロックに埋没していた（`rotate_journal.sh` が参照する見出しの欠落）。本文には手を加えず，見出しのみ 2026-08-05 に補完した。
+
 ### Iteration 21 実行済み
 
 **判定**: 実験無効（bug による code path 未到達）
@@ -15203,6 +15421,10 @@ Tian et al. (EMNLP 2023, arXiv:2305.14975) の Verbalized Top-K との整合性�
 3. **成功条件（副指標）**: Cohen's kappa の改善（ベースライン 0.081）．Top-K elicitation がドメイン弁別力を向上させる場合，kappa も上昇する．
 4. **監視項目**: (a) parse failure 率（0.0%に近いことを確認），(b) 再正規化頻度（_PROB_SUM_TOLERANCE を超える頻度），(c) ドメイン別 confidence 分布の形状変化（二峰→連続分布への移行）．
 5. **比較ベースライン**: `results/20260727_010532/`（Iter15, 1520問）．同一データセット上の McNemar 対比較が可能．
+
+## Iteration 15: eval_set_size=200 への評価データセット拡張
+
+> **【見出しを補完】** 本イテレーションは `## Iteration N:` 見出しを欠いており，直前のイテレーションのブロックに埋没していた（`rotate_journal.sh` が参照する見出しの欠落）。本文には手を加えず，見出しのみ 2026-08-05 に補完した。
 
 ### 調査 (Iter15)
 
@@ -18485,6 +18707,10 @@ margin <= 0 のケース（tie または下位）で misroute が集中的に発
 
 ---
 
+## Iteration 5: educationノードのfew-shot例をeducation固有話題へ差し替え
+
+> **【見出しを補完】** 本イテレーションは `## Iteration N:` 見出しを欠いており，直前のイテレーションのブロックに埋没していた（`rotate_journal.sh` が参照する見出しの欠落）。本文には手を加えず，見出しのみ 2026-08-05 に補完した。
+
 ### 分析 (解釈) (Iter5)
 
 **判定**: education ノード few-shot 例差し替えレバーは **rejected**（主基準 2 件未達，非退行 2 件未達）
@@ -18841,6 +19067,10 @@ wafl501（192.168.15.101）を education ノードとして使用（wafl504 は 
 - general-004 → education（expected: general）
 - general-008 → medical（expected: general，Iter1 既知パターン）
 - education-001 → medical（expected: education）
+
+## Iteration 4: educationドメイン追加による4ドメイン構成への拡張
+
+> **【見出しを補完】** 本イテレーションは `## Iteration N:` 見出しを欠いており，直前のイテレーションのブロックに埋没していた（`rotate_journal.sh` が参照する見出しの欠落）。本文には手を加えず，見出しのみ 2026-08-05 に補完した。
 
 ### Iteration 4 実行済み
 

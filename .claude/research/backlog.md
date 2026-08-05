@@ -1,3 +1,45 @@
+# backlog — 研究サイクルの判断記録
+
+research-cycle skill が自律判断した事項と，人間の判断を要する事項を記録する追記専用の台帳である．
+**新しいエントリは常にこのヘッダの直下へ追記する**（逆時系列＝新しいものが上）．
+
+## 書式
+
+```
+## B{n} [auto-decided YYYY-MM-DD] 題目
+- 状況: なぜ判断が要ったか
+- 自動選択: 何を選んだか
+- 根拠: なぜそれが最も妥当か
+- 要レビュー: 人間が確認・却下する際に何を見るか（却下時はこの項目を編集して差し替える）
+```
+
+不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
+
+## 現在オープンな要人間判断
+
+研究は Iteration 54 で `status="converged"` に到達した（B83）．継続中の判断待ちは以下．
+
+| 項目 | 出典 | 内容 |
+|---|---|---|
+| education_recall 基準値の再定義 | B81, B82, B83 | `medical_recall=0.5112` は，JMMLU に直接対応するタスクを持つ medical と，代理タスクしか持たない education を同じ土俵に乗せており不公平．education 固有の基準値を定めるか，目的自体を組み替えるか． |
+| classifier retraining への移行可否 | B82, B83 | post-hoc 天井（education_recall=0.6000）の突破には decision boundary の回転が必要．単一レバー原則（argmax flip rate <15%）との両立が構造的に困難であり，原則の緩和を承認するか否か． |
+| flip_rate 許容範囲の定義 | B82 | `<15%` を厳守するか，`<20%` まで許容するか． |
+| JMMLU 外部の教育固有タスク追加 | B81, B83 | `japanese_civics` が唯一の候補だが label leakage リスクが高い（Iter37 で確認）． |
+| 作業ツリーの未記録変更 | B27 `[needs-human 2026-07-26]` | 解消された記録が後続エントリに見当たらない．**未解決の可能性がある**ので棚卸しが必要． |
+
+## 採番の既知の乱れ（リナンバリングしないこと）
+
+B 番号は journal / journal_archive から本文中で参照されているため，**振り直すと参照が壊れる**．
+以下の乱れは事実として記録するに留め，番号は変更していない．
+
+- **欠番**: B55, B77
+- **番号の重複**: B64（Iter41 の計画版と rejected 確定版）／B67（Iter45 の Y2 設計確定版と Iter44 の adopted 確定版）／B73（Iter49 logit_bias=+0.3 版と Iter50 logit_bias=+0.5 版）
+- **逆時系列の違反**: B74 が B66 と B65 の間に置かれている．また B64・B67 の一方がファイル末尾（B1 より下）に取り残されている
+- **仕様外のタグ**: skill が定義するのは `[auto-decided]` と `[needs-human]` の 2 種のみだが，実際には
+  `[user-approved]`（8 件）・`[resolved]`・`[user]`・`[rc-reflector]`・`[Iter53 investigator]` が使われている
+- **サブ番号**: `B48-b` が 1 件
+
+---
 
 ## B83 [rc-reflector 2026-08-03] Iter54 考察: education_soft_label_distillation 棄却、研究 converging
 
@@ -1565,18 +1607,6 @@
 - 自動選択: `status="converged"` として研究サイクルを終了し、人間判断を待つ。
 - 根拠: (1) Ollama REST API で raw hidden states は取得できない（/api/embeddings は semantic representation のみ）。(2) embedding ベースの信号は Iter2 で rejected（task prefix 未付与で cross-lingual mismatch）。(3) 研究フロンティア全項目が単一レバー原則の枠を超える。
 - 要レビュー: 次のアクションを (A) 研究サイクル終了 or (B) 単一レバー原則再設計の上で研究フロンティア着手（例: routing_method=embedding + task_prefix 修正）のいずれかを選択すること。
-
----
-
-書式:
-```
-## B{n} [auto-decided YYYY-MM-DD] 題目
-- 状況: なぜ判断が要ったか
-- 自動選択: 何を選んだか
-- 根拠: なぜそれが最も妥当か
-- 要レビュー: 人間が確認・却下する際に何を見るか（却下時はこの項目を編集して差し替える）
-```
-不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
 ---
 
