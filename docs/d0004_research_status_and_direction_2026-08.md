@@ -1,5 +1,16 @@
 # d0004: 研究の現況と今後の方針（Iter27 時点，2026-07-31）
 
+> **【状態: 部分的に有効 — Iter27 で更新停止．現況ではない】**
+> 本書はタイトルに「現況」とあるが，**更新は Iter27 で止まっている**．研究はその後 Iter54 まで進み
+> `status="converged"` に到達した．**収束時点の現況は
+> `docs/d0006_research_summary_iter28-54_2026-08.md` を参照すること**．
+> 本書が扱っていない範囲: 分類器の較正（Iter29〜31），訓練データ構成の全 6 値（Iter32〜38），
+> embedding 適応の全 4 値（Iter40〜43），分類器ヘッドの後段調整（Iter44, Iter49〜53），集約方式の
+> 比較（Iter45〜48），および収束判定と 4 件の要人間判断．
+> なお本書 §4（no-op 実験を生む構造的原因）と §5（実験設計上の教訓）は現在も有効であり，
+> d0006 §5 に一般化して引き継いでいる．本書 §5「Y5: education/legal データ不均衡の是正で改善する」
+> という見立ては，Iter32〜38 で全値 rejected となり覆っている．
+
 **この文書の役割**: research-cycle の各フェーズ（rc-investigator / rc-planner / rc-implementer /
 rc-experimenter / rc-analyst / rc-reflector）が，次の一手を決める前に最初に読む現況文書である．
 `.claude/research/journal.md` はイテレーション単位の生記録であり，全体像は追えない．本書はそれを

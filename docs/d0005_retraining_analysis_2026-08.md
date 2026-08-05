@@ -131,6 +131,12 @@
 
 ### 5.2 次の一手
 
+> **【この節は Iter54 の結果で覆っている】** ここで提案した `classifier_training_data_composition` の
+> 新しい値（`education_soft_label_distillation`）は Iter54 の計画フェーズで検討されたが，
+> **single_lever_compatibility が低いと評価され，実験を実行せずに棄却された**．研究は
+> `status="converged"` へ移行している．経緯は `docs/d0006_research_summary_iter28-54_2026-08.md` §2.6
+> を参照すること．§5.3 の要人間判断 3 項目は現在も未解決である．
+
 - **Iter54+**: `classifier_training_data_composition` の新しい値を計画フェーズで検討
 - **重点調査**: より高品質な education training data の設計（handmade 問題の増強、または新しい proxy task の探索）
 - **評価基準**: flip_rate <15% を厳密に検証。超える場合は retraining 承認の見送り
@@ -148,7 +154,8 @@
 - `docs/d0001_literature_survey_2026-07.md`: 先行研究の文献調査
 - `docs/d0002_research_cycle_findings_2026-07.md`: Iter1〜22 の総括
 - `docs/d0003_next_experiments_2026-07.md`: 次の実験計画（Iter22 時点）
-- `docs/d0004_research_status_and_direction_2026-08.md`: 研究の現況（Iter27 時点）
+- `docs/d0004_research_status_and_direction_2026-08.md`: Iter15〜27 の到達点（Iter27 で更新停止）
+- `docs/d0006_research_summary_iter28-54_2026-08.md`: **Iter28〜54 の総括（研究収束時点の現況）**
 - `.claude/research/journal.md`: イテレーション単位の生記録（一次情報）
 - `.claude/research/backlog.md`: 自動判断の記録・要人間判断事項
 
