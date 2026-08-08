@@ -15,6 +15,42 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B87 [rc-reflector 2026-08-08] Iter56: conformal_prediction 棄却、研究 converged 確定
+
+- **状況**: Iter56（routing_confidence_calibration_method=conformal_prediction）の結果を考察．
+- **判定**: `棄却`（invalid + 方法的限界）．
+- **結果**:
+  - カバレッジ: 0.6056（target 0.87-0.93，-29.44pt）
+  - 平均セットサイズ: 1.51（target 1.5-4.0，合格）
+  - ECE: 0.0630（合格）
+  - argmax flip rate: 0%（合格）
+- **根本原因**:
+  1. q_hat 計算誤り（全スコア 14,270 vs 真クラススコア 1,427）．
+  2. 逆転現象（高信頼度=full-set，低信頼度=singleton）．
+  3. coverage = argmax accuracy = 0.6031（CP 層が機能していない）．
+- **修正シミュレーション**: 真クラススコア使用でも coverage=0.8025（未達），
+  mean_set_size=7.31（target 超過）．
+- **方法的限界**: 10 クラス問題で APS を適用し，信頼水準 0.90 を達成するには
+  平均 5-7 クラスの prediction set が必要．ルーティングに実用的ではない．
+- **全 levers 試し切り状態（最終）**:
+  - fallback_policy: adopted (完了)
+  - classifier_calibration: 全3値試済み (temperature adopted)
+  - classifier_training_data_composition: 全6値 rejected
+  - class_weight_adjustment: rejected
+  - embedding_adaptation: 全4値 rejected
+  - classifier_head_adaptation: 2 adopted, 1 exhausted, 1 skip (**CLOSED**)
+  - aggregation_method: 全3値試済み (max_confidence adopted)
+  - response_language_consistency: adopted (完了)
+  - routing_confidence_calibration_method: rejected (**CLOSED**)
+  - dispatch_policy: 未試行（スキーマ変更必要）
+- **収束判定**: 全 levers を試し切り，conformal_prediction も棄却．
+  `status="converged"` 確定．研究はこれで完全に終了．
+- **git commit**: （このイテレーションで実施）
+- **state.json**: status="converged", current_lever=null
+- **要人間判断**: なし（可逆な判断の範囲内）．
+
+---
+
 ## 現在オープンな要人間判断
 
 **2026-08-05，B84 にてすべて解消済み**．研究は Iteration 54 で `status="converged"` に到達し（B83），

@@ -667,7 +667,12 @@ levers:
             **成功条件（暫定）**: 指定信頼水準（例: 90%）に対する実際のカバレッジ率が有意に外れず，
             かつ ECE または fallback_rate が temperature 較正単体より改善すること．
             **到達コードパス**: `scripts/evaluate_classifier_calibration.py` に conformal prediction の
-            予測集合構成ロジックを追加する経路が想定される．具体的な変更箇所は計画フェーズで確定する"}
+            予測集合構成ロジックを追加する経路が想定される．具体的な変更箇所は計画フェーズで確定する
+            [2026-08-08 Iter56 reflector追記] `conformal_prediction` は **rejected** 確定．
+            カバレッジ 0.6056（target 0.87-0.93，-29.44pt）．根本原因: q_hat計算誤り（全スコア14,270
+             vs 真クラススコア1,427）．修正シミュレーションでもcoverage=0.8025（未達），
+            mean_set_size=7.31（target超過）．10クラス問題でのAPS適用は方法的限界．
+            **`routing_confidence_calibration_method` レバークローズ確定**"}}
 
   # --- 【3番目・要ユーザー確認】複合ドメイン compound_domain_set_recall の改善 ---
   - {name: dispatch_policy, values: [adaptive_confidence_gap],

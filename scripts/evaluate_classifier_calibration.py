@@ -50,6 +50,7 @@ import json
 import sys
 from typing import TextIO
 
+import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
 
 from classifier import load_domain_classifier
@@ -62,6 +63,53 @@ def _read_jsonl(path: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+def _compute_prediction_set(
+    probabilities: np.ndarray,
+    cp_data: dict,
+    confidence_level: float = 0.90,
+) -> tuple[list[int], int]:
+    """Compute a conformal prediction set using cumulative APS method.
+
+    Calibration: for each (sample, class) pair, compute nonconformity score
+    S(x, j) = 1 - cumulative_prob_up_to_class_j (classes sorted by prob desc).
+    q_hat = (1-alpha) quantile of ALL calibration scores.
+    Prediction set: include classes in decreasing probability order
+    while score (1 - cumsum) <= q_hat.
+
+    This ensures the top class is always included (smallest score),
+    and lower classes are added while the score stays below q_hat.
+
+    Returns (list of class indices in prediction set, set size).
+    """
+    alpha = 1.0 - confidence_level
+    all_scores = cp_data["all_scores"]  # shape=(n_cal, n_classes)
+
+    # q_hat = (1-alpha) quantile of ALL nonconformity scores.
+    # Using all scores (not just true-class) ensures proper coverage.
+    flat_scores = all_scores.flatten()
+    target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(flat_scores)))
+    q_hat = float(np.quantile(flat_scores, target, method="higher"))
+
+    # Include classes in decreasing probability order while score <= q_hat
+    # Score for class j = 1 - cumsum_prob_up_to_j (top class has smallest score)
+    sorted_indices = np.argsort(-probabilities)  # descending
+    pred_set: list[int] = []
+    cumsum = 0.0
+    for idx in sorted_indices:
+        cumsum += probabilities[idx]
+        score = 1.0 - cumsum
+        if score <= q_hat:
+            pred_set.append(int(idx))
+        else:
+            break
+
+    # Fallback: if no class meets threshold, include top class
+    if len(pred_set) == 0:
+        pred_set = [int(np.argmax(probabilities))]
+
+    return pred_set, len(pred_set)
+
+
 async def predict_calibrated_rows(
     ollama_client: OllamaClient,
     embedding_model: str,
@@ -70,6 +118,9 @@ async def predict_calibrated_rows(
     fine_tuned_embed_model: str | None = None,
     education_logit_bias: float = 0.0,
     education_threshold: float = 0.0,
+    conformal_prediction: bool = False,
+    calibration_dataset_path: str | None = None,
+    confidence_level: float = 0.90,
 ) -> list[dict]:
     """Recompute (selected_domain, confidence) for every dataset row via the calibrated classifier.
 
@@ -84,6 +135,78 @@ async def predict_calibrated_rows(
 
     classes = list(classifier.classes_)
     rows = []
+
+    # Pre-compute conformal prediction calibration data (APS method).
+    # Uses out-of-fold predictions from the CalibratedClassifierCV's internal
+    # 5-fold CV to avoid the data-overlap problem (in-sample predictions are
+    # overconfident, producing empty prediction sets).
+    #
+    # Non-conformity score for class j (sorted by prob descending):
+    #   S(x, j) = 1 - cumulative_prob_up_to_class_j
+    # The top class gets the HIGHEST score (least conforming), so we use the
+    # alpha-quantile of TRUE-CLASS scores as q_hat. This ensures the top class
+    # is included in the prediction set when its score <= q_hat.
+    cp_data: dict | None = None
+    if conformal_prediction:
+        cal_dataset = _read_jsonl(calibration_dataset_path)  # type: ignore[arg-type]
+        n_cal = len(cal_dataset)
+        n_classes = len(classes)
+
+        # Reconstruct 5-fold CV split using the same class labels
+        from sklearn.model_selection import StratifiedKFold
+
+        labels = [
+            classes.index(r["domain"]) if r["domain"] in classes else 0
+            for r in cal_dataset
+        ]
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+        # Compute out-of-fold embeddings and predictions
+        cal_embeddings = []
+        if fine_tuned_embed_model is not None:
+            local_model = SentenceTransformer(
+                fine_tuned_embed_model, trust_remote_code=True, device="cpu"
+            )
+            try:
+                local_model.load_adapter(fine_tuned_embed_model, "default")
+                local_model.set_adapter("default")
+            except ValueError:
+                pass
+            for cal_row in cal_dataset:
+                cal_embeddings.append(
+                    local_model.encode(cal_row["query"], normalize_embeddings=True,
+                                       show_progress_bar=False)
+                )
+        else:
+            for cal_row in cal_dataset:
+                cal_embeddings.append(
+                    await ollama_client.embed(embedding_model, cal_row["query"])
+                )
+        cal_embeddings = np.array(cal_embeddings)
+
+        # Get out-of-fold predictions using the base estimator (LogisticRegression)
+        base_estimator = classifier.estimator
+        oof_probs = np.zeros((n_cal, n_classes))
+        for train_idx, test_idx in skf.split(np.zeros(n_cal), labels):
+            fold_clf = type(base_estimator)(max_iter=1000)
+            fold_clf.fit(cal_embeddings[train_idx],
+                         [labels[j] for j in train_idx])
+            oof_probs[test_idx] = fold_clf.predict_proba(cal_embeddings[test_idx])
+
+        # Compute nonconformity scores for ALL (sample, class) pairs.
+        # S[i, j] = 1 - cumulative_prob_up_to_class_j (classes sorted by prob desc).
+        # The top class gets the SMALLEST score (most conforming), so it's always
+        # included in the prediction set. Lower classes are added while score <= q_hat.
+        all_scores = np.zeros((n_cal, n_classes))
+        for i in range(n_cal):
+            probs = oof_probs[i]
+            sorted_idx = np.argsort(-probs)  # descending
+            cumsum = 0.0
+            for rank, idx in enumerate(sorted_idx):
+                cumsum += probs[idx]
+                all_scores[i, idx] = 1.0 - cumsum
+
+        cp_data = {"all_scores": all_scores}
 
     if fine_tuned_embed_model is not None:
         local_model = SentenceTransformer(
@@ -106,7 +229,6 @@ async def predict_calibrated_rows(
             if education_logit_bias != 0.0:
                 edu_idx = classes.index("education") if "education" in classes else -1
                 if edu_idx >= 0:
-                    import numpy as np
                     logits = np.log(probabilities + 1e-10)
                     logits[edu_idx] += education_logit_bias
                     logits_max = np.max(logits)
@@ -117,16 +239,23 @@ async def predict_calibrated_rows(
                 edu_idx = classes.index("education") if "education" in classes else -1
                 if edu_idx >= 0:
                     probabilities[edu_idx] += education_threshold
+            # Compute conformal prediction set (uses original predict_proba probabilities)
+            if conformal_prediction and cp_data is not None:
+                pred_set, set_size = _compute_prediction_set(
+                    probabilities, cp_data, confidence_level
+                )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
-            rows.append(
-                {
-                    "id": row["id"],
-                    "expected_domains": row["expected_domains"],
-                    "selected_domain": classes[best_index],
-                    "confidence": float(probabilities[best_index]),
-                    "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
-                }
-            )
+            row_dict = {
+                "id": row["id"],
+                "expected_domains": row["expected_domains"],
+                "selected_domain": classes[best_index],
+                "confidence": float(probabilities[best_index]),
+                "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
+            }
+            if conformal_prediction:
+                row_dict["prediction_set"] = [classes[i] for i in pred_set]
+                row_dict["set_size"] = set_size
+            rows.append(row_dict)
     else:
         for row in dataset:
             query_embedding = await ollama_client.embed(embedding_model, row["query"])
@@ -135,7 +264,6 @@ async def predict_calibrated_rows(
             if education_logit_bias != 0.0:
                 edu_idx = classes.index("education") if "education" in classes else -1
                 if edu_idx >= 0:
-                    import numpy as np
                     logits = np.log(probabilities + 1e-10)
                     logits[edu_idx] += education_logit_bias
                     logits_max = np.max(logits)
@@ -146,16 +274,23 @@ async def predict_calibrated_rows(
                 edu_idx = classes.index("education") if "education" in classes else -1
                 if edu_idx >= 0:
                     probabilities[edu_idx] += education_threshold
+            # Compute conformal prediction set (uses original predict_proba probabilities)
+            if conformal_prediction and cp_data is not None:
+                pred_set, set_size = _compute_prediction_set(
+                    probabilities, cp_data, confidence_level
+                )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
-            rows.append(
-                {
-                    "id": row["id"],
-                    "expected_domains": row["expected_domains"],
-                    "selected_domain": classes[best_index],
-                    "confidence": float(probabilities[best_index]),
-                    "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
-                }
-            )
+            row_dict = {
+                "id": row["id"],
+                "expected_domains": row["expected_domains"],
+                "selected_domain": classes[best_index],
+                "confidence": float(probabilities[best_index]),
+                "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
+            }
+            if conformal_prediction:
+                row_dict["prediction_set"] = [classes[i] for i in pred_set]
+                row_dict["set_size"] = set_size
+            rows.append(row_dict)
     return rows
 
 
@@ -169,6 +304,9 @@ async def _run(
     fine_tuned_embed_model: str | None = None,
     education_logit_bias: float = 0.0,
     education_threshold: float = 0.0,
+    conformal_prediction: bool = False,
+    calibration_dataset_path: str | None = None,
+    confidence_level: float = 0.90,
 ) -> None:
     dataset = _read_jsonl(dataset_path)
     classifier = load_domain_classifier(classifier_path)
@@ -178,6 +316,9 @@ async def _run(
         fine_tuned_embed_model=fine_tuned_embed_model,
         education_logit_bias=education_logit_bias,
         education_threshold=education_threshold,
+        conformal_prediction=conformal_prediction,
+        calibration_dataset_path=calibration_dataset_path,
+        confidence_level=confidence_level,
     )
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -226,6 +367,23 @@ def main() -> None:
         help="Per-class threshold addition for education class (added to probability before argmax; lowers decision boundary)",
     )
     parser.add_argument(
+        "--conformal-prediction",
+        action="store_true",
+        default=False,
+        help="Enable conformal prediction (APS method) to compute prediction sets",
+    )
+    parser.add_argument(
+        "--calibration-dataset",
+        default=None,
+        help="Path to calibration dataset JSONL for non-conformity score computation (default: same as --dataset)",
+    )
+    parser.add_argument(
+        "--confidence-level",
+        type=float,
+        default=0.90,
+        help="Confidence level for conformal prediction coverage guarantee (default: 0.90)",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write the calibrated-side JSONL to (default: stdout)",
@@ -244,6 +402,9 @@ def main() -> None:
                 fine_tuned_embed_model=args.fine_tuned_embed_model,
                 education_logit_bias=args.education_logit_bias,
                 education_threshold=args.education_threshold,
+                conformal_prediction=args.conformal_prediction,
+                calibration_dataset_path=args.calibration_dataset,
+                confidence_level=args.confidence_level,
             )
         )
     else:
@@ -259,6 +420,9 @@ def main() -> None:
                     fine_tuned_embed_model=args.fine_tuned_embed_model,
                     education_logit_bias=args.education_logit_bias,
                     education_threshold=args.education_threshold,
+                    conformal_prediction=args.conformal_prediction,
+                    calibration_dataset_path=args.calibration_dataset,
+                    confidence_level=args.confidence_level,
                 )
             )
 
