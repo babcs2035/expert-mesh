@@ -614,6 +614,77 @@ levers:
   - {name: dispatch_top_k, values: [1, 2, 3], note: "直近完走実験(results/20260709_214113)でmedical recallが0.79（legal 0.93, general 1.0）と低いことが判明．top_k>1の並行dispatchで改善するか検証．aggregator.select_best_dispatch_responseは対応済み・新規実装不要"}
   - {name: confidence_threshold, values: [0.3, 0.5, 0.7], note: "フォールバック率とのトレードオフ．直近実験ではfallback_rate=0.0のため効果が薄い可能性あり"}
 
+  # =====================================================================
+  # 【2026-08-08 追加・docs/d0007】Iter54 収束（backlog B84）後，education_recall とは独立した
+  # 次の研究方向性を tavily-search で調査し，実行可能性の高い候補をレバー化した．
+  # 詳細な調査結果・出典は docs/d0007_next_research_directions_2026-08.md を参照．
+  # =====================================================================
+
+  # --- 【最優先・低コスト】回答言語一貫性: 複合ドメイン回答で意図せず中国語が生成される問題 ---
+  - {name: response_language_consistency, values: [system_prompt_enforcement, post_hoc_langdetect_retry],
+     note: "[2026-08-08 docs/d0007 §2] README『既知の制約と今後の課題』に記載のまま未着手だった課題．
+            複合ドメイン質問（例: 法律×医療）で選定自体は正しいノードが選ばれるにもかかわらず，
+            回答が日本語ではなく中国語で生成される事例が実機で確認されている．
+            **原因（tavily調査，出典は d0007 参照）**: (1) 専門用語で中国語表現の方が学習データ中の
+            確信度・トークン効率が高い，(2) RLHF/RLVR が言語一貫性を報酬に含めない，(3) 弱い言語指示
+            （\"Prefer Japanese\"）は注入コンテキストの言語に上書きされやすい．
+            **system_prompt_enforcement**: `http_server.py:build_dispatch_prompt()` の指示文を
+            「必ず日本語で応答し，他言語（特に中国語）を一切含めない」という強い表現に書き換える．
+            モデルの再学習は不要．
+            **post_hoc_langdetect_retry**: 生成結果を `langdetect` 等で言語判定し，日本語でなければ
+            同一質問で再生成するアプリ層の後処理を追加する．
+            **単一レバー原則との相性**: 良い．ルーティングロジック（confidence 算出・dispatch 判定）
+            には触れないため，この課題単独で検証できる．
+            **成功条件（暫定）**: 複合ドメイン設問 100 問の回答文に対する言語判定で，非日本語（主に
+            中国語混入）の発生率が有意に低下し，かつ top1_accuracy・education_recall 等ルーティング系
+            指標が非退行であること．
+            **到達コードパス**: `http_server.py` の `build_dispatch_prompt()` が組み立てるプロンプトを
+            `expert_backend.py:OllamaClient.generate()` が `/api/chat` へ渡す経路．post_hoc 側は
+            `run_experiment.py` または `scripts/evaluate_response_quality.py` に言語判定ステップを追加する
+            経路になる．いずれも実装前に到達確認を行うこと（d0004 §4 の教訓）．
+            **設定ファイルへの影響**: system_prompt_enforcement はプロンプト文言変更のみで
+            `config.yaml` のスキーマ変更は不要と推定される．post_hoc_langdetect_retry を config 化する
+            場合は新規フィールドの追加を要する（着手前に確認）"}
+
+  # --- 【次点・低コスト】confidence calibration の新しい軸: conformal prediction による被覆保証 ---
+  - {name: routing_confidence_calibration_method, values: [conformal_prediction],
+     note: "[2026-08-08 docs/d0007 §5-b] `classifier_calibration`（platt/isotonic/temperature，
+            Iter29〜31 で全値試行済み，temperature adopted）とは異なる統計的性質を持つ較正手法．
+            temperature 較正は ECE（期待較正誤差）を最小化する点較正であるのに対し，conformal
+            prediction は『指定した信頼水準でカバレッジを保証する』という被覆保証を提供する
+            （CP-Router, Conformal Arbitrage, NeurIPS 2025）．
+            **実施方法**: 既存の分類器 confidence 値（`models/domain_classifier.joblib` の
+            `predict_proba` 出力）に対し，held-out キャリブレーションセットで non-conformity score
+            を計算し，予測集合（prediction set）を構成する．**分類器の再訓練は不要**，既存 confidence
+            値の再利用でオフライン完結する．
+            **単一レバー原則との相性**: 良い．argmax（1 位選択）自体は変えず，予測集合のサイズや
+            fallback 判定にのみ影響する後付けの統計的処理として実装できる．
+            **成功条件（暫定）**: 指定信頼水準（例: 90%）に対する実際のカバレッジ率が有意に外れず，
+            かつ ECE または fallback_rate が temperature 較正単体より改善すること．
+            **到達コードパス**: `scripts/evaluate_classifier_calibration.py` に conformal prediction の
+            予測集合構成ロジックを追加する経路が想定される．具体的な変更箇所は計画フェーズで確定する"}
+
+  # --- 【3番目・要ユーザー確認】複合ドメイン compound_domain_set_recall の改善 ---
+  - {name: dispatch_policy, values: [adaptive_confidence_gap],
+     note: "[2026-08-08 docs/d0007 §3] `aggregation_method` レバー（Iter48 でクローズ．
+            max_confidence adopted，compound_domain_set_recall=0.345，理論上限1.0）の後継．
+            **機序**: 各ノードが 10 クラス softmax の自分のクラスの確率のみ返すため，2 位ノードの
+            confidence は構造的に 0.5 弱を超えない（aggregation_method note 参照）．binary relevance
+            （各ノードを独立の sigmoid にする）による根本解決は分類器の再訓練を要し単一レバー原則と
+            相性が悪い．
+            **adaptive_confidence_gap**: MoE 分野の adaptive gating（Huang et al., EMNLP 2023）・
+            Expert Choice Routing（Google Research）に基づき，固定 `dispatch_top_k=2` を，1位・2位の
+            confidence 差（gap）が閾値 `T` 未満のときだけ動的に k を増やす方式に変更する．既存の
+            分類器出力はそのまま使い，`aggregator.select_dispatch_targets()` の dispatch 判定ロジック
+            のみを変更するため分類器の再訓練は不要．argmax（1 位選択）自体は変えないため単一レバー
+            原則の判定基準にそのまま適合する．
+            **【重要】着手前にユーザー確認が必要**: `dispatch_top_k` を固定値運用から動的ポリシーへ
+            変更するため，`config.yaml` のスキーマ変更を伴う可能性が高い．Y2（`dispatch_candidate_threshold`
+            新設）と同様の扱いとし，CLAUDE.md の規約（public API・設定ファイル形式の変更は事前確認）
+            に従うこと．
+            **成功条件（暫定）**: compound_domain_set_recall が 0.345 から有意に改善し，単一ドメイン
+            top1_accuracy が非退行であること"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #
@@ -649,6 +720,22 @@ research_frontier:
      dispatch されなかった．検証には先に Y2（confidence_threshold の二重責務の分離）が必要．
      詳細は docs/d0004 §3・levers の aggregation_method note・backlog B48"
   - "無線アドホック化・ネットワーク不安定性への対応（設計書Phase3，本フェーズのスコープ外）"
+  - "[2026-08-08 docs/d0007 §4 追加] 医療ノードへの特化モデル導入: `Medical-Qwen3-Swallow-8B`
+     （Swallowプロジェクト，Qwen3 8Bベースに医学論文・診療ガイドラインで継続事前学習，Apache 2.0，
+     2026年公開）が既存構成（qwen3.5:9b，CPU推論）と同等以下のサイズで導入可能な候補として
+     見つかった．法律ノードは日本語法律特化の生成可能なオープンウェイトモデルが依然見つからず，
+     既存のqwen3.5:9b+LoRA構成を継続する．導入には medical ドメインの recall・回答品質の
+     実機再評価が必要であり，ライセンス・ベンチマーク数値の一次ソース（HuggingFaceモデルカード）
+     の確認も未了．levers 試し切り後，または人間判断を経て着手する"
+  - "[2026-08-08 docs/d0007 §5 追加] education_recall改善とは独立したLLMルーティング分野の新テーマ
+     （2025〜2026年動向調査）: (a) 分散/エッジ協調推論（投機的デコーディング，Decentralized
+     Speculative Decoding等，各ノードをdraft/verify役に分ける協調推論），(c) 適応的ルーティング
+     （dispatch結果の正誤フィードバックでルーティングポリシーを継続改善するオンライン学習，
+     OrcaRouter等），(d) 不安定通信下の協調推論（ノード離脱・切断への対応，Mesh LLM等）．
+     いずれも実装変更が大きく，実機実験（(c)はフィードバック記録の追加実装，(d)はノード切断の
+     シミュレーションとフォールバック経路の追加実装）を要する．config.yaml・アーキテクチャの
+     大規模変更を伴うため，上記levers（response_language_consistency等）を試し切ってから，
+     または人間判断を経て着手する"
 
 baselines: []   # ベースライン比較は research_frontier の項目であり levers 探索後に着手
 

@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 54,
-  "iteration_name": "education_soft_label_distillationによるclassifier再訓練",
-  "phase": "reflect",
-  "status": "converged",
-  "current_lever": null,
+  "iteration": 55,
+  "iteration_name": "複合ドメイン回答の言語一貫性対策",
+  "phase": "plan",
+  "status": "running",
+  "current_lever": "response_language_consistency",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1786167011,
-  "last_slack_ts": "1786167000.740849",
-  "iteration_thread_ts": "1785766143.980269",
+  "updated_at": 1786168128,
+  "last_slack_ts": "1786168121.462419",
+  "iteration_thread_ts": "1786168099.990009",
   "notion_toggle_created": true,
   "last_commit": "90d9b78"
 }

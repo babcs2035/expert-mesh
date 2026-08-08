@@ -1,3 +1,47 @@
+## Iteration 55: 複合ドメイン回答の言語一貫性対策
+
+### 調査 (Iter55)
+
+**背景**: Iter54 で研究サイクルは `status="converged"` に到達し，backlog B84（2026-08-05）で
+education_recall 改善は打ち止めが確定した．ユーザー指示により，education_recall とは独立に
+「今後進めるべき検討・実験の方向性」を tavily-search で調査した（2026-08-08）．
+
+**調査方法**: README「既知の制約と今後の課題」・d0004 §5「着手しない項目」・
+`research_frontier`（未完了項目）から，education_recall 以外で手つかずの課題を洗い出し，
+4 観点（回答言語一貫性・複合ドメイン `compound_domain_set_recall`・日本語法律/医療特化モデルの
+最新動向・LLM ルーティング分野の 2025〜2026 年新テーマ）を並列で tavily-search 調査した．
+詳細・出典は `docs/d0007_next_research_directions_2026-08.md` を参照．
+
+**調査結果の要点**:
+1. **回答言語一貫性**（複合ドメイン回答が中国語混入する問題，README 既知の制約 2）:
+   system prompt の言語強制と，出力後の langdetect 再生成が，モデル再学習不要・
+   ルーティングロジックと独立・単一レバー原則に適合する低コスト対策として見つかった．
+2. **複合ドメイン recall**（`aggregation_method` は Iter48 でクローズ済み，
+   compound_domain_set_recall=0.345 が理論上限 1.0 に対し頭打ち）: MoE 分野の adaptive gating
+   に基づく adaptive-k dispatch が，分類器再訓練不要・単一レバー原則適合の改善案として
+   見つかったが，`dispatch_top_k` の動的化は config.yaml スキーマ変更を伴う可能性が高く
+   要ユーザー確認．
+3. **日本語法律/医療特化モデル**: 医療は `Medical-Qwen3-Swallow-8B`（Apache 2.0，9B以下）が
+   新たな候補として見つかった．法律は依然候補なし．
+4. **LLM ルーティング分野の新テーマ**: conformal prediction によるルーティング較正
+   （既存 confidence 値の再利用でオフライン完結，最低コスト）が次点候補．分散協調推論・
+   適応的ルーティング・不安定通信対応は実装変更が大きく research_frontier として位置づけた．
+
+**config.yml への反映**: 優先順位の高い 3 レバーを `levers` 末尾に追加した．
+- `response_language_consistency`（values: system_prompt_enforcement, post_hoc_langdetect_retry）
+- `routing_confidence_calibration_method`（values: conformal_prediction）
+- `dispatch_policy`（values: adaptive_confidence_gap，要ユーザー確認）
+医療特化モデル導入・分散協調推論等の大規模変更候補は `research_frontier` に追加した．
+
+**次の単一レバー（推奨）**: `response_language_consistency=system_prompt_enforcement`．
+理由: (1) post-hoc 手法の理論的限界に到達する懸念がなく判定が単純，(2) ルーティング精度
+（confidence・分類器）に一切触れないため既存の最良構成を揺らさない，(3) 実機実験なしで
+既存の複合ドメイン設問の回答文をオフラインで言語判定するだけで効果を検証できる可能性が高い．
+計画フェーズ（rc-planner）は，この推奨を起点に単一レバー・変更ファイル一覧・到達コードパス・
+成功条件を確定すること．
+
+---
+
 ## Iteration 54: education_soft_label_distillationによるclassifier再訓練
 
 ### 計画 (Iter54)

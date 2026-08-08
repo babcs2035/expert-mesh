@@ -42,6 +42,31 @@ B 番号は journal / journal_archive から本文中で参照されているた
 
 ---
 
+## B85 [auto-decided 2026-08-08] education_recall改善打ち止め後の次レバー選定
+
+- 状況: Iter54 で `status="converged"` に到達し，B84（2026-08-05）で education_recall 改善は
+  打ち止めが確定した．ユーザー指示により，education_recall とは独立に「今後進めるべき検討・実験の
+  方向性」を tavily-search で調査し，research-cycle で着実に実行される形に整備することになった．
+- 自動選択: README「既知の制約と今後の課題」・d0004 §5「着手しない項目」から，education_recall 以外
+  で手つかずの課題を洗い出し，4 観点（回答言語一貫性・複合ドメイン `compound_domain_set_recall`・
+  日本語法律/医療特化モデルの最新動向・LLM ルーティング分野の 2025〜2026 年新テーマ）を並列で
+  tavily-search 調査した（詳細・出典は `docs/d0007_next_research_directions_2026-08.md`）．優先順位の
+  高い 3 レバーを `config.yml` の `levers` へ追加し，最優先レバー
+  `response_language_consistency=system_prompt_enforcement` を次イテレーション（Iter55）の
+  `current_lever` に設定した．
+- 根拠: 実行コスト（低いほど優先）・単一レバー原則との相性（良いほど優先）・成功条件の単純さ
+  （日本語で応答したかという二値判定）を基準に評価した．`response_language_consistency` は
+  post-hoc 手法の理論的限界に到達する懸念がなく，ルーティング精度（confidence・分類器）に一切
+  触れないため既存の最良構成（`classifier_calibration=temperature` 等）を揺らさない．
+  詳細は docs/d0007 §6 の優先順位表を参照．
+- 要レビュー: `dispatch_policy`（adaptive-k dispatch）は `dispatch_top_k` の固定値運用から動的
+  ポリシーへの変更を伴い，`config.yaml` のスキーマ変更が絡む可能性が高いため，着手前にユーザー
+  確認が必要（レバー note 内に明記済み）．医療特化モデル導入（`Medical-Qwen3-Swallow-8B`）は
+  `research_frontier` へ追加したのみで，ライセンス・ベンチマーク数値の一次ソース確認・実機評価は
+  まだ行っていない．
+
+---
+
 ## B84 [user 2026-08-05] 研究の最終確定と B27 の解消
 
 - 状況: 研究は Iteration 54 で converged．B81/B82/B83 が残した 4 件の要人間判断（education_recall
