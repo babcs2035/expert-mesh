@@ -7,9 +7,9 @@
   "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1785768360,
-  "last_slack_ts": "1785756332.084389",
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
-  "last_commit": "ba3f4e3"
+  "updated_at": 1786167011,
+  "last_slack_ts": "1786167000.740849",
+  "iteration_thread_ts": "1785766143.980269",
+  "notion_toggle_created": true,
+  "last_commit": "90d9b78"
 }
