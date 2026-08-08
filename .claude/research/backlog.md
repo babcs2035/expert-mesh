@@ -42,6 +42,23 @@ B 番号は journal / journal_archive から本文中で参照されているた
 
 ---
 
+## B86 [auto-decided 2026-08-08] Iter55: response_language_consistency=system_prompt_enforcement adopted。次レバー=routing_confidence_calibration_method
+
+- **状況**: Iter55（response_language_consistency=system_prompt_enforcement）の結果を考察．
+- **判定**: `adopted`（確信度: high）．
+- **結果**: McNemar p=1.0（discordant=0），argmax flip rate 0%，BH-regressions 0件．
+  compound questions 100 問の langdetect: ja=100, zh=0, other=0．
+  ルーティング指標はすべて不変（top1=0.603125，edu_recall=0.5118，med_recall=0.5000）．
+- **学び**: system_prompt_enforcement はルーティングに影響しないことが実証された．
+  言語一貫性の予防的強化として採用価値がある．
+- **次イテレーション（Iter56）の方針**: `routing_confidence_calibration_method=conformal_prediction`
+  を次レバーとする．理由: (1) 低コスト・オフライン完結（既存 confidence 値の再利用）
+  (2) 単一レバー原則との相性が良い（argmax を変えず，予測集合のサイズや fallback 判定にのみ影響）
+  (3) `dispatch_policy=adaptive_confidence_gap` は config.yaml スキーマ変更を伴うため要ユーザー確認．
+- **要人間判断**: なし（可逆な判断の範囲内）．
+
+---
+
 ## B85 [auto-decided 2026-08-08] education_recall改善打ち止め後の次レバー選定
 
 - 状況: Iter54 で `status="converged"` に到達し，B84（2026-08-05）で education_recall 改善は

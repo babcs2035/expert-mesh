@@ -121,7 +121,7 @@ def validate_node_config_values(
 
 def build_dispatch_prompt(domain: str, full_query: str) -> str:
     """Build the answer-generation prompt with the node's domain context."""
-    return f"あなたは「{domain}」分野の専門家です．次の質問に，あなたの専門知識を活かして具体的に回答してください．\n質問: {full_query}"
+    return f"あなたは「{domain}」分野の専門家です．次の質問に，あなたの専門知識を活かして具体的に回答してください．\n質問: {full_query}\n\n【重要】必ず日本語で応答してください．回答に中国語や他言語を一切含めないでください．"
 
 
 async def warmup_model(ollama_client: OllamaClient, model: str) -> None:

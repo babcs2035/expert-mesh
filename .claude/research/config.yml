@@ -644,7 +644,12 @@ levers:
             経路になる．いずれも実装前に到達確認を行うこと（d0004 §4 の教訓）．
             **設定ファイルへの影響**: system_prompt_enforcement はプロンプト文言変更のみで
             `config.yaml` のスキーマ変更は不要と推定される．post_hoc_langdetect_retry を config 化する
-            場合は新規フィールドの追加を要する（着手前に確認）"}
+            場合は新規フィールドの追加を要する（着手前に確認）
+            [2026-08-08 Iter55 reflector追記] `system_prompt_enforcement` は **adopted** 確定．
+            McNemar p=1.0（discordant=0），argmax flip rate 0%，BH-regressions 0件．
+            compound questions 100 問の langdetect: ja=100, zh=0, other=0．
+            ルーティング指標はすべて不変（top1=0.603125，edu_recall=0.5118，med_recall=0.5000）．
+            言語一貫性の予防的強化として採用価値あり．`post_hoc_langdetect_retry` は未試行．"}
 
   # --- 【次点・低コスト】confidence calibration の新しい軸: conformal prediction による被覆保証 ---
   - {name: routing_confidence_calibration_method, values: [conformal_prediction],

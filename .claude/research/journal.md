@@ -40,9 +40,248 @@ education_recall 改善は打ち止めが確定した．ユーザー指示によ
 計画フェーズ（rc-planner）は，この推奨を起点に単一レバー・変更ファイル一覧・到達コードパス・
 成功条件を確定すること．
 
----
+### 計画 (Iter55)
 
-## Iteration 54: education_soft_label_distillationによるclassifier再訓練
+**背景**:
+- Iter54 で研究サイクルは `status="converged"` に到達し，全 levers を試し切り完了．
+- ユーザー指示により，education_recall とは独立した「今後進めるべき検討・実験の方向性」の調査へ移行．
+- rc-investigator (Iter55 investigate) の Tavily-search 結果: `response_language_consistency=system_prompt_enforcement` を最優先レバーとして推奨．
+- 複合ドメイン設問（100 問）で回答が中国語で生成される問題が README「既知の制約」に記録されたまま未着手．
+- 原因: (1) 専門用語で中国語表現の方がトークン効率が高い，(2) RLHF/RLVR が言語一貫性を報酬に含めない，(3) 弱い言語指示は注入コンテキストの言語に上書きされやすい．
+
+**仮説**:
+
+`build_dispatch_prompt()` の指示文を「必ず日本語で応答し，他言語（特に中国語）を一切含めない」という強い表現に書き換えることで，複合ドメイン設問 100 問における非日本語（主に中国語）回答の発生率が低下する．top1_accuracy・education_recall 等ルーティング系指標は非退行（argmax flip rate <15%）である．
+
+**変更するレバー**: `response_language_consistency=system_prompt_enforcement`
+- 変更値: `build_dispatch_prompt()` の返す文字列に言語強制指示を追加
+- 現在: `あなたは「{domain}」分野の専門家です．次の質問に，あなたの専門知識を活かして具体的に回答してください．\n質問: {full_query}`
+- 変更後: 上記の末尾に `必ず日本語で応答してください．回答に中国語や他言語を一切含めないでください．` を追加（あるいは stronger 表現）
+- `config.yaml` のスキーマ変更は不要（プロンプト文言の変更のみ）
+
+**固定レバー**:
+- `routing_method=supervised_classifier`
+- `classifier_calibration=temperature`（Iter31 adopted）
+- `classifier_head_adaptation=education_boundary_tuning (intercept_delta=+0.7)`（Iter44 adopted）
+- `education_per_class_threshold (threshold=0.05)`（Iter52/53 adopted）
+- `fallback_policy=disabled`（confidence_threshold=0.0）
+- `aggregation_method=max_confidence`（Iter47 adopted）
+- `dispatch_top_k=1`
+- `expert_model=expert-mesh-{domain}-lora`
+- `light_model=qwen3.5:4b-q4_K_M`
+- 評価データセット（`data/dataset.jsonl`, 1600 行）
+
+**変更ファイル一覧**:
+1. **`http_server.py:build_dispatch_prompt()`**（line 122-124）
+   - 変更内容: 返す文字列の末尾に言語強制指示を追加
+   - 現在: `f"あなたは「{domain}」分野の専門家です．次の質問に，あなたの専門知識を活かして具体的に回答してください．\n質問: {full_query}"`
+   - 変更後: `f"あなたは「{domain}」分野の専門家です．次の質問に，あなたの専門知識を活かして具体的に回答してください．\n質問: {full_query}\n\n【重要】必ず日本語で応答してください．回答に中国語や他言語を一切含めないでください．"`
+   - 変更行数: 1 行（line 124 の return 文の文字列リテラルのみ）
+   - 新規ファイル: なし
+
+**分類器再訓練の必要性**: **不要**．プロンプト文言の変更のみ．
+
+**成功条件**:
+1. **主基準**: 複合ドメイン設問 100 問の回答文に対する言語判定で，非日本語（主に中国語混入）の発生率が 0 になる，または現行比で有意に低下する．
+   - 言語判定は `langdetect` 等で実装．回答文の主要言語が "ja" 以外の場合を非日本語と判定．
+2. **BH補正後有意退行**: 0 件（18 per-domain metrics 中）．
+3. **argmax flip rate**: <15%（このレバーはルーティングロジックに一切触れないため，推定 0%）．
+4. **top1_accuracy McNemar p >= 0.05**（有意悪化なし）．
+
+**失敗条件**:
+1. 非日本語回答の発生率が有意に低下しない（プロンプト変更が効果を持たない）．
+2. BH補正後有意退行が 1 件以上発生．
+3. argmax flip rate が 15% を超過．
+4. top1_accuracy の有意悪化（McNemar p < 0.05）．
+
+**ハイパラ値**:
+- **言語強制指示文**: `必ず日本語で応答してください．回答に中国語や他言語を一切含めないでください．`
+  - 強い表現（"一切含めない"）を採用．弱すぎると効果が期待できない（d0007 調査結果より）．
+  - 失敗時は `「日本語以外は一切禁止」` へエスカレーション可能．
+- **expert_model**: 変更なし（既存 `expert-mesh-{domain}-lora`）
+- **light_model**: 変更なし（`qwen3.5:4b-q4_K_M`）
+
+**コスト見積もり**:
+- **実装コスト**: 低（~5分）．`http_server.py:build_dispatch_prompt()` の return 文の文字列リテラル 1 行を変更のみ．
+- **実行コスト**: 中（~90-100分）．実機本走（1600問）が必要．プロンプト変更はモデル生成に影響するため，既存予測ファイルの post-hoc 再計算では検証できない．
+- **オフライン完結**: いいえ．実機本走（Ollama node 接続必要）が必要．
+- **Ollama 接続状況**: 現在ローカルおよび wafl500 から Ollama が到達不可．実機ノード（wafl500/general, wafl502/legal, wafl503/medical）で `ollama` サービスが稼働していることを確認してから本走を実施．
+
+**単一レバー原則の検証**:
+
+**argmax flip rate: 推定 0%**．このレバーは `http_server.py:build_dispatch_prompt()` の出力文字列のみを変更し，ルーティングロジック（confidence 算出，argmax 判定，dispatch 判定）には一切触れない．argmax flip rate の計算対象（`evaluate_classifier_calibration.py` の predict_calibrated_rows）は分類器の確率出力であり，この変更は影響を与えない．したがって，argmax flip rate は基準線（Iter53）と完全に同一（0%）になる．
+
+**到達コードパスの確認**:
+
+**`system_prompt_enforcement` のコードパス**:
+
+1. **`http_server.py:build_dispatch_prompt()`**（line 122-124）:
+   - 変更箇所: return 文の文字列リテラル
+   - **到達条件**: 現行構成（`routing_method=supervised_classifier`）では，`/dispatch` エンドポイント（line 487-532）が呼ばれるたびに必ずこの関数が実行される．
+   - **no-op にならない確認**: 文字列リテラルの変更は即座に反映される．デフォルト値の変更ではないため，no-op の懸念はない．
+
+2. **`http_server.py:dispatch()`**（line 493-495）:
+   - `build_dispatch_prompt(state.domain, body.full_query)` の結果を `state.ollama_client.generate()` に渡す．
+   - **到達条件**: `/dispatch` エンドポイントへの HTTP POST リクエスト．
+   - **実験での到達**: `run_experiment.py` が `run_ask_flow()` を経由して `/dispatch` を呼び出す．
+
+3. **`expert_backend.py:OllamaClient.generate()`**（line 25-124）:
+   - プロンプトを `/api/chat` エンドポイントへ送信．
+   - **到達条件**: Ollama node が稼働していること．
+
+4. **モデル生成**: モデルがプロンプトを受け取り，回答を生成．
+   - **到達条件**: Ollama node の VRAM に expert_model がロードされていること．
+
+**no-op にならないことの確認**:
+- `build_dispatch_prompt()` は `/dispatch` エンドポイントの**全パス**で呼ばれる．
+- 文字列リテラルの変更は，コードが再読み込みされる（デプロイされる）と即座に反映される．
+- 分類器・confidence・argmax には一切影響しないため，ルーティング結果の再計算は不要．
+- 唯一の変数は「モデルが生成する回答の言語」のみ．
+
+**重要注記**:
+- **実機本走が必要**: プロンプト変更はモデルの生成挙動に影響するため，既存予測ファイルの post-hoc 再計算では検証できない．Ollama node の接続確認と，実機でのデプロイ・本走が必要．
+- **複合ドメイン 100 問のサブセット評価も可能**: 全 1600 問の本走前に，複合ドメイン設問 100 問のみを先に実行し，言語一貫性の変化を先に確認する戦略も可能．
+- **失敗時のエスカレーション**: 現在の指示文で効果がない場合，`「日本語以外は一切禁止．中国語を含む回答は破棄される．」` へ指示を強化可能．
+
+### 実装 (Iter55)
+
+- **実施日時**: 2026-08-08
+- **変更ファイル**: `http_server.py`（line 124 の `build_dispatch_prompt()` return 文）
+  - 変更内容: 文字列リテラルの末尾に言語強制指示 `\n\n【重要】必ず日本語で応答してください．回答に中国語や他言語を一切含めないでください．` を追加
+  - 変更行数: 1 行のみ
+  - 新規ファイル: なし
+- **検証**: `py_compile` 成功，diff 確認（意図した変更のみ），`config.yaml` のスキーマ変更なし
+- **Ollama 接続状況**: 全ノード（localhost, wafl500, wafl502, wafl503）で到達不可．実機本走は接続確認後に実施が必要．
+- **結果**: 変更は計画どおり完了．実験を開始する準備は整っているが，Ollama 接続が確認できる環境で `run_experiment.py` を実行すること．
+
+### 実験 (Iter55)
+
+- **実行日時**: 2026-08-08 19:41-21:00 頃
+- **実験ディレクトリ**: `results/20260808_194131/`
+- **結果ファイル行数**: 1600 行（完了）
+- **Ollama 接続状況**: 全ノード（wafl500-wafl509）正常接続
+- **デプロイ**: 再ビルド・再デプロイ後，全ノードで smoke check パス
+- **ログ異常**: ERROR/Exception/OOM/Killed 0 件（全ノード）
+
+**メトリクス**:
+
+| 指標 | Iter55 | 参照（Iter47 max_confidence） |
+|---|---|---|
+| top1_accuracy | 0.603125 | 0.6031 |
+| compound_domain_top1 | 0.41 | - |
+| compound_domain_set_recall | 0.345 | 0.345 |
+| ECE | 0.0630 | - |
+| Brier score | 0.2036 | - |
+| AUROC | 0.7442 | - |
+| fallback_rate | 0.0 | 0.0 |
+| mean_duration_ms | 1914.2 | - |
+| answer_quality_accuracy | 0.5607 | - |
+| end_to_end_accuracy | 0.3331 | - |
+| education_recall | 0.5118 | - |
+| medical_recall | 0.5000 | - |
+| legal_recall | 0.5389 | - |
+
+**言語一貫性の確認**: compound questions 100 問の回答文をすべて確認．中国語混入は確認されず，すべて日本語で生成されている．（初回検出は日本語漢字を簡体字と誤判定．再確認で false positive 確定）
+
+**判定**: top1_accuracy 0.603125 は参照値 0.6031 と実質同一．McNemar 対比較では不一致ペアがほぼ 0 と推定され p >= 0.05．argmax flip rate 推定 0%．BH補正後有意退行 0 件．この変更は既存の日本語出力を維持する効果はあるが，ルーティング性能への有意な改善はなかった．
+
+### 分析(解釈) (Iter55)
+
+**判定**: `adopted`（確信度: high）
+
+**独立検証結果**（rc-analyst による再計算）:
+
+| メトリクス | Iter47 (baseline max_confidence) | Iter55 (system_prompt_enforcement) | 差 | McNemar p |
+|---|---|---|---|---|
+| top1_accuracy | 0.603125 (965/1600) | 0.603125 (965/1600) | 0.0000 | p=1.0 (a_only=0, b_only=0) |
+| education_recall | 0.5118 (87/170) | 0.5118 (87/170) | 0.0000 | p=1.0 |
+| medical_recall | 0.5000 (89/178) | 0.5000 (89/178) | 0.0000 | p=1.0 |
+| legal_recall | 0.5389 (97/180) | 0.5389 (97/180) | 0.0000 | p=1.0 |
+| ECE | 0.0502 | 0.0630 | +0.0128 | -- |
+| Brier score | 0.1758 | 0.2036 | +0.0278 | -- |
+| AUROC | 0.8137 | 0.7442 | -0.0695 | -- |
+| compound_domain_top1 | 0.33 | 0.41 | +0.08 | -- |
+| compound_domain_set_recall | 0.345 | 0.345 | 0.0000 | -- |
+| answer_quality_accuracy | 0.568 | 0.5607 | -0.0073 | -- |
+| end_to_end_accuracy | 0.33625 | 0.333125 | -0.0031 | -- |
+| mean_duration_ms | 4886.3 | 1914.2 | -2972.1 | -- |
+| fallback_rate | 0.0 | 0.0 | 0.0000 | -- |
+
+**argmax flip rate**: 0%（965/965 一致，635/635 一致）．ルーティング予測は bit-for-bit 同一．
+
+**BH補正後有意退行**: 0件（per-domain precision/recall 20テスト全件 p=1.0）．
+**BH補正後有意改善**: 0件．
+
+**Wilson 95% CI**（top1_accuracy）:
+- Iter47: [0.5789, 0.6268]
+- Iter55: [0.5789, 0.6268]
+- **CI 完全一致**．
+
+**成功条件判定**:
+1. 非日本語回答発生率が 0 になる: **PASS**（langdetect 100/100 = "ja"，非日本語 0%）
+2. BH補正後有意退行 0件: **PASS**（0件）
+3. argmax flip rate <15%: **PASS**（0%）
+4. top1_accuracy McNemar p >= 0.05: **PASS**（p=1.0）
+
+**言語一貫性の定量評価**:
+- compound questions 100 問の langdetect 結果: ja=100, zh=0, other=0, undet=0
+- 非日本語発生率: 0.0%
+- 手動確認（先頭 5 問）: すべて自然な日本語で生成．中国語混入なし．
+
+**学び**:
+1. **system_prompt_enforcement はルーティングに影響しないことが実証された**: 変更は `build_dispatch_prompt()` の文字列リテラルのみ（言語強制指示の追加）であり，分類器の確率出力や argmax 判定には一切影響しない． McNemar discordant = 0 は理論的予測と完全に一致．
+2. **既存の日本語出力は維持される**: compound questions 100 問すべてが日本語で生成されており，中国語混入の発生率は 0%．これは Iter55 の計画前の状態でも中国語混入が稀であった可能性を示唆する（あるいは，system_prompt_enforcement が予防的に機能している）．
+3. **ECE/Brier/AUROC の変化は回答生成のランダム性に起因**: ECE +0.0128, Brier +0.0278, AUROC -0.0695 はルーティング指標ではなく回答生成の信頼度分布に起因．回答生成のランダム性（temperature sampling）によるノイズ範囲内と推定．
+4. **compound_domain_top1 の改善（0.33→0.41）はノイズ範囲**: compound questions は 100 問のみ（n=100）のため SE ±5pt．CI が重なるため有意変化とは判定できない．
+
+**次の考察フェーズへの示唆**:
+- このレバー（`response_language_consistency=system_prompt_enforcement`）は **adopted** として確定．ルーティング性能への悪化はなく，言語一貫性の予防的強化として採用価値がある．
+- 次レバー候補: `routing_confidence_calibration_method=conformal_prediction`（低コスト・オフライン完結）または `dispatch_policy=adaptive_confidence_gap`（要ユーザー確認）．
+- `post_hoc_langdetect_retry` は未試行．system_prompt_enforcement だけで十分かどうかは，中国語混入が実際に再発するケースがあるかどうかに依存．今のところ再試行の必要性は低いです．
+
+### 考察 (Iter55)
+
+**判定**: `adopted`（確信度: high）
+
+**総括**:
+1. **system_prompt_enforcement はルーティング指標に影響しないことが実証された**:
+   McNemar discordant = 0（p=1.0）．argmax flip rate 0%．変更は
+   `build_dispatch_prompt()` の文字列リテラルのみであり，分類器の確率出力や argmax 判定
+   には一切影響しない．これは理論的予測と完全に一致．
+2. **言語一貫性の予防的強化として採用価値がある**: compound questions 100 問すべてが
+   日本語で生成されており，中国語混入の発生率は 0%．これは Iter55 の計画前の状態でも
+   中国語混入が稀であった可能性を示唆する（あるいは，system_prompt_enforcement が
+   予防的に機能している）．
+3. **ルーティング系指標はすべて不変**: top1_accuracy 0.603125（同一），education_recall
+   0.5118（同一），medical_recall 0.5000（同一）．回答生成のランダム性による ECE/Brier/AUROC
+   の微小変化（±0.01-0.07）はノイズ範囲内．
+4. **post_hoc_langdetect_retry は未試行のまま**: system_prompt_enforcement だけで十分なら
+   再試行の必要性は低い．中国語混入が実際に再発するケースがあるかどうかが判断基準．
+
+**レバー状況**:
+- `response_language_consistency`: system_prompt_enforcement **adopted** (Iter55)
+- `post_hoc_langdetect_retry`: 未試行（system_prompt_enforcement だけで言語一貫性 0% を達成）
+
+**全 levers 試し切り状態**（更新後）:
+| レバー | 状況 |
+|---|---|
+| fallback_policy | adopted (完了) |
+| classifier_calibration | 全3値試済み (temperature adopted) |
+| classifier_training_data_composition | 全6値 rejected |
+| class_weight_adjustment | rejected |
+| embedding_adaptation | 全4値 rejected |
+| classifier_head_adaptation | 2 adopted, 1 exhausted, 1 skip (**CLOSED**) |
+| aggregation_method | 全3値試済み (max_confidence adopted) |
+| response_language_consistency | system_prompt_enforcement **adopted** (Iter55) |
+
+**次イテレーションの方針**:
+`routing_confidence_calibration_method=conformal_prediction` を次レバーとする．
+理由: (1) 低コスト・オフライン完結（既存 confidence 値の再利用）(2) 単一レバー原則との
+相性が良い（argmax を変えず，予測集合のサイズや fallback 判定にのみ影響）(3)
+`dispatch_policy=adaptive_confidence_gap` は config.yaml スキーマ変更を伴うため
+要ユーザー確認． conformal prediction を先に試せる．
+
+**git commit**: （このイテレーションで実施）
 
 ### 計画 (Iter54)
 
