@@ -2,14 +2,14 @@
   "repo": "expert-mesh",
   "iteration": 61,
   "iteration_name": "合成ペア配分の均一化による設計リークの切り分け",
-  "phase": "investigate",
+  "phase": "reflect",
   "status": "running",
   "current_lever": "multilabel_pair_allocation",
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1789763236,
-  "last_slack_ts": "1789765882.579109",
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
+  "last_slack_ts": "1789767975.253389",
+  "iteration_thread_ts": "1789766248.417119",
+  "notion_toggle_created": true,
   "last_commit": "3564559"
 }

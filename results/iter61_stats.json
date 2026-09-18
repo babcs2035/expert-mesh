@@ -1,0 +1,80 @@
+{
+  "baseline_compound_domain_set_recall": 0.345,
+  "new_compound_domain_set_recall": 0.445,
+  "matches_implementation_phase_diagnostic_recall": false,
+  "S1_primary_criterion": {
+    "n_pairs": 200,
+    "improved_pairs": 32,
+    "regressed_pairs": 12,
+    "discordant_pairs": 44,
+    "chi2_statistic_continuity_corrected": 8.204545454545455,
+    "p_value_continuity_corrected": 0.004178557568166319,
+    "p_value_exact_binomtest": 0.003657766827927844,
+    "pass": true
+  },
+  "S2_effect_size_floor": {
+    "baseline_recall": 0.345,
+    "new_recall": 0.445,
+    "delta_pt": 0.10000000000000003,
+    "floor_pt": 0.04,
+    "pass": true
+  },
+  "S3_cost_neutrality": {
+    "n_rows": 1600,
+    "length_distribution": {
+      "2": 1600
+    },
+    "duplicate_rank1_rank2_count": 0,
+    "mean_dispatch": 2.0,
+    "pass": true
+  },
+  "S4_flip_rate_evidence_of_firing": {
+    "n_rows": 1600,
+    "flips": 736,
+    "rank2_flip_rate": 0.46,
+    "matches_implementation_phase_value": false,
+    "implementation_phase_value": 0.356875,
+    "pass": true
+  },
+  "N1_rank1_invariance": {
+    "n_rows": 1600,
+    "mismatch_count": 0,
+    "mismatch_ids": [],
+    "pass": true
+  },
+  "N2_top1_accuracy_invariance": {
+    "baseline_top1_accuracy": 0.5975,
+    "new_top1_accuracy": 0.5975,
+    "exact_match": true,
+    "caveat": "new_rows' selected_domain is copied verbatim from the baseline row by build_new_rows(), not re-derived from the new dispatched_domains via aggregator.select_best_dispatch_response. In the live system, select_best_dispatch_response depends on which nodes were actually dispatched (it selects among the dispatched nodes' live LLM responses), so this check confirms field preservation under the offline scoring script, not that the live aggregator's output is invariant to a rank_2 change -- that would require an online re-run not performed in this iteration.",
+    "pass": true
+  },
+  "N3_legal_non_regression": {
+    "n_legal_involving_pairs": 30,
+    "baseline_legal_self_coverage": 8,
+    "new_legal_self_coverage": 15,
+    "expected_baseline_value": 8,
+    "baseline_matches_journal_record": true,
+    "pass": true
+  },
+  "N4_improvement_breakdown_by_domain_category": {
+    "legal_involving": {
+      "n_pairs": 60,
+      "improved": 10,
+      "regressed": 2,
+      "unchanged": 48
+    },
+    "medical_involving": {
+      "n_pairs": 32,
+      "improved": 1,
+      "regressed": 3,
+      "unchanged": 28
+    },
+    "other": {
+      "n_pairs": 108,
+      "improved": 21,
+      "regressed": 7,
+      "unchanged": 80
+    }
+  }
+}
