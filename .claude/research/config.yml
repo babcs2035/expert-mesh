@@ -760,7 +760,51 @@ levers:
             新設）と同様の扱いとし，CLAUDE.md の規約（public API・設定ファイル形式の変更は事前確認）
             に従うこと．
             **成功条件（暫定）**: compound_domain_set_recall が 0.345 から有意に改善し，単一ドメイン
-            top1_accuracy が非退行であること"}
+            top1_accuracy が非退行であること
+            [2026-09-19 Iter58 reflector追記] `adaptive_confidence_gap` は **partial（条件付き採用）**で
+            確定し，**本レバーはクローズ（収束）**．事前登録8項目は全PASS
+            （compound_domain_set_recall 0.345→0.425，exact McNemar p=0.0166，単一ドメイン
+            mean dispatch 2.366≤2.40，全体 2.399375≤2.45，実機＝オフライン再生が小数点以下まで一致，
+            非退行4項目も全PASS）で，`config.yaml` の `dispatch_gap_threshold: 0.29` /
+            `dispatch_gap_max_k: 4` は本番設定として維持する．
+            **ただし主張の強度は探索的知見どまり**: (1) 有意性が境界的（discordant 40 のうち2ペア
+            反転で p=0.0807 と非有意化）．(2) 改善の大半は dispatch 呼び出し +19.97% の純増で説明でき，
+            同コストのランダムk混合（recall 0.3929）に対する gap 信号固有の寄与は +3.2pt で有意でない．
+            (3) (T, max_k) の選定と本走が同一1600問上の in-sample で，汎化の主張はできない．
+            (4) T=0.29 の下で実装は k∈{1,4} の二値に退化している（k=3 は1600行中0件．gap12<T かつ
+            gap23<T の727行で gap34 の最大値が 0.2357 と T に届かないため）．
+            **同一データ上での再探索（max_k=3，top-p型の累積質量変種）は情報が増えないため行わない**．"}
+
+  # --- 【2026-09-19 Iter58 reflector 新設・backlog B92】既存 levers が実質試し切りのため，
+  #     Iter58 で特定した根本原因（単一ラベル10クラス softmax を多ラベル問題に流用している）に
+  #     直撃する新レバーを考案して追加する ---
+  - {name: dispatch_candidate_ranking, values: [multilabel_binary_relevance_head],
+     note: "[2026-09-19 Iter58 reflector / backlog B92] **問題**: compound 100 行のうち2つの正解ドメインが
+            confidence 上位2位以内に収まるのは 3/100 のみで，2つ目の正解ドメインのランク中央値は5〜6位
+            （Iter58 調査フェーズ実測）．これは各ノードが 10 クラス softmax の自分のクラスの確率のみを
+            返す**単一ラベル構成を多ラベル問題へ流用している**ことの構造的帰結であり，Iter58 で
+            『k を増やす側（dispatch_policy）の工夫では，コストを払う以上の改善は得られない』
+            （gap 信号固有の寄与 +3.2pt，有意でない）ことがデータで確認された．
+            **機序**: 既存の embedding（frozen）を入力に，各ドメインを独立の sigmoid とする
+            OvR / binary relevance ヘッドを `data/classifier_train.jsonl`（1427件）で訓練し，
+            **rank_2 以降の dispatch 候補の順位付けにのみ**使う．rank_1（argmax）は既存の
+            `models/domain_classifier.joblib` のままとするため，**argmax flip rate は構造的に 0%** で
+            単一レバー原則を自動的に満たす（embedding も再訓練しないため Iter40〜43 で
+            embedding_adaptation が失敗した幾何学的制約にも抵触しない）．
+            **第1イテレーションはオフライン完結（実機本走不要）**: OvR ヘッドで 1600 問を採点し，
+            **固定 k=2（コスト中立，mean dispatch 2.0）**の条件で compound_domain_set_recall を測る．
+            **成功条件**: コスト中立（全体 mean dispatch = 2.0）のまま compound_domain_set_recall が
+            0.345 から有意に改善（ドメイン単位 n=200 の exact McNemar，α=0.05）すること．
+            **等コスト参照ポリシーとの比較を必ず併記する**（Iter58 の学び1: コストを動かさない
+            設計なので基準線比較で足りるが，k を伸ばす変種を併せて評価する場合は同コスト参照を必須とする）．
+            非退行: rank_1 は不変なので top1_accuracy は定義上不変（変化したら実装バグ）．
+            **スキーマ変更と人間判断**: オフラインで所定の改善が確認できた場合に限り，次々イテレーションで
+            `config.yaml` へ候補順位付けモデルの指定（例: `dispatch_ranking_model`）を追加して実行時経路へ
+            配線する．**この配線の段階で初めて config.yaml のスキーマ変更が生じるため，
+            CLAUDE.md 規約に従いユーザー確認が必要**（B90 と同じ扱い）．第1イテレーションは
+            スキーマ変更を伴わないため自律着手してよい．
+            **不成立の場合**: 多ラベル信号でも2つ目の正解ドメインを上位へ持ち上げられないことになり，
+            compound 設問の改善は分類器の再訓練・訓練データ設計（research_frontier 相当）へ移る．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
