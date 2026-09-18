@@ -14,8 +14,8 @@ Three independent checks, run via --check (each exits 1 on failure):
               tree has uncommitted changes, since the Docker image that
               backs every node's `app` container is built from git HEAD.
   hashes      Host-side. Compares the md5 of http_server.py/router.py/
-              config.yaml on disk against the copy inside each node's
-              running container, over SSH.
+              config.yaml/classifier.py on disk against the copy inside
+              each node's running container, over SSH.
   probe       Container-side only (Ollama is bound to 127.0.0.1:11434 on
               each remote host, unreachable from this workstation). Sends
               one /probe to a peer and checks that the field implied by the
@@ -51,7 +51,7 @@ from expert_backend import OllamaClient  # noqa: E402
 
 SMOKE_QUERY = "スモークテスト用のダミー質問です。"
 SMOKE_PROBE_TIMEOUT_S = 130.0
-DEPLOYED_FILES = ["http_server.py", "router.py", "config.yaml"]
+DEPLOYED_FILES = ["http_server.py", "router.py", "config.yaml", "classifier.py"]
 SELF_HOST_OVERRIDE = "localhost"  # avoids hairpin-NAT issues probing one's own LAN IP
 
 
