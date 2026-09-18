@@ -15,6 +15,52 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B88 [user 2026-09-18] converged 状態のレビューと再開方針の決定
+
+- **状況**: `status="converged"`（B87，Iter56 完了時点）のまま `.claude/research` 全体
+  （journal.md，journal_archive.md 19,941 行，backlog.md，config.yml，docs/d0001〜d0007，state.json）
+  を通読レビューした．レビューで研究の最終結論に関わる問題を含む 4 論点が見つかり，ユーザーに
+  優先順位を確認した．
+- **決定（ユーザー選択）**:
+  1. **最優先**: production_deployment_gap の検証・修復（config.yml `levers` 先頭に追加）．
+     Iter52/53 で adopted 確定した `education_per_class_threshold`（threshold=0.05）が，実行時
+     経路 `classifier.py:estimate_confidence_classifier()` には実装されておらず，
+     `scripts/evaluate_classifier_calibration.py` のオフライン評価コードにしか存在しないと判明．
+     「education_recall=0.6000 で天井に達し研究終了」（B84）の前提の一部が実機で未確認．
+     Iter55 の実機実測は `education_recall=0.5118` で 0.6000 と一致しない．
+  2. **次点・要ユーザー確認**: `dispatch_policy=adaptive_confidence_gap`（既存レバー，B85/B86）．
+     `config.yaml` のスキーマ変更を伴うため 1. の結果を見てから着手．
+  3. **優先度低**: `routing_confidence_calibration_method` に `conformal_prediction_true_class_qhat`
+     （Iter56 の q_hat 計算バグを修正した版）を追加したが，Iter56 の修正シミュレーションで既に
+     coverage 0.8025（target 0.87 未達）・mean_set_size 7.31（target 超過）と分かっており，
+     1・2 に手が無くなってから検討する．
+  4. **レバーではなく検証・修正タスク**（下記参照）として別途対応する．
+- **根拠**: 実行コスト・研究結論の正確性への影響・単一レバー原則との相性で評価した．1. は
+  「新手法の検証」ではなく「既に adopted 済みの決定が実装されているかの是正」であり，最終結論の
+  正しさに直結するため最優先とした．
+- **要人間判断（今後）**: 1. の実機再測定で `education_recall` が `medical_recall` 基準（0.5112）を
+  下回った場合，B84 の「研究 converged」という結論自体の撤回が必要になる．その場合は改めて
+  ユーザー判断を求めること．
+- **測定系の未解決課題（hygiene task，レバーではない）**:
+  - **recall の母数不一致**: Iter44 実装者報告の `education_recall=0.5235` と Iter53 再計算の
+    `0.5588` が一致せず，journal は「母数の取り方の違いと推測される」（journal_archive.md
+    L2043-2046）としたまま検証していない．`docs/d0006` 内に 2 系統の数値が併存している．
+    次にこの指標に触れるイテレーション（1. の実機再測定が該当）で，2 通りの計算方法を突き止めて
+    どちらが正しいかを確定させ，journal に明記すること．
+  - **McNemar の chi2 計算不一致**: 実装者報告の chi2 が標準公式 `(a-b)²/(a+b)` と一致しない事例が
+    複数回報告されている（d0006 L212-213/L218，「恒久対策は未実施」と明記）．次に McNemar 検定を
+    使うイテレーションで，実装（`scripts/` 内の該当関数）と公式を直接比較して修正すること．
+  - **answer_quality_accuracy の未計測**: Iter29 以降，回答品質（評価軸②）の継続比較が行われて
+    いない（README「既知の制約と今後の課題」，journal_archive.md L1592-1594・L849）．1. の実機
+    再測定を行う際は `mise run analyze` の evaluation.py 経路も必ず実行し，計測を復活させること．
+- **P1（config.yml の YAML 構文破損）は本エントリと同時に修正済み**: `config.yml:675` 末尾の
+  `"}}` を `"}` に修正し，`yaml.safe_load` が levers 全体を正しく parse できることを確認した．
+- **state.json**: `status="converged"` から `phase="investigate", status="running"` へ更新し，
+  Iter57 の調査フェーズから再開できるようにした（`current_lever` は null のまま，rc-planner が
+  上記優先順位に従って config.yml の先頭レバーを選ぶ想定）．
+
+---
+
 ## B87 [rc-reflector 2026-08-08] Iter56: conformal_prediction 棄却、研究 converged 確定
 
 - **状況**: Iter56（routing_confidence_calibration_method=conformal_prediction）の結果を考察．
