@@ -395,6 +395,17 @@
   ベンチマーク実行スクリプト（`run_experiment.py`）内の**メトリクス記録専用の重複呼び出し**を
   見落としたことが原因．今後同種のレバーを扱う際は `grep -rn "関数名("` をテストディレクトリ以外
   の全 `.py` に対して行い，呼び出し元の数を機械的に確認すること．
+- 修正後，`mise run setup`（image digest `sha256:9ab0c4c3...`，git HEAD=`ea4f680`）→
+  `mise run deploy`（全10ノードhealthy，1回のリトライ後にhealthy化，smoke check全pass）で
+  再デプロイし，**同一20問（`results/20260919_005614/results_prelim20b.jsonl`）で予備実行を
+  再実行**したところ，`dispatched_domains` 長は `{1: 5件, 2: 1件, 4: 14件}`（mean 3.15，
+  business_economicsドメイン20問という偏った小標本のため，全体基準の単一ドメイン
+  mean 2.366より高いが，business_economicsは既知の低confidence分離ドメインであるため
+  方向として妥当）と**1〜max_k(4)に分散し，修正前の全行長さ2固定から明確に変化**．
+  隣接ランク差から手計算した期待値（例: business_economics-004 gap12=0.2947>T=0.29→k=1，
+  business_economics-006 gap12=0.34>T=0.29→k=1，business_economics-001 gap12=0.1177<T→k=2かつ
+  gap23=0.3176≥T→k=2で停止）と実際の出力が全て一致することを個別に確認した．**(c)(d)の
+  合格条件（発火の証拠＝長さの分散）を修正後に達成**．本走へ進む．
 
 ## Iteration 57: education_threshold=0.05の実行時経路反映と実機検証
 
