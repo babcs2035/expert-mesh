@@ -15,6 +15,21 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B90 [user 2026-09-18] Iter58 dispatch_policy=adaptive_confidence_gap 着手承認
+
+- **状況**: B89 で Slack へ @mention（Iteration 57 完了報告，2026-09-18T13:24:08Z）した
+  A1/A2/A3 の確認に対し，返信が無いまま watchdog が「想定外の blocked」を検知して警告
+  （2026-09-18T14:24:29Z）し，その後セッションがクラッシュ・再起動した．再起動後の
+  `continue` 実行時点でもスレッドに返信は無かったため，オーケストレータがユーザーへ
+  直接（対話セッション経由で）A1/A2/A3 を再提示して確認した．
+- **決定**: **A1（dispatch_policy=adaptive_confidence_gap に着手）**採用．
+- **根拠**: ユーザー承認．config.yaml のスキーマ変更（`dispatch_top_k` の固定値運用から
+  confidence gap による動的ポリシーへの変更）を伴うため，CLAUDE.md 規約に従い着手前確認が
+  必須だった．
+- **要レビュー**: なし（承認済み）．Slack Iter57 スレッドへ承認結果を返信済み
+  （ts=1789743472.974059）．`state.json.status` を `blocked` → `running` に更新し，
+  Iter58 の調査フェーズへ進む．
+
 ## B89 [auto-decided 2026-09-18] Iter57 採用確定，Iter58 は dispatch_policy=adaptive_confidence_gap（要ユーザー確認，status=blocked）
 
 - **Iter57 判定**: **採用（adopted）**．`production_deployment_gap=apply_education_threshold_to_runtime`

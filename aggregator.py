@@ -30,12 +30,25 @@ def select_dispatch_targets(
     confidence_threshold: float,
     top_k: int = 1,
     dispatch_candidate_threshold: float | None = None,
+    gap_threshold: float | None = None,
+    gap_max_k: int = 2,
 ) -> list[ProbeResponse]:
     """Filter nodes above the confidence threshold and return the top-k.
 
     Rank 1 (highest confidence) uses ``confidence_threshold``.
     Rank 2 and below use ``dispatch_candidate_threshold`` (defaults to
     ``confidence_threshold`` for backward compatibility).
+
+    When ``gap_threshold`` is None (default), ``top_k`` is used as a fixed
+    cutoff, unchanged from the original behavior. When ``gap_threshold`` is
+    set, ``top_k`` is ignored and k is instead decided dynamically by a
+    chained escalation over adjacent-rank confidence gaps (Iter58,
+    config.yml dispatch_policy=adaptive_confidence_gap; the cumulative-
+    threshold style attributed in project notes to "Huang et al. 2024", as
+    distinct from the binary top-1/top-2 escalation of Li et al., EMNLP
+    2023): starting at k=1, k is incremented while k < gap_max_k and the gap
+    between rank k and rank k+1 is smaller than gap_threshold (i.e. the
+    candidates remain too close in confidence to commit to k so far).
 
     Uses stable sort so that nodes with equal confidence preserve their
     input order (matching peers.yaml declaration order). Returns an empty
@@ -64,7 +77,18 @@ def select_dispatch_targets(
     ]
 
     candidates = [rank_1] + qualified_rest
-    return candidates[:top_k]
+
+    if gap_threshold is None:
+        return candidates[:top_k]
+
+    # Chained escalation: keep extending k while the adjacent-rank gap stays
+    # below gap_threshold, capped by gap_max_k and by how many candidates
+    # actually qualified above.
+    k = 1
+    ceiling = min(gap_max_k, len(candidates))
+    while k < ceiling and (candidates[k - 1].confidence - candidates[k].confidence) < gap_threshold:
+        k += 1
+    return candidates[:k]
 
 
 def validate_aggregation_method(aggregation_method: str) -> None:

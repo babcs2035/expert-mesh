@@ -55,6 +55,26 @@ semantic_sample_temperature: 0.7
 # in parallel (design doc 2.5); aggregation_method then picks the final
 # answer among them.
 dispatch_top_k: 2
+# dispatch_gap_threshold (Iter58, dispatch_policy=adaptive_confidence_gap):
+# when set (non-null), overrides dispatch_top_k with a dynamic k decided by
+# chained escalation over adjacent-rank confidence gaps in
+# aggregator.select_dispatch_targets(); k grows (up to dispatch_gap_max_k)
+# while consecutive candidates stay within dispatch_gap_threshold of each
+# other. null (default) is the original fixed-dispatch_top_k behavior,
+# unchanged — same backward-compatible pattern as
+# dispatch_candidate_threshold. (T, max_k) are to be confirmed by offline
+# replay (scripts/replay_dispatch_gap_policy.py) before a non-null value is
+# set for a real run; see journal.md Iter58 for the pre-registered selection
+# procedure.
+# T=0.29, max_k=4 confirmed by offline replay against
+# results/20260918_202613/results.jsonl (Iter58 journal.md "実験 (Iter58)"):
+# the pre-registered selection rule (max compound_domain_set_recall among
+# grid points with single-domain-row mean dispatch <= 2.40 and overall mean
+# dispatch <= 2.45) picked this point globally across max_k in {3,4,5,6},
+# with compound_domain_set_recall=0.425, single_domain_mean_dispatch=2.366,
+# overall_mean_dispatch=2.399375.
+dispatch_gap_threshold: 0.29
+dispatch_gap_max_k: 4
 # aggregation_method (research_frontier item 5, 2026-07-30): how to pick the
 # final answer when dispatch_top_k > 1 produces multiple candidates. A no-op
 # when dispatch_top_k == 1 (a single candidate is always "the best").

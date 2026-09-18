@@ -149,6 +149,60 @@ def test_select_dispatch_targets_backward_compatible_with_same_threshold() -> No
     assert [t.node_id for t in targets_new] == [t.node_id for t in targets_old]
 
 
+def test_select_dispatch_targets_gap_threshold_none_matches_fixed_top_k() -> None:
+    """gap_threshold=None (default) is a no-op: behavior is identical to the
+    original fixed-top_k cutoff, regardless of how close confidences are."""
+    responses = [
+        _probe_response("A", 0.9),
+        _probe_response("B", 0.89),  # gap to A is tiny, but gap_threshold is None
+        _probe_response("C", 0.5),
+    ]
+    targets = select_dispatch_targets(
+        responses,
+        confidence_threshold=0.0,
+        top_k=1,
+        gap_threshold=None,
+        gap_max_k=3,
+    )
+    assert [t.node_id for t in targets] == ["A"]
+
+
+def test_select_dispatch_targets_gap_threshold_escalates_k_when_gap_small() -> None:
+    """k grows past 1 while the adjacent-rank gap stays below gap_threshold,
+    and stops escalating once a gap of gap_threshold or larger is reached."""
+    responses = [
+        _probe_response("A", 0.90),
+        _probe_response("B", 0.85),  # gap to A = 0.05 < T=0.1 -> escalate to k=2
+        _probe_response("C", 0.40),  # gap to B = 0.45 >= T=0.1 -> stop at k=2
+        _probe_response("D", 0.35),
+    ]
+    targets = select_dispatch_targets(
+        responses,
+        confidence_threshold=0.0,
+        gap_threshold=0.1,
+        gap_max_k=4,
+    )
+    assert [t.node_id for t in targets] == ["A", "B"]
+
+
+def test_select_dispatch_targets_gap_threshold_capped_by_gap_max_k() -> None:
+    """Escalation stops at gap_max_k even if every adjacent gap stays below
+    gap_threshold and more qualifying candidates remain."""
+    responses = [
+        _probe_response("A", 0.90),
+        _probe_response("B", 0.85),  # gap 0.05 < T
+        _probe_response("C", 0.80),  # gap 0.05 < T
+        _probe_response("D", 0.75),  # gap 0.05 < T, but gap_max_k=2 caps k here
+    ]
+    targets = select_dispatch_targets(
+        responses,
+        confidence_threshold=0.0,
+        gap_threshold=0.1,
+        gap_max_k=2,
+    )
+    assert [t.node_id for t in targets] == ["A", "B"]
+
+
 def test_select_best_dispatch_response_returns_none_for_empty_list() -> None:
     """Return None when every /dispatch call failed."""
     assert select_best_dispatch_response([]) is None

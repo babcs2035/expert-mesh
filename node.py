@@ -216,6 +216,8 @@ async def run_ask_flow(
         confidence_threshold=config.get("confidence_threshold", 0.5),
         top_k=config.get("dispatch_top_k", 1),
         dispatch_candidate_threshold=config.get("dispatch_candidate_threshold"),
+        gap_threshold=config.get("dispatch_gap_threshold"),
+        gap_max_k=config.get("dispatch_gap_max_k", 2),
     )
     if not targets:
         # Design doc 2.5: fall back to the requester's own general model

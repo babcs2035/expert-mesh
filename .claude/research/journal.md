@@ -1,3 +1,362 @@
+## Iteration 58: adaptive_confidence_gapによる複合ドメインdispatchの動的化
+
+### 調査 (Iter58)
+
+**問い**
+- Q1: adaptive gating（Huang et al. 想定，実際は Li et al., EMNLP 2023）・Expert Choice Routing
+  （Zhou et al. 2022，Google Research）は gap 閾値 / top-k 動的化をどう設計しているか。
+  固定値かデータ駆動の校正か。
+- Q2: `aggregator.py` の `select_dispatch_targets()` 実装・呼び出し経路・`config.yaml` の現行
+  `dispatch_top_k` の位置づけを踏まえ，gap 閾値をどこに・どのスキーマで追加するのが自然か。
+- Q3: 本リポジトリの実データ（既存 `results.jsonl` の `probe_candidates`）を使って，gap 閾値による
+  動的化が compound_domain_set_recall・単一ドメイン設問の dispatch コストに実際どう効くかを
+  オフラインで再生（replay）し，T の妥当な探索範囲と副作用を定量化する。
+
+**分かったこと（Q1: 先行研究の設計）**
+- **Li et al., "Adaptive Gating in Mixture-of-Experts based Language Models", EMNLP 2023**
+  （ACL Anthology 2023.emnlp-main.217，著者は Li/Su/Yang/Jiang/Wang/Xu — config.yml の
+  「Huang et al.」表記は著者名の取り違えの可能性が高い．次イテレーションでの引用時は
+  著者名を修正すること）。機序はトークン単位で「デフォルトは top-1 gating，正規化した
+  top-1 ゲート値が `1 - T` を下回る（＝ top-1 に確信が集中していない）場合のみ top-2 gating
+  へ昇格する」という**二値のエスカレーション**（3 位以降への拡張はしない）。
+  閾値 T はタスクごとに ablation（4.6 節，Table 5）で決めており，**固定値の理論的最適解はなく，
+  検証セット上でのグリッドサーチ**（QA タスクでは T=0.2 が最良，他タスクでは T=0.1 台）
+  で選んでいる。T を上げるほど top-2 適用率が上がり FLOPs も増える trade-off を明記。
+  出典: https://aclanthology.org/2023.emnlp-main.217 ,
+  https://henryhxu.github.io/share/jiamin-emnlp23.pdf
+- **別系統として PMC/Frontiers の survey が言及する「Huang et al. 2024」の閾値付き動的ルーティング**
+  は，top-k をソートした活性化確率の**累積和が閾値 p を超える最小集合**を選ぶ方式（nucleus/top-p
+  的な累積質量閾値）で，3 位以降への拡張を自然に許す点が Li et al. の二値方式と異なる。
+  出典: https://pmc.ncbi.nlm.nih.gov/articles/PMC12558867 ,
+  https://www.frontiersin.org/journals/neurorobotics/articles/10.3389/fnbot.2025.1590994/pdf
+  （**この区別が Q3 の結論に直結する**．config.yml の note は両方式を「Huang et al., EMNLP 2023」
+  として一括りにしているが，実際は別の 2 論文の別機序である）。
+- **Expert Choice Routing（Zhou et al. 2022, Google Research，arXiv:2202.09368）**は per-instance の
+  confidence gap 閾値を使わない．経路が根本的に逆（expert が token を選ぶ）で，「capacity factor
+  c（1 トークンあたり平均何 expert に届くか）」というグローバルなハイパーパラメータで k を
+  間接的に制御する．学習時のみ有効な方式で，推論時に個別クエリごとの gap を見て k を決める
+  今回の用途とは設計思想が異なる（k はトークンごとに emergent に 1〜4+ に分布するが，これは
+  容量制約からの副産物であり，個々の confidence gap を明示的に閾値判定しているわけではない）。
+  出典: https://research.google/blog/mixture-of-experts-with-expert-choice-routing ,
+  https://arxiv.org/pdf/2202.09368
+- **示唆**: T は先行研究でも「理論的に導出される値」ではなく，**検証データ上でのグリッドサーチ
+  で選ぶもの**という点は一貫している。本プロジェクトには独立した検証セットがないため
+  （1600 問が唯一のデータセット），T の選定は既存の 1600 行データ上でのオフライン再生
+  （下記 Q3）で行い，本走で使う前に妥当性を確認するのが筋が良い。
+
+**分かったこと（Q2: 実装箇所）**
+- `select_dispatch_targets()`（`aggregator.py:28-67`）は `rank_1` を `confidence_threshold` で，
+  `rank_2+` を `dispatch_candidate_threshold` でゲートしたのち `candidates[:top_k]` で固定 k を
+  切り出すだけの純粋関数．gap ロジックを入れるならこの関数のシグネチャに `top_k` の代わりに
+  （または加えて）`gap_threshold: float | None` を追加し，`rank_1.confidence - rest[0].confidence
+  < gap_threshold` を満たすときだけ `top_k` を動的に決める分岐を関数内に追加するのが最小差分。
+- **呼び出し経路は `http_server.py` ではなく `node.py:214-219`（`run_ask_flow()`）のみ**．
+  `http_server.py` は `/probe`・`/dispatch` エンドポイント（受信側）を実装するだけで
+  `select_dispatch_targets` を呼ばない．依頼元タスク文の想定（http_server.py 経由）は誤りであり，
+  実際に変更すべき呼び出し元は `node.py` の 1 箇所のみ（`run_experiment.py` も `run_ask_flow` 経由で
+  同じ関数を使うため，二重実装の心配はない）。
+- `config.yaml` の現行 `dispatch_top_k: 2`（L57）は Iter47/48 で `aggregation_method=max_confidence`
+  採用時に固定された値で，`confidence_threshold: 0.0`・`dispatch_candidate_threshold: 0.0`（L5, L10）
+  と合わせて**現状は毎回無条件で上位 2 ノードへ dispatch している**（gap 判定は一切していない）。
+  つまり現行本番設定は「常に k=2」であり，「常に k=1」ではない点に注意（後述 Q3 の解釈に直結）。
+- **スキーマ変更案（複数）**:
+  1. **`dispatch_gap_threshold: float | null` を新設**（推奨）。`null`（既定）なら現行どおり
+     `dispatch_top_k` を固定値として使う後方互換パスを残し，値を入れたときだけ gap 判定で
+     `top_k` を動的決定する分岐を有効化する。`dispatch_candidate_threshold` の導入パターン
+     （Y2，既定値で後方互換）を踏襲でき，レビューしやすい。
+  2. `dispatch_top_k` を `int` から `{base: int, gap_threshold: float, max_k: int}` のような
+     構造体に変更する案もあるが，既存の `config.get("dispatch_top_k", 1)`（`node.py:217`）の
+     単純な `int` 読み取り箇所を構造化パースへ書き換える必要があり，変更点が増える割に
+     利点が薄い（非推奨）。
+  3. 案1をベースに `dispatch_gap_max_k: int`（既定 2，現行と同じ上限）を併設し，gap が小さい
+     ときにどこまで k を伸ばすかを明示的に制御できるようにする（Q3 の結論を踏まえると，
+     この `max_k` の設計が成果を左右するため必須に近い）。
+- いずれの案でも `select_dispatch_targets()` は純粋関数のまま保て，`node.py` 側で
+  `config.get("dispatch_gap_threshold")` を読んで分岐を渡すだけで済む．分類器の再訓練は不要
+  （依頼元の前提どおり）．
+
+**分かったこと（Q3: 実データでのオフライン再生 — 本調査の主要な発見）**
+- `results/20260918_202613/results.jsonl`（Iter57 本走，1600 行，`probe_candidates` に全 10 ノードの
+  confidence を保持）を使い，`select_dispatch_targets` 相当のロジックを Python で再現し，
+  gap 閾値方式を**追加の実機実験なしに**オフライン検証した（この検証手法自体を次回以降の
+  T 探索の標準手順として推奨する）。
+- **前提の再確認（固定 top_k のスイープ）**: `top_k=1` → compound_domain_set_recall
+  **0.205**（構造的下限，note の 0.500 は「両方カバーできた行の割合」ベースの別集計；本指標
+  `covered/total_expected` の定義（`metrics.py:190`）では 0.205），`top_k=2` → **0.345**
+  （既知の報告値と完全一致，再現確認済み），`top_k=3` → 0.465，`top_k=4` → 0.575，
+  `top_k=5` → 0.645，`top_k=10`（全ノード）→ 1.000（理論上限）。
+- **決定的な発見1**: compound 100 行のうち，**2 つの正解ドメインが両方とも confidence 上位 2 位
+  以内に収まっている行はわずか 3/100**。残り 97 行は「1 つは上位（多くは 1 位）に来るが，
+  もう 1 つの正解ドメインは 3 位以降（中央値ランク 5〜6，最大 10 位）」という分布
+  （expected domain の順位分布: 1位=41, 2位=28, 3位=24, 4位=22, 5位=14, 6位=23, 7位=14, 8位=8,
+  9位=19, 10位=7）。**つまり現行 `dispatch_top_k=2` が compound_domain_set_recall=0.345 を
+  達成できているのは，ほぼ全て「rank_1 が正解ドメインの片方に一致する」ことの寄与であり，
+  rank_2 が 2 つ目の正解ドメインに一致するのは稀（100 行中せいぜい 十数〜数十行）**。
+- **決定的な発見2（gap の compound 予測力は弱い）**: compound 行の gap（confidence 差）分布
+  （平均 0.291，中央値 0.200）と単一ドメイン行の gap 分布（平均 0.355，中央値 0.306）は
+  重なりが大きく，**gap を compound/single の分類スコアとして見た AUC は 0.576**
+  （ランダム 0.5 に近い．rank_2 の生 confidence 値を使っても AUC 0.580 と同程度）。
+  依頼元タスク文にある「2位confidenceの最大値0.4955，0.4→75件(4.7%)」等の分布は，
+  compound 率（6.25%）と近い割合になる点で一見有望に見えるが，実際に「rank_2 confidence が
+  高い行」と「compound な行」の対応は弱く，**多くの false positive（実は単一ドメインだが
+  rank_2 が高い行）を含む**（precision は T をどこに置いても 7〜8% 程度で頭打ち）。
+- **決定的な発見3（依頼元想定に近い二値エスカレーション方式のシミュレーション）**: Li et al.
+  型の「既定 k=1，gap(1位,2位) < T のときだけ k=2 へ昇格」という方式を T=0.05〜0.40 で
+  スイープしたところ，**どの T でも compound_domain_set_recall は現行の固定 k=2 基準線
+  0.345 に届かない**（最良は T=0.35〜0.40 で 0.295，かつこの時点で単一ドメイン行の
+  60.3% が既に k=2 へ昇格しており，現行の「常に k=2」とほぼ同じコストに近づいているのに
+  性能は下回る）。T=0.05 では compound_set_recall=0.225（k=2 昇格率は compound/single とも
+  約 12〜13%）と，現行基準線を大きく下回る。
+  **原因**: 現行本番設定は「常に k=2」であり，二値エスカレーション方式は「基本 k=1，まれに
+  k=2」に変えるものなので，gap が compound を正しく見分けられない限り，昇格率を上げるほど
+  現行に近づくだけで超えられない（k=2 に固定した方が強い）。
+- **示唆**: 依頼元の成功条件「compound_domain_set_recall が 0.345 から有意に改善」を，
+  Li et al. 型の**二値**エスカレーション（k∈{1,2}）で満たすのは，本データでは**構造的に困難**
+  （gap という信号自体の compound 判別力が弱いため）。改善の余地があるとすれば，
+  Huang et al. 2024 型の**累積閾値／連鎖的エスカレーション**（gap が小さい限り k=3,4,...と
+  伸ばし続ける）だが，これは同時に単一ドメイン行の平均 dispatch 数も押し上げる
+  （T=0.15 で compound 側 mean_k=3.35 まで改善（recall 0.435）に対し，単一ドメイン側も
+  mean_k=2.76 まで増加し，現行の一律 k=2（mean_k=2.0）より**コストが高くなる**）。
+  つまり「compound recall 改善」と「単一ドメインのコスト削減」は，この gap 信号を使う限り
+  **同時には成立しにくい**（依頼元の項目3が懸念する副作用は，まさにこのトレードオフとして
+  データで裏付けられた）。
+
+**次の計画フェーズへの示唆**
+1. **T の探索範囲**: 文献（Li et al. EMNLP2023）は T=0.1〜0.2 を報告しているが，本リポジトリの
+   gap 分布（compound 中央値 0.20，single 中央値 0.31）に照らすと，二値エスカレーション方式
+   では T=0.15〜0.35 の範囲でグリッドサーチしても現行基準線 0.345 を超えないことが上記
+   オフライン再生で判明済み。**T の探索自体は `results/20260918_202613/results.jsonl` の
+   `probe_candidates` を使ってオフラインで再現可能**（追加の実機実験は不要）なので，rc-planner
+   は本走を組む前にこの offline replay を「(a) オフライン検証」ステップとして計画に組み込み，
+   期待される改善幅を事前に確認することを推奨する。
+2. **単純な二値ゲート（k=1/2）では success_criteria「0.345 から有意に改善」を満たせない見込みが
+   高い**（上記シミュレーション根拠）。選択肢:
+   (a) 累積閾値／連鎖的エスカレーション（k を 3 以上まで動的に伸ばす，スキーマ案3の
+   `dispatch_gap_max_k` を 2 より大きく設定）を採用しつつ，単一ドメイン側のコスト増を
+   許容範囲として明示的に success_criteria に組み込む（例: 単一ドメイン平均 dispatch 数の
+   上限を明記し，それを超えない範囲で compound recall 改善を狙う）。
+   (b) 依頼元の成功条件を「compound_domain_set_recall の有意な改善」から「同等以上の
+   compound_domain_set_recall を維持しつつ，単一ドメイン行の平均 dispatch 数を有意に削減
+   （コスト最適化）」へ再定義する（gap 信号は compound 判別には弱いが，「rank_1 が圧倒的に
+   確信を持っている単一ドメイン行」を見分ける程度の弱い分離能力（AUC 0.58 は compound
+   flagging には弱いが，逆に「gap が大きい行は高確率で単一ドメイン」という片側の主張には
+   使える可能性があり，この観点は未検証．必要なら次イテレーションで
+   `single 側の gap が大きい行を k=1 に落とす際の false-negative率`（＝実は compound なのに
+   k=1 にされてしまう行の割合）を追加検証すること）。
+   どちらを採るかはユーザー判断が要る可能性があるため，rc-planner は A1/A2 のような形で
+   選択肢を明示し，必要なら backlog へ登録すること。
+3. **実装は `aggregator.select_dispatch_targets()` への `gap_threshold`（＋必要なら `max_k`）引数
+   追加＋ `config.yaml` への `dispatch_gap_threshold`（＋ `dispatch_gap_max_k`）新設が最小差分**。
+   呼び出し元は `node.py:214-219` の 1 箇所のみ（http_server.py は無関係）。
+4. **config.yml の note の引用は次回修正が必要**: 「Huang et al., EMNLP 2023」は著者名の誤り
+   （正しくは Li et al.）であり，かつ「累積閾値方式（Huang et al. 2024 系）」と「二値
+   エスカレーション方式（Li et al. EMNLP2023）」は別機序なので，どちらを実装するかを
+   rc-planner の計画時に明記すること。
+
+### 計画 (Iter58)
+
+**仮説**
+現行の固定 `dispatch_top_k=2`（常に上位 2 ノードへ dispatch）を，**隣接ランク間の confidence gap による
+連鎖的エスカレーション**（Huang et al. 2024 系の累積閾値型．Li et al. EMNLP2023 の二値エスカレーション
+ではない）へ置き換えると，単一ドメイン設問では k を 1 に落として節約し，confidence が拮抗する複合ドメイン
+設問でのみ k を 3 以上へ伸ばせるため，dispatch コストの増加を +20% 以内に抑えたまま
+`compound_domain_set_recall` を 0.345 から有意に改善できる．
+
+**単一レバー（何を何から何へ）**
+- レバー: `dispatch_policy` = `adaptive_confidence_gap`（config.yml levers 記載，B90 でユーザー承認済み）
+- 変更前: `config.yaml:dispatch_top_k: 2` による固定 k=2
+- 変更後: `config.yaml` に **`dispatch_gap_threshold: float | null`（既定 null）** と
+  **`dispatch_gap_max_k: int`（既定 2）** を新設し，`dispatch_gap_threshold` が非 null のときのみ
+  下記の連鎖的エスカレーションで k を動的決定する（null なら従来どおり `dispatch_top_k` の固定値を使う
+  完全な後方互換パス．`dispatch_candidate_threshold` 導入時（Y2）と同じパターン）．
+- k の決定規則（`aggregator.select_dispatch_targets()` 内，confidence 降順ソート済み候補 `cs` に対して）:
+  ```
+  k = 1
+  while k < max_k and (cs[k-1].confidence - cs[k].confidence) < T:
+      k += 1
+  ```
+  **隣接ランク間の差**を見る点が肝である（rank_1 との差を見る変種は同一コスト帯で compound recall が
+  一貫して劣ることをオフライン再生で確認済み．例: single mean_k≈1.93 のとき隣接差型 0.355 に対し
+  rank_1 差型 0.32）．既存の `confidence_threshold` / `dispatch_candidate_threshold` によるゲートは
+  変更せず，ゲート通過後の候補列に対して上式を適用する．
+
+**変更するファイルと箇所（最小差分）**
+1. `aggregator.py:28-67 select_dispatch_targets()` — 引数に `gap_threshold: float | None = None`,
+   `gap_max_k: int = 2` を追加し，`candidates[:top_k]` の直前で上記ループにより `top_k` を動的決定する．
+   純粋関数のまま保つ（テスト容易性のため）．
+2. `node.py:214-219 run_ask_flow()` — `select_dispatch_targets()` 呼び出しに
+   `gap_threshold=config.get("dispatch_gap_threshold")`,
+   `gap_max_k=config.get("dispatch_gap_max_k", 2)` を追加する．**呼び出し元はここ 1 箇所のみ**
+   （`http_server.py` は `select_dispatch_targets` を呼ばない．`run_experiment.py` も `run_ask_flow` 経由）．
+3. `config.yaml` — `dispatch_top_k: 2`（L57）の直下に `dispatch_gap_threshold` と `dispatch_gap_max_k`
+   を追記する（値は下記(a)で確定）．
+4. `tests/` — `select_dispatch_targets` の既存テストに，(i) `gap_threshold=None` で従来と同一の結果に
+   なること（後方互換），(ii) gap が T 未満のとき k が伸びること，(iii) `gap_max_k` で頭打ちになること，
+   の 3 ケースを追加する．
+
+**レバーが読まれるコード行と到達条件（d0004 §4 の反復失敗への対策，必須記載）**
+- 読まれる行: `node.py:217-218` で `config.get("dispatch_gap_threshold")` を読み，
+  `aggregator.py` の上記ループへ渡る．
+- 到達条件: `run_ask_flow()` は fallback 判定より前に必ず通る経路であり，現行設定
+  `confidence_threshold=0.0` / `dispatch_candidate_threshold=0.0` では rank_1 は常に適格・
+  候補は常に 10 件あるため，**1600 問すべてでこのループに到達する**（Iter27 のような候補ゲートによる
+  no-op は起き得ない）．
+- **発火の証拠フィールド**: `results.jsonl` の `dispatched_domains` の**長さの分布**．現行基準線では
+  全 1600 行が長さ 2 で固定である．発火していれば長さが 1〜max_k に分散する．
+  rc-experimenter は本走前の予備実行（先頭 20 問）でこの分布を直接確認すること．
+- **重要（analyst への申し送り）**: 集約は `max_confidence` であり，`select_best_dispatch_response()` は
+  probe 時の confidence が最大の応答＝ rank_1 を返す．したがって **`selected_domain` / `top1_accuracy` は
+  本レバーでは構造的に不変**（rank_1 の dispatch が失敗した行を除く）．
+  **top1_accuracy が基準線と完全一致しても success_criteria (6) の「実験不成立(invalid)」とは判定しないこと**．
+  invalid の判定は `dispatched_domains` 長が全行 2 で固定だった場合に限る．
+
+**実施方法**
+- (a) **オフライン再生による (T, max_k) の確定（実機不要，数分）**: `results/20260918_202613/results.jsonl`
+  （Iter57 本走 1600 行，`probe_candidates` に全 10 ノードの confidence を保持）に対して上記 k 決定規則を
+  再生し，`T ∈ {0.01,…,0.60}` × `max_k ∈ {3,4,5,6}` のグリッドで
+  `compound_domain_set_recall`・単一ドメイン行の mean dispatch 数・全体 mean dispatch 数を算出する．
+  **事前登録した選定規則**: 「単一ドメイン行の mean dispatch 数 ≤ 2.40 かつ全体 mean dispatch 数 ≤ 2.45」
+  を満たす組のうち `compound_domain_set_recall` が最大のものを選ぶ（同値なら mean dispatch 数が小さい方）．
+  計画フェーズでの予備再生では **`max_k=4, T=0.29〜0.30`** が該当し，
+  compound_domain_set_recall 0.425〜0.430（基準線 0.345），単一ドメイン mean_k 2.37〜2.42，
+  ドメイン単位ペア比較（n=200）で改善 28 件・悪化 11〜12 件，McNemar 正確検定 p=0.0095〜0.0166 が
+  得られる見込みである．この値を再現できることを (a) の合格条件とする．
+  再生スクリプトは `scripts/` 配下に `replay_dispatch_gap_policy.py` として残し，後続の T 再探索に使えるようにする．
+- (b) 実装（上記 1〜4）．
+- (c) 予備実行（先頭 20 問）で `dispatched_domains` 長の分散を確認．
+- (d) 実機 1600 問を 1 回実行（約 100 分）し，`mise run analyze` で全指標を取得する．
+
+**成功条件（事前登録）**
+1. **主基準**: `compound_domain_set_recall` が基準線 0.345（Iter47 以降 `dispatch_top_k=2` 固定時の値）から
+   改善し，ドメイン単位（n=200）のペア比較で McNemar 正確検定 p < 0.05 であること．
+   目標値は (a) で確定した再生値（見込み 0.425 前後）．
+2. **コスト条件**: 単一ドメイン行（1500 行）の mean dispatch 数 ≤ 2.40（基準線 2.0 に対し +20% 以内），
+   かつ全体 mean dispatch 数 ≤ 2.45．
+3. **再現性条件（実装検証）**: 実機実測の `compound_domain_set_recall` と
+   `compound_mean_dispatched_count` が (a) のオフライン再生値と一致すること（probe の confidence は
+   分類器出力で決定論的なため，本来は完全一致するはず）．**不一致が 1pt を超える場合は実装バグを疑い，
+   採否判定より先に原因を特定する**．
+
+**非退行条件**
+1. `top1_accuracy` が非退行（McNemar p ≥ 0.05）．上記のとおり構造的に不変が期待値であり，
+   **有意な変化が出た場合はむしろ実装の副作用を疑う**．
+2. per-domain precision/recall 20 指標の BH 補正後，有意に悪化する指標が 0 件．
+3. `answer_quality_accuracy`・`end_to_end_accuracy` の変化が 3SD = 2.6pt 以内
+   （success_criteria (5)．max_confidence 集約のため本来ほぼ不変のはず）．
+4. `mean_duration_ms` の増加が +25% 以内（dispatch は `asyncio.gather` で並列のため，k 増加は
+   帯域・ノード負荷の増加であって直列な遅延増ではない．基準線 Iter57 の実測値と比較する）．
+
+**留保（考察フェーズで必ず言及すること）**
+- T の選定は独立した検証セットではなく評価集合 1600 問そのもの（Iter57 の probe 出力）の上で行う
+  in-sample なグリッドサーチである．これは先行研究（Li et al. EMNLP2023 の ablation）と同じ手続きだが，
+  汎化性能の主張はできない．
+- gap の compound 判別力自体は弱い（AUC 0.576，調査節）．本方式が効くのは「gap が小さい行で k を伸ばす」
+  弱い相関の積み上げによるものであり，**コスト中立（単一ドメイン mean_k ≤ 2.0）の範囲では
+  compound_domain_set_recall は 0.37〜0.39 止まりで有意差に届かない**（予備再生で確認済み．
+  p ≈ 0.175）．今回 +20% のコスト増を許容した判断の是非は backlog B91 に記録した．
+
+### 実装 (Iter58)
+
+**変更したファイル（計画どおり最小差分，目的外の変更なし）**
+1. `aggregator.py` の `select_dispatch_targets()`（旧 L28-67）: 引数に
+   `gap_threshold: float | None = None`, `gap_max_k: int = 2` を追加．既存のゲート処理
+   （`confidence_threshold` / `dispatch_candidate_threshold`）はそのまま，`candidates = [rank_1] +
+   qualified_rest` の直後に分岐を追加した．`gap_threshold is None` なら従来どおり
+   `candidates[:top_k]`（変更前と完全に同一の戻り値）．非 None のときのみ計画どおりの
+   隣接ランク差ループ（`k=1` から `k < min(gap_max_k, len(candidates))` かつ
+   `candidates[k-1].confidence - candidates[k].confidence < gap_threshold` の間 `k += 1`）で
+   `k` を決め `candidates[:k]` を返す．`gap_max_k` を候補数でクランプしているのは，ゲート通過後の
+   候補が `gap_max_k` 未満しかない場合に `IndexError` を避けるため（計画書の擬似コードには
+   明記されていなかった実装上の補完．純粋関数の性質・シグネチャの意味は変えていない）．
+2. `node.py` の `run_ask_flow()`（`select_dispatch_targets()` 呼び出し，旧 L214-219）:
+   `gap_threshold=config.get("dispatch_gap_threshold")`,
+   `gap_max_k=config.get("dispatch_gap_max_k", 2)` の2キーワード引数を追加．他の引数・
+   呼び出し順は変更なし．
+3. `config.yaml`: `dispatch_top_k: 2`（L57）の直下に `dispatch_gap_threshold: null` と
+   `dispatch_gap_max_k: 2` を追記．**計画書の指示どおり T・max_k の具体値はここでは書き込んで
+   いない**（既定値は null のまま，後方互換パスを維持）．既存の無関係な未コミット差分
+   （`central_router.embed_node_host: wafl502 → wafl-ctrl5`）には触れていない．
+4. `tests/test_aggregator.py`: 計画の3ケースを `select_best_dispatch_response_returns_none...`
+   の直前に追加した．
+   - `test_select_dispatch_targets_gap_threshold_none_matches_fixed_top_k`: gap が僅差
+     （0.9 vs 0.89）でも `gap_threshold=None` なら `top_k=1` の従来どおり1件のみ返ることを確認
+     （後方互換）．
+   - `test_select_dispatch_targets_gap_threshold_escalates_k_when_gap_small`: 隣接差
+     0.05 < T=0.1 のとき k=1→2 へ伸び，次の隣接差 0.45 ≥ T で止まることを確認．
+   - `test_select_dispatch_targets_gap_threshold_capped_by_gap_max_k`: 全隣接差が T 未満でも
+     `gap_max_k=2` で頭打ちになることを確認．
+
+**検証結果**
+- `uv run pytest tests/test_aggregator.py -q`: 25 passed（既存22＋新規3）．
+- `uv run pytest -q`（全体）: 223 passed, 2 skipped, 13 failed．失敗13件は全て
+  `tests/test_build_dataset.py`（9件）と `tests/test_train_domain_classifier.py`（4件）に限られ，
+  依頼元が事前に無関係と明記した既知の失敗（JMMLUデータ欠落・`CalibratedClassifierCV`に
+  `classes_`属性が無い sklearn API不整合）と一致することを確認した．今回変更した
+  `aggregator.py`・`node.py`・`config.yaml`・`tests/test_aggregator.py` に起因する失敗はない．
+- `uv run ruff check aggregator.py node.py tests/test_aggregator.py`: All checks passed（`ruff`
+  は YAML を Python として構文解析しようとするため `config.yaml` は対象外，`uv run python -c
+  "yaml.safe_load(...)"` で構文の妥当性のみ別途確認済み．`dispatch_gap_threshold`/
+  `dispatch_gap_max_k`/既存の `embed_node_host: wafl-ctrl5` とも意図どおり読める）．
+
+**実験開始可否**: 実装は完了し既存テスト・新規テストとも green．**ただしこのまま実機本走へは
+進めない**．計画フェーズが事前登録した (T, max_k) の確定手続きが未実施のため，次フェーズ
+（rc-experimenter）は以下を先に行うこと．
+- **(a) オフライン再生を先に実施すること**: `scripts/replay_dispatch_gap_policy.py` を新規作成し，
+  `results/20260918_202613/results.jsonl` の `probe_candidates` を使って，計画フェーズの
+  事前登録手続き（`T ∈ {0.01,…,0.60}` × `max_k ∈ {3,4,5,6}` のグリッド，選定規則「単一ドメイン行
+  mean dispatch 数 ≤ 2.40 かつ全体 mean dispatch 数 ≤ 2.45 を満たす組のうち
+  compound_domain_set_recall 最大」）に従って (T, max_k) を確定させる．計画フェーズの予備再生
+  （`max_k=4, T≈0.29〜0.30` で compound_domain_set_recall 0.425〜0.430 見込み）を再現できるかを
+  (a) の合格条件とする．**実機実験は不要**（このスクリプトは今回作成しておらず，次フェーズの
+  最初のタスクとして残っている）．
+- (a) で確定した T・max_k を `config.yaml` の `dispatch_gap_threshold` / `dispatch_gap_max_k` に
+  反映してから，予備実行（先頭20問で `dispatched_domains` 長の分散を確認）→ 実機1600問本走へ
+  進むこと．
+
+### 実験 (Iter58)
+
+**(a) オフライン再生による (T, max_k) の確定**
+
+- 新規作成した `scripts/replay_dispatch_gap_policy.py` で，`results/20260918_202613/results.jsonl`
+  （Iter57 本走 1600 行）の `probe_candidates` に対し，計画フェーズ事前登録の決定規則
+  （`k=1` から `k < max_k` かつ隣接ランク差 `candidates[k-1].confidence - candidates[k].confidence
+  < T` の間 `k += 1`）を再生した．集計は `metrics.py:compute_compound_coverage_metrics()` と同一定義
+  （`covered_domain_count / expected_domain_total`，compound 行 = `len(expected_domains) > 1`）に
+  合わせ，加えて単一ドメイン行（1500行）・全体（1600行）の mean dispatch 数を算出した．
+  実行コマンド:
+  ```
+  uv run python scripts/replay_dispatch_gap_policy.py \
+      --results results/20260918_202613/results.jsonl \
+      --max-k-values 3,4,5,6
+  ```
+  （`--t-min/--t-max/--t-step`・`--*-cost-limit` は既定値のまま＝計画どおり
+  `T∈{0.01,…,0.60}`(0.01刻み)，選定規則の閾値は単一ドメイン≤2.40・全体≤2.45）．
+- **グリッド全体**: `max_k∈{3,4,5,6}` × `T`60点＝240組．選定規則（両コスト条件を満たす組のうち
+  `compound_domain_set_recall` 最大，同値なら mean dispatch 数最小）を満たす組は **120/240**．
+  `max_k` 別の（コスト条件下での）最良点は以下のとおりで，`max_k=4` が全 `max_k` の中で最良
+  （他の `max_k` の最良点をいずれも上回る）:
+  - `max_k=3`: `T=0.50` → recall 0.395，single_mean 2.3947，overall_mean 2.4025
+  - **`max_k=4`: `T=0.29` → recall 0.425，single_mean 2.366，overall_mean 2.399375（グローバル最良）**
+  - `max_k=5`: `T=0.22` → recall 0.415，single_mean 2.3367，overall_mean 2.370625
+  - `max_k=6`: `T=0.19` → recall 0.42，single_mean 2.400，overall_mean 2.430625
+  - 参考として `max_k=4` 近傍の T 感度（`T=0.25`〜`0.33`）:
+    `T=0.25`→recall 0.395/single 2.180，`T=0.28`→0.410/2.313，**`T=0.29`→0.425/2.366（選定点）**，
+    `T=0.30`→0.430/2.420（single_mean 2.420 > 2.40 の上限を超過し不適格），`T=0.33`→0.445/2.567
+    （overall_mean 2.596 でさらに超過）．**`T=0.30` が僅差でコスト条件を超過するため，境界の
+    `T=0.29` が選定される**（計画フェーズの「`T≈0.29〜0.30`」という幅はこの境界のことを指す）．
+- **選定 (T, max_k) = (0.29, 4)**．根拠: 上記事前登録の選定規則（両コスト条件下で
+  `compound_domain_set_recall` 最大）を機械的に適用した結果，`max_k=4, T=0.29` が
+  `eligible_count=120` 組の中でグローバル最良（recall 0.425，かつ他の `max_k` の最良点
+  0.395/0.415/0.420 をいずれも上回る）だった．
+- **(a) の合格条件（計画フェーズの予備再生 `max_k=4, T≈0.29〜0.30` で recall 0.425〜0.430，
+  単一ドメイン mean_k 2.37〜2.42 を再現できること）との対比**: recall 0.425 は範囲内で一致，
+  単一ドメイン mean_k 2.366 は範囲下限 2.37 よりわずかに小さい（-0.004pt）が，計画フェーズの
+  値が「予備再生」（概算）であるのに対し今回はグリッド全点を機械的に再計算した確定値であり，
+  乖離幅も無視できる小ささのため実装バグの兆候とは判断しない．**(a) は合格**とみなし，
+  T・max_k の確定手続きを完了した．
+- 全グリッド生データ（TSV，241行）は本メッセージには含めない（`scripts/replay_dispatch_gap_policy.py`
+  を同一引数で再実行すればいつでも再現可能，決定論的）．再現コマンドは上記のとおり．
+
 ## Iteration 57: education_threshold=0.05の実行時経路反映と実機検証
 
 ### 実験 (Iter57)

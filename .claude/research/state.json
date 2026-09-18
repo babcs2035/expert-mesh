@@ -2,14 +2,14 @@
   "repo": "expert-mesh",
   "iteration": 58,
   "iteration_name": "adaptive_confidence_gapによる複合ドメインdispatchの動的化",
-  "phase": "investigate",
-  "status": "blocked",
+  "phase": "experiment",
+  "status": "running",
   "current_lever": "dispatch_policy=adaptive_confidence_gap",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1789737383,
-  "last_slack_ts": "1789736254.258109",
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
-  "last_commit": "1e63d67"
+  "updated_at": 1789737926,
+  "last_slack_ts": "1789745344.059789",
+  "iteration_thread_ts": "1789744756.915609",
+  "notion_toggle_created": true,
+  "last_commit": "eba6ddf"
 }
