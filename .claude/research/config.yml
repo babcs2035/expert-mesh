@@ -853,6 +853,55 @@ levers:
             残る余地は『rank_1 側の改善（compound 行で 41/100 が上限 0.705 のもう一方のボトルネック）』
             または『複合設問データセット自体の再設計（research_frontier）』に限られる．"}
 
+  - {name: multilabel_pair_allocation, values: [uniform_three_per_pair],
+     note: "[2026-09-19 Iter60 reflector / backlog B94] **問題**: Iter60
+            （`multilabel_training_signal=synthetic_two_domain_training_examples`）は adopted
+            （S1 exact p=0.000142，compound_domain_set_recall 0.345→0.480，mean_dispatch 2.000000）
+            だが，2 つの留保が残った．(R-A) 合成 153 件のペア配分（45 ペア一律 3 件＋`legal` 絡み
+            9 ペアのみ 5 件）の決定に，評価集合 `_COMPOUND_QUESTIONS` のペア別件数分布
+            （legal×medical が 12 行で最多）という**テスト集合由来の情報**が入っている．本文の
+            リークは無い（A7 の 3-gram Jaccard 最大 0.1667）が，A7 では検出できない設計レベルの
+            弱いリークである．実測でも 5 件配分＝改善 17/悪化 1 に対し 3 件配分＝改善 21/悪化 10 と
+            収支が異なる．(R-B) legal 絡み 60 ペアを除くと exact p=0.0708（+7.9pt，方向は一貫）で，
+            主基準の有意性が legal 絡みの寄与に相当程度依存する．
+            **実施方法**: `scripts/generate_multidomain_training_examples.py` を
+            `--per-pair 3 --per-pair-legal 3`（＝legal 優遇なし，45 ペア×3 件＝135 件）で
+            **再生成**し，`scripts/train_multilabel_dispatch_head.py` で再訓練して
+            `scripts/evaluate_dispatch_candidate_ranking.py` ＋ `scripts/compute_iter59_ranking_stats.py`
+            で同一手続きにより採点する．**変更するのは配分 1 変数のみ**で，生成プロンプト・
+            フィルタ F1〜F4・ヘッド構造・推論経路・採点スクリプト・基準線はすべて Iter60 から固定する．
+            生成モデル・temperature=0.8 も固定（生成の乱数により 135 件の中身は Iter60 と同一には
+            ならない点は，効果が個々の生成文ではなく設計に帰属するかを見る意味でむしろ望ましい）．
+            A0（`(Y.sum(axis=1)>=2).sum()==135`，床は 120 に据え置き）・A1・A2・A3・A6・A7 は
+            Iter60 のアサーションをそのまま使う．A5 は対 Iter60 予測
+            （`results/iter60_multilabel_ranking_predictions.jsonl`）の rank_2 不一致件数に読み替える．
+            **基準線と成功条件**: 基準線は Iter59/60 と同一の
+            `results/20260918_202613/results.jsonl`（compound_domain_set_recall 0.345）．
+            S1 主基準はドメイン単位 n=200 の exact McNemar（α=0.05）で p<0.05，
+            S2 効果量下限 +0.04pt（Iter59/60 と同一に据え置く．Iter60 の +0.135pt を基準にした
+            引き上げは事後的な基準変更になるため行わない），S3 mean_dispatch=2.000000，
+            S4 rank2_flip_rate>0 かつ対 Iter60 不一致>0．非退行は N1（rank_1 1600/1600 不変）・
+            N2（top1_accuracy 0.5975 完全一致）・N3（legal 自身の被覆 ≧8/30）・
+            N5（単一ドメイン 1500 行の argmax 正解率 ≧0.590）を Iter60 から踏襲し，
+            **N6 を新設**: education 自身の被覆を必ず報告する（Iter60 で 9/20→4/20 の退行が
+            観測されたため．gate ではなく報告義務）．
+            **第 2・第 3 の参照点（併記必須）**: Iter59（単一ラベル教師，0.350）と
+            Iter60（legal 優遇あり，0.480）．今回の値を両者と並べ，**『legal 優遇という
+            テスト集合由来の設計情報を取り除いた場合に効果がどれだけ残るか』**として解釈する．
+            **判定規則（事前登録）**: S1〜S4 全充足なら Iter60 の adopted を『汎化可能な効果』へ
+            格上げし，効果量の正式値を本イテレーションの値に置き換える．S1 が不成立でも
+            S2 相当（+0.04pt 以上）が残るなら partial とし，Iter60 の対外記述に
+            『legal 絡みの厚い配分に依存する』という注記を恒久的に付す．S1・S2 とも不成立なら，
+            Iter60 の効果は設計リーク（配分）に相当程度帰属するという結論になり，
+            Iter60 の adopted の効力範囲を『legal を含むペアに限定した改善』へ縮小する
+            （Iter60 自体の判定は事前登録どおり adopted のまま据え置き，主張の強度だけを落とす）．
+            **オフライン完結・スキーマ変更なし**（生成トラフィック 135 件のみ，実機 1600 問の
+            本走は不要）のため自律着手してよい．実行時経路への配線は本イテレーションでも行わない
+            （`config.yaml` のスキーマ変更を伴うためユーザー確認が必要．B94 要レビュー項目）．
+            **見送った代替案**: (b) 合成件数のスケールアップ（配分という交絡を残したまま件数を
+            動かすと帰属が曖昧になるため後回し），(c) 生成フィルタ強化によるプロンプト echo 行
+            4.6% の除去（悪化方向の交絡であり急がない），(d) 実行時経路への配線（要ユーザー確認）．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #
