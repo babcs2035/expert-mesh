@@ -357,6 +357,45 @@
 - 全グリッド生データ（TSV，241行）は本メッセージには含めない（`scripts/replay_dispatch_gap_policy.py`
   を同一引数で再実行すればいつでも再現可能，決定論的）．再現コマンドは上記のとおり．
 
+**(b)〜(d) 実装コミット・config反映・予備実行，および予備実行で発見した第2のno-opバグ**
+
+- コミット `b9df0b8`（🔀 Iter58: dispatch_policy=adaptive_confidence_gap実装，T=0.29/max_k=4を
+  オフライン再生で確定）: `aggregator.py`・`node.py`・`tests/test_aggregator.py` の計画どおりの
+  差分と，`config.yaml` への `dispatch_gap_threshold: 0.29` / `dispatch_gap_max_k: 4`（(a)の確定値）
+  の反映，`scripts/replay_dispatch_gap_policy.py` の新規追加を含む．
+  既存の無関係な未コミット差分（`central_router.embed_node_host: wafl502→wafl-ctrl5`，
+  `results/iter45_preliminary/logs/` 配下）は意図的に除外（`git add -p` で該当hunkのみ選択）．
+- `mise run setup`（image digest `sha256:0d5dbb77...`，git HEAD=`b9df0b8`）→ `mise run deploy`
+  （全10ノードhealthy，smoke check git-status/hashes/probe全pass）．
+- **(d) 予備実行（先頭20問，`results/20260919_004600/results_prelim20.jsonl`）で
+  `dispatched_domains` 長の分布を確認したところ，20/20行すべてが長さ2で固定**（分散していない）．
+  計画フェーズの到達条件チェック「発火していれば長さが1〜max_kに分散する」に抵触したため，
+  本走前に原因を特定した．
+- **原因（第2のno-opバグ，config到達性ではなくコード重複由来）**: `select_dispatch_targets()`
+  の呼び出し箇所は `node.py:214`（`run_ask_flow()`，実際のdispatchに使われる．gap引数を正しく渡す）
+  だけでなく，**`run_experiment.py:85`（`_run_one()`）にも独立した2箇所目の呼び出しがあった**
+  （調査フェーズの「呼び出し経路はnode.py 1箇所のみ」という記述は誤りだったと判明．
+  `run_experiment.py` は `run_ask_flow()` を呼んで実際のdispatch/回答生成は行うが，
+  `dispatched_domains`/`probe_candidates`（metrics.py が読む集約用フィールド）は
+  同じ `probe_responses` から**別途もう一度** `select_dispatch_targets()` を呼んで再計算しており，
+  この2箇所目の呼び出しが `gap_threshold`/`gap_max_k` を渡していなかったため，実際のdispatchは
+  gap方式で動いているのに，記録される `dispatched_domains` だけが旧来の固定 `dispatch_top_k=2`
+  にフォールバックしていた（gap12=0.34・0.306・0.428・0.299（いずれもT=0.29超）の行でも
+  長さ2が記録されていたことから特定，`business_economics-006/008/010/020` 等）．
+  **回答生成（`selected_domain`/`confidence`/`answer_text`）自体は正しくgap方式で行われており
+  影響を受けていない．影響を受けるのは `dispatched_domains` から導出される
+  `compound_domain_set_recall`・mean dispatch数などmetrics.py側の集計のみ**．
+- **修正**: `run_experiment.py:85` の `select_dispatch_targets()` 呼び出しに
+  `gap_threshold=config.get("dispatch_gap_threshold")`, `gap_max_k=config.get("dispatch_gap_max_k",
+  2)` を追加（`node.py` と同一の2引数．純粋関数のシグネチャ・ロジックは無変更）．
+  検証: `uv run pytest tests/test_run_experiment.py tests/test_aggregator.py -q`
+  （31 passed）・`uv run ruff check run_experiment.py`（all pass）．
+- **教訓（次回のrc-plannerへの申し送り）**: 「`select_dispatch_targets` の呼び出し元は1箇所」
+  という調査フェーズの結論は，grepの対象を運用コードパス（`node.py`）だけに絞ったために
+  ベンチマーク実行スクリプト（`run_experiment.py`）内の**メトリクス記録専用の重複呼び出し**を
+  見落としたことが原因．今後同種のレバーを扱う際は `grep -rn "関数名("` をテストディレクトリ以外
+  の全 `.py` に対して行い，呼び出し元の数を機械的に確認すること．
+
 ## Iteration 57: education_threshold=0.05の実行時経路反映と実機検証
 
 ### 実験 (Iter57)

@@ -82,11 +82,21 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
     # coverage metrics (metrics.py's compute_compound_coverage_metrics)
     # without changing routing/aggregation behavior itself. Empty when no
     # node cleared confidence_threshold (the fallback case).
+    # gap_threshold/gap_max_k (Iter58) must be passed here too — this is a
+    # second, independent call to select_dispatch_targets() from the one
+    # node.run_ask_flow() makes internally (same pure function, same
+    # config values), and without these two kwargs it would silently
+    # recompute dispatched_domains under the old fixed dispatch_top_k
+    # cutoff even while the actual dispatch (above, via run_ask_flow) uses
+    # the gap policy — a mismatch caught by the Iter58 preliminary
+    # 20-question run (results/20260919_004600/), see journal.md Iter58.
     dispatch_targets = select_dispatch_targets(
         result.probe_responses,
         confidence_threshold=config.get("confidence_threshold", 0.5),
         top_k=config.get("dispatch_top_k", 1),
         dispatch_candidate_threshold=config.get("dispatch_candidate_threshold"),
+        gap_threshold=config.get("dispatch_gap_threshold"),
+        gap_max_k=config.get("dispatch_gap_max_k", 2),
     )
     dispatched_domains = [config["nodes"][t.node_id]["domain"] for t in dispatch_targets]
     probe_candidates = [

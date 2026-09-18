@@ -3,13 +3,13 @@
   "iteration": 58,
   "iteration_name": "adaptive_confidence_gapによる複合ドメインdispatchの動的化",
   "phase": "experiment",
-  "status": "running",
+  "status": "waiting_experiment",
   "current_lever": "dispatch_policy=adaptive_confidence_gap",
   "experiment_dir": null,
-  "experiment_deadline": null,
-  "updated_at": 1789737926,
+  "experiment_deadline": 1789758297,
+  "updated_at": 1789745697,
   "last_slack_ts": "1789745344.059789",
   "iteration_thread_ts": "1789744756.915609",
   "notion_toggle_created": true,
-  "last_commit": "eba6ddf"
+  "last_commit": "b9df0b8"
 }
