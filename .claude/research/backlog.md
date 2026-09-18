@@ -15,6 +15,56 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B93 [auto-decided 2026-09-19] Iter59 は rejected，dispatch_candidate_ranking クローズ．次レバーは新設の multilabel_training_signal
+
+- **状況**: Iter59（`dispatch_candidate_ranking=multilabel_binary_relevance_head`）の採否確定と，
+  config.yml の levers が実質試し切りになった状態での次の一手の決定が必要だった．
+- **自動選択（採否）**: **rejected（確信度 高）**．レバー `dispatch_candidate_ranking` は values 単一値
+  のため**クローズ（収束）**．`config.yaml` への配線は行わない（計画が条件付けた改善が未達）．
+  `models/dispatch_candidate_ranking_head.joblib` は本番経路から参照されず，
+  `models/domain_classifier.joblib` は md5 不変のためロールバック作業は不要．
+- **根拠**:
+  1. 事前登録の成功条件 2/2 が FAIL（S1: exact McNemar p=1.0，改善10/悪化9/discordant 19．
+     S2: compound_domain_set_recall 0.345→0.350 の +0.005pt で，下限 +0.04pt に遠く未達）．
+     計画文の判定規則「S1・S2 とも不成立なら棄却」に機械的に該当する．
+  2. FAIL は検出力不足ではない．より高検出力の追加検定（compound 行の 2 つ目の正解ドメインの
+     順位比較，n=159・非ゼロ差89）で Wilcoxon p=0.914，平均順位 4.201→4.258（微悪化方向），
+     単一ドメイン1500行の argmax 正解率も 0.610 vs 0.610 で完全一致．
+  3. 一方で**実験は成立している**（S3 mean dispatch 2.000000，S4 rank2_flip_rate 0.356875，
+     N1 rank_1 1600/1600 一致，N2 top1 0.5975 完全一致，N3 legal 8/30→9/30 が全 PASS）．
+     success_criteria (6) の invalid 条件（完全一致かつ discordant 0）には該当せず，
+     **no-op ではなく有効な陰性結果**として記録する．
+- **自動選択（次レバー）**: **`multilabel_training_signal = synthetic_two_domain_training_examples`**（新設）．
+  config.yml の levers 末尾へ追記した．
+- **根拠（次レバー）**: 既存 levers は実質試し切り（残るのは `conformal_prediction_true_class_qhat`
+  ＝B88 で失敗見込み確定，`post_hoc_langdetect_retry`＝Iter55 で langdetect ja=100/100 のため
+  改善余地なし）．skill の停止条件 1 に従い，Iter58・Iter59 の学びから新レバーを考案した．
+  2 回連続で確認された制約は「単一ラベル訓練データ（1行1ドメイン）の加工・後処理では多ラベル性は
+  生まれない」（Iter58: gap の compound 判別 AUC 0.576，Iter59: 順位比較 Wilcoxon p=0.914）であり，
+  同じ枠組みでの 3 度目の再挑戦は同じ壁に当たる．そこで**推論側ではなく教師信号側**へ移り，
+  2 ドメインにまたがる訓練事例を新規生成して真の multi-label 問題としてヘッドを訓練する．
+  Iter59 の実装（訓練・採点スクリプト，埋め込みキャッシュ）をそのまま再利用し差分を訓練データ生成部
+  のみに閉じるため，**「ヘッド構造は同一で教師信号だけが違う」という Iter59 との直接対比**が成立し，
+  今回の陰性結果が対照群として機能する（この設計が最も情報量が多いと判断した）．
+- **次イテレーション名**: 「2ドメイン訓練事例の新規生成による多ラベルヘッドの再訓練」．
+- **採らなかった候補**: (a) **rank_1 側の改善**（compound 行での rank_1 正解率 41/100 は，
+  オラクル上限 0.705 に対するもう一方の同規模のボトルネック）．有望だが，rank_1 の top1_accuracy は
+  Iter29〜48 で多数のレバーを試し 0.5975 で頭打ちであり，新しい入力・教師信号なしに動かす見込みが薄い．
+  (b) **複合設問データセット自体の再設計**（research_frontier 相当，評価集合の変更を伴うため
+  過去との比較可能性を失う．人間判断が必要）．(c) `conformal_prediction_true_class_qhat` は
+  B88 の優先度判断（失敗見込み確定）を維持して見送る．(a)(b) は今回の新レバーが不成立の場合の
+  次の候補として記録を残す．
+- **要レビュー（人間）**:
+  1. 新レバーの訓練データ生成方法を (a) 既存訓練行 2 件の結合 / (b) LLM 生成 のどちらにするかは
+     次イテレーションの計画フェーズが 1 つに絞る．(b) を選ぶ場合は実機の生成トラフィックが発生する．
+  2. **評価用複合設問 100 問（`build_dataset.py` の `_COMPOUND_QUESTIONS`）を訓練へ流用しない**という
+     リーク禁止制約を config.yml note に明記した．レビュー時はこの点を最優先で確認すること．
+  3. `results/iter59_query_embeddings.npz`（9.6MB の埋め込みキャッシュ）は，リポジトリに大きな
+     バイナリを持ち込まないため**コミットしていない**（再生成可能な派生物．`results/` 配下に
+     npz の追跡実績も無い）．次イテレーションで再利用する場合はローカルに残っているものを使う．
+
+---
+
 ## B92 [auto-decided 2026-09-19] Iter58 は partial（条件付き採用），dispatch_policy クローズ．次レバーは新設の dispatch_candidate_ranking
 
 - **状況**: Iter58（`dispatch_policy=adaptive_confidence_gap`）は事前登録8項目（主基準1・コスト条件2・

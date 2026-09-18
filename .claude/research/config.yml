@@ -804,7 +804,54 @@ levers:
             CLAUDE.md 規約に従いユーザー確認が必要**（B90 と同じ扱い）．第1イテレーションは
             スキーマ変更を伴わないため自律着手してよい．
             **不成立の場合**: 多ラベル信号でも2つ目の正解ドメインを上位へ持ち上げられないことになり，
-            compound 設問の改善は分類器の再訓練・訓練データ設計（research_frontier 相当）へ移る．"}
+            compound 設問の改善は分類器の再訓練・訓練データ設計（research_frontier 相当）へ移る．
+            [2026-09-19 Iter59 reflector追記] `multilabel_binary_relevance_head` は **rejected** 確定，
+            **本レバーはクローズ（収束）**．事前登録 S1（exact McNemar p=1.0，改善10/悪化9/discordant 19）・
+            S2（compound_domain_set_recall 0.345→0.350，+0.005pt で下限 +0.04pt に遠く未達）がともに FAIL．
+            S3/S4/N1/N2/N3 は全 PASS（mean dispatch 2.000000，rank2_flip_rate 0.356875，
+            rank_1 1600/1600 一致，top1 0.5975 完全一致，legal 8/30→9/30）で **no-op ではなく有効な陰性結果**．
+            **機序**: OvR ヘッドは既存分類器と同等の判別力（単一ドメイン1500行の argmax 正解率
+            0.610 vs 0.610）で誤り方だけが脱相関しており，2つ目の正解ドメインの順位比較（n=159）でも
+            Wilcoxon p=0.914・平均順位 4.201→4.258 と効果ゼロ．根本原因は
+            `data/classifier_train.jsonl` が 1 行 1 ドメインで複合事例を 1 件も含まないこと．
+            **学び**: 『単一ラベル訓練データの加工・後処理では多ラベル性は生まれない』が
+            Iter58（gap 信号 AUC 0.576）と Iter59 の 2 回連続で確認された．
+            `config.yaml` への配線は行わない（条件未達）．"}
+
+  # --- 【2026-09-19 Iter59 reflector 新設・backlog B93】Iter58/59 が 2 回連続で示した欠落
+  #     （多ラベル教師信号そのものが存在しない）に直撃する新レバー ---
+  - {name: multilabel_training_signal, values: [synthetic_two_domain_training_examples],
+     note: "[2026-09-19 Iter59 reflector / backlog B93] **問題**: Iter58（既存 confidence の gap，
+            compound 判別 AUC 0.576）と Iter59（既存 embedding ＋ 単一ラベルデータの OvR 再分解，
+            2つ目の正解ドメインの順位比較 Wilcoxon p=0.914）が，異なる 2 つの機序で
+            『単一ラベル訓練データ（1行1ドメイン）の加工・後処理では多ラベル性は生まれない』ことを
+            独立に示した．欠けているのは推論側の工夫ではなく**多ラベル教師信号そのもの**である．
+            **機序**: `data/classifier_train.jsonl`（1427件，全行が単一ドメイン）から
+            2 ドメインにまたがる訓練事例を新規生成し，`MultiLabelBinarizer` で真の多ラベル目的変数を
+            作って OvR ヘッド（Iter59 と同一構造）を再訓練する．推論側・評価側は Iter59 の実装を
+            そのまま再利用し（`scripts/train_dispatch_candidate_ranking_head.py` /
+            `scripts/evaluate_dispatch_candidate_ranking.py` / 埋め込みキャッシュ
+            `results/iter59_query_embeddings.npz`），**差分は訓練データ生成部のみ**とする．
+            これにより『ヘッド構造は同一で教師信号だけが違う』という Iter59 との直接対比が成立し，
+            Iter59 の陰性結果が対照群として機能する．
+            **【必須の制約】評価用複合設問 100 問（`build_dataset.py` の `_COMPOUND_QUESTIONS`）は
+            テストセットであり，訓練へ流用してはならない**（リーク．流用した結果は無効とする）．
+            **生成方法の候補（計画フェーズで 1 つに絞ること．単一レバー原則のため同時比較はしない）**:
+            (a) 異なるドメインの既存訓練行 2 件を自然な日本語で 1 問に結合する（LLM 不要・決定論的・
+            低コストだが，実データの複合設問が『2 問の連結』ではなく『統合された 1 つのシナリオ』である
+            分布差が残る），(b) 実機ノードの生成モデル（`config.yaml` の judge_model 等）で
+            2 ドメインにまたがる設問を生成する（分布は近いが生成コストと品質確認が必要）．
+            **基準線・成功条件は Iter59 と完全に揃える**: 固定 k=2・コスト中立（mean dispatch 2.0）・
+            基準線 `results/20260918_202613/results.jsonl`（compound_domain_set_recall 0.345）・
+            主基準はドメイン単位 n=200 の exact McNemar（α=0.05）・効果量下限 +0.04pt・
+            rank_1 完全不変（1600/1600）．**加えて Iter59 の OvR ヘッド（教師信号が単一ラベル）を
+            第 2 の参照点として併記する**（0.350，Wilcoxon p=0.914）．
+            **第1イテレーションはオフライン完結・スキーマ変更なし**のため自律着手してよい．
+            実行時経路への配線が必要になった段階で `config.yaml` のスキーマ変更が生じるため，
+            その時点でユーザー確認が必要（B90/B92 と同じ扱い）．
+            **不成立の場合**: 教師信号を多ラベル化しても 2 位枠が改善しないことになり，compound 方向の
+            残る余地は『rank_1 側の改善（compound 行で 41/100 が上限 0.705 のもう一方のボトルネック）』
+            または『複合設問データセット自体の再設計（research_frontier）』に限られる．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

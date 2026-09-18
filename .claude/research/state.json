@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 58,
-  "iteration_name": "adaptive_confidence_gapによる複合ドメインdispatchの動的化",
-  "phase": "experiment",
+  "iteration": 60,
+  "iteration_name": "2ドメイン訓練事例の新規生成による多ラベルヘッドの再訓練",
+  "phase": "investigate",
   "status": "running",
-  "current_lever": "dispatch_policy=adaptive_confidence_gap",
-  "experiment_dir": "results/20260919_005727/",
+  "current_lever": "multilabel_training_signal",
+  "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1789749778,
-  "last_slack_ts": "1789745344.059789",
-  "iteration_thread_ts": "1789744756.915609",
-  "notion_toggle_created": true,
-  "last_commit": "735eb25"
+  "updated_at": 1789762800,
+  "last_slack_ts": "1789761991.392439",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
+  "last_commit": "1dab51b"
 }
