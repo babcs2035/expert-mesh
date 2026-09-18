@@ -15,6 +15,45 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B89 [auto-decided 2026-09-18] Iter57 採用確定，Iter58 は dispatch_policy=adaptive_confidence_gap（要ユーザー確認，status=blocked）
+
+- **Iter57 判定**: **採用（adopted）**．`production_deployment_gap=apply_education_threshold_to_runtime`
+  で全成功条件 (d) PASS（education_recall 0.5118→0.5353 > 0.5112，top1 0.5975
+  McNemar p=0.0523 境界値で非退行，他 9 ドメイン 18 指標 BH 補正後有意退行 0 件，
+  flip 2.375% < 15%）．shadow 検証でオフライン flip 38 件 ＝ 実走 flip 38 件
+  （100% 一致，selected_domain 不一致 0/1600）を確認し，**deployment gap は解消された**．
+  単一値レバーゆえ採用で収束，追加反復は不要．
+- **次レバー（auto-decided）**: `dispatch_policy=adaptive_confidence_gap`．
+  根拠: B88 のユーザー承認済み優先順位 2 番手であり，「1. の結果を見てから着手する」
+  という条件は Iter57 の採用（deployment gap 解消，education_recall 0.5353 > 0.5112）
+  で満たされた．3 番手の `conformal_prediction_true_class_qhat` は B88 で優先度低と
+  確定済みのため除外．
+- **要人間判断（不可逆）**: `dispatch_policy=adaptive_confidence_gap` は
+  `config.yaml` のスキーマ変更を伴う（`dispatch_top_k` を固定値運用から confidence
+  gap による動的ポリシーへ変更）ため，自律着手できない（Y2 と同様の扱い，
+  CLAUDE.md 規約「設定ファイル形式の変更は事前確認」）．**オーケストレータが
+  Slack で @mention し `status="blocked"` にする**．ユーザーが承認すれば
+  Iter58 の計画フェーズへ進む．
+- **iteration_name（Iter58 案）**: 「adaptive_confidence_gapによる複合ドメインdispatchの動的化」
+- **ツールバグ修正タスク 2 件**（単一レバー実験の対象ではなく検証・修正タスク，
+  B88 の 4 番目と同様の扱い．いずれの実験フェーズでも同時にオフラインで対応してよい）:
+  1. **setup の registry 判定バグ**: `docker ps --filter name=... | grep -q .` が
+     コンテナ 0 件でもヘッダー行にマッチし「already running」と誤判定 → push が
+     connection refused で失敗（Iter57 で wipe 後に顕在化，手動 registry 起動で回避）．
+     mise.toml の `docker ps -q --filter ...` への修正を推奨．
+  2. **analyze の「最新」解決バグ**: `ls -1d results/*/ | sort | tail -1` は辞書順のため
+     `results/iter45_preliminary/`（0 行）が選択される．metrics_cmd と同じ `ls -1dt`
+     方式への修正を推奨．**副作用**: 初回実行で全ノードのログが
+     `results/iter45_preliminary/logs/` に混入（10 ファイル，未コミットのまま放置中）．
+- **「天井 0.6000」の定義注記（計画フェーズの申し送り）**: B84 の「education_recall=0.6000
+  で天井・研究終了」の 0.6000 は**行レベル正解率**の値であり，公式 multi-label
+  定義（n=170）では 0.5647（旧オフライン経路）／0.5353（実走経路，Iter57）である．
+  Iter52/53 の adopted 判定は不変．今後 0.6000 を引用する際は定義を必ず併記すること．
+- **要レビュー**: 次レバー `dispatch_policy=adaptive_confidence_gap` の着手可否
+  （config.yaml スキーマ変更の承認，ユーザー確認待ち）．
+
+---
+
 ## B88 [user 2026-09-18] converged 状態のレビューと再開方針の決定
 
 - **状況**: `status="converged"`（B87，Iter56 完了時点）のまま `.claude/research` 全体
