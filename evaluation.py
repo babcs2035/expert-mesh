@@ -70,7 +70,13 @@ def compute_answer_quality_accuracy(results: list[dict], dataset: list[dict]) ->
     correct = sum(
         1
         for result, dataset_row in gradable
-        if extract_answer_letter(result.get("answer_text", "")) == dataset_row["jmmlu_answer"]
+        # answer_text is None (not just absent) for dispatch_failed rows
+        # (run_experiment.py's _run_one); `.get(..., "")` only substitutes
+        # the default when the key is missing, not when its value is None,
+        # so `or ""` is required too (matches the same guard already
+        # applied at this module's only other caller,
+        # scripts/evaluate_response_quality.py's _run()).
+        if extract_answer_letter(result.get("answer_text", "") or "") == dataset_row["jmmlu_answer"]
     )
     return correct / len(gradable)
 

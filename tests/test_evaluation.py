@@ -74,6 +74,18 @@ def test_compute_answer_quality_accuracy_returns_zero_when_no_row_gradable() -> 
     assert compute_answer_quality_accuracy(results, dataset) == 0.0
 
 
+def test_compute_answer_quality_accuracy_treats_none_answer_text_as_incorrect() -> None:
+    """A dispatch_failed row (run_experiment.py sets answer_text to None, not "")
+    is counted as gradable-but-incorrect rather than raising (regression test:
+    Iter58 found this crashing scripts.evaluate_response_quality's tasks.analyze
+    step when a real run produced one dispatch_failed row; the bug was that
+    `result.get("answer_text", "")` only substitutes the default when the key is
+    *missing*, not when its value is None)."""
+    dataset = [{"id": "medical-001", "jmmlu_answer": "B"}]
+    results = [{"id": "medical-001", "answer_text": None}]
+    assert compute_answer_quality_accuracy(results, dataset) == 0.0
+
+
 def test_build_llm_judge_prompt_includes_query_and_response() -> None:
     """The judge prompt embeds both the original query and the expert's response."""
     prompt = build_llm_judge_prompt("頭痛が続いています", "内科の受診をお勧めします")

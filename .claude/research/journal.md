@@ -407,6 +407,86 @@
   gap23=0.3176≥T→k=2で停止）と実際の出力が全て一致することを個別に確認した．**(c)(d)の
   合格条件（発火の証拠＝長さの分散）を修正後に達成**．本走へ進む．
 
+**(e) 本走（1600問）とメトリクス取得**
+
+- 実行コマンド: `mise run start --dataset data/dataset.jsonl --output results.jsonl`
+  （`mise run analyze` は既知の「最新ディレクトリ」辞書順解決バグ（Iter57で既報）のため
+  `mise run analyze 20260919_005727` と明示指定で実行）．
+  結果: `results/20260919_005727/results.jsonl`（1600行，実行時間 約44分，開始00:57:27〜完了
+  01:41付近）．git HEAD=`ea4f680`（run_experiment.py修正後），image digest `sha256:9ab0c4c3...`．
+- **`dispatched_domains` 長分布（1600行全体）**: `{1: 815件, 2: 58件, 4: 727件, 3: 0件}`．
+  mean = (815×1+58×2+727×4)/1600 = **2.399375**．k=3がゼロ件だったのは，一度隣接gapがTを
+  下回り始めると（gap分布の性質上）後続の隣接gapも連続して小さいままになりやすく，
+  途中で止まらず`max_k=4`まで到達する行が多いためと考えられる（考察フェーズで検討要）．
+  `dispatch_failed`は1件（`social_science-100`，`dispatched_domains=['social_science']`の
+  単一ターゲットへの`/dispatch`呼び出し自体が失敗．レバーのロジックとは無関係な
+  ノード側の一過性障害）．`used_fallback`は0件．
+- **`mise run analyze`実行中に第2のバグを発見**: `scripts/evaluate_response_quality.py`
+  （`tasks.analyze`が呼ぶ）が`dispatch_failed`行（`answer_text=None`）で
+  `TypeError: expected string or bytes-like object, got 'NoneType'`をraiseしクラッシュした．
+  原因は`evaluation.py:compute_answer_quality_accuracy()`の
+  `extract_answer_letter(result.get("answer_text", ""))`が`or ""`ガードを欠いており，
+  `.get(key, default)`はキー自体が無い場合のみdefaultを返す（値が`None`のときは`None`を
+  そのまま返す）という基本的な誤り．同じモジュール内の唯一のもう1つの呼び出し元
+  （`scripts/evaluate_response_quality.py`の`_run()`）は既に`or ""`で正しくガードしていた
+  ため非対称だった．**レバーとは無関係の既存バグ**（`dispatch_failed`行が実質存在しなかった
+  過去の全実行では踏まれなかった経路）．
+  修正: `evaluation.py:73`に`or ""`を追加．回帰テスト
+  `test_compute_answer_quality_accuracy_treats_none_answer_text_as_incorrect`を追加．
+  検証: `uv run pytest tests/test_evaluation.py -q`（20 passed）・`uv run ruff check
+  evaluation.py tests/test_evaluation.py`（all pass）．この修正はローカルのみで完結する
+  スクリプト（`scripts/evaluate_response_quality.py`はコンテナではなくホストで実行）のため
+  再デプロイ不要．修正後に`uv run python -m scripts.evaluate_response_quality --results
+  results/20260919_005727/results.jsonl --dataset data/dataset.jsonl`を再実行して取得．
+- **主要メトリクス（`uv run python metrics.py --results results/20260919_005727/results.jsonl
+  --json`，および axis23 は上記コマンド）**:
+  | 指標 | 基準線（Iter57, `results/20260918_202613/`, dispatch_top_k=2固定） | 本走（Iter58） |
+  |---|---|---|
+  | top1_accuracy | 0.5975 (956/1600) | 0.596875 (955/1600) |
+  | compound_domain_set_recall | 0.345 (69/200) | **0.425 (85/200)** |
+  | compound_mean_dispatched_count | 2.0 | 2.9 |
+  | single_domain_mean_dispatch（1500行，`dispatched_domains`長平均） | 2.0 | 2.366 |
+  | overall_mean_dispatch（1600行） | 2.0 | 2.399375 |
+  | ECE | 0.0549 | 0.054626 |
+  | answer_quality_accuracy | 0.569333 | 0.558 |
+  | end_to_end_accuracy | 0.335 | 0.326875 |
+  | mean_duration_ms | 1491.9 | 1502.156875（axis23側1501.68，`rows_with_dispatch_timing`
+    1600→1599の差はdispatch_failed行の欠測による） |
+  | dispatch_failure_rate | 0.0 | 0.000625 (1/1600) |
+  | fallback_rate | 0.0 | 0.0 |
+  - compound domain別内訳（`compound_coverage`）: covered=85/expected=200
+    （baseline covered=69/200，`metrics.py`の`compute_compound_coverage_metrics`を
+    `results/20260918_202613/results.jsonl`に対して再実行して確認）．
+- **(a)オフライン再生との再現性照合（成功条件3）**: `compound_domain_set_recall`=0.425，
+  `single_domain_mean_dispatch`=2.366，`overall_mean_dispatch`=2.399375は
+  いずれも(a)の再生値と**完全一致（小数点以下差分0）**．**成功条件3（再現性）は合格**．
+- **統計的検定（`metrics.py`の既存関数のみ使用，continuity-corrected McNemar／Fisher正確検定，
+  独立再計算可能）**:
+  1. **主基準: compound_domain_set_recallのドメイン単位ペア比較（n=200，
+     `(row_id, expected_domain)`ペアごとに「baseline/newそれぞれの`dispatched_domains`に
+     含まれるか」を対応のある2値として`metrics._mcnemar_from_correctness()`へ渡した）**:
+     改善（baselineで非被覆→newで被覆）= **28件**，悪化（baselineで被覆→newで非被覆）=
+     **12件**，discordant=40，chi2=5.625，**p=0.017706**．計画フェーズの事前予測
+     （改善28件・悪化11〜12件，p=0.0095〜0.0166）と改善/悪化件数は完全一致，pは範囲より
+     わずかに大きいが同オーダー．**α=0.05でp<0.05のため主基準は合格**．
+  2. top1_accuracy McNemar（`compute_mcnemar_test`）: discordant_a_only=1（baseline正解→new
+     不正解，`social_science-100`のdispatch_failedによるもの），discordant_b_only=0，chi2=0.0，
+     **p=1.0**．非退行条件1（p≥0.05）**合格**．構造的に不変という事前予想どおり．
+  3. per-domain 20指標（10ドメイン×recall/precision，`compute_domain_recall_mcnemar_test`／
+     `compute_domain_precision_fisher_test`）＋BH補正（`apply_benjamini_hochberg`, q=0.05）:
+     **BH補正後有意 0/20**．非零のdiscordantはsocial_science recall/precisionのみ（同じ
+     `social_science-100`由来，p=1.0）．非退行条件2**合格**．
+  4. answer_quality_accuracy 0.569333→0.558（**-1.13pt**），end_to_end_accuracy
+     0.335→0.326875（**-0.81pt**）．いずれも3SD=2.6pt以内．非退行条件3**合格**．
+  5. mean_duration_ms 1491.9→1502.156875（**+0.688%**）．+25%以内．非退行条件4**合格**．
+- **コミット**: `b9df0b8`（実装＋(a)確定値のconfig反映）→`ea4f680`（run_experiment.pyの
+  gap引数欠落no-op修正）→`735eb25`（予備実行分散確認の記録，journal.mdのみ）．
+  本メッセージ確定後，evaluation.pyのNoneガード修正・axis23再取得・本走メトリクスの
+  journal追記をまとめて次コミットで記録する．
+- **すべて機械的な事前登録済み基準に対する結果**: 主基準1件・コスト条件2件・再現性条件1件
+  （成功条件，計4項目）と非退行条件4項目の**計8項目すべてPASS**．内容面の解釈・採否判断は
+  次フェーズ（analyst/reflector）に委ねる．
+
 ## Iteration 57: education_threshold=0.05の実行時経路反映と実機検証
 
 ### 実験 (Iter57)
