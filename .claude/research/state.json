@@ -8,8 +8,8 @@
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1789763236,
-  "last_slack_ts": "1789765435.004509",
-  "iteration_thread_ts": "1789762944.403939",
-  "notion_toggle_created": true,
-  "last_commit": "1e9c312"
+  "last_slack_ts": "1789765882.579109",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
+  "last_commit": "3564559"
 }
