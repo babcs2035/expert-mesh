@@ -41,6 +41,7 @@ import sys
 
 import joblib
 import numpy as np
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import KFold, cross_val_predict
@@ -62,6 +63,14 @@ _MAX_ITER = 1000
 # which StratifiedKFold does not support (journal Iter60 plan).
 _DIAGNOSTIC_CV = 5
 _DIAGNOSTIC_CV_RANDOM_STATE = 42
+
+# Iter62 (multilabel_rank2_score_calibration=per_domain_holdout_calibration): the
+# internal held-out split CalibratedClassifierCV uses to fit each domain's
+# sigmoid (Platt scaling) recalibration map. Kept as a separate constant from
+# _DIAGNOSTIC_CV (same value, different responsibility -- the diagnostic CV
+# never touches the saved model; this one does) so either can change
+# independently later (journal.md Iter62 plan, decision 1).
+_CALIBRATION_CV = 5
 
 # A0 (journal.md Iter60 plan, "no-op対策"): the number of MLB rows carrying
 # >=2 positive labels must both equal the synthetic row count exactly (no
@@ -145,14 +154,26 @@ def _covered_domain_pairs(labels: list[str | list[str]]) -> set[frozenset[str]]:
 def train_multilabel_ranking_head(
     embeddings: list[list[float]], Y: np.ndarray
 ) -> OneVsRestClassifier:
-    """Fit a One-vs-Rest sigmoid head from embeddings to a true multi-label indicator matrix Y.
+    """Fit a One-vs-Rest calibrated head from embeddings to a true multi-label indicator matrix Y.
 
     Each of the 10 domains' binary sub-problem is fit independently via
-    LogisticRegression(class_weight="balanced"), exactly as in Iter59's
-    train_ranking_head() -- only the target (Y, a true multi-label matrix,
-    vs Iter59's single-label array) differs, per the single-lever principle.
+    CalibratedClassifierCV(LogisticRegression(class_weight="balanced"),
+    method="sigmoid", cv=_CALIBRATION_CV, ensemble=True): OneVsRestClassifier
+    clones and fits this base estimator once per domain column, so the
+    held-out split used for calibration never leaves that domain's own rows
+    (journal.md Iter62 investigation Q1/Q3 -- no evaluation-set leakage).
+    method="sigmoid" (Platt scaling) and ensemble=True are pinned explicitly
+    rather than relying on sklearn defaults, so a future sklearn version's
+    default change cannot silently alter this head (journal.md Iter62 plan,
+    decision 1). Iter59/60/61 used a bare LogisticRegression here; this is
+    Iter62's single lever (multilabel_rank2_score_calibration=
+    per_domain_holdout_calibration).
     """
-    model = OneVsRestClassifier(LogisticRegression(max_iter=_MAX_ITER, class_weight="balanced"))
+    base_estimator = LogisticRegression(max_iter=_MAX_ITER, class_weight="balanced")
+    calibrated_estimator = CalibratedClassifierCV(
+        base_estimator, method="sigmoid", cv=_CALIBRATION_CV, ensemble=True
+    )
+    model = OneVsRestClassifier(calibrated_estimator)
     model.fit(embeddings, Y)
     return model
 

@@ -964,6 +964,55 @@ levers:
             (ii) rank_1 側の改善（compound 行で 41/100，上限 0.705 のもう一方のボトルネック），
             (iii) 複合設問データセット自体の再設計（research_frontier 相当・人間判断）に限られる．"}
 
+  # --- 【2026-09-19 Iter62 reflector 新設・backlog B96】`multilabel_rank2_score_calibration` は
+  #     partial（S1〜S4 充足・主基準 S5 不成立）でクローズ．「rank_2 のドメイン間比較を較正で是正する」
+  #     方向は，較正が低 AP ドメインの可動域を選択的に潰すという実測（Spearman ρ(cv_AP, sd 比)=0.952）
+  #     により打ち止めとなったため，上記「不成立の場合」の選択肢 (ii)＝rank_1 側の改善へ移る ---
+  - {name: rank1_source, values: [multilabel_head_argmax],
+     note: "[2026-09-19 Iter62 reflector / backlog B96] **問題**: Iter59〜62 のオフライン採点系は
+            rank_1 を基準線 JSONL（`results/20260918_202613/results.jsonl` の `selected_domain`＝
+            実行時ルータの top-1）からコピーし，多ラベルヘッドは rank_2 のみを決めていた．
+            この rank_1 は複合 100 行で 41/100 しか正解せず，`compound_domain_set_recall` の
+            構造的上限を 0.705 に固定している．rank_2 側は Iter60/61 で 0.345→0.445 まで改善し，
+            Iter62 の較正では**それ以上動かないこと**が実証された（rank_2 側は飽和に近い）．
+            残るボトルネックは rank_1 側である．
+            **単一レバー**: rank_1 の選択元を『基準線ルータの `selected_domain`』から
+            『多ラベルヘッドの argmax（`head_scores` の最大ドメイン）』へ切り替える．
+            rank_2 は従来どおり同じ `head_scores` の 2 位（rank_1 を除く max）とする．
+            ヘッド自体（Iter61 の未較正 `OneVsRestClassifier(LogisticRegression)`）・訓練データ
+            （`data/classifier_train.jsonl` ＋ `data/classifier_train_multidomain_iter61.jsonl`）・
+            埋め込み・基準線・採点/統計スクリプトの他ロジックはすべて Iter61 から固定する．
+            **較正は使わない**（Iter62 で partial に終わったため `models/dispatch_multilabel_head_iter61.joblib`
+            を再利用する．較正の有無を同時に動かすと単一レバー原則が破れる）．
+            **変更範囲**: `scripts/evaluate_dispatch_candidate_ranking.py` の `build_new_rows()`
+            （rank_1 を基準線からコピーしている箇所）1 関数のみ．訓練スクリプトは無変更．
+            **実行可能性の事前確認（reflector が既存の予測 JSONL を集計した参考値であり，事前登録値ではない）**:
+            Iter61 のヘッドの argmax を rank_1 に使うと複合 100 行の rank_1 正解は 41→61，
+            `compound_domain_set_recall` は 0.445→0.49 となる一方，単一ドメイン 1500 行の top-1 正解率は
+            0.610→0.6033（-0.7pt）となる．**この数値は評価集合上で算出しているため効果量の推定値として
+            引用してはならない**（レバーが no-op でないこと・方向がありうることの確認にのみ用いる）．
+            **成功条件（暫定案．計画フェーズで事前登録して確定すること）**:
+            S1 全体 200 ペアの exact McNemar で基準線比 p<0.05，
+            S2 `compound_domain_set_recall` が Iter61/62 の 0.445 を**上回る**（点推定で ≧0.465＝+2.0pt 以上），
+            S3 mean_dispatch=2.000000（コスト中立），
+            S4 rank_1 が基準線と異なる行 >0（発火の証拠），
+            S5（本レバー固有の主基準）複合 100 行の rank_1 正解数が基準線の 41/100 を
+            対応あり exact McNemar で有意に上回る（p<0.05）．
+            **非退行**: **N1（rank_1 1600/1600 不変）は本レバーでは定義上成立しないため撤回する**
+            （Iter59〜62 の N1 をそのまま流用してはならない）．代わりに
+            N2'（全 1600 行の top1_accuracy が基準線 0.5975 から 1.0pt を超えて低下しない＝≧0.5875），
+            N3（legal 自身の被覆 ≧8/30），N5（単一ドメイン 1500 行の argmax 正解率 ≧0.590），
+            N6（education 6/20・medical 11/28 という Iter62 の水準から悪化しない）を課す．
+            **オフライン完結・スキーマ変更なし**（埋め込みは `results/iter59_query_embeddings.npz` を再利用，
+            実機本走も生成トラフィックも不要）のため自律着手してよい．
+            **留意点**: 本レバーは『rank_1 も多ラベルヘッドが決める』構成であり，
+            実行時経路（`node.py` のルータ）との乖離がさらに広がる．オフラインで採用された場合でも
+            実機検証には配線が必須となるため，B95 要レビュー 1（配線可否の人間判断）の重要性が増す．
+            **不成立の場合**: rank_1・rank_2 の双方をヘッド側で動かしても上限 0.705 を超えられない
+            ことになり，残るのは (i) 合成データのドメイン別 positive 件数の設計（R-A 型リーク再発に注意），
+            (iii) 複合設問データセット自体の再設計（research_frontier 相当・人間判断），
+            あるいは埋め込み表現そのものの適応（`embedding_adaptation` の再訪）である．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #

@@ -15,6 +15,64 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B96 [auto-decided 2026-09-19] Iter62 は partial（実質は効果なし）で multilabel_rank2_score_calibration をクローズ．次レバーは新設の rank1_source
+
+- **状況**: Iter62（`multilabel_rank2_score_calibration=per_domain_holdout_calibration`）は，
+  S1〜S4 を充足する一方で**本レバー固有の主基準 S5（education ≧9/20 かつ medical ≧13/28 への回復）が
+  不成立**（education 6/20，medical 11/28）に終わった．事前登録の判定規則のどの分岐に該当するかの確定と，
+  values 単一値レバーを試し切った後の次の一手の決定が必要だった．
+- **自動選択（採否）**: **partial（部分的成立．ただし効果量は 0 と扱う．確信度 高）**．
+  事前登録の**第 2 分岐**（S1〜S4 充足・S5 のみ不成立，かつ education 6/20 > Iter61 の 5/20 と
+  改善方向）に文言どおり機械的に該当する．レバーは values 単一値のため**クローズ（試し切り・収束）**．
+- **根拠**:
+  1. 規則の文言への忠実性を優先した．分析（解釈）フェーズの所見（「+1 はノイズ，medical は逆方向」）を
+     理由に事後的に rejected へ降格させることは，Iter29 以降の事前登録運用を壊す（B94/B95 と同じ判断基準）．
+  2. 同時に，partial の中身が空であることを留保 R-D として明文化した．partial を成立させた
+     education +1 は対 Iter61 の discordant 1 件に基づき，medical は −1 で逆方向．基準線との対応あり
+     比較でも education p=0.375・medical p=0.6875 で有意差がない．
+  3. 収束と判断した根拠は偶然性ではなく機序である．較正後のスコア標準偏差の縮み方は各ドメインの
+     cv_AP と強く単調に対応し（Spearman ρ=0.952, p=2.3e-5），最も縮んだのが medical（0.224 倍）と
+     education（0.329 倍）＝持ち上げたかった当の 2 ドメインだった．行内 `max` で決まる rank_2 の
+     勝敗を左右するのは水準ではなく可動域であり，Platt 較正の作用方向は目的に対して中立〜逆である．
+     追加反復で符号が反転する類のばらつきではない．
+  4. 事前登録の機序仮説「n_positive が不揃い」は実データ（legal=104，他 9 ドメインは education・
+     medical を含め 177）と整合せず，支持されない．
+- **自動選択（対外記述）**: 効果量の正式値は **Iter61 の +10.0pt（p=0.003658）のまま据え置く**
+  （B95 の方針を変更しない）．**「較正により education/medical の退行が緩和された」とは書かない**．
+  R-C（education・medical が基準線を下回る）は未解消のまま残る．
+- **自動選択（配線）**: **本番経路への配線は今回も行わない（3 回目）**．`config.yaml` のスキーマ変更を
+  伴い rc-reflector の自律判断の範囲外であるため．論点は B95 要レビュー 1 に一本化したまま維持する
+  （本エントリで累積させない）．
+- **自動選択（次レバー）**: **`rank1_source = multilabel_head_argmax`**（新設，config.yml の levers 末尾へ追記）．
+  rank_1 の選択元を「基準線ルータの `selected_domain`」から「多ラベルヘッドの argmax」へ切り替える
+  （ヘッドは Iter61 の未較正版を再利用し，較正は使わない）．
+- **根拠（次レバー）**: (i) 既存 levers は実質試し切り済みのため skill の停止条件 1 に従い新レバーを
+  考案した．(ii) Iter62 で rank_2 側の飽和が示された一方，rank_1 は複合 100 行で 41/100 しか正解せず
+  `compound_domain_set_recall` の上限を 0.705 に固定している唯一の残ボトルネックである．
+  (iii) 変更は採点スクリプト 1 関数のみでオフライン完結・スキーマ変更なし・低コスト．
+  (iv) 既存の予測 JSONL を集計した実行可能性の事前確認では，Iter61 ヘッドの argmax を rank_1 に使うと
+  複合 100 行の rank_1 正解が 41→61，`compound_domain_set_recall` が 0.445→0.49 となる一方，
+  単一ドメイン 1500 行の top-1 は 0.610→0.6033（-0.7pt）だった．**この数値は評価集合上の集計であり，
+  効果量の推定値として引用してはならない**（no-op でないことの確認にのみ用いる．計画フェーズで
+  基準値を事前登録し，この数値に合わせて閾値を調整しないこと）．
+- **採らなかった候補**: (a) 合成データのドメイン別 positive 件数の再設計（「どのドメインを増やすか」の
+  決定にテスト集合の情報が入り R-A 型リークが再発しやすい），(b) 複合設問データセット自体の再設計
+  （research_frontier 相当・過去との比較可能性を失うため人間判断が要る），(c) 分散を揃える順位変換
+  （ドメイン別経験分位点への写像）— 機序上は較正より筋が良いが，rank_2 側は Iter62 で飽和が示された
+  ため優先度を rank_1 側の下に置く（将来の候補として記録する）．
+- **次イテレーション名**: 「rank_1 の選択元を多ラベルヘッドの argmax へ切り替える」．
+- **要レビュー（人間）**:
+  1. **B95 要レビュー 1〜3 は未決のまま継続**（配線可否・効果量の対外記述の方針・R-C の許容可否）．
+     特に R-C は「較正では是正できない」と実証されたため，B95 要レビュー 3 の判断（全体 +10.0pt と
+     引き換えに 2 ドメインの被覆が基準線を下回る状態を維持してよいか）が現実の選択になった．
+  2. **次レバーは rank_1 もヘッドが決める構成であり，実行時経路（`node.py` のルータ）との乖離が
+     さらに広がる**．オフラインで採用しても実機検証には配線が必須となるため，配線の可否判断を
+     先送りし続けるコストが上がっている点を確認いただきたい．
+  3. `results/iter62_multilabel_ranking_predictions.jsonl` と `results/iter62_stats.json` は Iter59〜61 の
+     先例に倣いコミットした．`models/dispatch_multilabel_head_iter62.joblib` は `.gitignore` 対象
+     （models/）のため未コミット，`results/iter59_query_embeddings.npz`（9.5MB）も B93 の判断を維持して
+     未コミット，`results/iter62_noop_check_iter61head.jsonl`（A8 の一時検証物）も未コミットとした．
+
 ## B95 [auto-decided 2026-09-19] Iter61 は adopted，Iter60 の効果を「汎化可能」へ格上げ・正式値を +10.0pt へ置換．次レバーは新設の multilabel_rank2_score_calibration
 
 - **状況**: Iter61（`multilabel_pair_allocation=uniform_three_per_pair`）は，Iter60 の留保 R-A

@@ -166,15 +166,27 @@ def _load_head(head_path: str) -> tuple[OneVsRestClassifier, list[str]]:
 def _head_scores(
     model: OneVsRestClassifier, classes: list[str], embedding: list[float]
 ) -> dict[str, float]:
-    """Per-domain independent sigmoid score (not renormalized across domains); see module docstring.
+    """Per-domain independent probability score (not renormalized across domains); see module docstring.
 
     Always keyed by `classes` (the domain-name list resolved by
     _load_head()), never by `model.classes_` directly -- for an
     MLB-based head, model.classes_ would be integer column indices, not
     domain names (see A6 below, which asserts this never regresses).
+
+    Uses predict_proba() rather than decision_function()+_sigmoid(), because
+    Iter62's CalibratedClassifierCV base estimator does not implement
+    decision_function() at all, so OneVsRestClassifier.decision_function()
+    (which only delegates when every wrapped estimator has it) raises
+    AttributeError (journal.md Iter62 investigation, reproduced on sklearn
+    1.9.0). For Iter59/60/61's uncalibrated OneVsRestClassifier(
+    LogisticRegression) heads this is a numerical no-op: multi-label OvR's
+    predict_proba() is NOT renormalized across classes to sum to 1 (unlike
+    the single-label multiclass case the module docstring above describes),
+    so predict_proba(x) == sigmoid(decision_function(x)) exactly (verified
+    in the Iter62 investigation, max abs diff == 0.0; also re-verified by
+    this iteration's A8 pre-check against the Iter61 head).
     """
-    logits = model.decision_function([embedding])[0]
-    probabilities = _sigmoid(np.asarray(logits))
+    probabilities = np.asarray(model.predict_proba([embedding])[0])
     return {domain: float(p) for domain, p in zip(classes, probabilities)}
 
 

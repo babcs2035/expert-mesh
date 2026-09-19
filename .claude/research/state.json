@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 62,
-  "iteration_name": "多ラベルヘッド得点のドメイン別較正による rank_2 偏りの是正",
+  "iteration": 63,
+  "iteration_name": "rank_1 の選択元を多ラベルヘッドの argmax へ切り替える",
   "phase": "investigate",
   "status": "running",
-  "current_lever": "multilabel_rank2_score_calibration",
+  "current_lever": "rank1_source",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1789763236,
-  "last_slack_ts": "1789767975.253389",
+  "updated_at": 1789790400,
+  "last_slack_ts": "1789781365.104179",
   "iteration_thread_ts": null,
   "notion_toggle_created": false,
-  "last_commit": "4c6fe50"
+  "last_commit": "4f33b26"
 }

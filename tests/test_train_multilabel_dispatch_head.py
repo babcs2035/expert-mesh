@@ -114,16 +114,39 @@ def test_covered_domain_pairs_counts_distinct_two_domain_combinations() -> None:
 def test_train_multilabel_ranking_head_fits_a_model_that_predicts_seen_multilabel_rows() -> None:
     """A model trained on separable multi-label data recovers both positive labels
     for a row it was trained on (sanity check that Y, not a 1D label array, is
-    actually reaching OneVsRestClassifier.fit())."""
+    actually reaching OneVsRestClassifier.fit()).
+
+    Iter62 (multilabel_rank2_score_calibration=per_domain_holdout_calibration)
+    wraps the base LogisticRegression in CalibratedClassifierCV(cv=_CALIBRATION_CV),
+    which raises ValueError unless every binary sub-problem's y has at least
+    _CALIBRATION_CV examples of each class (sklearn 1.9.0 requirement) -- hence
+    6 rows per cluster below (Iter59/60/61's fixture used 2 rows per cluster,
+    which is no longer sufficient)."""
     embeddings = [
         [1.0, 0.0],
+        [1.0, 0.05],
         [1.0, 0.1],
+        [1.0, -0.05],
+        [1.0, -0.1],
+        [1.0, 0.02],
         [0.0, 1.0],
+        [0.0, 1.05],
         [0.0, 1.1],
+        [0.0, 0.95],
+        [0.0, 0.9],
+        [0.0, 1.02],
         [1.0, 1.0],
         [1.0, 1.05],
+        [1.0, 0.95],
+        [1.0, 1.1],
+        [1.0, 0.9],
+        [1.0, 1.02],
     ]
-    labels = ["medical", "medical", "legal", "legal", ["legal", "medical"], ["legal", "medical"]]
+    labels = (
+        ["medical"] * 6
+        + ["legal"] * 6
+        + [["legal", "medical"]] * 6
+    )
     Y, mlb = build_multilabel_targets(labels)
 
     model = train_multilabel_ranking_head(embeddings, Y)
