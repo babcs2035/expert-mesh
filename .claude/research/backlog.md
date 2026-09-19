@@ -15,6 +15,40 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B99 [auto-decided 2026-09-19] Iter65 は rejected（405 行で頭打ち＋N5 の有意退行）で multilabel_synthetic_volume_dose_response をクローズ．「量」の変数は打ち止め．次レバーは新設の multilabel_training_mixture_ratio（本数を固定して質量比のみ Iter64 水準へ戻す）
+
+- **状況**: Iter65（`multilabel_synthetic_volume_dose_response=uniform_eighteen_per_pair`．
+  2 ドメイン合成訓練事例を全 45 ペア一律 9→18 件／ペア＝405→810 行）は，主基準 S5'' の
+  3 条件すべて（a 21/72=0.2917・b p=0.1237・c 12→24→21）が FAIL し，非退行も
+  N2' 0.573125・N5 0.563333 の 2 件が有意に FAIL した．事前登録の判定規則では
+  rejected 分岐 1（S5''-c かつ S5''-a の不成立）と分岐 3（N5<0.590）が同時に成立する．
+  併せて，config.yml の全 levers のうちオフラインで自律着手できる未試行の値が尽きたため，
+  次に何を試すかの決定が必要だった．
+- **自動選択**: (1) 判定を **rejected（確定）**とし本レバーをクローズ．config.yml の note と
+  journal「### 考察 (Iter65)」に機序を確定記録した．(2) **さらなる増量（36 件／ペア等）は
+  行わない**と決定．(3) SKILL.md 停止条件の選択肢 1 に従い，新レバー
+  **`multilabel_training_mixture_ratio = single_domain_rows_duplicated_x2`** を考案し
+  config.yml の levers 末尾へ追記した．合成側は Iter65 の 810 行を固定（再生成しない）し，
+  単一ドメイン訓練行を 2 重化して合成文の質量比のみを 51.9%→35.1%（Iter64 水準）へ戻す．
+  次イテレーション名は「合成文の質量比のみを Iter64 水準へ戻す（単一ドメイン行の2重化）」．
+- **根拠**: Iter64→65 は「合成文の本数（語彙的多様性）」と「陽性訓練行に占める質量比」を
+  同時に動かしており，N5 の有意な退行（p=0.0053，誤り先が共起ドメインへ集中）がどちらに
+  由来するかを分離できていない．本数を固定して質量比のみ戻せば，N5 が回復するか否かで
+  次の一手（用量反応の再開 / 2 ヘッド構成への移行）が一意に決まる．
+  `sample_weight` ではなく行の複製を用いるのは Iter32 で実測した
+  `class_weight='balanced'` × `sample_weight` の乗算結合を構造的に避けるため．
+  コストは 15 分程度・オフライン完結・スキーマ変更なしで可逆である．
+- **要レビュー**: (a) 「量」という変数を打ち止めにした判断（増分が 0 を跨ぎ N5 が有意退行
+  したことが根拠．生成品質の劣化は反証済みで「綺麗なデータで増やす」逃げ道はない）．
+  (b) 新レバーの設計（行の複製は `CalibratedClassifierCV(cv=5)` の fold を跨ぎ較正値が
+  楽観化しうるという既知の留保つき）．(c) **事実誤認の訂正**: Iter63/64/65 の計画節と
+  config.yml は多ラベルヘッドを「未較正 OvR」と記述してきたが，実装は Iter62（927e363）以降
+  `OneVsRestClassifier(CalibratedClassifierCV(..., method='sigmoid', cv=5))` で
+  **Platt 較正済み**である（3 イテレーションで同一のため比較の妥当性には影響しないが，
+  「ヘッド構造を疑う」方向を検討する際の前提が変わる）．(d) **R-F（実行時経路への配線が
+  7 イテレーション連続で未実施）**．本研究線のオフライン成果は実機での有効性を主張できず，
+  研究の結論を確定させる段階では人間判断を要する．
+
 ## B98 [auto-decided 2026-09-19] Iter64 は partial（非退行は全通・S5-b のみ検出力の壁で未達）で multilabel_synthetic_volume をクローズ．効果量の正式値を +20.0pt へ更新，R-C を格下げ．次レバーは同一変数の用量反応（18 件／ペア）
 
 - **状況**: Iter64（`multilabel_synthetic_volume=uniform_nine_per_pair`．2 ドメイン合成訓練事例を
