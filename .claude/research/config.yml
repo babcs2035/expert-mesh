@@ -11,6 +11,14 @@ repo_name: expert-mesh
 # ノード拡張の活用方向はユーザー承認済み（新規専門ドメインの追加，research_frontier参照）．
 # Iteration 2（routing_method）は単一レバー原則を守るため現行3ノード構成のまま実施し，
 # ノード拡張は別イテレーションとして着手する．
+# 【2026-09-19 ユーザー指示（恒久的な運用ルール）】本体の実験（実機ノード wafl500〜509 を
+# 使った実際のルーティング1600問本走）以外の処理（合成データ生成のLLM呼び出し，埋め込み計算，
+# judge_model呼び出し等）は，実験ドメインノード（wafl500〜509）ではなく専用の制御ホスト
+# wafl-ctrl5（Hostname 192.168.15.10，User denjo，ProxyJump wafl 経由，~/.ssh/config 定義済み，
+# GPU: NVIDIA GeForce RTX 3060 12GB）を使うこと．Iter64 でこの方針に合わせて wafl-ctrl5 上に
+# Ollama（Docker，`ollama/ollama:latest`イメージ，`--runtime nvidia`，他ノードと同じ
+# docker-compose.gpu.ymlのGPU構成を踏襲）をセットアップ済み（詳細はjournal.md「Iteration 64
+# 実行済み」節参照）．今後のイテレーションでも本体実験以外はwafl-ctrl5を優先すること．
 tasks:
   setup:   "mise run setup"
   deploy:  "mise run deploy"
@@ -1086,7 +1094,84 @@ levers:
             量を増やすとノイズも増える点に注意），(ii) 複合設問データセット自体の再設計
             （research_frontier 相当・人間判断），(iii) 埋め込み表現の適応
             （`embedding_adaptation` は Iter40〜43 で全 4 値 rejected だが，当時の目的は
-            education_recall 改善であり，多ラベル 2 ドメイン性という別目的での再訪は別物である）．"}
+            education_recall 改善であり，多ラベル 2 ドメイン性という別目的での再訪は別物である）．
+            **[2026-09-19 Iter64 計画フェーズで確定（暫定案→確定．以後この閾値は緩めない）]**
+            journal.md 『### 計画 (Iter64)』に事前登録した．(a) 成功条件 S1（200 ペア exact McNemar
+            p<0.05）・S2（recall ≧0.510）・S3（mean_dispatch=2.000000）・S4（対 Iter63 予測の
+            不一致行 >0）は暫定案どおり閾値無変更で確定．(b) **S5 は 2 つの副条件として確定**:
+            S5-a（複合 100 行の rank_1 正解行に占める rank_2 も正解した行の割合 > 17/61=0.2787．
+            分母は Iter64 実測で可変）と S5-b（複合 100 行の『2 ドメインとも被覆』の対 Iter63
+            対応あり exact McNemar で p<0.05 かつ被覆行数 >17）．adopted には両方の充足を要し，
+            片方のみなら partial．(c) 非退行は N2'（≧0.5875．**`selected_domain` を新 rank_1 で
+            上書きした後の値**で算出）・N3（≧8/30）・N5（≧0.590）・**N6'（education ≧3/20 かつ
+            medical ≧18/28＝Iter63 の実測水準）**で確定．(d) 実装仕様: コード変更ゼロ
+            （`--per-pair 9 --per-pair-legal 9` と出力パス名のみ変更），出力は
+            `data/classifier_train_multidomain_iter64.jsonl` /
+            `models/dispatch_multilabel_head_iter64.joblib` /
+            `results/iter64_multilabel_ranking_predictions.jsonl` / `results/iter64_stats.json`，
+            ヘッド再訓練は Iter61 の手順を踏襲，採点は `--rank1-source head_argmax` を主系に固定，
+            統計は `compute_iter59_ranking_stats.py` 無改造（N1／N2 の `exact_match` は記録のみ）．
+            (e) **A8'（新設）**: 生成行数が 360 行（目標 405 の 90%）未満なら実験を中止して原因を
+            調査する（下方修正した行数で採点を進めない）．
+            **[2026-09-19 Iter64 reflector 追記・本レバーはクローズ]** 判定は **partial**
+            （事前登録の第 2 分岐＝『S5-a 充足・S5-b 不成立（p≧0.05）だが被覆行数 >17 かつ S2 充足』に
+            機械的に該当）．実測は S1 p=1.65e-06，S2 recall **0.545**（閾値 0.510 超），
+            S3 mean_dispatch=2.000000，S4 対 Iter63 不一致 987 行，**S5-a 24/72=0.3333 > 0.2787（充足）**，
+            **S5-b は被覆 24>17 を満たすが p=0.167（exact）で p 側が未達＝不成立**．
+            非退行は N2' 0.599375・N3 16/30・N5 0.591333・N6' education 6/20・medical 20/28 で
+            **4 件すべて充足**（Iter63 で不成立だった education は 3/20→6/20 に回復）．
+            values 単一値のため試し切り＝クローズ．
+            **確定した機序**: S5-b の不成立はサンプルサイズ起因の検出力不足で説明できる
+            （discordant=19，改善 13／悪化 6．この改善比 0.68 で p<0.05 に達するには discordant≧30＝
+            複合行 158 行相当が必要だが評価集合の複合行は 100 行固定）．同一指標は基準線比 p=1.94e-05・
+            Iter61 比 p=0.0118 で有意であり，指標が動いていないのではない．最も明確な信号は
+            **rank_1 正解と rank_2 正解の負の関連の消失**（Fisher p: 基準線 1e-4 → Iter61 0.0023 →
+            Iter63 0.0211 → **Iter64 0.2538**）で，rank_2 単独の正解行数は 37→37 と横ばいのまま
+            『rank_1 が当たった行でも 2 つ目を当てる』同時性＝2 ドメイン性が伸びた．
+            echo 混入率は 0.74%→1.23% と率では横ばいで，**増量がノイズを相対的に増やした証拠はない**．
+            詳細は journal.md 『### 考察 (Iter64)』・backlog B98．"}
+
+  # --- 【2026-09-19 Iter64 reflector 新設・backlog B98】上記 `multilabel_synthetic_volume` は
+  #     partial（S5-b のみ検出力の壁で未達）でクローズした．**同一変数の第 2 用量**として
+  #     用量反応を測る．目的は「量で 2 ドメイン性を学べるか」を 135/405/810 行の 3 点の単調性で
+  #     検証し，1 反復増分を n=100 行で有意にするという構造的に不可能な条件（留保 R-H）を回避すること ---
+  - {name: multilabel_synthetic_volume_dose_response, values: [uniform_eighteen_per_pair],
+     note: "[2026-09-19 Iter64 reflector / backlog B98] **これは `multilabel_synthetic_volume` と
+            同一の変数（2 ドメイン合成訓練事例の件数）の第 2 用量であり，機序の異なる別レバーではない．**
+            **単一レバー**: 全 45 ペア一律で 9 件／ペア → **18 件／ペア**（405 行 → 810 行）．
+            `scripts/generate_multidomain_training_examples.py --per-pair 18 --per-pair-legal 18`
+            で新規生成し `data/classifier_train_multidomain_iter65.jsonl` へ出力する
+            （**両引数を同値にして『配分の決定』を存在させない**＝R-A 型リークの構造的回避．Iter64 と同じ）．
+            **固定する構成**: 生成プロンプト・F1〜F4・temperature=0.8・生成モデル・ペア集合・A7 閾値・
+            ヘッド種別（未較正 OvR ロジスティック回帰）・単一ドメイン訓練データ
+            `data/classifier_train.jsonl`・埋め込み `nomic-embed-text` とキャッシュ
+            `results/iter59_query_embeddings.npz`・基準線 `results/20260918_202613/results.jsonl`・
+            採点／統計スクリプト・`--rank1-source head_argmax`．コード変更はしない．
+            **成功条件（暫定案．計画フェーズで事前登録して確定すること）**:
+            (a) S1 全体 200 ペア exact McNemar（対基準線）p<0.05．
+            (b) S2 `compound_domain_set_recall` ≧ 0.565（Iter64 の 0.545 を点推定で +2.0pt 以上上回る）．
+            (c) S3 mean_dispatch=2.000000．(d) S4 対 Iter64 予測の不一致行 >0．
+            (e) **S5''（本レバー固有の主基準）は，Iter64 の S5-b が陥った検出力の壁（R-H）を避けるため
+            『対 Iter64 の 1 反復増分』だけに置かないこと．**具体的には S5''-a（複合 100 行の
+            rank_1 正解行に占める rank_2 も正解した行の割合が Iter64 の 24/72=0.3333 を上回る），
+            S5''-b（**被覆 2 個行の対 Iter61（12/100）対応あり exact McNemar で p<0.05**＝検出力のある
+            参照点に置き換える），S5''-c（135/405/810 行の 3 点で被覆 2 個行数が**単調増加**する）を
+            計画フェーズで組み立てること．
+            **非退行（暫定案）**: **N5 の下限 0.590 は据え置く（留保 R-G．Iter64 実測 0.5913 で
+            余裕は 2 行分しかないが，これを理由に緩めてはならない）**．N2' ≧0.5875，N3 ≧8/30，
+            N6'' は Iter64 実測（education ≧6/20・medical ≧18/28）を下限とするか Iter63 水準を
+            維持するかを計画フェーズで決め，一度決めたら動かさない．
+            **想定コスト（Iter64 の実測基準．Iter61 の実績は使わないこと）**: wafl-ctrl5 で
+            生成 405 行＝7 分の線形外挿で 810 行＝約 15 分，ヘッド再訓練（1427+810 行の埋め込み）
+            約 20 分，採点・統計 約 2 分＝**合計 40 分程度**．オフライン完結・`config.yaml` の
+            スキーマ変更なし・実機 1600 問本走なしのため自律着手してよい．
+            **実行基盤**: 本ファイル冒頭の恒久ルールどおり **wafl-ctrl5 に一本化**する
+            （SSH ローカルフォワード．Iter64 は 11499 番を使用）．
+            **不成立の場合**: 810 行でも被覆 2 個行が頭打ち，または N5 が 0.590 を割るなら
+            『量では 2 ドメイン性を学べない／量は単一ドメイン判別とトレードオフである』と結論し，
+            (i) 生成文の品質改善（echo 除去フィルタ），(ii) 埋め込み表現の適応（`embedding_adaptation`
+            の別目的での再訪），(iii) 複合設問データセット自体の再設計（research_frontier 相当・
+            人間判断）の順に移る．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
