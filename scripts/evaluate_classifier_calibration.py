@@ -67,12 +67,22 @@ def _compute_prediction_set(
     probabilities: np.ndarray,
     cp_data: dict,
     confidence_level: float = 0.90,
+    qhat_source: str = "all",
 ) -> tuple[list[int], int]:
     """Compute a conformal prediction set using cumulative APS method.
 
     Calibration: for each (sample, class) pair, compute nonconformity score
     S(x, j) = 1 - cumulative_prob_up_to_class_j (classes sorted by prob desc).
-    q_hat = (1-alpha) quantile of ALL calibration scores.
+    q_hat is the (1-alpha) quantile of a calibration score population, whose
+    choice is controlled by qhat_source:
+    - "all": ALL (sample, class) nonconformity scores (n_cal * n_classes
+      values). This is the original Iter29-56 implementation. It does NOT
+      match the standard APS calibration procedure (Romano et al., 2020,
+      "Classification with Valid and Adaptive Coverage sets"), which defines
+      q_hat over TRUE-CLASS scores only; using all scores was found (Iter69)
+      to under-cover its nominal confidence level.
+    - "true_class": only the TRUE-CLASS nonconformity score for each
+      calibration sample (n_cal values), per the standard APS procedure.
     Prediction set: include classes in decreasing probability order
     while score (1 - cumsum) <= q_hat.
 
@@ -81,12 +91,18 @@ def _compute_prediction_set(
 
     Returns (list of class indices in prediction set, set size).
     """
-    alpha = 1.0 - confidence_level
-    all_scores = cp_data["all_scores"]  # shape=(n_cal, n_classes)
+    if qhat_source not in ("all", "true_class"):
+        raise ValueError(f"qhat_source must be 'all' or 'true_class', got {qhat_source!r}")
 
-    # q_hat = (1-alpha) quantile of ALL nonconformity scores.
-    # Using all scores (not just true-class) ensures proper coverage.
-    flat_scores = all_scores.flatten()
+    alpha = 1.0 - confidence_level
+    if qhat_source == "true_class":
+        flat_scores = cp_data["true_class_scores"]  # shape=(n_cal,)
+    else:
+        all_scores = cp_data["all_scores"]  # shape=(n_cal, n_classes)
+        flat_scores = all_scores.flatten()
+
+    # q_hat = (1-alpha) quantile of the selected nonconformity score population,
+    # with the standard finite-sample correction (1-alpha)*(1+1/n).
     target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(flat_scores)))
     q_hat = float(np.quantile(flat_scores, target, method="higher"))
 
@@ -121,6 +137,7 @@ async def predict_calibrated_rows(
     conformal_prediction: bool = False,
     calibration_dataset_path: str | None = None,
     confidence_level: float = 0.90,
+    qhat_source: str = "all",
 ) -> list[dict]:
     """Recompute (selected_domain, confidence) for every dataset row via the calibrated classifier.
 
@@ -206,7 +223,30 @@ async def predict_calibrated_rows(
                 cumsum += probs[idx]
                 all_scores[i, idx] = 1.0 - cumsum
 
-        cp_data = {"all_scores": all_scores}
+        # True-class-only nonconformity scores (n_cal values), used by the
+        # standard APS calibration procedure (qhat_source="true_class").
+        # Iter69: the pre-existing "all" population (n_cal * n_classes scores)
+        # was found to under-cover its nominal confidence level.
+        true_class_scores = np.array([all_scores[i, labels[i]] for i in range(n_cal)])
+
+        cp_data = {"all_scores": all_scores, "true_class_scores": true_class_scores}
+
+        # Print which q_hat population is actually used, and its resulting
+        # value, so a mis-wired qhat_source is visible instead of silently
+        # falling back to the default (Iter69: past no-op failures were only
+        # caught by an independent post-hoc recomputation).
+        alpha = 1.0 - confidence_level
+        if qhat_source == "true_class":
+            _diag_scores = true_class_scores
+        else:
+            _diag_scores = all_scores.flatten()
+        _diag_target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(_diag_scores)))
+        _diag_q_hat = float(np.quantile(_diag_scores, _diag_target, method="higher"))
+        print(
+            f"[evaluate_classifier_calibration] qhat_source={qhat_source} "
+            f"q_hat={_diag_q_hat:.4f} population_size={len(_diag_scores)}",
+            file=sys.stderr,
+        )
 
     if fine_tuned_embed_model is not None:
         local_model = SentenceTransformer(
@@ -242,7 +282,7 @@ async def predict_calibrated_rows(
             # Compute conformal prediction set (uses original predict_proba probabilities)
             if conformal_prediction and cp_data is not None:
                 pred_set, set_size = _compute_prediction_set(
-                    probabilities, cp_data, confidence_level
+                    probabilities, cp_data, confidence_level, qhat_source=qhat_source
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -277,7 +317,7 @@ async def predict_calibrated_rows(
             # Compute conformal prediction set (uses original predict_proba probabilities)
             if conformal_prediction and cp_data is not None:
                 pred_set, set_size = _compute_prediction_set(
-                    probabilities, cp_data, confidence_level
+                    probabilities, cp_data, confidence_level, qhat_source=qhat_source
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -307,6 +347,7 @@ async def _run(
     conformal_prediction: bool = False,
     calibration_dataset_path: str | None = None,
     confidence_level: float = 0.90,
+    qhat_source: str = "all",
 ) -> None:
     dataset = _read_jsonl(dataset_path)
     classifier = load_domain_classifier(classifier_path)
@@ -319,6 +360,7 @@ async def _run(
         conformal_prediction=conformal_prediction,
         calibration_dataset_path=calibration_dataset_path,
         confidence_level=confidence_level,
+        qhat_source=qhat_source,
     )
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -384,6 +426,14 @@ def main() -> None:
         help="Confidence level for conformal prediction coverage guarantee (default: 0.90)",
     )
     parser.add_argument(
+        "--qhat-source",
+        choices=["all", "true_class"],
+        default="all",
+        help="Nonconformity score population used to compute q_hat: 'all' (n_cal*n_classes "
+             "scores, the original implementation) or 'true_class' (n_cal scores, the "
+             "standard APS calibration procedure). Default 'all' preserves prior behavior.",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write the calibrated-side JSONL to (default: stdout)",
@@ -405,6 +455,7 @@ def main() -> None:
                 conformal_prediction=args.conformal_prediction,
                 calibration_dataset_path=args.calibration_dataset,
                 confidence_level=args.confidence_level,
+                qhat_source=args.qhat_source,
             )
         )
     else:
@@ -423,6 +474,7 @@ def main() -> None:
                     conformal_prediction=args.conformal_prediction,
                     calibration_dataset_path=args.calibration_dataset,
                     confidence_level=args.confidence_level,
+                    qhat_source=args.qhat_source,
                 )
             )
 

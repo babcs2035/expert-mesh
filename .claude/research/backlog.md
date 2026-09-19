@@ -15,6 +15,33 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B105 [auto-decided 2026-09-19] Iter69 は rejected 確定・`routing_confidence_calibration_method` クローズ．新レバー `conformal_set_construction=corrected_aps` を config へ追加し Iter70 の単一レバーとする
+
+- **状況**: Iter69（`conformal_prediction_true_class_qhat`）は成功条件 3 指標の AND が不成立で
+  rejected．これで本レバーは両値とも試行済みとなり，config の levers は**全て試行済み**になった．
+  SKILL.md の停止条件に従い，(1) 学びから新レバーを考案できるか，(2) できなければ調査フェーズから
+  再探索，(3) いずれも不可なら converged，の順で次の一手を決める必要があった．
+- **自動選択**: **停止条件 1 を適用**し，新レバー
+  **`conformal_set_construction: [corrected_aps]`** を config.yml（`routing_confidence_calibration_method`
+  の直下）へ追加した．Iter70 の単一レバーはこれとする．iteration_name 案:
+  **「conformal予測集合の構成規則をAPS標準へ修正して被覆を再測定」**．`status` は `running` を維持．
+- **根拠**: Iter69 の分析(解釈) §4-5 が，(a) 棄却の真因が
+  `scripts/evaluate_classifier_calibration.py:_compute_prediction_set()` の集合構成が二値ゲートへ
+  縮退しているという**レバーとは独立の既存バグ**であること，(b) 同一データで標準 APS を事後計算すると
+  coverage 0.87 が mean_set_size≈3.3，0.90 が ≈4.0 で到達し**成功条件の帯に入りうる**こと，
+  (c) オフライン完結・分類器再訓練なし・`config.yaml` スキーマ変更なしで自律着手できること，
+  を同時に示している．これは「有望な次レバーを自分で考案できる」条件を満たす典型例である．
+  なお，このレバーは Iter56 以来の「10 クラス APS は方法的限界」という記録が誤りを含んでいた
+  ことの決着でもあり，成立でも不成立でも確定的な結論が得られる（情報量がゼロにならない）．
+- **要レビュー**: (1) 実装欠陥の修正を「バグ修正」ではなく「レバー」として立てた点の是非
+  （既定値は現行の退化した挙動を温存し，Iter56/69 出力のバイト単位再現を後方互換テストで担保する
+  設計としたため，過去の記録は無効化されない）．(2) 事前登録した帯（coverage 0.87-0.93 ∧
+  mean_set_size 1.5-4.0）を Iter69 と同一にした点（実際の OOF 校正では動作点が集合の大きい側へ
+  ずれるため，上限 4.0 で落ちる可能性が相応にある．帯を緩めるなら着手前に指示されたい）．
+  (3) **B104 を `blocked` にしなかった判断**: Iter69 の結果は A1/A2 の判断材料に直接ならず，
+  人間へ提示する情報は Iter68 時点から実質不変のため再 @mention せず，かつ自律着手できる
+  新レバーがあるため研究サイクルは停止しない，とした．
+
 ## B104 [needs-human 2026-09-19] R-H（複合評価集合 n=100 の検出力）の解消可否と R-F（実行時経路への配線，11 反復目の見送り）— Slack で `<@U055AN8LWF6>` へ mention 要
 
 - **状況**: Iter63〜68 の 6 反復で rank_2 ヘッドの学習データ側の変数（量・混ぜ方・構造・質）を

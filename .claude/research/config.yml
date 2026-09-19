@@ -758,7 +758,72 @@ levers:
             **計画フェーズへの申し送り**: 成功条件の `fallback_rate` は Iter28 の fallback 廃止
             （confidence_threshold=0.0）により常に 0 で機能しないため外し，**ECE・coverage・
             mean_set_size の 3 つで事前登録し直すこと**．予測集合の rank_2 候補源への流用は
-            本イテレーションのレバーに含めない（mean_set_size 7.31 は top-2 dispatch には大きすぎる）．"}
+            本イテレーションのレバーに含めない（mean_set_size 7.31 は top-2 dispatch には大きすぎる）．
+            [2026-09-19 Iter69 reflector追記] `conformal_prediction_true_class_qhat` は **rejected** 確定．
+            実測（`results/20260919_202700/`，n=1600）は coverage=0.6556（合格帯 0.87-0.93 の下限に対し
+            -21.44pt，二項 SE=0.0119 の 18 倍で有意）・mean_set_size=4.0319（上限 4.0 を +0.0319 超過）・
+            ECE=0.0630（合格）で，AND 条件不成立．レバーの発火は 3 系統で確認済み
+            （母集団 14,270 vs 1,427 の stderr 診断・q_hat 0.1133 vs 0.3865・set_size 変化 449/1600 行，
+            McNemar p=8.08e-28）であり，**d0004 §4 の『実験不成立』には該当しない有効な測定**である．
+            **これで本レバーは両値とも試行済みとなり，レバークローズを確定する**．
+            以下 2 点は将来の再解釈で同じ誤りが再生産されないよう必ず残すこと:
+            (1) **Iter56 journal の『q_hat=0.3865』は誤記**である．本実行 A（`--qhat-source all`）の
+            出力は Iter56 出力と md5 一致（`2e0a1533a754e5f853d429ef57836616`）で，そこから逆算した
+            当時の q_hat は (0.1130, 0.1136] に確定する（実測 0.1133）．0.3865 は真クラス版の q_hat，
+            すなわち本イテレーションの本実行 B の値である．Iter56 が挙げた真クラス版の見積り
+            0.5956 とそれに基づく修正シミュレーション（coverage=0.8025・mean_set_size=7.31）も
+            この誤記の連鎖であり，実測とは一致しない．なお Iter56 の coverage=0.6056 は
+            `any(d in prediction_set for d in expected_domains)` 定義，Iter69 の 0.5988 は
+            `expected_domains[0] in prediction_set` 定義による**被覆の定義差**（同一ファイル・差 11 行）で，
+            退行ではない．top1_accuracy は A・B とも 0.603125．
+            (2) **棄却理由は『conformal prediction という手法が本分類器に不適』ではない**．
+            `scripts/evaluate_classifier_calibration.py:_compute_prediction_set()` の集合構成が
+            退化しており（確率降順走査で `score = 1 - cumsum` は単調**減少**するのに『score > q_hat で
+            break』する設計のため，判定が実質 `1 - p_max ≤ q_hat` の二値ゲートに縮退．set_size は
+            1 か 10 しか取らず，A・B とも中間サイズ 0 件），APS として機能していなかった．
+            この実装欠陥は**本レバー（q_hat の母集団）とは独立の既存バグ**であり，Iter56 の結論も
+            同じ欠陥の上に乗っていた．q_hat を掃引しても coverage 0.87 到達には mean_set_size≈8.3 を
+            要し，成功条件の両立は本実装のままでは数学的に不可能である．修正実装での追試は
+            別レバー `conformal_set_construction` として切り出した（本ファイル直下）．"}
+
+  # --- 【Iter69 で新設】conformal prediction の集合構成そのものを修正する ---
+  - {name: conformal_set_construction, values: [corrected_aps],
+     note: "[2026-09-19 Iter69 reflector 新設 / backlog B105] Iter69 が特定した実装欠陥
+            （`scripts/evaluate_classifier_calibration.py:_compute_prediction_set()` が二値ゲートに
+            縮退しており APS として機能していない．詳細は上の `routing_confidence_calibration_method`
+            note (2)）を，標準的な APS の集合構成へ修正したうえで被覆を再測定するレバーである．
+            **単一レバー原則**: 動かすのは集合構成規則のみ．q_hat の母集団は Iter69 で確定した
+            true_class 版に固定し，分類器・埋め込み・argmax・confidence・`config.yaml` は一切変更しない
+            （Iter69 の実測で q_hat の切替が argmax/confidence/probabilities に影響しないことは
+            1,600 行すべてで確認済み）．
+            **corrected_aps の定義**: 確率降順に走査し，**累積確率が閾値（校正で定めた q_hat）に
+            達するまで**クラスを集合に加える（Romano et al., 2020）．現行実装の `break` 条件の
+            符号誤りを正し，集合サイズが 1〜10 の中間値を取れるようにする．
+            **成功条件（事前登録）**: Iter69 と同一の 3 指標・同一の帯を用いる．
+            **coverage 0.87 ≤ x ≤ 0.93 かつ 1.5 ≤ mean_set_size ≤ 4.0 かつ ECE ≤ 0.0680**
+            （ECE は confidence を変えないため 0.0630 で不変のはず＝同一性アンカー）．
+            **成立しうる帯があることの事前根拠（Iter69 §5，評価集合自身で校正した楽観値）**:
+            閾値 0.80 → coverage 0.8544 / size 3.0587，0.90 → 0.9181 / 4.3444，0.95 → 0.9463 / 5.6031．
+            補間で coverage 0.87 は size≈3.3，0.90 は ≈4.0．top-k 正解率は
+            top1=0.5956 / top2=0.7450 / top3=0.8237 / top4=0.8831 / top5=0.9219 であり，
+            分類器性能の観点からは被覆 0.87〜0.90 に必要な集合サイズの下限が 3〜4 である．
+            **ただしこれは楽観値**であり，実際の校正（`classifier_train.jsonl` の OOF，OOF accuracy
+            57.32% は評価集合 top1 59.56% より低い）では q_hat が大きくなり動作点は集合が大きい側へ
+            ずれる．**mean_set_size が上限 4.0 を超えて rejected になる可能性は十分にある**．
+            **非退行条件**: `selected_domain`・`confidence`・`probabilities` が Iter69 出力
+            （`results/20260919_202700/Iter69_conformal_qhat_true_class.jsonl`）と 1,600 行すべてで
+            一致すること（許容差 1e-9）．集合構成は argmax に影響してはならない．
+            **到達コードパス**: CLI 直接起動のオフライン評価のみ（`config.yaml` 非経由，実機ノード不使用，
+            埋め込み計算のみ ollama）．`--qhat-source true_class` に加えて集合構成を切り替える CLI
+            フラグを 1 つ足す形が自然．既定値は現行挙動（退化版）を温存し，Iter56/69 の出力が
+            バイト単位で再現できることを後方互換テストで確認すること．
+            **コスト**: 1 実行 10〜30 分・GPU 実機占有なし・分類器再訓練なし．
+            **スコープ外**: 予測集合の rank_2 候補源への流用は本レバーに含めない
+            （mean_set_size が 4 前後まで下がれば top-2 dispatch への流用が初めて検討可能になるが，
+            それは採択後の別レバーとする）．
+            **不成立の場合**: 修正実装でも成功条件が両立しないなら，conformal prediction は
+            『本分類器の性能（top1 59.56%・10 クラス）では被覆保証と集合サイズを両立できない』という
+            **手法的限界**として結論でき，Iter56 以来の系列を確定的に閉じてよい．"}
 
   # --- 【3番目・要ユーザー確認】複合ドメイン compound_domain_set_recall の改善 ---
   - {name: dispatch_policy, values: [adaptive_confidence_gap],
