@@ -10,9 +10,9 @@
   "next_iteration_name": "rank_2訓練データへのecho除去フィルタ適用",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1789785734,
+  "updated_at": 1789806078,
   "last_slack_ts": "1789804052.110569",
   "iteration_thread_ts": "1789804312.969669",
   "notion_toggle_created": true,
-  "last_commit": "d6446b8"
+  "last_commit": "0574fe5"
 }
