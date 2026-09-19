@@ -1040,6 +1040,12 @@ R-A 型リークは構造的に生じない．
 （見出しの欠落なし）．`journal_retention: 3` に従い `rotate_journal.sh` を実行し，Iteration 60 の
 ブロックを `journal_archive.md` へ移した．
 
+本イテレーションのコミット: **c1d1116**（`scripts/evaluate_dispatch_candidate_ranking.py`・
+`tests/test_evaluate_dispatch_candidate_ranking.py`・`results/iter63_multilabel_ranking_predictions.jsonl`・
+`results/iter63_stats.json`・`.claude/research/` 配下 5 ファイル）．作業ツリーに残る
+`config.yaml`（`embed_node_host` 変更）と `results/iter45_preliminary/logs/wafl*/expert-mesh.log`
+は本イテレーションと無関係のため触れず，コミットに含めていない．
+
 ## Iteration 62: 多ラベルヘッド得点のドメイン別較正による rank_2 偏りの是正
 
 ### 調査 (Iter62)
