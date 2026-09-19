@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 64,
-  "iteration_name": "2ドメイン合成訓練事例の一律増量（3→9件/ペア）",
-  "phase": "reflect",
+  "iteration": 65,
+  "iteration_name": "2ドメイン合成訓練事例の用量反応（9→18件/ペア）",
+  "phase": "investigate",
   "status": "running",
-  "current_lever": "multilabel_synthetic_volume=uniform_nine_per_pair",
+  "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1789785734,
-  "last_slack_ts": "1789788929.666629",
-  "iteration_thread_ts": "1789785453.215419",
-  "notion_toggle_created": true,
-  "last_commit": "c1d1116"
+  "last_slack_ts": "1789797711.694359",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
+  "last_commit": "afb7985"
 }
