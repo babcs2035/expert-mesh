@@ -1,16 +1,18 @@
 {
   "repo": "expert-mesh",
-  "iteration": 66,
-  "iteration_name": "合成文の質量比のみをIter64水準へ戻す（単一ドメイン行の2重化）",
+  "iteration": 67,
+  "iteration_name": "rank_1を単一ドメイン分類器に戻す2ヘッド構成",
   "phase": "reflect",
   "status": "running",
   "last_judgment": "partial",
-  "current_lever": "multilabel_training_mixture_ratio=single_domain_rows_duplicated_x2",
+  "current_lever": "multilabel_head_architecture=two_head_rank1_single_domain_classifier",
+  "next_lever": "multilabel_synthetic_data_quality=echo_filtered_synthetic_rows",
+  "next_iteration_name": "rank_2訓練データへのecho除去フィルタ適用",
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1789785734,
-  "last_slack_ts": "1789803658.903819",
-  "iteration_thread_ts": "1789801736.674859",
+  "last_slack_ts": "1789804052.110569",
+  "iteration_thread_ts": "1789804312.969669",
   "notion_toggle_created": true,
-  "last_commit": "73a0e3a"
+  "last_commit": "d6446b8"
 }
