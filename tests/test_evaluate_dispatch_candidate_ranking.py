@@ -1,6 +1,7 @@
 """Tests for scripts/evaluate_dispatch_candidate_ranking.py's dual-format head loading
-(Iter59 bare-estimator heads vs Iter60 MultiLabelBinarizer-based dict-payload heads)
-and the Iter60 no-op guards (A5/A6/N5).
+(Iter59 bare-estimator heads vs Iter60 MultiLabelBinarizer-based dict-payload heads),
+the Iter60 no-op guards (A5/A6/N5), and the Iter63 rank1_source modes (build_new_rows'
+baseline vs head_argmax rank_1 selection, A9, and the S4 rank1_change_count report).
 """
 
 import joblib
@@ -10,11 +11,16 @@ from sklearn.multiclass import OneVsRestClassifier
 from sklearn.preprocessing import MultiLabelBinarizer
 
 from scripts.evaluate_dispatch_candidate_ranking import (
+    _RANK1_SOURCE_BASELINE,
+    _RANK1_SOURCE_HEAD_ARGMAX,
     _assert_head_scores_are_domain_names,
+    _assert_rank1_matches_head_argmax,
     _compute_a5_iter59_disagreement,
+    _compute_rank1_change_count,
     _compute_single_domain_argmax_accuracy,
     _head_scores,
     _load_head,
+    build_new_rows,
 )
 
 _TOY_EMBEDDINGS = [
@@ -165,3 +171,90 @@ def test_compute_a5_iter59_disagreement_counts_rank2_mismatches(tmp_path) -> Non
     result = _compute_a5_iter59_disagreement(new_rows, str(iter59_path))
 
     assert result == {"n_rows": 2, "mismatches": 1, "mismatch_rate": 0.5}
+
+
+def test_build_new_rows_defaults_to_baseline_rank1_and_verbatim_selected_domain() -> None:
+    """rank1_source='baseline' (the default): rank_1 and selected_domain are copied
+    through from the baseline row unchanged, matching Iter59-62 behavior (A10)."""
+    model = _fit_iter59_style_head()
+    classes = list(model.classes_)
+    baseline_rows = [
+        {
+            "id": "r1",
+            "expected_domains": ["legal"],
+            "selected_domain": "legal",
+            "dispatched_domains": ["legal", "education"],
+        }
+    ]
+    # A medical-like embedding, deliberately disagreeing with the baseline's
+    # rank_1="legal", so this test also proves baseline mode ignores head_scores
+    # for rank_1 (unlike head_argmax mode, tested below).
+    embeddings_by_id = {"r1": [1.0, 0.0, 0.0]}
+
+    new_rows = build_new_rows(
+        baseline_rows, model, classes, embeddings_by_id, rank1_source=_RANK1_SOURCE_BASELINE
+    )
+
+    assert new_rows[0]["dispatched_domains"][0] == "legal"
+    assert new_rows[0]["selected_domain"] == "legal"
+
+
+def test_build_new_rows_head_argmax_mode_overrides_rank1_and_selected_domain() -> None:
+    """rank1_source='head_argmax': rank_1 becomes argmax(head_scores) instead of the
+    baseline's rank_1, and selected_domain is overwritten to match (journal.md Iter63
+    plan decision 3 -- without this, compute_top1_accuracy() would not exercise the lever)."""
+    model = _fit_iter59_style_head()
+    classes = list(model.classes_)
+    baseline_rows = [
+        {
+            "id": "r1",
+            "expected_domains": ["legal"],
+            "selected_domain": "legal",
+            "dispatched_domains": ["legal", "education"],
+        }
+    ]
+    embeddings_by_id = {"r1": [1.0, 0.0, 0.0]}  # medical-like
+
+    new_rows = build_new_rows(
+        baseline_rows, model, classes, embeddings_by_id, rank1_source=_RANK1_SOURCE_HEAD_ARGMAX
+    )
+
+    expected_argmax = max(new_rows[0]["head_scores"], key=new_rows[0]["head_scores"].get)
+    assert new_rows[0]["dispatched_domains"][0] == expected_argmax
+    assert new_rows[0]["selected_domain"] == expected_argmax
+    # rank_2 must still exclude the (possibly new) rank_1, never duplicate it.
+    assert new_rows[0]["dispatched_domains"][1] != expected_argmax
+
+
+def test_assert_rank1_matches_head_argmax_passes_when_rank1_is_the_argmax() -> None:
+    """A9 passes when every row's rank_1 equals argmax(head_scores)."""
+    new_rows = [
+        {"id": "r1", "dispatched_domains": ["medical", "legal"], "head_scores": {"legal": 0.1, "medical": 0.9}},
+    ]
+
+    _assert_rank1_matches_head_argmax(new_rows)
+
+
+def test_assert_rank1_matches_head_argmax_rejects_mismatch() -> None:
+    """A9 must catch the case build_new_rows() regresses to a rank_1 not actually
+    equal to argmax(head_scores) while still running in head_argmax mode."""
+    new_rows = [
+        {"id": "r1", "dispatched_domains": ["legal", "medical"], "head_scores": {"legal": 0.1, "medical": 0.9}},
+    ]
+
+    with pytest.raises(AssertionError, match="A9"):
+        _assert_rank1_matches_head_argmax(new_rows)
+
+
+def test_compute_rank1_change_count_counts_rank1_mismatches() -> None:
+    """S4: counts rows where the new rank_1 differs from --baseline's rank_1 (non-fatal report)."""
+    baseline_rows = [
+        {"id": "r1", "dispatched_domains": ["legal", "education"]},
+        {"id": "r2", "dispatched_domains": ["medical", "education"]},
+    ]
+    new_rows = [
+        {"id": "r1", "dispatched_domains": ["medical", "legal"]},  # changed
+        {"id": "r2", "dispatched_domains": ["medical", "legal"]},  # unchanged
+    ]
+
+    assert _compute_rank1_change_count(baseline_rows, new_rows) == 1

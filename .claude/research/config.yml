@@ -1011,7 +1011,82 @@ levers:
             **不成立の場合**: rank_1・rank_2 の双方をヘッド側で動かしても上限 0.705 を超えられない
             ことになり，残るのは (i) 合成データのドメイン別 positive 件数の設計（R-A 型リーク再発に注意），
             (iii) 複合設問データセット自体の再設計（research_frontier 相当・人間判断），
-            あるいは埋め込み表現そのものの適応（`embedding_adaptation` の再訪）である．"}
+            あるいは埋め込み表現そのものの適応（`embedding_adaptation` の再訪）である．
+            **[2026-09-19 Iter63 計画フェーズで確定]** 上記の成功条件 S1〜S5・非退行 N2'/N3/N5/N6 は
+            閾値を一切変更せずそのまま事前登録した（journal.md 『### 計画 (Iter63)』）．
+            あわせて計画フェーズで次の 3 点を確定した: (a) 変更範囲は
+            `scripts/evaluate_dispatch_candidate_ranking.py` の 1 ファイル 4 箇所
+            （`--rank1-source {baseline,head_argmax}` フラグ追加，`build_new_rows()` の rank_1 決定式，
+            `_assert_rank1_unchanged()`（A1）を既定モード限定にして `head_argmax` では新設 A9
+            『rank_1 == argmax(head_scores)』へ差し替え，`selected_domain` の由来）であり
+            note 本文の『`build_new_rows()` 1 関数のみ』は誤り，(b) `selected_domain` は
+            `head_argmax` モードでのみ新 rank_1 で上書きする（上書きしないと N2' が自明 PASS になる），
+            (c) S4 の計測は新設の非致命的レポート `summary[\"rank1_change_count\"]` で行う．
+            **[2026-09-19 Iter63 reflector 追記・本レバーはクローズ]** 判定は **partial**
+            （S1 p=1.54e-4，S2 recall 0.490，S3 mean_dispatch=2.000000，S4 rank1_change_count=380，
+            S5 複合 100 行 41→61 で exact p=8.21e-4＝**主基準は大きく有意**．非退行は N2' 0.60375・
+            N3 17/30・N5 0.6033 を充足するが **N6 のみ不成立**（education 3/20 < フロア 6/20，
+            medical 18/28 は充足）．事前登録の最終分岐『非退行のいずれかが FAIL → 最大 partial』に
+            機械的に該当）．values 単一値のため試し切り＝クローズ．
+            **確定した機序**: rank_1 をヘッド argmax にすると `dispatched_domains` はヘッドの top-2
+            そのものになる．education は当該 20 行で 1 行もヘッド 2 位に来ず（自ドメイン得点の中央値が
+            行内最大の 0.0899 倍），失われた 2 行は『基準線ルータが rank_1 に education を選んでいたから
+            被覆されていた』行だった．**順位付け層をどう変えても education 被覆は 3/20 から動かせない**
+            （3 位まで広げても 5/20）．また rank_1 正解 +20 に対し 2 ドメイン被覆行は +5 にとどまり，
+            『rank_1 が当たった行で 2 つ目を当てる』割合は 29.3%→27.9% と不変＝**ボトルネックはここへ移動した**．
+            詳細は journal.md 『### 考察 (Iter63)』・backlog B97．"}
+
+  # --- 【2026-09-19 Iter63 reflector 新設・backlog B97】`rank1_source` は partial（S1〜S5 全充足・
+  #     N6 のみ不成立）でクローズ．順位付け層（rank_1/rank_2 の選び方・スコア変換）で動かせる余地は
+  #     Iter59〜63 で尽きたため，上記 note の「不成立の場合」選択肢 (i)＝訓練データ側へ移る．
+  #     ただし『どのドメインを増やすか』を選ぶと R-A 型リークが再発するため，**全ペア一律の増量**
+  #     という配分決定を含まない形に限定する ---
+  - {name: multilabel_synthetic_volume, values: [uniform_nine_per_pair],
+     note: "[2026-09-19 Iter63 reflector / backlog B97] **問題**: Iter63 で (a) education の被覆は
+            順位付け層では 3/20 から動かせないこと（ヘッドが education 絡み複合行で自ドメインに
+            ほぼ信号を出さない．自得点／行内最大の中央値 0.0899，ヘッド 2 位に来る行 0/20），
+            (b) rank_1 正解が 41→61 と +20 改善しても 2 ドメインとも被覆した行は 12→17 の +5 に
+            とどまり『rank_1 が当たった行で 2 つ目を当てる』割合が 29.3%→27.9% と不変であることが
+            確定した．残差はスコア変換（Iter62 で棄却）でも rank_1 の選択元（Iter63）でも動かず，
+            **多ラベルヘッドが 2 ドメイン性を学べていない＝訓練信号の量そのもの**が次の律速である．
+            **単一レバー**: 2 ドメイン合成訓練事例の件数を **全 45 ペア一律で 3 件／ペア → 9 件／ペア**
+            （135 行 → 405 行）へ増やす．
+            `scripts/generate_multidomain_training_examples.py --per-pair 9 --per-pair-legal 9`
+            （Iter61 は `--per-pair 3 --per-pair-legal 3`）で新規生成し，
+            `data/classifier_train_multidomain_iter64.jsonl` として出力する．
+            **一律増量に限定する理由**: 『どのドメインを何件増やすか』を選ぶと決定にテスト集合の
+            情報が入り R-A 型リークが再発する（Iter60 の教訓）．一律ならば配分の決定が存在しないため
+            構造的にリークしない．生成プロンプト・生成モデル・ペア集合・A7 リーク監査は Iter61 から無変更．
+            **固定する構成**: ヘッド種別（未較正 `OneVsRestClassifier(LogisticRegression(max_iter=1000,
+            class_weight='balanced'))`）・単一ドメイン訓練データ `data/classifier_train.jsonl`・
+            埋め込み `nomic-embed-text` とキャッシュ `results/iter59_query_embeddings.npz`
+            （合成訓練文の埋め込みのみ新規に必要）・基準線 `results/20260918_202613/results.jsonl`・
+            採点／統計スクリプト・**`--rank1-source head_argmax`（Iter63 の構成を主系として固定）**．
+            較正は使わない．
+            **成功条件（暫定案．計画フェーズで事前登録して確定すること）**: 主系（head_argmax）で
+            S1 全体 200 ペア exact McNemar p<0.05，S2 `compound_domain_set_recall` ≧ 0.510
+            （Iter63 の 0.490 を点推定で +2.0pt 以上上回る），S3 mean_dispatch=2.000000，
+            S4 発火の証拠（対 Iter63 予測の不一致行 >0），
+            S5（本レバー固有の主基準）**『rank_1 が正解した行のうち rank_2 も正解した割合』が
+            Iter63 の 17/61=27.9% を上回ること**（Iter63 で移動が確定したボトルネックを直接測る．
+            分母が可変であるため，計画フェーズでは複合 100 行の被覆 2 個の行数＝17 行との
+            対応あり McNemar も併せて事前登録すること）．
+            **非退行**: N2'（top1_accuracy ≧ 0.5875），N3（legal 自身の被覆 ≧8/30），
+            N5（単一ドメイン 1500 行の argmax 正解率 ≧0.590），
+            **N6' は Iter63 の実測水準（education ≧3/20・medical ≧18/28）を下限とする**
+            （Iter62 の 6/20 を据え置くと本レバーが達成し得ない条件を課すことになるため水準は
+            更新するが，**閾値は計画フェーズで事前登録し，実験後に緩めないこと**）．
+            **参考（探索的．主基準にしないこと）**: 一律増量が education の自得点比（0.0899）を
+            押し上げるかを診断値として記録すると，次に訓練データ側と表現側のどちらへ進むかの判断材料になる．
+            **コスト**: LLM 生成 405 件（Iter61 の 135 件の 3 倍．judge_model を SSH ローカル
+            フォワード経由で呼ぶ．Iter60/61 と同じ手順）＋ヘッド再訓練＋オフライン採点．
+            実機 1600 問本走は不要（オフライン完結・`config.yaml` のスキーマ変更なし）のため自律着手してよい．
+            **不成立の場合**: 訓練事例の『量』では 2 ドメイン性を学べないことになり，残るのは
+            (i) 生成文の品質改善（低品質行＝プロンプトの echo の混入は Iter60 以来未解消で，
+            量を増やすとノイズも増える点に注意），(ii) 複合設問データセット自体の再設計
+            （research_frontier 相当・人間判断），(iii) 埋め込み表現の適応
+            （`embedding_adaptation` は Iter40〜43 で全 4 値 rejected だが，当時の目的は
+            education_recall 改善であり，多ラベル 2 ドメイン性という別目的での再訪は別物である）．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

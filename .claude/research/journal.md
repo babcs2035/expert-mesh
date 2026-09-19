@@ -1,3 +1,1045 @@
+## Iteration 63: rank_1 の選択元を多ラベルヘッドの argmax へ切り替える
+
+### 調査 (Iter63)
+
+**問い**（config.yml が既に詳細な設計を事前登録している＝backlog B96・config.yml:971-1014．
+先行研究の新規調査ではなく，一次情報＝コード・実データの確認を優先した）
+
+- Q1: `scripts/evaluate_dispatch_candidate_ranking.py` の `build_new_rows()` は rank_1 をどこで
+  基準線からコピーしているか．argmax へ切り替える変更は本当にこの 1 関数のみで完結するか
+  （rank_2 選択ロジック `rank2_new = max(...)` との相互作用，rank_1==rank_2 の重複が起きないかを含む）．
+- Q2: Iter61 の資産（ヘッド・埋め込みキャッシュ・訓練データ・予測 JSONL）は実在し，再利用可能か．
+- Q3: config.yml が事前登録した S1〜S5・N2'/N3/N5/N6 は既存の `compute_iter59_ranking_stats.py`
+  でそのまま計算できるか，追加のアドホック集計が要るか．
+- Q4: reflector が挙げた実行可能性の参考値（複合100行の rank_1 正解 41→61，
+  `compound_domain_set_recall` 0.445→0.49，単一ドメイン argmax 0.610→0.6033）は，既存の予測 JSONL
+  から再現できるか．
+
+**分かったこと（全文読了・実行確認による一次情報）**
+
+1. **`build_new_rows()`**（`scripts/evaluate_dispatch_candidate_ranking.py:193-226`，全文読了）:
+   `rank_1 = row["dispatched_domains"][0]`（`:208`）が基準線 JSONL からのコピー箇所そのもの．
+   `rank2_new = max((d for d in head_scores if d != rank_1), key=...)`（`:211-214`）は
+   `rank_1` を除外して選ぶ構造のため，**`rank_1` を `argmax(head_scores)` に差し替えるだけで
+   `rank_2` の除外集合も自動的に追随し，`rank_1==rank_2` の重複は構造的に起こり得ない**
+   （`rank_2` は常に `rank_1` 以外の 9 ドメインから選ばれるため）．ここまでは reflector の
+   「1 関数のみで完結する」という見立てどおりである．
+2. **しかし build_new_rows() 単独の変更では `_run()` が壊れる**（重要な訂正）:
+   `_assert_rank1_unchanged()`（A1，`:229-240`）が `_run()`（`:380`）で**無条件に**呼ばれており，
+   `base["dispatched_domains"][0] != new["dispatched_domains"][0]` を検出すると
+   `AssertionError` を送出する．新 rank_1 は基準線と 1600 行中 **380 行（23.75%）** で異なることを
+   実測したため（下記 4），build_new_rows() だけを変更すると実行時に必ずこのアサーションで落ちる．
+   このアサーションはまさに「rank_1 は再計算しない」という**旧設計の不変条件を保証するための
+   意図的な安全装置**（モジュール docstring `:5-13` が同じ不変条件を明記）であり，
+   本レバーの目的（rank_1 自体を変える）と正面から衝突する．**変更範囲は最低でも 2 箇所
+   （`build_new_rows()` と `_run()` 内の A1 呼び出し／A1 自体の役割変更）になる**．
+   config.yml の S4「rank_1 が基準線と異なる行 >0（発火の証拠）」は，A1 を「例外を送出する
+   アサーション」から「不一致件数を報告する非致命的なチェック」へ作り替えることでそのまま
+   計測できる（precedent: 同ファイルの `_compute_rank2_flip_rate` と同型の設計）．
+   モジュール docstring の該当箇所（rank_1 不変性の説明）も実装フェーズで更新が要る
+   （ドキュメントのみで実行には影響しないが，古い記述を放置しない）．
+3. **`selected_domain` フィールドは本レバーでも再計算されない**（`build_new_rows():219` が
+   `"selected_domain": row["selected_domain"]` と基準線から素通しコピーするのは変更後も同じ）．
+   `metrics.compute_top1_accuracy()` は `r["selected_domain"] in r["expected_domains"]` を見る
+   （`metrics.py:42`）ため，**`selected_domain` を書き換えない限り `compute_top1_accuracy()` が
+   返す値は本レバーの効果に関係なく基準線と完全一致し続ける**．実際に確認したところ
+   （元の `selected_domain` のまま計算）新旧とも **0.5975 で一致**した．
+   一方，**`selected_domain` を新 rank_1 で上書きして** `compute_top1_accuracy()` を計算すると
+   **0.60375（基準線比 +0.625pt，むしろ改善）** になった（下記 4 の実測．単一ドメイン
+   1500 行 905/1500=0.6033，複合 100 行 61/100=0.61 の加重平均）．
+   **config.yml の N2'（top1_accuracy が基準線比 1.0pt を超えて低下しない＝≧0.5875）は，
+   `selected_domain` を書き換えない実装では常に自明に PASS する（0.5975=0.5975 で退行しようが
+   ないため何も検証していないのと同じ）**．これは CLAUDE.md/config.yml が繰り返し警告している
+   「レバーを読むコードに実行が到達しない」型の穴になりうるため，計画フェーズで
+   **「N2' の top1_accuracy は `selected_domain` を新 rank_1 で上書きして計算する」と明示的に
+   決め，実装しないと N2' が無意味な自明 PASS になる**ことを申し送る．なお実測では上書きした
+   場合でも悪化ではなく改善方向なので，判断を誤っても致命的な結果にはならないが，
+   「何を検証しているか」を曖昧にしたまま実装するのは避けるべきである．
+4. **reflector の参考値を独立に再現した**（`results/iter61_multilabel_ranking_predictions.jsonl`
+   の `head_scores` フィールドのみを使い，embedding 呼び出し・実機接続なしで再計算．
+   `metrics.compute_compound_coverage_metrics` は無改造で呼んだ）:
+   - 複合 100 行の rank_1 正解数: 基準線 **41/100** → 新 rank_1（`argmax(head_scores)`）**61/100**．
+   - `compound_domain_set_recall`: 基準線 0.345 → 新 rank_1+新 rank_2 で **0.49**
+     （reflector の note にある「0.445→0.49」の 0.445 は Iter61 の値であり，真の基準線 0.345 比では
+     +14.5pt に相当）．
+   - 単一ドメイン 1500 行の rank_1（argmax head_scores）正解率: **905/1500 = 0.603333**
+     （journal Iter62 の N5 実測値 0.603333 と完全一致，同一ヘッドなので当然の整合）．
+   - 全 1600 行での rank_1 変化件数: **380/1600（23.75%）**．
+   - 以上はすべて既存 JSONL の `head_scores` フィールドのみで再計算可能であり，Ollama 埋め込みも
+     実機接続も不要だった（低コストの事前確認として妥当）．
+5. **Iter61 資産の実在を再確認した**（`ls -la`）: `data/classifier_train_multidomain_iter61.jsonl`
+   （41,551B）・`models/dispatch_multilabel_head_iter61.joblib`（66,134B）・
+   `results/iter59_query_embeddings.npz`（9,971,712B）・
+   `results/iter61_multilabel_ranking_predictions.jsonl`（982,193B）・
+   `results/20260918_202613/results.jsonl`（3,510,699B，基準線）・`data/classifier_train.jsonl`
+   （600,281B）が全て実在し，mtime も直近イテレーションの記録と整合する．較正は使わない方針
+   （config.yml 既定）なので Iter62 の較正済みヘッドは今回使わない．
+6. **`scripts/compute_iter59_ranking_stats.py`**（全文読了）は S1（200 ペア McNemar）・S2（効果量）・
+   S3（コスト中立）・S4（Iter59/61/62 では rank_2 flip の意味だが，本レバーでは `_compute_s4` の
+   ロジック自体は基準線 `dispatched_domains[1]` 比較のままで rank_2 の変化を測るだけであり，
+   本レバー固有の S4「rank_1 が基準線と異なる行 >0」とは別物であることに注意）・N1（`_compute_n1`，
+   本レバーでは定義上 FAIL し続けることを config.yml が明記済み，スクリプトは例外を送出せず
+   `pass:false` を返すだけなので実行は壊れない）・N3（legal 非退行）は**無改造でそのまま使える**．
+   一方，**S5（複合 100 行の rank_1 正解数を対応あり McNemar で基準線 41/100 と比較）はこのスクリプトに
+   存在しない新規の集計単位**（既存の `_compute_s1` はドメイン対単位＝200 ペア，S5 は行単位＝100 行の
+   `dispatched_domains[0] in expected_domains` 判定）である．ただし `metrics._mcnemar_from_correctness()`
+   は `{id: bool}` の辞書を 2 つ受け取る汎用関数（docstring に「per-domain callers が独自の
+   correctness 定義を渡せる」と明記）なので，**行 ID をキーにした 100 件の bool 辞書を渡すだけで
+   既存の検定ロジックをそのまま再利用でき，新しい統計機構の実装は不要**（Iter59〜62 が繰り返してきた
+   「既存関数を薄く呼ぶアドホック集計」と同じパターンで済む）．N6（education/medical 自己被覆が
+   Iter62 の 6/20・11/28 から悪化しないこと）も，Iter60〜62 で使ってきた
+   `_domain_pair_coverage_maps()` 経由のアドホック集計をそのまま踏襲でき，新規実装は不要．
+7. **N2' は上記 3 の理由で公式スクリプトの `compute_top1_accuracy()` を素通しで使うだけでは
+   検証にならない**．計画フェーズは「`selected_domain` を新 rank_1 で上書きした行を使って
+   `compute_top1_accuracy()` を呼ぶ」ことを明示的な実装項目として登録する必要がある．
+
+**結論**
+
+reflector の見立て（「変更範囲は `build_new_rows()` 1 関数のみ」）は rank_1/rank_2 の選択ロジック
+自体については正しいが，**実行を通すには最低でも `_assert_rank1_unchanged()`（A1）の役割変更が
+追加で必要**であり，かつ**N2'（top1_accuracy の非退行）を意味のある検証にするには `selected_domain`
+フィールドの扱いを計画フェーズで明示的に決める必要がある**（決めずに実装すると自明 PASS になる）．
+reflector の実行可能性の参考値（41→61，0.445→0.49，0.610→0.6033）はすべて独立再計算で一致し，
+本レバーが no-op でないことが低コストで確認できた．S5 に必要な行単位 McNemar は
+`metrics._mcnemar_from_correctness()` を薄く再利用すれば新規実装なしで足りる．Iter61 の資産は
+全て実在し再利用可能．
+
+**次フェーズへの示唆**
+
+- 変更対象は `evaluate_dispatch_candidate_ranking.py` 内の **2 箇所**（`build_new_rows()` の
+  rank_1 決定ロジック，`_assert_rank1_unchanged()`／`_run()` 呼び出し側の役割変更）と申し送ること．
+  「1 関数のみ」と誤って計画すると実装フェーズで確実にアサーションエラーに当たる．
+- N2' の計算方法（`selected_domain` を新 rank_1 で上書きするか否か）を計画フェーズで**必ず
+  事前登録に明記**すること．上書きする場合，実測では悪化ではなく改善方向（+0.625pt 相当）と
+  見込まれるため，N2' の閾値（≧0.5875）は現実的には楽に PASS しうるが，それでも「何を測る指標か」
+  を曖昧にしないこと．
+- S5 は `metrics._mcnemar_from_correctness()` を行 ID キーの 100 件 bool 辞書で呼ぶアドホックコードを
+  1 つ追加するだけで実装できる（新しい統計機構は不要）．N6 は Iter60〜62 のアドホック集計パターンを
+  そのまま踏襲する．
+- 較正は使わない（Iter61 の未較正ヘッドを再利用．較正済みヘッドと同時に動かすと単一レバー原則が
+  破れる）という config.yml の指示を計画フェーズでもそのまま踏襲してよい．
+- 実行コストは Q4 の再現で示したとおり極めて低い（既存 JSONL の `head_scores` のみで大半の検証が
+  完結し，実機オフライン採点コマンド自体も埋め込みキャッシュ完全ヒットが見込まれる）．
+
+### 計画 (Iter63)
+
+**仮説**
+
+Iter60〜62 で rank_2 側は 0.345→0.445 まで改善したのち較正でも動かず飽和した．残るボトルネックが
+**rank_1（基準線ルータの top-1）が複合 100 行で 41/100 しか当たらず，`compound_domain_set_recall` の
+構造的上限を 0.705 に固定していること**にあるなら，rank_1 の選択元を多ラベルヘッドの argmax へ
+切り替えれば，rank_2 を含む他の全構成を Iter61 のまま固定したままで複合行の被覆が 0.445 を超えて
+向上するはずである．逆に向上しないなら，rank_1/rank_2 の双方をヘッド側で決めても現行の埋め込み
+表現・訓練データでは上限に到達しており，残るのは合成データ設計・データセット再設計・埋め込み適応に
+限られることになる．
+
+**単一レバー（今回変更する唯一の変数）**
+
+`rank1_source`: `baseline_router_selected_domain`（Iter59〜62 の実質値＝基準線 JSONL の
+`dispatched_domains[0]` をコピー）→ **`multilabel_head_argmax`**（`head_scores` の最大ドメイン）．
+rank_2 は従来どおり「同じ `head_scores` のうち rank_1 を除く最大」であり，**選択ロジックも
+ヘッドも訓練データも埋め込みも変更しない**（`build_new_rows():211-214` は `rank_1` を除外して
+`max` を取る構造なので，rank_1 を差し替えるだけで除外集合が自動追随し，rank_1==rank_2 の重複は
+構造的に起こり得ない＝A2 が保証）．
+
+**確定した実装仕様（本フェーズの決定事項 1・2・3）**
+
+変更は `scripts/evaluate_dispatch_candidate_ranking.py` の **1 ファイル**に閉じる（訓練スクリプトは
+無変更，較正済みヘッドは使わない）．変更箇所は次の 4 点で，いずれも「rank_1 の選択元」という
+単一の変数に従属する．
+
+1. **rank_1 の選択元を CLI フラグで切り替える（既存挙動は既定値として温存する）**
+   - `_parse_args()` に `--rank1-source {baseline,head_argmax}`（**既定値 `baseline`**）を追加し，
+     `_run()` 経由で `build_new_rows()` に `rank1_source: str` 引数として渡す．
+   - `build_new_rows()`（`:193-226`）の `rank_1 = row["dispatched_domains"][0]`（`:208`）を，
+     `head_scores` を先に計算したうえで
+     `rank_1 = row["dispatched_domains"][0] if rank1_source == _RANK1_SOURCE_BASELINE
+     else max(head_scores, key=lambda d: head_scores[d])` に変更する
+     （`_head_scores()` の呼び出しを rank_1 決定より前へ移動する必要がある）．
+     `_RANK1_SOURCE_BASELINE = "baseline"` / `_RANK1_SOURCE_HEAD_ARGMAX = "head_argmax"` を
+     モジュール定数として置く（マジック文字列を埋め込まない）．
+   - **フラグ方式を採る理由**: 既定値 `baseline` を維持することで Iter59〜62 の全実行・全
+     アサーションがそのまま再現でき（A10 で実証する），「既存のテストを理由なく削除・弱体化
+     させない」という CLAUDE.md 規約を満たしつつ，新旧を同一コードパスで A/B できる．
+     ヘッド種別による分岐ではなく明示フラグとするため，どちらのモードで生成された成果物かが
+     CLI 履歴から一意に追える．
+2. **A1（`_assert_rank1_unchanged()`）の役割を再定義する（削除しない）**
+   - `_assert_rank1_unchanged()`（`:229-240`）は**そのまま残し**，`_run()`（`:380`）での呼び出しを
+     `if rank1_source == _RANK1_SOURCE_BASELINE:` の条件下に置く．既定モードでは従来どおり
+     `AssertionError` を送出する強度を保つ（＝旧設計の不変条件は弱体化しない）．
+   - `head_argmax` モードでは，代わりに**新設 A9 `_assert_rank1_matches_head_argmax(new_rows)`**
+     を呼ぶ．「全 1600 行で `dispatched_domains[0] == max(head_scores, key=...)` であること」を
+     検証し，不一致があれば `AssertionError` を送出する．**A1 が守っていた「rank_1 の由来が
+     設計どおりであること」という役割を，新しい由来（ヘッド argmax）に対して同じ強度で
+     引き継ぐ**（安全装置を外すのではなく，検査対象の定義を差し替える）．
+   - さらに `head_argmax` モードでは**非致命的な報告**として
+     `_compute_rank1_change_count(baseline_rows, new_rows)` を新設し，基準線と異なる rank_1 の
+     行数・率を `summary["rank1_change_count"]` / `["rank1_change_rate"]` に出力する
+     （`_compute_rank2_flip_rate()`（`:266-269`）と同型の設計）．これが S4 の直接の計測値となる．
+   - モジュール docstring（`:5-13`，`:15-30`）の「rank_1 は再計算しない」という記述を，
+     `--rank1-source` による 2 モード制の説明へ更新する（実行には影響しないが古い記述を残さない）．
+3. **`selected_domain` は `head_argmax` モードでのみ新 rank_1 で上書きする（本フェーズの決定）**
+   - `build_new_rows():219` の `"selected_domain": row["selected_domain"]` を，
+     `head_argmax` モードでは `rank_1`（新 rank_1）を入れるよう変更する．`baseline` モードでは
+     従来どおり基準線からの素通しコピー（＝挙動不変）．
+   - **決定理由**: (a) 基準線 JSONL では `selected_domain == dispatched_domains[0]` が
+     **1600/1600 行で成立している**ことを本フェーズで実測した（不一致 0 行）ため，
+     「`selected_domain` ＝ top-1 に選ばれたドメイン」という不変条件を新 rank_1 でも維持する方が
+     データの意味論として整合する．(b) 上書きしない場合，`metrics.compute_top1_accuracy()`
+     （`metrics.py:42`）は `selected_domain` しか見ないため N2' が 0.5975=0.5975 の**自明 PASS**
+     となり，「レバーを読むコードに到達しない」型の穴（Iter58 の教訓）を再生産する．
+   - **N2' の基準値は config.yml 暫定案の ≧0.5875 をそのまま確定する**（閾値は変更しない）．
+     上書きにより指標の意味は「基準線ルータの top-1 精度」から「ヘッド argmax の top-1 精度」へ
+     変わるが，比較対象（基準線 0.5975）と許容幅（-1.0pt）は事前登録どおり据え置く．
+     調査フェーズの実測では 0.60375（+0.625pt）と改善方向であり，この閾値で棄却されることは
+     考えにくいが，**「rank_1 をヘッドに任せても全 1600 行の top-1 精度を 1.0pt 超は落とさない」
+     という仮説を実際に検定している**点に意味がある．
+4. **統計スクリプト `scripts/compute_iter59_ranking_stats.py` は無改造で使う**
+   - S1・S2・S3・N3 はそのまま利用する．**N1（`_compute_n1`）は本レバーでは定義上 `pass:false` に
+     なるため，出力は記録するが判定には用いない**（config.yml が撤回を明記済み．例外は送出せず
+     `pass:false` を返すだけなのでパイプラインは壊れない）．**N2（`_compute_n2`）も `exact_match`
+     を要求する実装のため `pass:false` になりうるが，判定には `new_top1_accuracy` の数値のみを
+     N2' の閾値（≧0.5875）と照合して用いる**．同スクリプトの S4 はドメイン対単位の rank_2 変化を
+     測るものであり，本レバーの S4（rank_1 変化行数）とは別物である点を混同しないこと．
+   - **S5（複合 100 行の rank_1 正解数の対応あり exact McNemar）**と **N6（education/medical の
+     自己被覆）**は，Iter60〜62 と同じ「既存関数を読み取り専用で薄く呼ぶアドホック集計」で行う．
+     S5 は `metrics._mcnemar_from_correctness()` に行 ID をキーとする 100 件の bool 辞書
+     （`dispatched_domains[0] in expected_domains`）を 2 つ渡すだけで足り，新しい統計機構は
+     実装しない．N6 は `compute_iter59_ranking_stats.py:_domain_pair_coverage_maps()` を流用する．
+
+**固定する構成（Iter61 から一切変えない）**
+
+- ヘッド: `models/dispatch_multilabel_head_iter61.joblib`（未較正 `OneVsRestClassifier
+  (LogisticRegression(max_iter=1000, class_weight="balanced"))`）を**再訓練せず再利用**．
+  **Iter62 の較正済みヘッド（`..._iter62.joblib`）は使わない**（較正の有無を同時に動かすと
+  単一レバー原則が破れる．config.yml 指示どおり）．
+- 訓練データ `data/classifier_train.jsonl`（1427 行）＋
+  `data/classifier_train_multidomain_iter61.jsonl`（135 行）: 再生成しない（実行経路に登場しない）．
+- 埋め込みモデル `nomic-embed-text`，キャッシュ `results/iter59_query_embeddings.npz`．
+- rank_2 の選択ロジック（`rank_1` 以外の `head_scores` 最大），`_head_scores()`（Iter62 で
+  `predict_proba()` に統一済み），`_load_head()`，A2/A3/A6，N5 の計算（`_compute_single_domain_
+  argmax_accuracy()` は rank_1 の由来に依存しないヘッド自身の argmax 精度を測る）．
+- 基準線 `results/20260918_202613/results.jsonl`（`compound_domain_set_recall` = 0.345，
+  `top1_accuracy` = 0.5975），統計スクリプト（**無改造**），`config.yaml`．
+- **実行時経路（`node.py` のルータ）への配線は本イテレーションでも行わない**（B94/B95．
+  本レバーは rank_1 まで実行時ルータから乖離させるため，配線の人間判断の重要性が増す）．
+
+**出力ファイル命名（Iter61/62 の成果物を上書きしないこと）**
+
+| 種別 | 既存（保護・読み取り専用） | Iter63（新規作成） |
+|---|---|---|
+| ヘッド | `models/dispatch_multilabel_head_iter61.joblib` | （再利用．新規訓練なし） |
+| 予測 | `results/iter61_multilabel_ranking_predictions.jsonl` | `results/iter63_multilabel_ranking_predictions.jsonl` |
+| 統計 | `results/iter62_stats.json` | `results/iter63_stats.json` |
+| 既定モード回帰検証（A10） | — | `results/iter63_regression_check_baseline_mode.jsonl` |
+
+**実行コマンド（`--ollama-host` は疎通する方を使う．採点時の実績は SSH ローカルフォワード
+`127.0.0.1:11435`．埋め込みキャッシュ完全ヒット＝embed 呼び出し 0 件の想定）**
+
+```
+# 0) A10 事前チェック（フラグ導入が既定モードで no-op であることの実証）
+#    --rank1-source を省略（既定 baseline）して Iter61 のヘッドを再採点し，
+#    results/iter61_multilabel_ranking_predictions.jsonl と完全一致することを確認する．
+uv run python -m scripts.evaluate_dispatch_candidate_ranking \
+    --baseline results/20260918_202613/results.jsonl \
+    --head models/dispatch_multilabel_head_iter61.joblib \
+    --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 \
+    --embedding-cache results/iter59_query_embeddings.npz \
+    --output results/iter63_regression_check_baseline_mode.jsonl
+diff <(jq -cS . results/iter61_multilabel_ranking_predictions.jsonl) \
+     <(jq -cS . results/iter63_regression_check_baseline_mode.jsonl)
+
+# 1) 本走: rank_1 をヘッド argmax にして 1600 問をオフライン採点
+#    --iter59-predictions は引数名に反して汎用（_compute_a5_iter59_disagreement()）．
+#    対 Iter61 の rank_2 変化を見るため Iter61 の予測を渡す（参考情報．S4 とは別）．
+uv run python -m scripts.evaluate_dispatch_candidate_ranking \
+    --baseline results/20260918_202613/results.jsonl \
+    --head models/dispatch_multilabel_head_iter61.joblib \
+    --rank1-source head_argmax \
+    --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 \
+    --embedding-cache results/iter59_query_embeddings.npz \
+    --iter59-predictions results/iter61_multilabel_ranking_predictions.jsonl \
+    --output results/iter63_multilabel_ranking_predictions.jsonl
+
+# 2) 指標・検定（Iter59〜62 と同一スクリプト・同一手続き．無改造）
+#    N1 は定義上 pass:false，N2 は exact_match:false になりうるが，いずれも記録のみ．
+uv run python -m scripts.compute_iter59_ranking_stats \
+    --baseline results/20260918_202613/results.jsonl \
+    --new results/iter63_multilabel_ranking_predictions.jsonl \
+    --output results/iter63_stats.json
+
+# 3) S5（複合 100 行の rank_1 正解数の対応あり exact McNemar）と N6（education/medical 被覆）の
+#    アドホック集計．metrics._mcnemar_from_correctness() と
+#    compute_iter59_ranking_stats._domain_pair_coverage_maps() を読み取り専用で呼ぶ．
+#    公式の採点・統計パスには手を入れない（Iter60〜62 の N6 と同じ手順）．
+```
+
+**成功条件（事前登録．事後変更禁止）**
+
+config.yml:994-1005 の暫定案を，上記決定事項 3（`selected_domain` の上書き）を反映したうえで
+**閾値は一切変更せずに確定する**．基準線は `results/20260918_202613/results.jsonl`
+（`compound_domain_set_recall` = 0.345，複合 100 行の rank_1 正解 41/100，`top1_accuracy` = 0.5975），
+第 2 参照点は Iter61/62（0.445，education 6/20，medical 11/28）で，両者を必ず併記する．
+
+- **S1（有意性の維持）**: 全体 200 ペアの exact McNemar（`scipy.stats.binomtest`，α=0.05）で
+  基準線比 **p < 0.05**．
+- **S2（全体性能の向上）**: `compound_domain_set_recall` が **≧ 0.465**
+  （Iter61/62 の 0.445 を点推定で +2.0pt 以上上回る）．
+- **S3（コスト中立）**: `mean_dispatch = 2.000000`（完全一致）．
+- **S4（発火の証拠）**: `summary["rank1_change_count"] > 0`（rank_1 が基準線と異なる行が存在する）．
+- **S5（本レバー固有の主基準）**: 複合 100 行の rank_1 正解数が基準線 41/100 を
+  **対応あり exact McNemar で有意に上回る（p < 0.05，かつ正解数が 41 より大きい方向）**．
+
+**判定規則（事前登録）**
+
+- **S1〜S5 全充足 かつ N2'/N3/N5/N6 全充足** → `rank1_source = multilabel_head_argmax` を
+  **adopted**．「rank_1 側がボトルネックであり，ヘッド argmax で解消できる」と結論し，
+  実行時経路への配線（B95 要レビュー 1）の優先度を最上位へ引き上げる．
+- **S1・S3・S4 充足，S5 充足，S2 のみ不成立（ただし 0.445 ≦ recall < 0.465）かつ非退行全充足**
+  → **partial**．「rank_1 の改善は複合行の正解を有意に増やすが，集合再現率の押し上げは +2.0pt に
+  届かない」と記録する．
+- **S1・S3・S4 充足，S5 不成立（p ≧ 0.05）だが複合 100 行の rank_1 正解数 > 41 かつ S2 充足**
+  → **partial**．効果量はあるが検出力不足である可能性を記録し，次イテレーションへ引き継ぐ．
+- **S2 不成立（recall < 0.445＝Iter61/62 水準割れ）** → **rejected**．
+- **S4 不成立（`rank1_change_count == 0`）** → **no-op** として rejected 扱いとし，
+  ヘッド argmax が基準線ルータと一致していたことを機序として記録する．
+- **非退行 N2'/N3/N5/N6 のいずれかが FAIL** → **adopted にはしない**（S 側が全充足でも最大 partial
+  とし，どの指標が退行したかを対外記述の留保として残す）．
+
+**非退行条件（事前登録．N1 は本レバーでは定義上成立しないため撤回済み）**
+
+- **N2'**: 全 1600 行の `top1_accuracy`（**`selected_domain` を新 rank_1 で上書きした行**に対し
+  `metrics.compute_top1_accuracy()` で算出）が基準線 0.5975 から 1.0pt を超えて低下しない
+  （**≧ 0.5875**）．統計スクリプトの `N2_top1_accuracy_invariance.new_top1_accuracy` を用いる．
+- **N3**: legal 自身の被覆 **≧ 8/30**（`_compute_n3()` が自動判定）．
+- **N5**: 単一ドメイン 1500 行の argmax 正解率 **≧ 0.590**
+  （`_compute_single_domain_argmax_accuracy()`．rank_1 の由来に依存しないヘッド固有の指標）．
+- **N6**: education **≧ 6/20** かつ medical **≧ 11/28**（Iter62 の水準から悪化しないこと）．
+
+**アサーション（no-op・交絡対策）**
+
+- **A1（条件付き温存）**: `--rank1-source baseline` のときのみ従来どおり実行し，
+  rank_1 の基準線一致を `AssertionError` 強度で検証する（弱体化させない）．
+- **A2/A3/A6**: Iter59〜62 の定義のまま無変更で実行する（A2 が rank_1==rank_2 の重複不在を保証）．
+- **A5（読み替え・参考）**: 対 Iter61 予測の rank_2 不一致件数を報告する（本レバーでは rank_1 の
+  変化に伴い rank_2 の除外集合が変わるため 0 にはならない見込み．判定には用いない）．
+- **A9（新設・本レバー固有）**: `--rank1-source head_argmax` のとき，全 1600 行で
+  `dispatched_domains[0] == argmax(head_scores)` であること．不一致があれば `AssertionError`．
+  A1 が担っていた「rank_1 の由来が設計どおりである」という保証を新しい由来へ引き継ぐ．
+- **A10（新設・交絡対策）**: 上記コマンド 0) のとおり，フラグ導入後のスクリプトを**既定モード**で
+  Iter61 のヘッドに適用した結果が `results/iter61_multilabel_ranking_predictions.jsonl` と
+  **全フィールド完全一致**すること．一致しなければ，フラグ導入のリファクタ自体が効果に混入して
+  いることになり，単一レバー原則が破れるため実験を中止して原因を調査する．
+
+**単一レバー原則の確認（混入チェック）**
+
+- ヘッド（Iter61 の未較正 joblib）: 再訓練せず再利用 → **無変更**．較正は導入しない．
+- 訓練データ・合成データ生成・埋め込みモデル・埋め込みキャッシュ → 実行経路に登場しない
+  → **無変更**．
+- rank_2 の選択ロジック・`_head_scores()`・`_load_head()`・A2/A3/A6・N5 の計算 → **無変更**．
+- 基準線 JSONL・統計スクリプト・`config.yaml` → **無変更**．
+- コード変更は 1 ファイル 4 箇所だが，そのすべてが「rank_1 の選択元」という単一の変数に従属する
+  （CLI フラグの追加，rank_1 決定式，A1→A9 の切替，`selected_domain` の由来）．既定モードでは
+  全挙動が従来と bit 単位で一致することを A10 で実証するため，実効的な変数は
+  **「rank_1 をどこから取るか」1 つだけ**である．
+- `selected_domain` の上書きは rank_1 変更に**構造的に従属する**（基準線でも
+  `selected_domain == dispatched_domains[0]` が 1600/1600 で成立しており，同じ不変条件を
+  維持するだけ）であり，独立した第 2 のレバーではない．
+- 出力パス名の変更は測定対象に影響しない（ファイル I/O のみ）．
+
+**既知の制約（申し送り）**
+
+- 本構成は rank_1・rank_2 の双方をオフラインのヘッドが決めるため，**実行時経路（`node.py` の
+  ルータによる top-1 選択）との乖離が最大になる**．オフラインで adopted となっても，実機での
+  有効性は配線・本走なしには一切主張できない（B94/B95．対外記述に必ず留保を付す）．
+- `selected_domain` の上書きは「ヘッド argmax が top-1 として dispatch される」という仮定の下での
+  値であり，実機の `aggregator.select_best_dispatch_response()`（実応答の confidence で選ぶ）を
+  再現するものではない．`_compute_n2()` の caveat（`compute_iter59_ranking_stats.py:213-223`）は
+  本イテレーションでも有効であり，N2' は「オフライン上の field の意味論的整合」に留まる．
+- 統計スクリプトの N1 は `pass:false` 固定になる（撤回済みのため判定に用いない）．出力 JSON を
+  そのまま「全項目 pass」と読むことはできない点を reflector へ申し送る．
+- 低品質行（プロンプトの echo）の混入は Iter60 から続く既知の穴であり，訓練データを据え置く
+  本イテレーションでも残る．
+- S2/S5 の参考値（recall 0.49，複合 rank_1 正解 61/100）は評価集合上で事前に算出した値であり，
+  **効果量の推定値として対外記述に引用してはならない**（config.yml note と同じ制約）．
+
+### 実装 (Iter63)
+
+計画フェーズが確定した仕様どおり，`scripts/evaluate_dispatch_candidate_ranking.py` **1 ファイル
+4 箇所**のみを変更した（訓練スクリプト・ヘッド・訓練データ・埋め込み・基準線 JSONL・統計スクリプト
+`compute_iter59_ranking_stats.py`・`config.yaml` は無変更）．
+
+1. **CLI フラグ追加**: `_parse_args()` に `--rank1-source {baseline,head_argmax}`
+   （既定値 `baseline`，`choices=` で不正値を argparse レベルで拒否）を追加し，`main()` から
+   `_run(..., rank1_source=args.rank1_source)` として渡した．マジック文字列を避けるため
+   モジュール定数 `_RANK1_SOURCE_BASELINE = "baseline"` / `_RANK1_SOURCE_HEAD_ARGMAX = "head_argmax"`
+   を新設（`_N5_SINGLE_DOMAIN_ARGMAX_ACCURACY_FLOOR` の直後）．
+2. **`build_new_rows()` の rank_1 決定式を切替**: シグネチャに `rank1_source: str =
+   _RANK1_SOURCE_BASELINE` を追加し，`_head_scores()` の呼び出しをループ内で rank_1 決定より
+   前へ移動．`baseline` モードは従来どおり `rank_1 = row["dispatched_domains"][0]` と
+   `selected_domain = row["selected_domain"]`（素通しコピー，挙動不変）．`head_argmax` モードは
+   `rank_1 = max(head_scores, key=lambda domain: head_scores[domain])` とし，
+   `selected_domain = rank_1`（計画フェーズ決定事項 3 のとおり新 rank_1 で上書き）．
+   `rank2_new = max((d for d in head_scores if d != rank_1), ...)` はどちらのモードでも無変更
+   （除外集合が rank_1 の由来変更に自動追随するため，A2 の重複不在保証もそのまま成立）．
+3. **A1 を既定モード限定にし，`head_argmax` モードでは新設 A9 へ差し替え**: `_run()` の
+   `_assert_rank1_unchanged(baseline_rows, new_rows)` 呼び出しを
+   `if rank1_source == _RANK1_SOURCE_BASELINE:` の条件下に置いた（`_assert_rank1_unchanged()`
+   自体は削除せず，強度も無変更）．`head_argmax` モードでは新設
+   `_assert_rank1_matches_head_argmax(new_rows)`（A9）を呼び，全行で
+   `dispatched_domains[0] == argmax(head_scores)` を検証し，不一致があれば
+   `AssertionError` を送出する．
+4. **S4 の非致命的レポート**: 新設 `_compute_rank1_change_count(baseline_rows, new_rows) -> int`
+   （`_compute_rank2_flip_rate()` と同型の単一値返却，読み取り専用の集計のみで例外は送出しない）を
+   `head_argmax` モードでのみ `_run()` から呼び，`summary["rank1_change_count"]` /
+   `summary["rank1_change_rate"]` として標準エラー出力の JSON サマリに含めた（`baseline` モードでは
+   両キーとも出力しない＝既存の JSON 構造に対する非破壊的な追加）．
+5. **モジュール docstring 更新**: 冒頭のいわゆる「rank_1 は再計算しない」という説明（旧 `:5-13`）を，
+   既定モード（`baseline`）ではその説明が引き続き成立すること，`head_argmax` モードでは A1 の代わりに
+   A9 が同じ「由来が設計どおりであること」の保証役を引き継ぐことを追記する形に更新した
+   （実行への影響はなし，計画節「決定事項 2」どおり）．
+
+**A10 事前チェック（実機実行・完了，交絡対策）**
+
+計画節記載のコマンド 0）をそのまま実行した（SSH ローカルポートフォワード
+`127.0.0.1:11435` 経由，実行前から稼働中のトンネルで疎通確認済み）．
+
+```
+uv run python -m scripts.evaluate_dispatch_candidate_ranking \
+    --baseline results/20260918_202613/results.jsonl \
+    --head models/dispatch_multilabel_head_iter61.joblib \
+    --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 \
+    --embedding-cache results/iter59_query_embeddings.npz \
+    --output results/iter63_regression_check_baseline_mode.jsonl
+```
+
+`--rank1-source` を省略（既定 `baseline`）して実行し，`AssertionError` なく完走
+（サマリ: `compound_domain_set_recall=0.445`，`n5_single_domain_argmax_accuracy.accuracy=0.6033`，
+いずれも Iter61/62 の既知値と一致，埋め込みキャッシュ完全ヒットのため embed 呼び出し 0 件）．
+`diff <(jq -cS . results/iter61_multilabel_ranking_predictions.jsonl) <(jq -cS . results/iter63_regression_check_baseline_mode.jsonl)`
+は**終了コード 0・差分 0 行**（全 1600 行・全フィールド完全一致）．**A10 PASS**:
+フラグ導入のリファクタ自体は既定モードで bit 単位の no-op であり，本レバーの効果測定に混入しない．
+
+**`head_argmax` モードのスモークテスト（実機実行・完了，クラッシュしないことの確認のみ）**
+
+計画節記載のコマンド 1）をそのまま実行した（統計計算コマンド 2)〜3) は実験フェーズの担当のため
+今回は実行していない）。
+
+```
+uv run python -m scripts.evaluate_dispatch_candidate_ranking \
+    --baseline results/20260918_202613/results.jsonl \
+    --head models/dispatch_multilabel_head_iter61.joblib \
+    --rank1-source head_argmax \
+    --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 \
+    --embedding-cache results/iter59_query_embeddings.npz \
+    --iter59-predictions results/iter61_multilabel_ranking_predictions.jsonl \
+    --output results/iter63_multilabel_ranking_predictions.jsonl
+```
+
+A9 の `AssertionError` なく完走．サマリ: `compound_domain_set_recall=0.49`
+（調査フェーズの独立再計算値と一致），`rank1_change_count=380`／`rank1_change_rate=0.2375`
+（調査フェーズの実測「380/1600（23.75%）」と一致，S4 は発火の証拠として非ゼロ確認済み），
+`n5_single_domain_argmax_accuracy.accuracy=0.6033`（floor 0.590 を pass），
+`a5_iter59_disagreement.mismatches=380`（rank_1 変化に伴い rank_2 の除外集合が変わるため
+参考値として非ゼロ，判定には用いない）．
+`results/iter63_multilabel_ranking_predictions.jsonl` は決定的（固定の埋め込みキャッシュ・
+固定のヘッド）なため，実験フェーズが同一コマンドを再実行しても同一ファイルが得られる見込みだが，
+念のため実験フェーズで再生成し直すことを推奨する．
+
+**検証**
+
+- `uv run ruff check scripts/evaluate_dispatch_candidate_ranking.py
+  tests/test_evaluate_dispatch_candidate_ranking.py` → `All checks passed!`．
+  リポジトリ全体の `uv run ruff check .` は既存の無関係ファイル（`scripts/analyze_iter52.py`・
+  `scripts/prepare_lora_training_data.py` 等，計 23 件）で F541/F401 が出るが，いずれも本
+  イテレーションの変更対象外であり，本イテレーションで触った 2 ファイルには 1 件も含まれない．
+- `mypy` はリポジトリに未導入（`pyproject.toml` に設定なし）のため型チェックは実施していない
+  （Iter62 と同じ既知の制約）．
+- 新規ユニットテストを 5 件追加した（`tests/test_evaluate_dispatch_candidate_ranking.py`）:
+  `build_new_rows()` の baseline/head_argmax 両モードの rank_1・selected_domain の挙動，
+  A9（`_assert_rank1_matches_head_argmax`）の pass/fail 両方，S4
+  （`_compute_rank1_change_count`）の集計値．いずれも既存の joblib フィクスチャ
+  （`_fit_iter59_style_head()`）や辞書直書きの手法を踏襲し，新しい Wrapper やモックは導入していない．
+- `uv run pytest tests/test_evaluate_dispatch_candidate_ranking.py -q` → **13 件全て pass**
+  （既存 8 件・新規 5 件）．
+- 全体テスト (`uv run pytest -q`) では上記ファイル以外に `test_build_dataset.py`・
+  `test_train_domain_classifier.py` の計 12 件が失敗するが，`git stash push --
+  scripts/evaluate_dispatch_candidate_ranking.py tests/test_evaluate_dispatch_candidate_ranking.py`
+  で本イテレーションの変更のみを退避して再実行しても同じ 12 件が同じ原因
+  （`train_domain_classifier.py` が `CalibratedClassifierCV.classes_` に依存しており，
+  別イテレーションの既存資産で今回の変更対象外）で失敗することを確認済みであり，
+  本イテレーションの変更によるものではない．
+
+**実験フェーズへの申し送り**
+
+コードの変更は上記 4 箇所のみで A10 も PASS しているため，計画節のコマンド 2)〜3)
+（`results/iter63_multilabel_ranking_predictions.jsonl` に対する統計計算・S5/N6 のアドホック集計）を
+そのまま実行してよい状態にある．`results/iter63_multilabel_ranking_predictions.jsonl` は本フェーズの
+スモークテストで既に生成済み（上記のとおり `rank1_change_count`/`compound_domain_set_recall` は
+調査フェーズの独立再計算値と一致）だが，実験フェーズで以下のコマンドを再実行し直すことを推奨する．
+
+```
+# 1) 本走（既に実施済みだが，実験フェーズで独立に再実行して確定させることを推奨）
+uv run python -m scripts.evaluate_dispatch_candidate_ranking \
+    --baseline results/20260918_202613/results.jsonl \
+    --head models/dispatch_multilabel_head_iter61.joblib \
+    --rank1-source head_argmax \
+    --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 \
+    --embedding-cache results/iter59_query_embeddings.npz \
+    --iter59-predictions results/iter61_multilabel_ranking_predictions.jsonl \
+    --output results/iter63_multilabel_ranking_predictions.jsonl
+
+# 2) 指標・検定（S1・S2・S3・N3 はそのまま利用，N1/N2 は記録のみで判定に用いない）
+uv run python -m scripts.compute_iter59_ranking_stats \
+    --baseline results/20260918_202613/results.jsonl \
+    --new results/iter63_multilabel_ranking_predictions.jsonl \
+    --output results/iter63_stats.json
+
+# 3) S5（複合100行のrank_1正解数の対応ありexact McNemar）とN6（education/medical被覆）の
+#    アドホック集計。metrics._mcnemar_from_correctness() と
+#    compute_iter59_ranking_stats._domain_pair_coverage_maps() を読み取り専用で呼ぶこと
+#    （新しい統計機構を実装しないこと。行IDキーの100件bool辞書
+#    `dispatched_domains[0] in expected_domains` を2つ渡すだけで足りる）。
+```
+
+判定は journal.md 計画節の「判定規則（事前登録）」（adopted / partial / rejected / no-op の 5 分岐）
+をそのまま用いること．閾値・判定規則は本フェーズでは一切変更していない．
+
+### 実験 (Iter63)
+
+**本レバーはオフライン完結（backlog B96・config.yml 事前登録どおり）**．埋め込みキャッシュ
+`results/iter59_query_embeddings.npz` を再利用し，実機 1600 問本走・生成トラフィックとも不要．
+`mise run deploy`／`mise run start` は実行していない（journal 計画節「実行時経路（node.py の
+ルータ）への配線は本イテレーションでも行わない」との整合）．
+
+**接続先ホストの再確認（実装フェーズと同じ状況の再確認）**
+
+`curl -m 3 http://192.168.15.100:11434/api/tags` はタイムアウト（exit 28，応答なし）で直接 IP は
+不通．一方，実行前から稼働中の SSH ローカルポートフォワード（`127.0.0.1:11435`）経由の
+`curl http://127.0.0.1:11435/api/tags` は応答し `nomic-embed-text:latest` を含むモデル一覧を返した
+ため，実装フェーズと同じ `--ollama-host 127.0.0.1 --ollama-port 11435` を用いた（レバー以外の
+パラメータ変更ではなく，接続先の読み替えのみ）．ただし全コマンドとも埋め込みキャッシュ完全
+ヒットのため embed 呼び出しは 0 件だった．
+
+**実行した3コマンド（journal 計画節・実装フェーズ申し送りのコマンドをそのまま独立に再実行した）**
+
+```
+# 1) 本走: rank_1 をヘッド argmax にして1600問をオフライン採点
+uv run python -m scripts.evaluate_dispatch_candidate_ranking \
+    --baseline results/20260918_202613/results.jsonl \
+    --head models/dispatch_multilabel_head_iter61.joblib \
+    --rank1-source head_argmax \
+    --embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435 \
+    --embedding-cache results/iter59_query_embeddings.npz \
+    --iter59-predictions results/iter61_multilabel_ranking_predictions.jsonl \
+    --output results/iter63_multilabel_ranking_predictions.jsonl
+
+# 2) 指標・検定（compute_iter59_ranking_stats.py，無改造）
+uv run python -m scripts.compute_iter59_ranking_stats \
+    --baseline results/20260918_202613/results.jsonl \
+    --new results/iter63_multilabel_ranking_predictions.jsonl \
+    --output results/iter63_stats.json
+
+# 3) S5（複合100行のrank_1正解数の対応ありexact McNemar）とN6（education/medical被覆）の
+#    アドホック集計。metrics._mcnemar_from_correctness() と
+#    compute_iter59_ranking_stats._domain_pair_coverage_maps() を読み取り専用で呼ぶ
+#    （Iter60〜62 と同型のパターン。行IDキーのbool辞書を渡すだけで新規の統計機構は実装していない）。
+```
+
+所要時間は3コマンド合計で数秒（`time` 計測: コマンド1が実時間 3.28 秒，ユーザ時間 11.97 秒／
+373% CPU＝埋め込み呼び出し 0 件・キャッシュ完全ヒット）．実行中の異常・OOM・タイムアウト・
+クラッシュは発生していない．
+
+**A10 の独立再確認（実験フェーズ自身でも交絡対策を再検証）**
+
+実装フェーズが生成した `results/iter63_regression_check_baseline_mode.jsonl` に対し，
+`diff <(jq -cS . results/iter61_multilabel_ranking_predictions.jsonl) <(jq -cS . results/iter63_regression_check_baseline_mode.jsonl)`
+を実験フェーズでも再実行し，**終了コード 0・差分 0 行**（全 1600 行・全フィールド完全一致）を
+再確認した．フラグ導入のリファクタは既定 `baseline` モードで bit 単位の no-op であり続けている．
+
+**1) 本走結果（`evaluate_dispatch_candidate_ranking.py` 標準エラー出力の JSON 全文）**
+
+```json
+{
+  "n_rows": 1600,
+  "mean_dispatch": 2.0,
+  "rank2_flip_rate": 0.563125,
+  "compound_domain_set_recall": 0.49,
+  "compound_rows_evaluated": 100,
+  "n5_single_domain_argmax_accuracy": {
+    "n_single_domain_rows": 1500,
+    "correct": 905,
+    "accuracy": 0.6033333333333334,
+    "floor": 0.59,
+    "pass": true
+  },
+  "a5_iter59_disagreement": {
+    "n_rows": 1600,
+    "mismatches": 380,
+    "mismatch_rate": 0.2375
+  },
+  "rank1_change_count": 380,
+  "rank1_change_rate": 0.2375
+}
+```
+
+（A9：例外なし＝全 1600 行で `dispatched_domains[0] == argmax(head_scores)`．`a5_iter59_disagreement`
+は `--iter59-predictions` に Iter61 予測を渡しているため対 Iter61 の rank_2 不一致を表す参考値で，
+判定には用いない．実装フェーズのスモーク実行値と全項目一致し，`md5sum` も出力ファイル間で一致した
+ため，独立再実行による決定性を確認できた．）出力: `results/iter63_multilabel_ranking_predictions.jsonl`
+（1600 行，sha256 `4952bff9845d89c0568eb1909ab3422ab70ca07653da208a2bf9a7c4eb2f38af`）。
+
+**2) 指標・検定結果（`results/iter63_stats.json` 全文，無改造スクリプトの出力，sha256
+`1cc257f29467da75e88815208c3b5480ff2df5c7e4ea68be43b001a5da17eac9`）**
+
+```json
+{
+  "baseline_compound_domain_set_recall": 0.345,
+  "new_compound_domain_set_recall": 0.49,
+  "matches_implementation_phase_diagnostic_recall": false,
+  "S1_primary_criterion": {
+    "n_pairs": 200,
+    "improved_pairs": 43,
+    "regressed_pairs": 14,
+    "discordant_pairs": 57,
+    "chi2_statistic_continuity_corrected": 13.75438596491228,
+    "p_value_continuity_corrected": 0.00020833380892648634,
+    "p_value_exact_binomtest": 0.0001538890224443423,
+    "pass": true
+  },
+  "S2_effect_size_floor": {
+    "baseline_recall": 0.345,
+    "new_recall": 0.49,
+    "delta_pt": 0.14500000000000002,
+    "floor_pt": 0.04,
+    "pass": true
+  },
+  "S3_cost_neutrality": {
+    "n_rows": 1600,
+    "length_distribution": {"2": 1600},
+    "duplicate_rank1_rank2_count": 0,
+    "mean_dispatch": 2.0,
+    "pass": true
+  },
+  "S4_flip_rate_evidence_of_firing": {
+    "n_rows": 1600,
+    "flips": 901,
+    "rank2_flip_rate": 0.563125,
+    "matches_implementation_phase_value": false,
+    "implementation_phase_value": 0.356875,
+    "pass": true
+  },
+  "N1_rank1_invariance": {
+    "n_rows": 1600,
+    "mismatch_count": 380,
+    "mismatch_ids": ["business_economics-001", "business_economics-005", "..."],
+    "pass": false
+  },
+  "N2_top1_accuracy_invariance": {
+    "baseline_top1_accuracy": 0.5975,
+    "new_top1_accuracy": 0.60375,
+    "exact_match": false,
+    "pass": false
+  },
+  "N3_legal_non_regression": {
+    "n_legal_involving_pairs": 30,
+    "baseline_legal_self_coverage": 8,
+    "new_legal_self_coverage": 17,
+    "expected_baseline_value": 8,
+    "baseline_matches_journal_record": true,
+    "pass": true
+  },
+  "N4_improvement_breakdown_by_domain_category": {
+    "legal_involving": {"n_pairs": 60, "improved": 14, "regressed": 3, "unchanged": 43},
+    "medical_involving": {"n_pairs": 32, "improved": 3, "regressed": 2, "unchanged": 27},
+    "other": {"n_pairs": 108, "improved": 26, "regressed": 9, "unchanged": 73}
+  }
+}
+```
+
+`N1_rank1_invariance.pass=false`・`N2_top1_accuracy_invariance.pass=false`（`exact_match` 判定）は
+計画節が事前に「本レバーでは定義上こうなる／判定に用いない」と明記済みの項目であり，出力どおり
+記録するに留める（N2' は下記 3) のアドホック計算で別途 `new_top1_accuracy=0.60375` の数値のみを
+閾値 ≧0.5875 と照合する）。
+
+**3) S5（複合100行のrank_1正解数の対応ありexact McNemar）と N6（education/medical自己被覆）の
+アドホック集計（`metrics._mcnemar_from_correctness()` と
+`compute_iter59_ranking_stats._domain_pair_coverage_maps()` を読み取り専用で呼んだ．新規の統計
+機構は実装していない）**
+
+```json
+{
+  "S5_compound_row_rank1_mcnemar": {
+    "n_rows": 100,
+    "baseline_rank1_correct": 41,
+    "new_rank1_correct": 61,
+    "discordant_baseline_only_correct": 7,
+    "discordant_new_only_correct": 27,
+    "discordant_pairs": 34,
+    "chi2_continuity_corrected": 10.617647058823529,
+    "p_value_continuity_corrected": 0.0011201348827110102,
+    "p_value_exact_binomtest": 0.0008213953115046024,
+    "direction_favors_new": true
+  },
+  "N6_education_medical_self_coverage": {
+    "education": {"n_pairs": 20, "baseline_covered": 9, "new_covered": 3, "floor": 6},
+    "medical": {"n_pairs": 28, "baseline_covered": 13, "new_covered": 18, "floor": 11}
+  }
+}
+```
+
+`baseline_rank1_correct=41`・`new_rank1_correct=61` は調査フェーズ・実装フェーズの独立再計算値
+（Q4・スモークテスト）と完全一致した．`education.new_covered=3` は Iter62 の水準（6/20，config.yml
+の N6 フロア）を下回っており，`medical.new_covered=18` は Iter62 の水準（11/28）を上回っている
+（education 側の実測を裏取りするため，該当 20 行を個別に列挙し baseline/new の `dispatched_domains`
+を突き合わせて手計算でも 3/20 と再確認した）。
+
+**成果物・付随確認**
+
+- 新規ファイル: `results/iter63_multilabel_ranking_predictions.jsonl`（実装フェーズのスモーク実行
+  結果を独立再実行で再生成．md5sum が実装フェーズ生成時と一致し決定的であることを確認），
+  `results/iter63_stats.json`（新規）。`results/iter63_regression_check_baseline_mode.jsonl`
+  （実装フェーズ生成物，A10 用）は変更していない。
+- Iter61/62 の保護対象資産（`models/dispatch_multilabel_head_iter61.joblib`・
+  `results/iter61_multilabel_ranking_predictions.jsonl`・`results/iter61_stats.json`・
+  `results/iter62_stats.json`・`results/iter62_multilabel_ranking_predictions.jsonl`・
+  `data/classifier_train_multidomain_iter61.jsonl`）の `mtime` を実行前後で確認し，本実験フェーズの
+  実行時刻（本日 10:53〜10:58）より前のまま一切変更されていないことを確認した。
+- `git status --porcelain` を確認した。実装フェーズが変更した2ファイル
+  （`scripts/evaluate_dispatch_candidate_ranking.py`・`tests/test_evaluate_dispatch_candidate_ranking.py`，
+  いずれも `M`）と，研究サイクルのメタデータ3ファイル（`.claude/research/config.yml`・
+  `.claude/research/journal.md`・`.claude/research/state.json`，各フェーズが継続的に更新するもの）
+  以外に，**無関係な作業ツリー変更が2件存在する**（いずれも本イテレーションの変更対象外で，
+  実験フェーズの開始前から存在していたもの）:
+  (a) `config.yaml`（`central_router.embed_node_host` が `wafl502` から `wafl-ctrl5` へ変更されている。
+  本イテレーションのコマンドはいずれも `--ollama-host`/`--ollama-port` を明示指定しており
+  `config.yaml` を読まないため実行結果には影響していないが，出所不明の変更であり本フェーズでは
+  一切手を触れていない）。
+  (b) `results/iter45_preliminary/logs/wafl{500..509}/expert-mesh.log`（10 ファイルとも `M`。
+  常時起動中のコンテナ（`OLLAMA_KEEP_ALIVE=-1`）が生成し続けているログの差分と見られ，本
+  イテレーションのオフライン採点コマンドはこれらのログファイルに書き込みを行っていない）。
+  本フェーズではいずれも変更・復元せず，事実として記録するに留める。
+- 実行中の異常・障害は発生していない（3コマンドとも exit code 0，エラー出力なし，OOM・
+  タイムアウトなし，A9/A10 とも例外なし）。
+
+**解釈・採否判断はこのフェーズでは行わない**（次の分析(解釈)フェーズに委ねる。上記はすべて
+生の実測値であり，`pass: true/false` はスクリプト自身が出力した事前登録済みアサーションの結果を
+そのまま転記したものである）。
+
+### 分析 (Iter63)
+
+**数値集計のみ（解釈・採否判定は次フェーズ rc-analyst の担当）**
+
+事前登録の成功条件・非退行条件（journal.md 本イテレーション計画節）に対応する実測値の対応表:
+
+| 条件 | 事前登録の基準 | 実測値 | 基準との機械的な照合 |
+|---|---|---|---|
+| S1（有意性の維持） | 全体200ペアexact McNemar，p<0.05 | p=0.0001538890224443423（改善43／悪化14／discordant57） | 満たす |
+| S2（全体性能の向上） | `compound_domain_set_recall` ≧0.465 | 0.49 | 満たす |
+| S3（コスト中立） | mean_dispatch=2.000000（完全一致） | 2.000000（全1600行 len=2，重複0） | 満たす |
+| S4（発火の証拠） | `rank1_change_count`>0 | 380（rate 0.2375） | 満たす |
+| S5（本レバー固有の主基準） | 複合100行のrank_1正解数41/100を対応ありexact McNemarで有意に上回る（p<0.05かつ正解数>41） | 61/100，discordant34（改善27／悪化7），p=0.0008213953115046024 | 満たす |
+| N2'（top1_accuracy非退行） | `selected_domain`上書き後のtop1_accuracy ≧0.5875 | 0.60375 | 満たす |
+| N3（legal非退行） | legal自身の被覆 ≧8/30 | 17/30 | 満たす |
+| N5（単一ドメインargmax非退行） | ≧0.590 | 0.6033333（905/1500） | 満たす |
+| N6（education/medical非退行） | education≧6/20 かつ medical≧11/28 | education 3/20，medical 18/28 | **満たさない**（education単独が未達，AND条件のため全体として不成立） |
+
+**参考（判定には用いない項目，計画節が事前に撤回・限定を明記済み）**
+
+| 項目 | 実測値 |
+|---|---|
+| N1（rank_1不変，本レバーでは定義上成立しない） | 不一致380/1600（`pass:false`固定） |
+| 統計スクリプト自身のN2（`exact_match`要求，判定には`new_top1_accuracy`の数値のみ使用） | `exact_match:false`（`new_top1_accuracy=0.60375`はN2'欄に転記済み） |
+
+**判定不能だった項目**: なし。config.yml/計画節が事前登録した S1〜S5・N2'/N3/N5/N6 の全項目について，
+`evaluate_dispatch_candidate_ranking.py`・`compute_iter59_ranking_stats.py` の出力および
+`metrics._mcnemar_from_correctness()`／`_domain_pair_coverage_maps()` を用いたアドホック集計から
+実測値を取得できた。
+
+### 分析（解釈） (Iter63)
+
+採否の最終確定（backlog 記録・config.yml 更新・次レバー選定・commit）は次の考察フェーズ
+（rc-reflector）の担当であり，本節は行わない．本節は一次データ
+（`results/20260918_202613/results.jsonl`・`results/iter60/61/62/63_multilabel_ranking_
+predictions.jsonl` の各全 1600 行，`results/iter63_stats.json`）を直接集計した独立検算に基づく解釈である．
+
+**0. 独立検算（Iter62 の先例に倣い，公式パスとは別に全項目を再計算した）**
+
+実験節の全実測値が再現した．`compound` 100 行・`single` 1500 行の分離，`mean_dispatch=2.0`
+（全 1600 行 `len=2`，rank_1==rank_2 の重複 0），A9 の不一致 0 行，`rank1_change_count=380`，
+S1（200 ペア，改善 43／悪化 14／discordant 57，exact p=0.0001538890224443423），
+S2（recall 基準線 0.3450 → 0.4900），S5（41/100 → 61/100，discordant 34＝新のみ正解 27／
+基準線のみ正解 7，exact p=0.0008213953115046024），N2'（0.59750 → 0.60375），N5（905/1500=0.603333），
+N3（legal 8/30 → 17/30），N6（education 3/20，medical 18/28）のすべてが実験節・`stats.json` と
+小数以下まで一致した．以下の集計基盤は公式パスと整合している．
+
+自己被覆の時系列（基準線→Iter60→Iter61→Iter62→Iter63，いずれも同一の複合 100 行上で再集計）:
+**education 9→4→5→6→3**，**medical 13→19→12→11→18**，**legal 8→20→15→16→17**．
+`compound_domain_set_recall` は **0.345→0.480→0.445→0.445→0.490**，複合 100 行の rank_1 正解は
+**41→41→41→41→61**（Iter60〜62 は rank_1 を基準線からコピーしていたので 41 固定，本レバーで初めて動いた）．
+
+**1. N6 不成立の機序（本フェーズの主眼）— 決定的な事実は「Iter63 の被覆＝ヘッド top-2 に入るか否か」に尽きる**
+
+本レバー適用後の `dispatched_domains` は **ヘッドの top-2 そのもの**（rank_1＝argmax，rank_2＝
+argmax を除く max）である．したがって任意のドメイン d の自己被覆数は
+「d が期待ドメインに含まれる複合行のうち，d がヘッド内順位 1 位または 2 位である行数」と
+**恒等的に等しい**．該当 20/28 行でヘッド内順位を集計した実測:
+
+| ドメイン | 対象行 | ヘッド 1 位 | ヘッド 2 位 | top-2 計 | 中央順位 | Iter63 実測被覆 |
+|---|---|---|---|---|---|---|
+| education | 20 | 3 | **0** | **3** | 5 位 | 3/20 |
+| medical | 28 | 9 | 9 | 18 | 2 位 | 18/28 |
+
+すなわち **education は 20 行中 1 行もヘッド 2 位に来ておらず**，被覆 3/20 はヘッド 1 位の 3 行
+（compound-016・019・095）だけで構成される．medical は 1 位 9 行＋2 位 9 行で 18/28．
+**N6 の education／medical の明暗は，rank_1 決定ロジックの副作用ではなく，同一ヘッドの
+当該行に対する順位付け能力そのものの差である**．
+
+得点の実測がこれを裏づける（当該ドメインが期待に含まれる複合行のみ，`head_scores` 生値）:
+
+| ドメイン | 自ドメイン得点の中央値 | 行内最大得点の中央値 | 自得点／行内最大 の中央値 |
+|---|---|---|---|
+| education | **0.0657** | 0.9900 | **0.0899** |
+| medical | 0.7364 | 0.9819 | 0.7496 |
+
+education 絡みの複合行において，ヘッドは education にほぼ信号を出していない（行内勝者の 1 割未満）．
+medical は勝者の 0.75 倍の得点を出しており，2 枠に入る競争力がある．
+
+**2. Iter61→Iter63 で失われた education 2 行の直接確認（該当 20 行を全件突き合わせた結果）**
+
+education 被覆の遷移（基準線, Iter61, Iter63）の内訳は
+`(F,F,F)=11 行`・`(T,T,T)=3 行`・`(T,T,F)=2 行`・`(T,F,F)=4 行` で，**本レバーで新たに失われたのは
+2 行のみ**（残る 4 行は Iter60/61 の rank_2 変更時点で既に失われていた）．その 2 行:
+
+| 行 | expected | 基準線 rank_1/rank_2 | Iter61 | Iter63 | Iter63 の head 上位 |
+|---|---|---|---|---|---|
+| compound-006 | education+legal | **education**/business_economics | **education**/general | general/legal | general 0.9409, legal 0.8461, medical 0.6281, **education 0.2725（4 位）** |
+| compound-078 | mathematics+education | **education**/medical | **education**/medical | medical/social_science | medical 0.9996, social_science 0.9804, general 0.9759, **education 0.8531（4 位）** |
+
+**2 行とも「基準線の実行時ルータが rank_1 に education を選んでいたおかげで被覆されていた」行**であり，
+rank_1 をヘッド argmax に渡した瞬間に失われた．education が rank_2 経由で失われた行は 0 である
+（1 の表のとおり education はヘッド 2 位に 1 行も来ていない）．
+逆に medical の改善 6 行（対 Iter61，悪化 0）は compound-004・008・009・025・057・071 で，
+いずれも **基準線ルータが business_economics を rank_1 に選んでいた行**をヘッドが legal/medical/
+natural_science 等へ置き換え，その結果 medical がヘッド 2 位（実測順位 2 位）として 2 枠目に
+滑り込んだものである．
+
+**3. S5 の +20 と N6 の education 退行が両立する理由（見かけの矛盾の解消）**
+
+基準線の実行時ルータは複合 100 行の rank_1 を **business_economics 44 行・education 13 行**に
+極端に偏らせていた（ヘッド argmax は最大でも natural_science 19 行で 10 ドメインに分散）．
+全 1600 行での dispatch 量・適合率の実測が偏りの性質を示す:
+
+| ドメイン | 基準線 dispatch／適合率 | Iter61 | Iter63 |
+|---|---|---|---|
+| education | **664 行**／0.173 | 373／0.268 | 322／0.295 |
+| medical | 310／0.358 | 349／0.318 | 357／0.322 |
+| legal | 190／0.637 | 232／0.591 | 243／0.576 |
+
+基準線は education を全 1600 行の **41.5%** に投げており（真の出現は 170 行），適合率 0.173 の
+**過剰出力によって被覆を稼いでいた**．S5 の discordant の内訳もこれと整合する:
+新のみ正解 27 行の新 rank_1 は legal 7・computer_science 5・social_science 5・medical 3…と
+基準線が過小に選んでいたドメインに集中し，**基準線のみ正解 7 行の基準線 rank_1 は
+business_economics 4・education 2・history_culture 1** と，基準線が過剰に選んでいたドメインに集中する．
+すなわち S5 の +20（41→61，95% CI [+9.3pt, +30.7pt]）は
+**「事前分布に張り付いた過剰出力から，識別に基づく分散した出力への再配分」**であり，
+education は構造的にその再配分の負け側に回る．S5 と N6 は矛盾しておらず，同一機序の表裏である．
+
+**4. Iter60〜62 の「rank_2 側の改善が education/medical を犠牲にする」パターンと同型か（判定）**
+
+**損失経路は新規（rank_1 固有）だが，根本原因は同一**と判定する．
+
+- **新規である点**: Iter60〜62 の education 退行（9→4→5→6）は，ヘッド内の rank_2 競争で
+  education が他ドメインに押し出された結果だった．今回失われた 2 行はどちらも rank_2 競争と無関係で，
+  **基準線ルータが持っていた rank_1 枠（＝ヘッドとは別系統の分類器）の喪失**による．
+  複合 100 行で基準線ルータのみ正解 7・ヘッドのみ正解 27・両方正解 34 であり，
+  **2 系統の和集合は 68/100 だがヘッド単独では 61/100**．本レバーは
+  rank_1（実行時ルータ）と rank_2（ヘッド）という異種 2 分類器のアンサンブルを
+  **単一分類器の top-2 へ畳み込む**変更でもあり，多様性由来の 7 行を捨てている．
+  その 7 行のうち 2 行が education であった．
+- **同一である点**: いずれの場合も education の被覆は「識別信号」ではなく
+  「どこかのコンポーネントの過剰出力」に支えられており，選択をヘッド主導＝適合率志向に
+  寄せる変更は必ず education を削る．education 被覆は dispatch 量と単調に対応している
+  （664→9/20，373→5/20，322→3/20）．Iter62 の学び 4「education の rank_2 出力を増やしても
+  被覆は増えない（rank_2 適合率 7.6%）」と，本イテレーションの「education はヘッド 2 位にすら
+  1 行も来ない」は同じ事実の別断面である．
+- **構造的な帰結（次レバー設計への含意）**: 現行ヘッドの下では，**rank_2 の選び方をどう変えても
+  education 被覆は 3/20 から動かせない**（2 位が 0 行のため）．ヘッド内順位 3 位以内まで広げても
+  5/20 にしかならず，コストを 2→3 に増やしても N6 フロア 6/20 に届かない（実測）．
+  education の改善余地は順位付け層ではなく，**表現（埋め込み）または訓練データ側**にしか残っていない．
+
+**5. ノイズか有意かの判定**
+
+対応あり exact McNemar（同一 20/28 行の固定集合上）:
+
+| 比較 | education | medical |
+|---|---|---|
+| vs 基準線 | 悪化 6／改善 0，**p=0.0312** | 悪化 1／改善 6，p=0.1250 |
+| vs Iter61（同一ヘッド＝直接比較） | 悪化 2／改善 0，p=0.5000 | 悪化 0／改善 6，**p=0.0312** |
+| vs Iter62（N6 のフロア基準） | 悪化 3／改善 0，p=0.2500 | 悪化 0／改善 7，**p=0.0156** |
+
+- **medical の改善は有意**（vs Iter61 p=0.0312，vs Iter62 p=0.0156）．方向も一貫しており信号である．
+- **education の 3/20 は，N6 のフロア（Iter62 の 6/20）に対しては有意差なし**（p=0.25，discordant 3 件）．
+  head ベース 4 反復の値は 4・5・6・3（標本 sd≈1.29）で，3/20 はこのばらつきの下端に位置し，
+  **「Iter62 比でさらに退行した」と統計的に主張することはできない**．
+  一方 **基準線比 9/20→3/20 は悪化 6／改善 0 で p=0.0312 と有意**であり，
+  **R-C（education が基準線を下回る）は本イテレーションで初めて統計的に裏づけられた**．
+  対外記述ではこの 2 つを混同しないこと（N6 の不成立はあくまで**事前登録した閾値に対する機械的な未達**であって，
+  「Iter62 比の有意な退行」ではない）．
+- 主要指標側は明確に信号である．S1 は改善 43／悪化 14（p=1.5e-4，Δ=+14.5pt，95% CI [+7.4pt, +21.6pt]）で，
+  Iter61/62（改善 32〜33／悪化 12〜13，p≈0.004）を discordant の絶対数でも上回る．
+  **legal 絡み 60 ペアを除いた部分集合（n=140）でも +12.9pt・改善 29／悪化 11・p=0.006427** であり，
+  Iter61 で残っていた R-B（legal 絡みを除くと p=0.0501 で有意水準に届かない）は
+  **本イテレーションで解消した**．これは本レバーの効果が legal 依存でないことの直接証拠である．
+
+**6. 仮説との整合**
+
+計画節の仮説「rank_1 が複合行で 41/100 しか当たらず recall の上限を 0.705 に固定していることが
+残るボトルネックであり，rank_1 をヘッド argmax にすれば 0.445 を超える」は**支持された**．
+rank_1 正解は 41→61 に上がり，rank_1 を固定したときの recall 上限は 0.705→**0.805** へ拡大し，
+実測 recall も 0.445→0.490 となった．想定外の挙動（発散・言語崩れ・OOM・アサーション違反）はない．
+
+ただし**仮説が想定していなかった副作用が 2 点ある**．
+(a) 上記 4 のアンサンブル多様性の喪失（基準線ルータのみ正解 7 行の放棄）．
+(b) **rank_1 正解が +20 行増えたのに，2 ドメインとも被覆した行は 12→17 の +5 行にとどまる**
+（被覆 1 個の行は 65→64 でほぼ横ばい，被覆 0 個の行が 23→19）．rank_1 が正解した行のうち
+rank_2 も正解した割合は Iter61 の 12/41=29.3% から Iter63 の 17/61=27.9% へ**変わっていない**．
+すなわち **rank_1 の枠は改善したが，「rank_1 が当たった行で 2 つ目を当てる」能力は Iter62 で
+確認された飽和のまま**であり，新しい上限 0.805 に対して実測 0.490 と 0.315 の乖離が残っている．
+次のボトルネックはここに移った（ただし Iter62 が示したとおり，これはスコア変換では動かない）．
+
+**7. 事前登録の判定規則との機械的な対応（最終確定は次フェーズ rc-reflector）**
+
+計画節「判定規則（事前登録）」に照らすと:
+
+- 第 1 分岐（S1〜S5 全充足**かつ** N2'/N3/N5/N6 全充足 → adopted）: **該当しない**（N6 が不成立）．
+- 第 4 分岐（S2 不成立＝recall<0.445 → rejected）: 該当しない（0.490 ≧ 0.465）．
+- 第 5 分岐（S4 不成立＝no-op → rejected）: 該当しない（`rank1_change_count=380`）．
+- 第 2・第 3 分岐（S2 のみ／S5 のみの不成立に基づく partial）: いずれも前提が成立しない（S2・S5 とも充足）．
+- **最終分岐「非退行 N2'/N3/N5/N6 のいずれかが FAIL → adopted にはしない（S 側が全充足でも最大 partial とし，
+  どの指標が退行したかを対外記述の留保として残す）」に該当する**．
+
+したがって機械的な結論は **partial（S1〜S5 全充足・非退行 4 件中 N6 のみ不成立により adopted 不可）**である．
+事後の閾値緩和・厳格化は行っていない．Iter62 の partial（実質「効果なし」）とは中身が大きく異なり，
+**今回は主基準側に有意かつ大きな効果があるうえで非退行 1 件が未達という型の partial** である点を，
+reflector は区別して記録すべきである．
+
+**8. 対外記述で必ず併記すべき留保**
+
+- **R-C（更新・格上げ）**: education 自己被覆は基準線 9/20 → **3/20** で，
+  対応あり exact McNemar p=0.0312 の**有意な退行**．本イテレーションで初めて有意になった．
+  「複合設問の被覆が全体で改善した」と書く場合，**education 単独では基準線より有意に悪化している**ことを
+  必ず併記する．同時に「Iter62 比の追加退行（6→3）は有意ではない（p=0.25）」ことも併記し，
+  過大に書かないこと．
+- **R-E（新規・アンサンブル多様性の喪失）**: 本構成は rank_1・rank_2 の双方を単一のオフラインヘッドが
+  決めるため，実行時ルータが持っていた独立な正解 7 行（複合 100 行中）を捨てている．
+  和集合の上限 68/100 に対しヘッド単独 61/100．「ヘッドは実行時ルータより優れている」ではなく
+  「ヘッドは実行時ルータより優れているが，両者は部分的に相補的である」が正確な記述である．
+- **R-F（実機未検証・B94/B95 の再掲，本イテレーションで最も重い）**: 本構成は rank_1 まで実行時経路
+  （`node.py` のルータ）から乖離させる．配線は行っていないため，**オフラインの +14.5pt は実機性能の
+  主張には一切使えない**．`selected_domain` の新 rank_1 での上書きも「ヘッド argmax が top-1 として
+  dispatch される」という仮定下のオフライン上の値であり，実機の
+  `aggregator.select_best_dispatch_response()` を再現しない（N2'=0.60375 の解釈はこの範囲に留まる）．
+- **効果量の扱い**: 0.345→0.490（+14.5pt，exact McNemar p=1.5e-4，95% CI [+7.4pt, +21.6pt]，
+  mean_dispatch 2.000000 でコスト中立）．legal 絡みを除く部分集合でも +12.9pt・p=0.006427 で
+  方向・有意性とも一貫する（R-B は解消）．なお Iter60 の 0.480 は R-A（テスト集合のペア分布を
+  参照した配分）を含む値であり，**リーク非依存の構成で 0.48 を超えたのは本イテレーションが初めて**だが，
+  0.490 と 0.480 の差自体は検定していない．
+- **既知の穴（継続）**: 低品質行（プロンプトの echo）の混入は Iter60 以来未解消．
+  目的指標の n が 20/28 と小さく ±2 件程度の真の効果を検出する統計的検出力がないという
+  測定基盤の制約も Iter62 から継続している（今回 education の N6 判定がまさにこの制約下にある）．
+
+### 考察 (Iter63)
+
+**判定: partial（部分的成立．ただし Iter62 の partial とは型が異なり，主基準側に大きく有意な効果がある）**
+
+事前登録の判定規則（本イテレーション計画節）への機械的な照合は以下のとおりで，事後の閾値変更は
+一切行っていない（Iter29 以降の事前登録運用）．
+
+- S1 p=0.0001538890224443423 / S2 recall 0.490（≧0.465）/ S3 mean_dispatch=2.000000 /
+  S4 rank1_change_count=380 / S5 複合 100 行 41→61，exact p=0.0008213953115046024（方向も新側）
+  → **S1〜S5 全充足**．
+- N2' 0.60375（≧0.5875）/ N3 17/30（≧8/30）/ N5 0.6033333（≧0.590）は充足，
+  **N6 のみ不成立**（education 3/20 < フロア 6/20．medical 18/28 は充足だが AND 条件のため全体で不成立）．
+- 第 1 分岐（adopted）は N6 不成立により該当せず，第 2・第 3 分岐は前提（S2 または S5 の不成立）が
+  成立せず，第 4・第 5 分岐（rejected / no-op）も該当しない．
+  **最終分岐「非退行のいずれかが FAIL → adopted にはしない（最大 partial）」に該当する**．
+
+レバー `rank1_source` は config.yml で values 単一値（`multilabel_head_argmax`）のため
+**試し切り＝クローズ**する．
+
+**このイテレーションで確定した学び**
+
+1. **rank_1 がボトルネックであるという仮説は支持された**．基準線ルータの top-1 は複合 100 行で
+   41/100 しか正解せず recall 上限を 0.705 に固定していたが，ヘッド argmax に替えると 61/100・
+   上限 0.805 となり，実測 recall も 0.345→0.490（+14.5pt，95% CI [+7.4pt, +21.6pt]，コスト中立）．
+   **legal 絡み 60 ペアを除く n=140 でも +12.9pt・p=0.006427 で有意**となり，Iter61 まで残っていた
+   留保 R-B（効果の legal 依存）は本イテレーションで解消した．
+2. **しかしボトルネックは消えたのではなく移動した**．rank_1 正解が +20 行増えたのに 2 ドメインとも
+   被覆した行は 12→17（+5）にとどまり，「rank_1 が当たった行で 2 つ目も当てる」割合は
+   29.3%→27.9% と**不変**である．新上限 0.805 と実測 0.490 の乖離 0.315 がこれに対応する．
+   Iter62 が示したとおり，この残差はスコア変換（較正）では動かない．
+3. **education の被覆は識別信号ではなく過剰出力に支えられていた（Iter60〜62 と同一の根本原因）**．
+   基準線は education を全 1600 行の 41.5%（664 行，適合率 0.173）へ投げており，今回失われた 2 行
+   （compound-006・078）はいずれも「基準線ルータが rank_1 に education を選んでいたから被覆されていた」
+   行であった．rank_2 競争由来の損失は 0 件である．ヘッドは education 絡みの複合行で自ドメイン得点の
+   中央値が行内最大の 0.0899 倍しかなく，**20 行中 1 行もヘッド 2 位に来ない**．したがって
+   **順位付け層（rank_1/rank_2 の選び方・スコア変換）をどう変えても education 被覆は 3/20 から
+   動かせない**（3 位まで広げても 5/20 で，コストを 2→3 に増やしてもフロア 6/20 に届かないことを実測）．
+   改善余地は**表現（埋め込み）または訓練データ側にしか残っていない**．これが次レバー選定の根拠である．
+4. **S5 の改善と education の退行は同一機序の表裏であり矛盾しない**．S5 の discordant は，新側のみ
+   正解 27 行が legal/computer_science/social_science 等（基準線が過小に選んでいたドメイン）に，
+   基準線側のみ正解 7 行が business_economics/education（基準線が過剰に選んでいたドメイン）に集中する．
+   本レバーは「事前分布に張り付いた過剰出力から識別ベースの分散出力への再配分」であり，
+   education は構造的に負け側に回る．
+5. **新しい留保 R-E（アンサンブル多様性の喪失）**: rank_1・rank_2 の双方を単一ヘッドが決める構成は，
+   実行時ルータだけが正解していた 7 行（複合 100 行中）を捨てている（和集合 68/100 vs ヘッド単独 61/100）．
+   「ヘッドは実行時ルータより優れている」ではなく「優れているが両者は部分的に相補的」が正確な記述である．
+   ただし「両系統の和集合を dispatch する」構成は事実上 Iter61（rank_1=ルータ，rank_2=ヘッド argmax）
+   そのものであり，recall 0.445 と本構成の 0.490 に劣ることが実測済みである点に注意する
+   （多様性の利得は rank_1 の正解数には効くが，2 枠という予算の下では回収できていない）．
+6. **統計上の区別を混同しないこと**: education 3/20 は，**基準線 9/20 比では悪化 6／改善 0 で
+   p=0.0312 の有意な退行**（留保 R-C が本イテレーションで初めて統計的に裏づけられた）だが，
+   **N6 のフロアである Iter62 の 6/20 比では p=0.25 で有意差なし**（head ベース 4 反復の値は
+   4・5・6・3 でばらつきの下端）．N6 の不成立は「事前登録した閾値に対する機械的な未達」であって，
+   「Iter62 比の有意な追加退行」ではない．
+
+**対外記述の方針（本フェーズの決定）**
+
+- 効果量の正式値を **0.345 → 0.490（Δ=+14.5pt，n=200 のドメイン対 exact McNemar p=1.5e-4，
+  95% CI [+7.4pt, +21.6pt]，mean_dispatch=2.000000 でコスト中立）** へ更新する．ただし
+  **partial である旨と，これが `rank_1` まで実行時ルータから乖離させたオフライン構成の値である旨
+  （R-F）を必ず併記する**．B95 の正式値（Iter61 の +10.0pt）は「rank_1 を実行時ルータのまま保った
+  構成での値」として併記し，削除しない（配線可否の人間判断が未決であるため，両構成の値が要る）．
+- 留保 **R-B は解消**，**R-C は「基準線比で有意な退行」へ格上げ**，**R-E を新規追加**，
+  **R-F（実機未検証）は継続**する．低品質行の混入（Iter60 以来）も未解消のまま継続する．
+
+**本番経路への配線**
+
+**今回も配線しない（4 回目）．かつ，現時点では配線を推奨しない**．理由は 2 つある．
+(a) 配線は `config.yaml` のスキーマ変更（＋`node.py:214`・`run_experiment.py:93` の同時変更）を伴い，
+rc-reflector の可逆な自律判断の範囲外である（B94/B95/B96 と同一論点．論点は B95 要レビュー 1 に一本化）．
+(b) 本イテレーションで R-C が基準線比 p=0.0312 の有意な退行として確定したため，配線は
+「全体 +14.5pt と引き換えに education 単独の被覆を基準線より有意に落とす」ことを本番で確定させる
+選択になる．この可否は研究の結論に関わる不可逆な判断であり，人間の判断を要する．
+
+**次の一手**
+
+既存 levers は実質試し切り済みであるため skill の停止条件 1 に従い新レバーを考案し，config.yml の
+`levers` 末尾へ追記した（backlog B97）．
+**`multilabel_synthetic_volume = uniform_nine_per_pair`**（2 ドメイン合成訓練事例を全 45 ペア一律で
+3 件／ペア → 9 件／ペアへ増やす．`scripts/generate_multidomain_training_examples.py --per-pair 9
+--per-pair-legal 9`）．上記の学び 3（education の改善余地は訓練データ／表現側にしかない）と
+学び 2（残差は「2 つ目を当てる」能力にあり，スコア変換では動かない）の両方に同時に効きうる唯一の
+低コスト・非リークな軸であるため．配分は一律であり「どのドメインを増やすか」の決定が入らないので
+R-A 型リークは構造的に生じない．
+
+### journal ローテーション
+
+本フェーズ実行前の `## Iteration ` 見出しは 4 件（Iter63/62/61/60）で，実イテレーション数と一致
+（見出しの欠落なし）．`journal_retention: 3` に従い `rotate_journal.sh` を実行し，Iteration 60 の
+ブロックを `journal_archive.md` へ移した．
+
 ## Iteration 62: 多ラベルヘッド得点のドメイン別較正による rank_2 偏りの是正
 
 ### 調査 (Iter62)
@@ -1621,941 +2663,4 @@ levers 末尾へ追記した（詳細と根拠は backlog B95）．
 イテレーション名は「**多ラベルヘッド得点のドメイン別較正による rank_2 偏りの是正**」．
 
 **コミット**: `b86eddb`（🎯 Iter61: 配分均一化でも効果は有意に残存，多ラベル教師信号を「汎化可能な効果」へ格上げ）
-
-## Iteration 60: 2ドメイン訓練事例の新規生成による多ラベルヘッドの再訓練
-
-### 調査 (Iter60)
-
-**問い**
-
-- Q1: 少量データでの multi-label 学習データの合成生成（ルールベース結合 vs LLM 生成）の品質・
-  分布ギャップ・過学習リスクに関する先行研究．`MultiLabelBinarizer` を使った少量サンプル OvR
-  訓練の落とし穴．
-- Q2（最優先）: `data/classifier_train.jsonl` の実データ・Iter59 実装（訓練/採点スクリプト・埋め込み
-  キャッシュ）・`build_dataset.py` の複合設問実装・`config.yaml` の生成モデル設定を正確に特定する．
-- Q3: Q1・Q2 を踏まえた (a)/(b) の実現可能性・推奨デフォルトパラメータの整理．
-
-**分かったこと（Q1: 先行研究）**
-
-- **ルールベース結合（Concat）と LLM 生成の直接比較実験が文献に存在する**．Chen & Zhou (?), arXiv
-  2312.11276 "Compositional Generalization for Multi-label Text Classification: A Data-Augmentation
-  Approach" は "Concat"（単一ラベル事例をそのまま連結して多ラベル合成例を作る手法，Jia & Liang 2016
-  に由来）を GPT-3.5・Flan-T5・VAE 系生成器と同一ベンチマーク（SemEval/AAPD/IMDB）上で比較した．
-  **Concat は No-Aug からわずかに改善する（SemEval Jaccard 44.90→45.84，IMDB Jaccard 42.94→46.13，
-  Accuracy 4.48→8.71）が，GPT-3.5/Flan-T5 等の生成型手法に一貫して劣る**（IMDB Accuracy: Concat 8.71
-  vs GPT-3.5 10.04 vs Flan-T5 11.69）．原因として論文は「連結されたテキストが意味的・統語的に
-  一貫していない（neither semantically nor syntactically coherent）」ことを明記している
-  （出典: https://arxiv.org/html/2312.11276v3 ）．**本リポジトリの `_COMPOUND_QUESTIONS`（下記 Q2）
-  は「2問の連結」ではなく「1つの統合されたシナリオ」であり，この論文の Concat 劣化機序が
-  そのまま当てはまる構造的リスクである**ことが確認できた（config.yml note の懸念が文献的にも
-  裏付けられた）．
-- **低リソース設定での LLM 合成データ拡張は効果があるが，増やしすぎると頭打ちになる**．Empirical
-  case study (arXiv 2407.12813, "Data Generation using Large Language Models for Text
-  Classification") は，元データ 100 件規模では合成データ拡張で 3〜26% の改善が得られる一方，
-  1000 件規模では効果が 5% 未満に縮小し，「合成データ量を増やせば単調に改善するわけではない」
-  「生データと合成データを併用するのが望ましい」「合成データ特有のバイアス・パターンに注意」と
-  結論している（出典: https://arxiv.org/html/2407.12813v1 ）．本レバーの規模（元1427件に対し
-  数十〜百数十件を追加する想定）はこの「低リソース・少量追加」レンジに該当し，効果が出るとすれば
-  この規模感が妥当という傍証になる．
-- **`MultiLabelBinarizer` は実際に必須**（Iter59 の「不要」という結論はこのイテレーションには
-  適用されない）: 実機の sklearn 1.9.0 で実際に検証したところ，`OneVsRestClassifier.fit(X, y)` に
-  `y=[["a"],["b"],["a","b"], ...]`（ラベルのリストのリスト）を直接渡すと
-  `ValueError: You appear to be using a legacy multi-label data representation. Sequence of
-  sequences are no longer supported; use a binary array or sparse matrix instead - the
-  MultiLabelBinarizer transformer can convert to this format.` で例外になることを確認した．
-  **`MultiLabelBinarizer().fit_transform(y)` で二値インジケータ行列に変換してから
-  `OneVsRestClassifier.fit(X, Y)` に渡す必要がある**．
-- **`classes_` の意味が変わる点が実装上の落とし穴**: 同じ sklearn 1.9.0 で確認したところ，
-  単一ラベル文字列を渡した場合（Iter59の方式）は `model.classes_` がドメイン名文字列の配列になるが，
-  `MultiLabelBinarizer` の出力（0/1 行列）を渡した場合は `model.classes_` が単なる列インデックス
-  `[0, 1, 2, ...]` になる（ドメイン名の対応は別途保持している `mlb.classes_` を使う必要がある）．
-  **Iter59 の `evaluate_dispatch_candidate_ranking.py:_head_scores()`（`zip(head.classes_,
-  probabilities)`）をそのまま新ヘッドに使うと，キーがドメイン名ではなく整数になるバグを生む**．
-  新スクリプトでは `mlb.classes_`（保存が必要）を使って zip する実装に変える必要がある．
-- **`predict_proba()` の挙動も変わる**: 単一ラベル入力時は合計が1になるよう再正規化される
-  （Iter59 で確認済み）が，`MultiLabelBinarizer` 由来の真の多ラベル行列を渡すと**再正規化されず**，
-  各列が独立 sigmoid のまま返る（同一検証で `predict_proba(X).sum(axis=1)` が1にならないことを
-  実機のsklearn 1.9.0で確認）．したがって新ヘッドでは `decision_function()`＋手動sigmoidではなく
-  `predict_proba()` を直接使ってよい（Iter59 が `decision_function()` を使った理由＝単一ラベル時の
-  再正規化回避，は今回は該当しないが，Iter59との実装対称性を優先するなら decision_function 方式を
-  踏襲してもよい．どちらでも数学的に同じランキング結果になる．計画フェーズで選択）．
-- **少量データでの binary relevance のクラス不均衡・少数ラベル対策**は Iter59 調査で確認済みの
-  Zhang & Zhou (2017) の知見がそのまま今回にも適用される（`class_weight="balanced"` を各二値問題に
-  独立適用）．今回新たに追加されるのは「2ドメイン同時ラベルの正例数」という**新しい極少数クラス**
-  であり（後述 Q3 のとおり，各ドメインペアに数個ずつしか合成しない前提では，個々のペアの正例数は
-  訓練データ全体の1%未満になる），Wikipedia・Zhang & Zhou が指摘する「binary relevance はラベル間
-  依存を見ない」という弱点とは別に，**「ラベル共起パターン自体を学習させたいのに，共起の正例が
-  極少数」というこのレバー固有のジレンマ**が生じる点に注意が必要．
-
-**分かったこと（Q2: コードベース調査，最優先）**
-
-1. **`data/classifier_train.jsonl`**: 1427行，スキーマは `{"id", "query", "domain"}` の3フィールドの
-   み（Iter59調査と同一，再確認済み）．`id` は `"{domain}-train-{NNN:03d}"` 形式（例:
-   `business_economics-train-001`）で1427件全てユニーク．ドメイン別件数:
-   `business_economics/computer_science/education/general/history_culture/mathematics/medical/
-   natural_science/social_science` が各150件，**`legal` のみ77件**．`query` は JMMLU 由来の
-   四択問題文（A〜Dの選択肢付き）であり，**自然文の相談文ではない**（実データを実際に読んで確認．
-   例: 「かつてマルチブランド政策と呼ばれた...次のどれか? A. 個別ブランド B. ...」）．
-2. **`build_dataset.py:617-621`（`_COMPOUND_QUESTIONS` 直前のコメント）**: 「JMMLU の四択問題は
-   単一タスクに属し，真のクロスドメイン曖昧性を表現できないため，複合設問は JMMLU 由来ではなく
-   手作りとする」と明記されている．実際に `_COMPOUND_QUESTIONS`（`build_dataset.py:621-`，
-   Python構造として機械的にパースして確認）は**100件，1〜2文の自然な日本語相談文**（選択肢なし，
-   例:「仕事中に転倒して怪我をしました．治療費と休業補償について知りたいです．」）であり，
-   `classifier_train.jsonl` の四択問題形式とは**文体・構造が根本的に異なる**．
-   ドメインペア別内訳（機械的に集計）: `legal×medical` が12件で最多，`education×medical`・
-   `education×legal` が各4件，残り40ペアが各2件（45ペア中43ペアが登場，計100件．legal を含む行は
-   30件でIter59調査の記述と一致）．`build_dataset.py:1147-1155`（`_build_rows()`）でこの100件に
-   `id=f"compound-{index:03d}"`・`expected_domains`・`is_compound=True` を付与して評価用
-   `dataset.jsonl` に組み込む．**IDは `compound-001`〜`compound-100`，`classifier_train.jsonl` の
-   `id` 命名（`{domain}-train-NNN`）とは名前空間が別**であり，機械的なID衝突は起きない．
-   ただし**リーク回避のために本レバーの実装は `_COMPOUND_QUESTIONS` を一切 import／参照しない**
-   ことを構造的に徹底すべき（生成プロンプトの参考にすることも含め避ける．文字列としての漏洩だけで
-   なく，シナリオの着想の漏洩も広義のリークとみなす）．
-3. **Iter59 の訓練スクリプト `scripts/train_dispatch_candidate_ranking_head.py`**（全文読了）:
-   `train_domain_classifier.py` の `_load_training_rows()`（`train_domain_classifier.py:74-77`，
-   `{"id","query","domain"}` を JSONL から読むだけ）と `build_training_features()`
-   （`train_domain_classifier.py:99-142`）を import して再利用し，`OneVsRestClassifier(
-   LogisticRegression(max_iter=1000, class_weight="balanced"))` を1427行で fit する
-   （`train_dispatch_candidate_ranking_head.py:83-100`）．**`class_weight="balanced"` かつ
-   `_extract_sample_weights()` を使わない設計**（Iter32の乗算結合バグを避けるため）．5-fold CV の
-   per-domain ROC-AUC/average precisionを診断出力する（`:103-132`）．
-   `build_training_features()`（`train_domain_classifier.py:99-142`）は**両分岐とも
-   `labels.append(row["domain"])` で `row["domain"]` をそのまま追加するだけ**であり，型チェックを
-   していない．**この関数はコードを変更しなくても `row["domain"]` がリスト（例:
-   `["legal","medical"]`）の行を含む JSONL をそのまま渡せば，そのリストを含んだ `labels` を返す**
-   （＝新規の合成2ドメイン行を既存関数に流し込むこと自体は無改造で可能．ただし返る `labels` は
-   文字列とリストが混在するため，`MultiLabelBinarizer` に渡す前に「文字列は1要素リストへ正規化する」
-   前処理が新スクリプト側に必要）．
-4. **Iter59 の採点スクリプト `scripts/evaluate_dispatch_candidate_ranking.py`**（全文読了）:
-   `--baseline`（固定 `dispatch_top_k=2` の `results/20260918_202613/results.jsonl`）から
-   rank_1 をそのまま引き継ぎ（`:148`，既存分類器を再計算しない），embedding キャッシュ
-   （`--embedding-cache`，`.npz`，`ids`/`embeddings` の2キー，`:84-101`）を使い回しつつクエリを
-   embed し，`_head_scores()`（`:127-131`，`decision_function()`→手動 sigmoid，
-   `zip(head.classes_, probabilities)`）で10ドメイン分のスコアを得て `build_new_rows()`
-   （`:134-166`）で rank_1 を除く9ドメイン中最大スコアを rank_2 とする．A1（rank_1不変，`:169-180`）・
-   A2（コスト中立，`:183-203`）・A3（rank2_flip_rate，`:206-209`）の assert 済み．**この
-   `_head_scores()` の `zip(head.classes_, ...)` 部分が，上記Q1で確認した「MLB経由だと `classes_`
-   が整数になる」問題の直撃箇所**であり，本レバー実装では改修必須．
-5. **`results/iter59_query_embeddings.npz`**: ローカルに実ファイルとして現存（9,971,712 bytes，
-   `ls -la` で確認．B93 の記載どおり git 未追跡）．中身は `{ids: array[str], embeddings:
-   array[float]}` の2キー（`_load_embedding_cache`/`_save_embedding_cache` の実装から自明，
-   `evaluate_dispatch_candidate_ranking.py:84-101`）で，1600問（`compound-*` 100件＋JMMLU由来
-   1500件）の embedding をキー=`id` で保持．**この1600件は評価用 `dataset.jsonl` の行であり，
-   `classifier_train.jsonl` の1427行とは別集合**（IDの名前空間も異なる）．したがって**この
-   キャッシュは評価フェーズ（1600問の再採点）ではそのまま再利用できるが，新設する合成訓練データ
-   （`classifier_train.jsonl` 由来ではない新規 `id`）の embedding は含まれておらず，訓練フェーズで
-   別途 embed が必要**（訓練コストは新規合成行数分のみ，数十〜百数十件なら数分未満）．
-6. **`config.yaml`**: `embedding_model: nomic-embed-text`（`:4`），`judge_model:
-   schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m`（`:107`，回答品質評価用に既存稼働中の
-   モデル）．`expert_backend.py:14-34`（`OllamaClient.generate(model, prompt, ...)`）が
-   既に汎用の生成API呼び出しとして実装済みで，`scripts/evaluate_response_quality.py` が
-   judge_model 呼び出しに使っている実績がある．**(b) LLM 生成を選ぶ場合，この `judge_model` を
-   そのまま生成モデルとして転用すればよく，新規のクライアント実装は不要**．
-
-**分かったこと（Q3: 実験設計への示唆）**
-
-1. **(a) ルールベース結合と (b) LLM 生成の比較まとめ**:
-   - (a) は文献上の "Concat" 相当だが，本リポジトリの (a) は「2行をそのまま連結」ではなく
-     「自然な日本語で1問に結合」という設計（config.ymlのnote）であるため，文献の Concat
-     （単純連結）よりは改善されているものの，**実装するには何らかのテンプレート／ルールで
-     四択問題文2つを1つの自然文シナリオへ書き換える処理が要る**．これは実質的に軽量な自然言語
-     生成であり，「ルールベースで自然文を作る」ことの難度は過小評価すべきでない．また
-     `classifier_train.jsonl` の `query` は四択形式（A〜D選択肢付き）で，`_COMPOUND_QUESTIONS` の
-     ような選択肢なし自然文とは文体が根本的に異なるため，**(a) を実装しても文体ギャップは
-     完全には埋まらない**（選択肢を残すか，除去して文だけ結合するかで設計判断が必要）．
-   - (b) は文献（2312.11276）で Concat より一貫して高性能かつ，本プロジェクトには
-     `judge_model`（`config.yaml:107`）という生成コストゼロ（追加LoRA不要）で使えるモデルが
-     既に存在するため，**実現コストは (a) とほぼ同等（生成トラフィックが加わる程度）で，
-     分布ギャップは (a) より小さくなる見込み**．ただし文献（2407.12813）が警告する
-     「合成データ固有のバイアス」対策として，生成後のフィルタリング（例: 生成された query が
-     実際に2ドメインの語彙を含むか，長さが極端でないか等の軽量チェック）を計画に含めるべき．
-   - **推奨**: (b) を第一候補とし，(a) は (b) が実機生成コスト・品質確認の点で見送られた場合の
-     フォールバックとして計画書に両論併記する．
-2. **推奨デフォルトパラメータ（次フェーズが1つに絞る前提の目安）**:
-   - **生成規模**: 文献（2407.12813）の知見（低リソースほど効果大，1000件規模では効果縮小）を
-     踏まえ，元の1427件に対し**全45ドメインペア×2〜4件＝90〜180件程度**を追加するのが妥当な
-     出発点．test の `_COMPOUND_QUESTIONS` 自身も「ほぼ全ペア×2件＋legal×medicalのみ12件」という
-     配分であり（Q2参照），この配分の**「件数」そのもの**（テキスト内容ではなくペアごとの多寡）を
-     参考に，legal×medical・education×medical・education×legal を若干厚めにする設計は，
-     テキストの漏洩を伴わない範囲で妥当な事前知識の反映といえる．
-   - **ドメインペア選定**: legal（訓練77件，最少）を含むペアは，OvR個別二値問題の正例が
-     極少数になりやすいため，過学習防止の観点から**生成件数をやや多めに配分**しつつ，
-     5-fold CV ROC-AUC の悪化がないかを訓練スクリプトの診断出力（Iter59から継承）で確認する
-     運用が要る．
-   - **スキーマ**: 新規ファイル（例: `data/classifier_train_multidomain.jsonl`）を新設し，
-     `classifier_train.jsonl` 自体は無変更に保つ設計を推奨（既存 `train_domain_classifier.py`
-     が rank_1 分類器の訓練に使う唯一の入力ファイルであり，混入・破壊のリスクを避けるため）．
-     `{"id": "synth-{domain1}-{domain2}-{NNN}", "query": "...", "domain": [domain1, domain2]}`
-     という形式にし，新設の訓練スクリプトが `classifier_train.jsonl`（`domain`は文字列）と
-     この新ファイル（`domain`はリスト）の両方を読み込み，`[row["domain"]] if isinstance(...)
-     str) else row["domain"]` で正規化してから `MultiLabelBinarizer` に渡す実装にする．
-3. **実装上の必須変更点（Q1で判明した落とし穴の反映）**:
-   - 訓練: `MultiLabelBinarizer().fit_transform(normalized_labels)` を経由してから
-     `OneVsRestClassifier(...).fit(embeddings, Y)` する．`mlb.classes_`（ドメイン名の順序付き配列）
-     を**モデルと一緒に保存する**（例: `joblib.dump({"model": model, "classes": mlb.classes_},
-     output_path)`，Iter59の「joblib.dump(model, ...)」単体保存から変更が必要）．
-   - 採点: `evaluate_dispatch_candidate_ranking.py` の `_head_scores()` を，保存された
-     `classes` 配列を使ってドメイン名にマッピングするよう改修する（`head.classes_` を直接使う
-     現行実装のままでは整数キーになりバグる）．`decision_function()`＋手動sigmoid／
-     `predict_proba()` 直接使用のどちらでも可（Q1参照，数学的に同じ順位になる）．
-   - A1（rank_1不変）・A2（コスト中立）・A3（rank2_flip_rate）のassertパターンはIter59のまま
-     再利用可能（`evaluate_dispatch_candidate_ranking.py:169-209`のロジックは変更不要，
-     `_head_scores()`の内部実装のみ変わる）．
-
-**次の計画フェーズへの示唆**
-
-1. **(a)/(b) の選択を計画フェーズの最初の決定事項とする**．(b) を推奨（文献根拠あり，実装コストは
-   同程度，`judge_model` が既に利用可能）．(a) を選ぶ場合は「四択選択肢をどう扱うか（残す/除去）」
-   を追加で決める必要がある．
-2. **既存の `classifier_train.jsonl` は変更せず，新規ファイルへ合成データを分離する**設計を推奨
-   （rank_1分類器の訓練データを汚染しない）．
-3. **`MultiLabelBinarizer` 導入に伴う実装変更点（`classes_` の意味変化，`_head_scores()` の
-   改修必須）を計画書に明記する**．Iter59のコードをそのまま流用できない箇所として最優先で扱うこと．
-4. **リーク防止策**: 生成スクリプト（(a)(b) どちらでも）は `build_dataset.py` の
-   `_COMPOUND_QUESTIONS` を一切 import／参照しないことをコードレビュー項目として明記する．
-5. **生成件数・ドメインペア配分の初期値**: 45ペア×2〜4件（90〜180件），legal絡みペアをやや厚め，
-   を出発点として計画フェーズで具体的な数値に確定する．
-6. **評価パイプラインは Iter59 をそのまま踏襲**（基準線 `results/20260918_202613/results.jsonl`，
-   成功条件 S1〜S4・非退行 N1〜N4 は config.yml note のとおり完全に揃える）．
-   `results/iter59_query_embeddings.npz` はローカルに現存し1600問評価に再利用可能（訓練用の新規
-   合成行の embedding だけ追加で必要）．
-
-**出典一覧**
-- Chen et al., "Compositional Generalization for Multi-label Text Classification: A
-  Data-Augmentation Approach" (arXiv, 2023/2024改訂): https://arxiv.org/html/2312.11276v3
-- "Data Generation using Large Language Models for Text Classification: An Empirical Case Study"
-  (arXiv 2407.12813): https://arxiv.org/html/2407.12813v1
-- scikit-learn 1.9.0 実機検証（本フェーズで `uv run python` により実行し確認，出典は本リポジトリの
-  Python環境自体）: `OneVsRestClassifier.fit()` への list-of-lists 直接投入がエラーになること，
-  `MultiLabelBinarizer` 経由後は `classes_` が整数配列になること，`predict_proba()` が
-  再正規化されなくなること．
-- Zhang & Zhou (2017)・Wikipedia "Multi-label classification"・scikit-learn calibration/
-  `OneVsRestClassifier` ドキュメント（Iter59調査で確認済み，本イテレーションでも参照）:
-  journal.md 旧Iteration 59「調査」節の出典一覧を参照．
-
-### 計画 (Iter60)
-
-**仮説**
-
-Iter58（既存 confidence の gap，compound 判別 AUC 0.576）と Iter59（既存 embedding ＋ 単一ラベル
-データの OvR 再分解，2 つ目の正解ドメインの順位比較 Wilcoxon p=0.914）が独立に示したとおり，
-2 位枠が改善しない原因は推論側の工夫の不足ではなく，**訓練データに「1 つの設問が 2 ドメインに
-またがる」という事例が 1 件も存在しないこと（`data/classifier_train.jsonl` 1427 行が全て単一
-ドメイン）**である．2 ドメインにまたがる訓練事例を新規生成して `MultiLabelBinarizer` で真の
-多ラベル目的変数を作り，Iter59 と**同一構造**の OvR ヘッドを再訓練すれば，dispatch コストを
-一切増やさない（固定 k=2，mean dispatch 2.0）まま `compound_domain_set_recall` が基準線 0.345
-から改善する．ヘッド構造・推論経路・評価手続きを Iter59 と完全に揃えるため，**Iter59 の結果
-（0.350，McNemar p=1.0）がそのまま対照群（教師信号が単一ラベルの場合）として機能する**．
-
-**単一レバー**
-
-`multilabel_training_signal`: （現状＝訓練事例が単一ドメインのみ）→ `synthetic_two_domain_training_examples`
-（**(b) LLM 生成**方式で 2 ドメイン同時ラベルの訓練事例を新規生成し，既存 1427 行に追加して
-`MultiLabelBinarizer` 経由で OvR ヘッドを訓練する）．
-
-**生成方式の選択（調査フェーズの (a)/(b) から 1 つに確定）: (b) LLM 生成を採用し，(a) 決定論的
-結合は実施しない（同時比較はしない）**．根拠は 3 点:
-1. arXiv 2312.11276 が Concat 系（単一ラベル事例の連結）は No-Aug より改善するものの LLM 生成に
-   一貫して劣ることを同一ベンチマーク上で示しており（IMDB Accuracy: Concat 8.71 vs GPT-3.5 10.04
-   vs Flan-T5 11.69），劣化の原因を「連結テキストが意味的・統語的に一貫しない」と明記している．
-2. 評価側の複合設問は「2 問の連結」ではなく「統合された 1 つのシナリオ」であり（調査 Q2），
-   (a) の分布ギャップは本リポジトリで特に大きい．さらに `classifier_train.jsonl` の `query` は
-   四択問題文（A〜D の選択肢付き）であり，(a) を採ると「選択肢を残す/除去する」という
-   **単一レバーに含まれない追加の設計判断**が生じる．
-3. `config.yaml:107` の `judge_model`（`schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m`）と
-   `expert_backend.py:24-34` の `OllamaClient.generate()` が既に稼働実績を持ち，**新規のクライアント
-   実装なしで (b) を実装できる**（実装コストは (a) とほぼ同等）．
-
-固定する構成（直近最良から変更しない）:
-- embedding: `nomic-embed-text`（frozen，再訓練なし）
-- rank_1 分類器: `models/domain_classifier.joblib` を**一切変更しない**（md5 不変を確認する）
-- ヘッド構造: `OneVsRestClassifier(LogisticRegression(max_iter=1000, class_weight="balanced"))`
-  ＝ Iter59 と同一．ハイパラ探索は行わない（Iter58 の in-sample 選定問題を繰り返さない）
-- 推論・採点手続き: Iter59 の `scripts/evaluate_dispatch_candidate_ranking.py` を踏襲
-  （rank_1 は baseline からそのまま引き継ぎ，残り 9 ドメインをヘッドスコア降順で rank_2 とする）
-- 基準線: `results/20260918_202613/results.jsonl`（固定 k=2，compound_domain_set_recall 0.345）
-- `aggregator.py` / `node.py` / `run_experiment.py` / `classifier.py` / `config.yaml` /
-  `data/classifier_train.jsonl` / `build_dataset.py`: 無変更
-
-**【必須の制約】リーク防止**
-
-評価用複合設問 100 問（`build_dataset.py` の `_COMPOUND_QUESTIONS`）はテストセットであり，
-訓練データ生成に一切流用しない．具体的な徹底策:
-- 生成スクリプト・訓練スクリプトは `build_dataset` を **import しない**（テキストの参照も，
-  シナリオ着想の参考にすることも禁止）．
-- 生成対象の 10 ドメイン名は `data/classifier_train.jsonl` の `domain` 列の一意集合から
-  導出する（`build_dataset.py` の `_DOMAIN_TASKS` を参照しない）．これにより「build_dataset を
-  import しない」ことが構造的に成立する．
-- 事後のリーク監査（下記 A7）のみ `_COMPOUND_QUESTIONS` を読むが，これは**近似重複の検出器
-  であって生成物の選別器ではない**（閾値 0.9 の剽窃ガードのみ．それ未満の類似度で生成物を
-  取捨選択することはしない）．
-
-**変更するファイルと箇所**
-
-1. `scripts/generate_multidomain_training_examples.py`（**新規**）
-   - `config.yaml` の `judge_model` を `OllamaClient.generate()` で呼び，指定 2 ドメイン双方の
-     知識が無いと答えられない 1〜2 文の日本語相談文を 1 件ずつ生成する（選択肢を含めない旨を
-     プロンプトで明示）．ドメイン名→日本語説明の対応は本スクリプト内の定数辞書で定義する．
-   - `temperature=0.8`（多様性確保），1 リクエスト 1 件，ペア・スロット順は決定論的に走査．
-   - **生成規模**: 10 ドメインの全 45 ペア × 3 件 ＝ 135 件をベースとし，`legal` を含む 9 ペア
-     のみ +2 件（計 5 件）として **153 件**を目標とする．根拠: 調査 Q3 の推奨レンジ 90〜180 件
-     （arXiv 2407.12813 の低リソース域）に収まり，`legal` は訓練 77 件と最少かつ compound 100 行
-     の 30 件に登場するため二値問題の正例が特に不足しやすい．**件数配分のみを事前知識として
-     反映し，テキストは一切参照しない**．
-   - **生成後フィルタ**（各スロット最大 3 回まで再生成，全滅したスロットは欠番として記録）:
-     F1 文字数 20〜200，F2 四択マーカー（`A.` `B.` `C.` `D.` 等）を含まない，
-     F3 生成済み集合と完全一致しない，F4 改行を含む複数問形式でない．
-   - 出力: `data/classifier_train_multidomain.jsonl`（**新規データファイル**，コミットする）．
-     形式 `{"id": "synth-{d1}-{d2}-{NNN}", "query": "...", "domain": [d1, d2]}`．
-     **`data/classifier_train.jsonl` は無変更**（rank_1 分類器の訓練入力を汚染しないため）．
-   - 実採取件数が **120 件未満なら実験を成立させず実装を見直す**（生成品質の下限）．
-2. `scripts/train_multilabel_dispatch_head.py`（**新規**．Iter59 の
-   `train_dispatch_candidate_ranking_head.py` は**対照群の再現性のため無変更で残す**）
-   - `--train-data`（既存 1427 行）と `--multilabel-train-data`（新規合成行）の 2 入力を読み，
-     `train_domain_classifier.py` の `_load_training_rows()` / `build_training_features()` を
-     再利用して embed する（調査 Q2-3 のとおり，`build_training_features()` は `row["domain"]`
-     をそのまま `labels` に積むため，リスト値の行も無改造で通る）．
-   - `labels` を `[x] if isinstance(x, str) else x` で正規化 → `MultiLabelBinarizer().fit_transform()`
-     → `OneVsRestClassifier(...).fit(embeddings, Y)`．
-   - 保存形式を Iter59 から変更: `joblib.dump({"model": model, "classes": list(mlb.classes_)},
-     "models/dispatch_multilabel_head.joblib")`（`OneVsRestClassifier.classes_` が MLB 経由では
-     整数列になるため，ドメイン名の対応を別途保持する必要がある．調査 Q1 参照）．
-   - 5-fold CV の per-domain ROC-AUC / average precision 診断出力は Iter59 から継承する
-     （多ラベル化に伴い `StratifiedKFold` が使えないため `KFold(shuffle=True, random_state=42)`
-      に変更し，out-of-fold の `decision_function` から列ごとに算出する）．
-3. `scripts/evaluate_dispatch_candidate_ranking.py`（**既存を編集**）
-   - `_head_scores()` を，保存された `classes`（ドメイン名配列）で zip するよう改修する
-     （現行の `zip(head.classes_, probabilities)` は MLB 由来ヘッドでは整数キーになりバグる）．
-   - ヘッド読み込みを「dict ペイロード（新）／素の推定器（Iter59 の旧形式）」の両対応にし，
-     旧形式では従来どおり `head.classes_` を使う（Iter59 成果物の再採点互換を壊さない）．
-   - `--iter59-predictions`（任意）を追加し，Iter59 予測との rank_2 不一致件数を出力に記録する
-     （下記 A5 用）．A1 / A2 / A3 のアサーションロジック（`:169-209`）は**変更しない**．
-4. `scripts/compute_iter59_ranking_stats.py`（**変更なし・そのまま流用**）
-   - `--baseline` / `--new` / `--output` で完全にパラメータ化されており，S1〜S4・N1〜N4 を
-     Iter59 と**同一コード・同一手続き**で算出できる．比較可能性を担保するため改変しない．
-
-**実施方法（コマンド手順）**
-
-```
-# 0) 合成訓練データの生成（judge_model への生成トラフィックが発生．153 件目標）
-uv run python -m scripts.generate_multidomain_training_examples \
-    --train-data data/classifier_train.jsonl \
-    --model schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m \
-    --ollama-host 192.168.15.100 \
-    --per-pair 3 --per-pair-legal 5 \
-    --output data/classifier_train_multidomain.jsonl
-
-# 0') リーク監査（A7．生成物を選別せず，近似重複のみ検出）
-uv run python -m scripts.generate_multidomain_training_examples --audit-leak \
-    --output data/classifier_train_multidomain.jsonl
-
-# 1) 多ラベルヘッドの訓練（1427 + 153 件 embed）
-uv run python -m scripts.train_multilabel_dispatch_head \
-    --train-data data/classifier_train.jsonl \
-    --multilabel-train-data data/classifier_train_multidomain.jsonl \
-    --embedding-model nomic-embed-text --ollama-host 192.168.15.100 \
-    --output models/dispatch_multilabel_head.joblib
-
-# 2) 1600 問のオフライン採点（embed のみ．キャッシュ再利用）
-uv run python -m scripts.evaluate_dispatch_candidate_ranking \
-    --baseline results/20260918_202613/results.jsonl \
-    --head models/dispatch_multilabel_head.joblib \
-    --embedding-model nomic-embed-text --ollama-host 192.168.15.100 \
-    --embedding-cache results/iter59_query_embeddings.npz \
-    --iter59-predictions results/iter59_ovr_ranking_predictions.jsonl \
-    --output results/iter60_multilabel_ranking_predictions.jsonl
-
-# 3) 指標・検定（Iter59 と同一スクリプト・同一手続き）
-uv run python -m scripts.compute_iter59_ranking_stats \
-    --baseline results/20260918_202613/results.jsonl \
-    --new results/iter60_multilabel_ranking_predictions.jsonl \
-    --output results/iter60_stats.json
-```
-
-**no-op 対策（Iter58/59 で繰り返し発生した「発火しているのに no-op」への機械的アサーション）**
-
-本イテレーションも実行時経路（`node.py:214` / `run_experiment.py:93`）を通らないオフライン検証
-であるため，Iter16/20/21/22/27/58 型の「レバーを読む行に到達しない」no-op は構造的に起こらない．
-代わりに，**教師信号の多ラベル化が実際にヘッドへ届いていること**を以下で機械的に保証する．
-
-- A0（教師信号が真に多ラベル）: MLB 出力 `Y` について `(Y.sum(axis=1) >= 2).sum()` が合成行数に
-  一致し，かつ **≧120** であることを訓練スクリプトで assert．`len(mlb.classes_) == 10` かつ
-  全要素が既知のドメイン名文字列であることも assert．合成行が 45 ペア中いくつを被覆したかを出力．
-- A1（rank_1 不変）: 1600/1600 一致（Iter59 の実装をそのまま使用）．
-- A2（コスト中立）: 全行 k=2・rank_1 ≠ rank_2・mean dispatch = 2.000000．
-- A3（発火の証拠・対 baseline）: `rank2_flip_rate > 0`．
-- A5（発火の証拠・対 Iter59＝**本レバー固有の no-op 検出**）: 新ヘッドの rank_2 が Iter59 ヘッドの
-  rank_2 と**1600 行中 1 行以上で異なる**こと．0 件なら「153 件の合成行がヘッドを一切動かして
-  いない」＝本レバーの no-op であり，実験を成立させず実装を見直す．不一致件数を必ず報告する．
-- A6（MLB 整数キー・バグの検出）: 採点スクリプトで `head_scores` のキー集合が 10 個のドメイン名
-  文字列と完全一致することを assert（整数キーへのすり替わりを機械的に検出する）．
-- A7（リーク監査）: 合成 153 件と `_COMPOUND_QUESTIONS` 100 件の全ペアについて文字 3-gram Jaccard
-  類似度を算出し，**最大値が 0.9 以上なら実験を無効**とする．最大値・中央値を必ず報告する．
-
-**成功条件（事前登録．Iter59 と完全に同一．判定は事後変更しない）**
-
-- **S1（主基準）**: `compound_domain_set_recall` が基準線 **0.345（69/200）** から上昇し，
-  ドメイン単位 n=200 の **exact McNemar（two-sided binomtest，α=0.05）で p < 0.05**．
-- **S2（効果量の下限）**: 点推定の上昇が **+0.04pt 以上**（被覆ドメイン数 69 → **77 以上**）．
-- **S3（コスト中立）**: 全 1600 行で k=2，mean dispatch = 2.000000（A2 が通ること）．
-- **S4（発火の証拠）**: `rank2_flip_rate > 0` かつ **A5 の対 Iter59 不一致件数 > 0**．
-- **第 2 の参照点（gate ではなく併記必須）**: Iter59 の OvR ヘッド（教師信号が単一ラベル，
-  同一構造）は **0.350（McNemar p=1.0，2 つ目の正解ドメインの順位比較 Wilcoxon p=0.914，
-  平均順位 4.201→4.258）**．本イテレーションの結果は基準線 0.345 だけでなく Iter59 の 0.350 とも
-  並べて報告し，**「教師信号を多ラベル化した差分」**として解釈する（Iter59 予測との
-  exact McNemar も参考値として算出・併記する）．
-
-判定規則: S1〜S4 全て充足なら**採用**（次イテレーションで実行時経路へ配線．ただし `config.yaml`
-のスキーマ変更を伴うためユーザー確認が必要），S1 不成立だが S2 相当の上昇（+0.04pt 以上）が
-見える場合は **partial**，S1・S2 とも不成立なら**棄却**．
-
-**非退行条件（事前登録）**
-
-- **N1（rank_1 完全不変）**: A1 が 1600/1600 で通ること．破れた結果は単一レバー原則違反として無効．
-- **N2（top1_accuracy 不変）**: new 側 rows で再計算した `top1_accuracy` が baseline の **0.5975** と
-  小数点以下まで完全一致すること．
-- **N3（legal 非退行・過学習チェック）**: legal 自身の被覆が基準線の **8/30 を下回らない**
-  （≧8．Iter59 は 9/30）．加えて 1600 行での legal スコアの標準偏差 > 0，5-fold CV の legal
-  ROC-AUC を報告する．
-- **N4（恩恵の偏りの分解）**: 改善がある場合，legal 絡み / medical 絡み / その他のドメインペア
-  単位に分解して報告する．legal 絡みのみに改善が集中する場合は主張の強度を落とす．
-- **N5（新規．文体ショートカットの検出）**: 合成行は自然文，既存 1427 行は四択問題文であり，
-  評価 1600 問も compound 100 問が自然文・JMMLU 1500 問が四択文であるため，ヘッドが
-  「自然文らしさ→多ラベル」という文体ショートカットを学習した可能性が構造的に残る．
-  単一ドメイン 1500 行に対するヘッドの argmax 正解率（Iter59 実測 **0.610**）が **0.590 以上**を
-  保つことを非退行条件とし，実測値を必ず報告する．これを下回る場合は，compound での改善が
-  あっても「文体による識別」の疑いを考察に明記する．
-
-**留保（考察フェーズへの申し送り）**
-
-- R1: OvR のスコアは合計 1 にならない（MLB 経由では `predict_proba()` も再正規化されない）．
-  ランキングにのみ使うため決定には影響しないが，**「確率」として対外記述しない**．
-- R2: 評価集合上でのハイパラ選択は行わない（推定器の設定は Iter59 から固定，探索しない）．
-  生成件数・配分（45 ペア×3，legal 絡みのみ 5）も事前に固定し，結果を見て変更しない．
-- R3: 本イテレーションは**オフライン完結・スキーマ変更なし**であり，ユーザー確認なしで自律着手
-  してよい．実機の dispatch 挙動・回答品質・レイテンシは測定しない．**採用となった場合の
-  実行時経路への配線（`node.py:214` と `run_experiment.py:93` の両方を同時に変更しないと Iter58 と
-  同型の no-op を再演する）と `config.yaml` のスキーマ変更は，その時点で初めてユーザー確認が
-  必要になる．今回は着手しない．**
-- R4: 合成 153 件は元データ 1427 件の約 10% であり，個々のドメインペアの正例は 3〜5 件と極少数
-  である（調査 Q1 が指摘した「共起パターンを学習させたいのに共起の正例が極少数」というジレンマ）．
-  陰性結果が出た場合，「多ラベル教師信号が無効」なのか「件数が不足」なのかは本イテレーション
-  単独では分離できない．次の一手（件数のスケールアップ）の判断材料として，合成行数と 5-fold CV
-  診断値の関係を考察で必ず言及する．
-- R5: 生成に使う `judge_model` は評価軸②（回答品質の LLM-as-judge）にも使われているモデルである．
-  訓練データ生成と回答品質評価が同一モデルであること自体は本イテレーションの指標
-  （`compound_domain_set_recall`，dispatch 側の指標）に影響しないが，将来 End-to-End 品質で
-  比較する際には交絡要因になりうる点を記録しておく．
-
-### 実装 (Iter60)
-
-**変更・新規ファイル（計画どおり）**
-
-1. `scripts/generate_multidomain_training_examples.py`（新規）: `config.yaml` の `judge_model`
-   （`OllamaClient.generate()`，`temperature=0.8`）で 45 ペア×3 件（`legal` 絡み 9 ペアのみ 5 件）＝
-   153 件を生成する CLI。ドメイン名は `data/classifier_train.jsonl` から導出（`_load_domain_names()`），
-   `build_dataset` は生成コードパスから import しない（下記「リーク防止の確認」参照）。
-   生成後フィルタ F1（20〜200 文字）・F2（四択マーカー不使用）・F3（完全一致重複拒否）・F4（複数行拒否）
-   をスロットごとに最大 3 回まで再試行．`--audit-leak` モードのみ `build_dataset._COMPOUND_QUESTIONS`
-   をローカル import して A7（文字 3-gram Jaccard，閾値 0.9）を計算する。
-2. `scripts/train_multilabel_dispatch_head.py`（新規）: `--train-data`（1427 行）と
-   `--multilabel-train-data`（153 行）を結合し，`train_domain_classifier.py` の
-   `_load_training_rows()`/`build_training_features()` を再利用して embed。`labels` を
-   `[x] if isinstance(x,str) else list(x)` で正規化し `MultiLabelBinarizer().fit_transform()` →
-   `OneVsRestClassifier(LogisticRegression(max_iter=1000, class_weight="balanced")).fit(embeddings, Y)`。
-   保存形式は `joblib.dump({"model": model, "classes": list(mlb.classes_)}, output_path)`（Iter59 の
-   素の estimator 保存から変更，計画どおり）。5-fold CV 診断は `KFold(shuffle=True, random_state=42)`
-   に変更（`StratifiedKFold` は多ラベル `Y` を受け付けないため）。
-3. `scripts/evaluate_dispatch_candidate_ranking.py`（既存編集，最小差分）: `_load_head()` を新設し，
-   dict ペイロード（新形式）／素の estimator（Iter59 旧形式）の両方に対応。`_head_scores()` は
-   常に呼び出し元から渡された `classes`（ドメイン名リスト）で zip するよう変更し，
-   `head.classes_` への直接依存を除去した。`--iter59-predictions`（任意）を追加し A5（Iter59 予測との
-   rank_2 不一致件数）を算出・報告するようにした。A1〜A3 のロジック（`:169-` 付近）は無変更。
-4. `data/classifier_train_multidomain.jsonl`（新規データファイル，実機生成）: 153 行，45 ペア全カバー
-   （legal 絡み 9 ペアは各 5 件，他 36 ペアは各 3 件）。
-5. `models/dispatch_multilabel_head.joblib`（新規モデル成果物，実機訓練）。
-6. `scripts/train_dispatch_candidate_ranking_head.py`・`scripts/compute_iter59_ranking_stats.py`・
-   `data/classifier_train.jsonl`・`models/domain_classifier.joblib`・`config.yaml`: **無変更を確認**
-   （`git diff` に差分なし，`models/domain_classifier.joblib` の md5 は
-   `b360ef827e258256888113a8293625a0`）。
-
-**data/・models/ の扱い（計画からの軽微な逸脱と判断根拠）**: 計画には「`data/classifier_train_multidomain.jsonl`
-はコミットする」とあったが，実際の `.gitignore` は `data/*`（`data/MANIFEST.md` 以外）と `models/` を
-除外しており，`data/classifier_train.jsonl` 自身や Iter59 の `models/dispatch_candidate_ranking_head.joblib`
-も git 追跡外で `data/MANIFEST.md` にも記載がない（イテレーション固有のオフライン成果物は
-journal の実施コマンドで再現性を担保する既存運用，docs/d0003 F5）。この既存運用に合わせ，
-今回もリポジトリへの force-add や MANIFEST.md への追記はせず，本節に sha256 を記録するに留めた
-（Iter59 と同一の扱い）:
-`data/classifier_train_multidomain.jsonl` = `ca286dae434ef27d3c92a04cb8e06581c6f85f27a2ad5bdc495ff4d1c90204bd`，
-`models/dispatch_multilabel_head.joblib` = `004aaf512bf638cff182d5a4564f778e50b3c0de6be4f3e5805fd45eb1fe9077`。
-
-**単体テスト（新規）**
-
-- `tests/test_generate_multidomain_training_examples.py`: F1〜F4 フィルタの正常系・境界値，
-  `_rows_for_pair()` の legal 優遇，`_generate_one()` の再試行打ち切り，`generate_all_rows()` の
-  id 命名・重複拒否，`audit_leak()` の近似重複検出（高類似度／低類似度の両方）。
-- `tests/test_train_multilabel_dispatch_head.py`: `_normalize_labels()` の str/list 混在正規化，
-  `build_multilabel_targets()` の `mlb.classes_` 順序と `Y` の対応，A0 アサーションの成功系・
-  行数不一致・120 件未満・ドメイン数不一致の失敗系，`_covered_domain_pairs()`，多ラベル訓練済み
-  モデルの実際の予測，sklearn 1.9.0 の「list-of-lists 直接投入はエラー」という前提の回帰ガード。
-- `tests/test_evaluate_dispatch_candidate_ranking.py`: `_load_head()` の新旧両形式対応，
-  `_head_scores()` が両形式で同じドメイン名キーを返すこと，A6（整数キー・欠落キーの検出），
-  N5（複合行を除外した単一ドメイン argmax 精度の計算），A5（Iter59 予測との不一致件数）。
-  なお `OneVsRestClassifier.decision_function()` はクラス数がちょうど2のとき1次元配列に退化する
-  sklearn の仕様があり（本レバーとは無関係の一般的な挙動），テストのトイデータは 3 ドメイン以上を
-  使うことでこの縮退を回避した（4 件目のバグではなく，フィクスチャ設計上の注意点として記録）。
-- 追加した 30 テストは全て `uv run pytest` で PASS。
-
-**検証結果**
-
-- `uv run ruff check .`: 新規・変更ファイルはすべて PASS。リポジトリ全体では 23 件のエラー
-  （`scripts/analyze_iter52.py` 等の無関係な既存ファイルの f-string 未使用プレースホルダ等）が
-  出るが，`git stash` で本イテレーションの変更を退避して再実行しても同じ 23 件が出ることを確認済み
-  （本イテレーション由来ではない既存債務）。
-- `uv run pytest`（全体）: 269 件中 257 PASS，12 件 FAIL。FAIL 12 件は `tests/test_build_dataset.py`
-  （9 件）と `tests/test_train_domain_classifier.py`（3 件）で，いずれも
-  `CalibratedClassifierCV` オブジェクトが `.classes_` 属性を持たない（`AttributeError`）という
-  sklearn バージョン起因のエラーであり，本イテレーションが触れた
-  `scripts/train_domain_classifier.py:201` 付近のコードは無変更．`git stash` で本イテレーションの
-  変更を退避して同じ2ファイルを再実行しても同じ 12 件が同じ理由で FAIL することを確認済み
-  （本イテレーション由来ではない既存の環境起因の失敗であり，`train_dispatch_candidate_ranking_head.py`
-  や `train_multilabel_dispatch_head.py`（`CalibratedClassifierCV` を使わない）には影響しない）。
-
-**実機での動作確認（生成・訓練・A0/A5/A6/A7/N5 の実測）**
-
-wafl500 への SSH ローカルポートフォワード（`ssh -fNT -L 11435:localhost:11434 wafl500`，実行前から
-稼働中だったものを流用）経由で `judge_model`／`nomic-embed-text` の双方が生きていることを確認し，
-計画の「実施方法」コマンドをそのまま実行した。
-
-1. 生成: `--per-pair 3 --per-pair-legal 5` で実行し，153/153 件が欠番なく生成された
-   （スロット再試行での欠落は 0 件）。45 ペア全てを被覆（legal 絡み 9 ペア＝各 5 件，他 36 ペア＝各 3 件）。
-2. **A7（リーク監査）**: `max_jaccard=0.1667`，`median_max_jaccard=0.0690`（閾値 0.9 を大きく下回り
-   PASS）。
-3. 訓練: `models/dispatch_multilabel_head.joblib` を作成。
-   **A0（真の多ラベル信号）**: `(Y.sum(axis=1)>=2).sum()=153` が合成行数 153 と完全一致，
-   `len(mlb.classes_)==10` かつ全て文字列で PASS。5-fold CV 診断で `legal` の
-   `n_positive=122`（単一ラベル 77 ＋ legal 絡み合成 45 と整合），`cv_roc_auc=0.9193`（他ドメインと
-   比べ遜色なく，過学習を示唆する明らかな異常なし）。
-4. 採点（オフライン，`--embedding-cache results/iter59_query_embeddings.npz` を再利用）:
-   出力先は次フェーズの公式ファイル名（`results/iter60_multilabel_ranking_predictions.jsonl`）とは
-   別の一時パスに書き出した（**正式な統計検定は本フェーズでは実施しないため**，公式パスへの書き込みは
-   次フェーズに委ねる）。
-   - **A1**（`_assert_rank1_unchanged`）: 例外なし＝1600/1600 一致。
-   - **A2**（`_assert_cost_neutral`）: 例外なし＝`mean_dispatch=2.000000`。
-   - **A6**（`_assert_head_scores_are_domain_names`）: 例外なし＝全 1600 行で `head_scores` のキーが
-     10 ドメイン名文字列と完全一致。
-   - **A3**（`rank2_flip_rate`）: `0.45625`（対 baseline，0 ではないため WARNING 非発火）。
-   - **A5**（対 Iter59）: `mismatches=527/1600`（`mismatch_rate=0.329375`，0 ではないため
-     WARNING 非発火）＝本レバー固有の no-op ではないことを確認。
-   - **N5**（単一ドメイン argmax，文体ショートカット検出）: `accuracy=0.6107`（916/1500），
-     floor 0.590 を上回り PASS（Iter59 実測 0.610 とほぼ同水準）。
-   - 参考値（**速報，正式な McNemar 検定は未実施**）: `compound_domain_set_recall=0.48`
-     （baseline 0.345，Iter59 0.350 から見て大きく上振れ）。この数値は
-     `scripts/compute_iter59_ranking_stats.py` を通していない生の速報値であり，S1〜S4・N1〜N4 の
-     正式判定は次フェーズが `--output results/iter60_multilabel_ranking_predictions.jsonl` へ書き出した
-     上で同スクリプトを実行して行うこと。
-
-**次フェーズへの申し送り**
-
-- 生成データに軽微な品質のばらつきを確認した（例:
-  `synth-natural_science-social_science-002` の query が
-  「自然科学と社会科学の両方の知識が必要な相談文：」というプロンプトのテンプレート文言の
-  ほぼそのままの echo になっており，F1〜F4 のいずれの機械的フィルタにも掛からず通過している）。
-  計画で事前登録された F1〜F4 以外のフィルタ（内容の実質性チェック等）は本フェーズの単一レバー
-  原則の範囲外として追加しなかったが，次フェーズの考察でこの種の低品質行の混入率と
-  `compound_domain_set_recall` への影響を注意深く見ること（R4 の「件数不足 vs 信号無効」の
-  切り分けにも関わりうる）。
-- 上記の速報 `compound_domain_set_recall=0.48` は実データでの寄り道確認であり，**本フェーズでは
-  正式な統計検定（S1 の exact McNemar 等）を意図的に実施していない**。次フェーズは計画の
-  「実施方法」手順 2)〜3) を公式パス（`results/iter60_multilabel_ranking_predictions.jsonl`，
-  `results/iter60_stats.json`）に対してそのまま再実行し，S1〜S4・N1〜N4 を正式判定すること
-  （本フェーズの速報値の再現性は担保されているはず＝同一の入力ファイル・同一コードで再計算するのみ）。
-- `data/classifier_train_multidomain.jsonl` と `models/dispatch_multilabel_head.joblib` は
-  ローカルディスク上に実ファイルとして現存する（sha256 は本節に記録済み）。`git status` は無関係な
-  未コミット変更（`config.yaml` の `embed_node_host: wafl502→wafl-ctrl5`,
-  `.claude/research/journal.md`・`state.json` 等）を含んでいたが，本フェーズはこれらに一切触れて
-  いない（`config.yaml` は計画どおり無変更）。
-
-### 実験・分析(実行) (Iter60)
-
-本フェーズも新規の実機トラフィック（probe/dispatch/LLM生成）を一切発生させていない。
-`results/iter59_query_embeddings.npz`（1600件）が基準線 `results/20260918_202613/results.jsonl`
-の全1600 IDを事前に完全カバーしていることを独立に確認した上で（キャッシュ欠落0件），
-`scripts/evaluate_dispatch_candidate_ranking.py` を公式パスで実行し，
-`results/iter60_multilabel_ranking_predictions.jsonl`（1600行）を生成した
-（実行コマンド: `uv run python -m scripts.evaluate_dispatch_candidate_ranking --baseline
-results/20260918_202613/results.jsonl --head models/dispatch_multilabel_head.joblib
---embedding-model nomic-embed-text --ollama-host 127.0.0.1 --ollama-port 11435
---embedding-cache results/iter59_query_embeddings.npz --iter59-predictions
-results/iter59_ovr_ranking_predictions.jsonl --output
-results/iter60_multilabel_ranking_predictions.jsonl`）。キャッシュフルヒットのため実際の
-embed 呼び出しは0件（完全オフライン）。続けて `scripts/compute_iter59_ranking_stats.py`
-（計画どおり無変更で流用）をそのまま実行し，`results/iter60_stats.json` に S1〜S4・N1〜N4 を
-保存した（実行コマンド: `uv run python -m scripts.compute_iter59_ranking_stats --baseline
-results/20260918_202613/results.jsonl --new
-results/iter60_multilabel_ranking_predictions.jsonl --output results/iter60_stats.json`）。
-新規に自作した統計ロジックはなく，`metrics.py` の既存関数（`compute_compound_coverage_metrics`・
-`_mcnemar_from_correctness`・`compute_top1_accuracy`）のみを使用（Iter59と同一コード）。
-**解釈・採否判断はこのフェーズでは行わない**（次の analyst フェーズに委ねる）。
-
-**A0/A5/A6/A7・N5 の独立再確認（実装フェーズの数値との一致確認）**
-
-- **A0**（真の多ラベル信号）: `data/classifier_train.jsonl`（1427行）と
-  `data/classifier_train_multidomain.jsonl`（153行）を再読込し，`train_multilabel_dispatch_head.py`
-  の `build_multilabel_targets()`/`_assert_a0_true_multilabel_signal()`/`_covered_domain_pairs()`
-  を embed なし（`row["domain"]` のみを使うラベル抽出のみ）で直接呼び出して独立検算した。
-  `multilabel_row_count=153`（合成行数と完全一致，かつ床値120以上），`mlb.classes_` は10ドメイン名
-  文字列，被覆ペア数=45（45ペア全カバー）。**実装フェーズの報告値と完全一致，PASS**。
-- **A5**（対Iter59不一致）: 上記の公式採点実行時に算出。`mismatches=527/1600`
-  （`mismatch_rate=0.329375`）。**実装フェーズの速報値（527/1600，0.329375）と完全一致**，
-  WARNING非発火（0件ではない）＝本レバー固有のno-opではないことを確認。
-- **A6**（`head_scores`のキーがドメイン名文字列）: 同じ採点実行で例外なし＝全1600行で
-  `head_scores`のキーが10ドメイン名文字列と完全一致。**PASS**（実装フェーズと一致）。
-- **A7**（リーク監査）: `uv run python -m scripts.generate_multidomain_training_examples
-  --audit-leak --output data/classifier_train_multidomain.jsonl` を独立に再実行（ネットワーク
-  呼び出しなし，ローカルファイル比較のみ）。`max_jaccard=0.1667`，`median_max_jaccard=0.0690`
-  （閾値0.9を大きく下回りPASS）。**実装フェーズの報告値と完全一致**。
-- **N5**（単一ドメイン argmax，文体ショートカット検出）: 上記の公式採点実行で
-  `accuracy=0.6107`（916/1500），floor 0.590を上回りPASS。**実装フェーズの速報値（0.6107）と
-  完全一致**。
-
-**S1〜S4・N1〜N4（`results/iter60_stats.json` より，正式判定）**
-
-| 項目 | 値 | 判定 |
-|---|---|---|
-| S1（主基準，n=200ペア，exact binomtest） | 改善38／悪化11／discordant49，p=0.0001420 | **PASS**（p<0.05） |
-| S1（参考，連続性補正chi2） | chi2=13.796，p=0.0002038 | 参考値，同じくPASS方向 |
-| S2（効果量下限） | recall 0.345→0.480，Δ=+0.135pt（floor +0.04pt） | **PASS** |
-| S3（コスト中立） | 全1600行 len=2，rank1≠rank2重複0，mean_dispatch=2.000000 | **PASS** |
-| S4（発火の証拠） | rank2_flip_rate=0.45625（730/1600） | **PASS**（>0） |
-| N1（rank_1完全不変） | 不一致0/1600 | **PASS** |
-| N2（top1_accuracy不変） | baseline 0.5975 → new 0.5975（完全一致，留保はIter59と同一文言でstats.json内に記録） | **PASS** |
-| N3（legal非退行） | legal自身の被覆 8/30 → 20/30 | **PASS**（8を下回らない） |
-| N4（内訳，判定なし） | legal絡み60ペア（改善17/悪化1/不変42），medical絡み32ペア（改善4/悪化1/不変27），その他108ペア（改善17/悪化9/不変82） | 報告のみ |
-
-補足: `compute_iter59_ranking_stats.py` は計画どおり無変更のため，`matches_implementation_phase_*`
-フィールド（`_IMPLEMENTATION_PHASE_COMPOUND_DOMAIN_SET_RECALL=0.35`,
-`_IMPLEMENTATION_PHASE_RANK2_FLIP_RATE=0.356875`）は**Iter59自身の実装フェーズ速報値**であり，
-本イテレーション（Iter60）の値と比較する定数ではない（`false`と出るのは想定どおりであり異常ではない）。
-Iter60自身の速報値（`compound_domain_set_recall=0.48`，`rank2_flip_rate=0.45625`）とは，本フェーズの
-`new_compound_domain_set_recall=0.48`・`rank2_flip_rate=0.45625`が完全一致しており，実装フェーズと
-本フェーズの間で不一致はない。
-
-**PASS/FAIL集計**: S1=PASS，S2=PASS，S3=PASS，S4=PASS，N1=PASS，N2=PASS，N3=PASS
-（N4は判定なし・報告のみ）。A0/A5/A6/A7・N5 も全てPASSかつ実装フェーズの数値と完全一致。
-内容面の解釈・採否判断（採用／partial／棄却の別）は次の analyst フェーズに委ねる。
-
-**成果物**: `results/iter60_multilabel_ranking_predictions.jsonl`（1600行，公式パス），
-`results/iter60_stats.json`（S1〜S4・N1〜N4の実測値，機械可読，公式パス）。既存ファイル
-（`scripts/evaluate_dispatch_candidate_ranking.py`・`scripts/compute_iter59_ranking_stats.py`・
-`models/dispatch_multilabel_head.joblib`・`data/classifier_train_multidomain.jsonl`・
-`models/domain_classifier.joblib`（md5 `b360ef827e258256888113a8293625a0`，不変を再確認）・
-`config.yaml`（本フェーズでは無変更，既存の無関係な未コミット差分1行のみ残存）は本フェーズでは
-変更していない。
-
-### 分析(解釈) (Iter60)
-
-**1. 独立検算（`metrics.py` の既存関数のみ使用．不一致 0 件）**
-
-`results/20260918_202613/results.jsonl`（基準線）・`results/iter60_multilabel_ranking_predictions.jsonl`
-（新）・`results/iter59_ovr_ranking_predictions.jsonl`（対照）を読み直し，`metrics.compute_compound_coverage_metrics()`・
-`metrics._mcnemar_from_correctness()`・`metrics.compute_top1_accuracy()` と `scipy.stats.binomtest` のみで
-`results/iter60_stats.json` の全項目を再計算した（作業用スクリプトは実行後に削除．リポジトリへの
-恒久的な追加はしていない）．**全項目が完全一致し，不一致は 1 件も無い**．
-
-| 項目 | 独立再計算値 | stats.json |
-|---|---|---|
-| compound_domain_set_recall（基準線 / Iter59 / 新） | 0.345（69/200） / 0.350（70/200） / **0.480（96/200）** | 一致 |
-| compound_domain_jaccard_mean | 0.2400 → 0.3667（Iter59 は 0.2500） | （未記録，本フェーズで追加算出） |
-| S1 ペア比較（n=200） | 改善 38 / 悪化 11 / discordant 49 / chi2=13.7959 / p_cc=0.0002038 | 一致 |
-| S1 exact binomtest | p=0.00014197 | 一致 |
-| S2 効果量 | Δ=+0.135pt（floor +0.04pt） | 一致 |
-| S3 コスト | 長さ分布 `{2: 1600}`，rank1=rank2 重複 0，mean_dispatch=2.000000 | 一致 |
-| S4 rank2_flip_rate | 0.45625（730/1600） | 一致 |
-| A5（対 Iter59 不一致） | 527/1600（0.329375） | 一致 |
-| A6（head_scores キー） | 全 1600 行で 10 ドメイン名文字列の単一キー集合（ユニーク keyset 数 = 1） | 一致 |
-| N1 rank_1 不一致 | 0/1600 | 一致 |
-| N2 top1_accuracy | 0.5975 → 0.5975 | 一致 |
-| N3 legal 自身の被覆 | 8/30 → 20/30 | 一致 |
-| N5 単一ドメイン argmax 正解率 | 0.610667（916/1500，floor 0.590） | 一致 |
-
-**2. ノイズか信号か — 信号である（3 つの独立な根拠）**
-
-- **(i) ランダム性が存在しない**: 本イテレーションは決定論的オフライン採点で，embed はキャッシュ
-  フルヒット（実呼び出し 0 件）．config.yml success_criteria (5) の 3SD=2.6pt のノイズ床は軸②③
-  （生成のランダム性を含む answer_quality / end_to_end）に対するもので，軸①のルーティング指標には
-  適用しない（同 (5) 末尾に明記）．反復間ノイズはゼロである．
-- **(ii) 標本ノイズに対しても十分大きい**: 残る不確実性は複合設問 100 問（200 ペア）の標本誤差のみ．
-  ペア差の近似 SE = sqrt(38+11)/200 = **3.5pt**，Δ=+13.5pt は **3.86 SE**，95% CI は
-  **[+6.6pt, +20.4pt]** で，事前登録した効果量下限 +4.0pt は CI 下端よりさらに下にある．
-  Iter59 の CI（[-3.8pt, +4.8pt]，+4pt が内側）とは対照的に，今回は下限自体が閾値を超えている．
-- **(iii) 過去イテレーションの実測ばらつきと比べても桁が違う**: 同一指標の履歴は Iter47 0.345 /
-  Iter48 0.345 / Iter46 0.360 / Iter58 0.345 / Iter59 0.350 で，レバーを振っても ±1.5pt の帯に
-  収まり続けていた．今回の +13.5pt はこの帯の 9 倍である．
-
-**3. Iter59 との対比が示すこと — 効いたのは「ヘッド構造」ではなく「教師信号」**
-
-Iter59 と Iter60 は，embedding・ヘッド構造（`OneVsRestClassifier(LogisticRegression(max_iter=1000,
-class_weight="balanced"))`）・推論経路・採点スクリプト・基準線・成功条件のすべてが同一で，
-**訓練データに 2 ドメインラベル行 153 件が入っているかどうかだけが違う**．結果は
-0.350（p=1.0，Wilcoxon p=0.914 で効果ゼロ）→ **0.480**．Iter59 予測を基準にした exact McNemar でも
-**改善 36 / 悪化 10，p=0.000156**（本フェーズで追加算出）．
-
-この対比の意味は，Iter58・Iter59 の考察で 2 回連続して立てられた命題
-**「単一ラベル訓練データ（1 行 1 ドメイン）の加工・後処理では多ラベル性は生まれない」が正しく，
-かつその裏（教師信号を多ラベル化すれば生まれる）も成立した**，ということである．
-単一レバーの帰属としては，「OvR という分解の導入」ではなく「2 ドメイン同時ラベルの訓練事例の存在」
-に因果を帰すのが妥当で，Iter59 がその切り分けを担保している．ただし厳密には，本イテレーションが
-動かしたのは「合成 153 件の追加」という 1 つの操作であり，「合成の質」「件数」「ペア配分」の
-どれが効いたかまでは分離していない（R4 の申し送りどおり）．
-
-**4. 発火率 0.45625（730/1600）の意味 — Iter59 より広く動いているが，暴走ではない**
-
-- Iter59 の 0.356875（571 行）から 0.45625（730 行）へ増え，Iter59 予測とも 527 行で異なる．
-  訓練データの 10.7%（153/1427+153）を入れ替えただけで rank_2 の 4 割超が動いており，
-  **rank_2 の順位付けは教師信号の構成に非常に敏感**である．
-- 重要なのは flip の「量」ではなく「収支」である．flip した compound 行 64/100 について，
-  rank_2 が正解ドメインを当てた件数は **基準線 11 → 新 38**（Iter59 は flip 31 行で 旧9→新10 と
-  ほぼ収支ゼロだった）．compound 100 行全体でも rank_2 の的中は **28 → 55**（Iter59 は 29）．
-  **今回の flip は「当たりと外れをほぼ同数入れ替える」のではなく，一方向に的中を増やしている**．
-- 単一ドメイン 1500 行でも 666 行（44.4%）が flip しているが，N2（top1 0.5975 不変）・N5（argmax
-  正解率 0.6107，Iter59 0.610 と同水準）が保たれており，rank_1 の判別力は損なわれていない．
-
-**5. legal への偏りの検証（N3・N4 の分解）— 偏りは「ある」が，legal だけでは説明できない**
-
-legal 自身の被覆 8/30→20/30 は 200 ペア中の 12 件の改善で，全改善 38 件の 32% を占める．
-ドメインペア単位まで分解して確認した（本フェーズで追加算出）．
-
-| 切り口 | 改善 | 悪化 | exact p | recall |
-|---|---|---|---|---|
-| 全体（200 ペア） | 38 | 11 | 0.000142 | 0.345→0.480 |
-| legal 絡み（60 ペア） | 17 | 1 | 0.000145 | — |
-| legal×medical のみ（24 ペア，最多 12 行） | 8 | 0 | — | — |
-| legal×medical を除く（176 ペア） | 30 | 11 | **0.00432** | — |
-| legal 絡みを全部除く（140 ペア） | 21 | 10 | 0.0708 | 0.350→0.4286（+7.9pt） |
-
-- **改善は 26 ペア種（45 ペア種中）に分散しており**，単一ペアに依存していない．最大の寄与源である
-  legal×medical（テスト集合で最多の 12 行）を丸ごと除いても **p=0.0043 で有意**であり，
-  「legal×medical だけで作られた見かけの改善」ではない．
-- ただし **legal 絡みを全部除くと p=0.0708 と有意水準を割る**（効果量は +7.9pt で方向は一貫）．
-  n=140・discordant 31 に落ちるため検出力の問題でもあるが，**主基準の有意性は legal 絡みの寄与に
-  相当程度依存している**と正直に記述すべきである．
-- **設計上の留保（重要）**: 計画は legal 絡み 9 ペアのみ合成件数を 3→5 に増やしており，合成件数別の
-  改善収支は **5 件配分＝改善 17/悪化 1，3 件配分＝改善 21/悪化 10** と明確に差がある．
-  この配分は「legal は訓練 77 件と最少」という訓練側の理由に加え，**調査 Q3 が評価集合
-  `_COMPOUND_QUESTIONS` のペア別件数分布（legal×medical が 12 件で最多）を参照して決めた**もので
-  ある（テキストは参照していないが，**テスト集合の分布情報が設計に入っている**）．
-  これは A7（Jaccard 監査）では検出できない種類の弱いリークであり，reflector は
-  「本文リークは無い（A7 max 0.1667）が，ペア配分という設計レベルの事前知識は入っている」
-  と区別して扱うべきである．
-- **反面の証拠（偏り説に不利）**: legal を rank_2 に選んだ compound 行の的中率は 19/32=59%
-  であり，「compound 行なら無条件に legal を出す」方針の期待値（legal はテスト 100 行中 30 行に
-  登場＝30%）の約 2 倍である．さらに下記 6. の content-blind 対照が決定的である．
-
-**6. 過学習・文体ショートカット・prior シフトの可能性を潰す追加検証（本フェーズ独自）**
-
-A7（3-gram Jaccard 最大 0.1667）だけでは「本文の剽窃が無い」ことしか言えないため，
-**「内容を見ずに事前分布だけをずらした結果ではないか」**という代替説明を直接検定した．
-
-- **content-blind 対照**: rank_2 を内容に関係なく固定ドメインにした場合の
-  compound_domain_set_recall を計算すると，**legal 固定 = 0.350**，medical 固定 = 0.310，
-  education 固定 = 0.285，business_economics 固定 = 0.240．すなわち**最良の内容非依存方策でも
-  0.350 にしか届かず（偶然にも Iter59 と同値），実測 0.480 はそれを 13pt 上回る**．
-  改善は事前分布のシフトでは説明できず，**行ごとの内容に反応している**．
-- **文体ショートカット**: N5=0.6107（Iter59 0.610，floor 0.590）で，四択文 1500 行に対する
-  判別力は落ちていない．「自然文なら多ラベル」という短絡を学んだなら四択側が崩れるはずだが
-  崩れていない．
-- **合成データの品質**: 153 件を目視・正規表現で走査したところ，**7 件（4.6%）がプロンプト文言の
-  echo**（例: `synth-mathematics-natural_science-003` = 「数学と自然科学の両方の知識が必要な
-  相談文：」）で，実装フェーズの申し送りどおり F1〜F4 を素通りしている．**低品質行が 4.6% 混入した
-  状態でこの効果量が出ている**ため，効果は品質の良い行が担っていると考えられ，
-  フィルタ強化には伸びしろが残っている（悪化方向の交絡ではない）．
-- **上限との距離**: rank_1 のみ（k=1 相当）の recall は 0.205，固定 k=2・rank_1 凍結下の
-  オラクル上限は 0.705（compound 行で rank_1 が正解しているのは 41/100 で Iter59 と同一）．
-  0.345→0.480 は**残余ギャップ 36.0pt のうち 13.5pt（37.5%）を埋めた**ことになる．
-  Iter59 は同じ尺度で 1.4% しか埋めていない．
-
-**7. Iter58 の教訓（改善がコスト増で説明できないか）の確認**
-
-Iter58 は mean_dispatch の増加と改善が交絡した．今回は S3 が **全 1600 行 len=2・rank_1≠rank_2 重複 0・
-mean_dispatch=2.000000**（独立再計算で一致）であり，**基準線と新方式は同じ 2 ノードを常に叩く**．
-dispatch 回数・k・閾値のいずれも変えていないため，コストで説明できる余地は構造的に無い．
-なお実機のレイテンシ・回答品質は本イテレーションでは未測定（計画 R3）であり，
-「コスト中立」は dispatch 回数についての主張に限定される．
-
-**8. 仮説との整合**
-
-計画の仮説「2 位枠が改善しない原因は推論側の工夫不足ではなく訓練データに多ラベル事例が無いこと．
-多ラベル教師信号を作れば，コストを増やさずに compound_domain_set_recall が改善する」は，
-**主張・機序ともに支持された**．想定外の挙動（言語崩れ・発散・OOM・整数キーバグ A6・no-op）は
-いずれも観測されていない．想定していなかった副次的な観測は 2 点:
-- **education の退行**: education 自身の被覆 9/20→**4/20**（-5）で，ドメイン別の悪化 11 件のうち
-  5 件が education．compound 行の rank_2 に education が選ばれる回数が 23→2 に激減している
-  （基準線は全体で rank_2=education を 421/1600 と過剰に出しており，その過剰さが偶然
-  education compound 行を拾っていた）．education は Iter32〜53 で 10 回以上レバーを振っても
-  動かなかった問題ドメインであり，**今回の改善の裏で唯一明確に退行している**点は記録に値する
-  （事前登録の非退行条件には education の項目が無いため FAIL ではないが，N4 の趣旨に照らして報告する）．
-- **social_science の大幅改善**: 0/18→7/18．基準線で唯一の被覆ゼロだったドメインが動いた．
-
-**9. 判定の確信度と追加反復の要否**
-
-- **確信度: 高**．(i) 決定論的で反復間ノイズがゼロ，(ii) 独立検算の不一致 0 件，(iii) 効果量が
-  標本 SE の 3.86 倍で CI 下端も事前登録閾値の上，(iv) content-blind 対照（0.350）を 13pt 上回り
-  prior シフト説を排除，(v) Iter59 という同一構造の対照群が存在する．
-- **同一設計での追加反復は不要**（決定論的なので同じ値が再現するだけ．Iter58/59 と同じ論理）．
-- **確信度が相対的に低い部分（追加検証があるとすれば）**: (a) legal 絡みを除くと p=0.0708 で
-  有意でない，(b) 合成件数のペア配分にテスト集合の分布情報が入っている，(c) 合成 4.6% が低品質，
-  (d) 実行時経路では未検証（オフライン採点のみ）．(a)(b) は
-  **「legal 絡みも一律 3 件にした配分での再訓練」**という 1 変数の追試で切り分けられる．
-
-**次フェーズ（rc-reflector）への申し送り**
-
-- **強い所見**: 事前登録した S1〜S4 が全て PASS（S1 p=0.000142，S2 Δ=+0.135pt），N1〜N3・N5 も
-  全て PASS．A0/A5/A6/A7 も実装フェーズと完全一致．d0004 §4 型の no-op ではなく，
-  コスト中立（mean_dispatch=2.000000）で達成されている．Iter59 という同一構造・教師信号のみ異なる
-  対照群があるため，**「多ラベル教師信号そのものが必要だった」という因果的主張が本研究で初めて
-  成立する**．Iter58・Iter59 の 2 連続陰性の解釈（単一ラベルの加工では多ラベル性は生まれない）が，
-  その対偶の側から裏付けられた．
-- **留保点（採否判断の強度に影響する）**:
-  1. legal 絡み 60 ペアを除くと exact p=0.0708（効果量 +7.9pt，方向は一貫）．主基準の有意性は
-     legal 絡みの寄与に相当程度依存する．ただし最大寄与ペア legal×medical を除いても p=0.0043．
-  2. 合成件数のペア配分（legal 絡みのみ 5 件）の決定に，評価集合のペア別件数分布という
-     **テスト集合由来の情報**が入っている．本文リークは無い（A7 max_jaccard=0.1667）が，
-     設計レベルの弱いリークとして区別して記録すべきである．
-  3. education 自身の被覆が 9/20→4/20 と退行（事前登録の非退行条件外）．
-  4. 合成 153 件のうち 7 件（4.6%）がプロンプト echo の低品質行．
-  5. オフライン採点であり，実行時経路（`node.py:214` / `run_experiment.py:93`）・
-     `answer_quality` / `end_to_end` / レイテンシは未検証．
-- **リスク**: 実行時経路への配線は `config.yaml` のスキーマ変更を伴い，Iter58 と同型の no-op を
-  避けるには 2 箇所を同時に変更する必要がある（計画 R3）．**ユーザー確認が必要**であり，
-  reflector が自律的に着手してよい範囲を超える．
-- **次の一手の候補（分析フェーズとしての示唆であり，採否判断ではない）**:
-  (a) 留保 1・2 を潰す追試（legal 絡みも一律 3 件＝135 件での再訓練．1 変数のみの変更で
-      オフライン完結），(b) 合成件数のスケールアップ（R4 の「信号無効 vs 件数不足」は今回
-      「信号有効」側に決着したので，残る問いは件数の収穫逓減点），(c) 生成フィルタの強化
-      （echo 行 4.6% の除去），(d) 実行時経路への配線（要ユーザー確認）．
-  なお本レバーの外に残る最大のボトルネックは依然 rank_1 側（compound 行で 41/100）である．
-
-### 考察・次計画 / イテレーション完了サマリー (Iter60)
-
-**単一レバー**: `multilabel_training_signal = synthetic_two_domain_training_examples`
-（`judge_model` による LLM 生成で 2 ドメイン同時ラベルの相談文 153 件を新規作成し，既存 1427 行と
-結合して `MultiLabelBinarizer` 経由で OvR ヘッドを再訓練．ヘッド構造・推論経路・採点手続き・基準線は
-Iter59 と完全に同一）．
-
-**結果（事前登録項目，`results/iter60_stats.json`）**: S1 exact binomtest p=0.0001420（改善 38／悪化 11，
-n=200），S2 `compound_domain_set_recall` 0.345→0.480（Δ=+0.135pt，下限 +0.04pt），
-S3 mean_dispatch=2.000000（コスト中立），S4 rank2_flip_rate=0.45625・対 Iter59 不一致 527/1600．
-N1（rank_1 不変 0/1600）・N2（top1 0.5975 完全一致）・N3（legal 8/30→20/30）・N5（単一ドメイン
-argmax 0.6107，floor 0.590）も全 PASS．A0/A5/A6/A7 は実装フェーズと独立再計算で完全一致
-（A7 max_jaccard=0.1667）．**事前登録 7 項目＋補助アサーション 5 項目が全 PASS，FAIL 0 件**．
-
-**判定: adopted（採用．ただし下記 3 点の留保を対外記述に必須で付す）**
-
-判定根拠は 4 点である．
-1. **事前登録の判定規則にそのまま該当する**．計画は「S1〜S4 全て充足なら採用」と事前登録し，
-   「判定は事後変更しない」と明記していた．全 PASS で FAIL が 1 件も無い以上，留保を理由に
-   事後的に判定規則を書き換えて partial へ降格させることは，本研究が Iter29 以降積み上げてきた
-   事前登録運用そのものを壊す．留保は**判定の格下げではなく次イテレーションの追試義務**として扱う．
-2. **Iter58（partial に留めた事例）とは交絡の質が違う**．Iter58 の partial は「改善の大半が
-   dispatch 呼び出し +19.97% の純増で説明でき，gap 信号固有の寄与が有意でない」という
-   **主張そのものを無効化しうる交絡**が理由だった．今回は S3（mean_dispatch=2.000000，全 1600 行
-   len=2）によりコストでの説明余地が構造的に無く，さらに content-blind 対照（rank_2 を内容に
-   関係なく固定ドメインにした場合の最良値 = legal 固定 0.350）を 13pt 上回るため，
-   prior シフトでの説明も排除されている．
-3. **因果の帰属先が対照群で担保されている**．Iter59 は embedding・ヘッド構造・推論経路・採点
-   スクリプト・基準線・成功条件のすべてが同一で，訓練データの多ラベル行 153 件の有無だけが違い，
-   0.350（p=1.0）だった．Iter59 予測を基準にした exact McNemar でも改善 36／悪化 10，p=0.000156．
-   「効いたのは OvR というヘッド構造ではなく 2 ドメイン同時ラベルという教師信号である」という
-   帰属は，本研究で初めて実験的に成立した．
-4. **ノイズではない**．決定論的オフライン採点（embed はキャッシュフルヒット，実呼び出し 0 件）で
-   反復間ノイズはゼロ．残る標本誤差に対しても Δ=+13.5pt は SE 3.5pt の 3.86 倍，95% CI
-   [+6.6pt, +20.4pt] の下端が事前登録閾値 +4.0pt の上にある．同一指標は Iter46〜59 を通じて
-   0.345〜0.360 の ±1.5pt 帯に張り付いていた．
-
-**留保（adopted の効力範囲を限定する．対外記述で必ず併記すること）**
-
-- **R-A: 効果量 +13.5pt は汎化推定値として引用しない**．合成件数のペア配分（legal 絡み 9 ペアのみ
-  3→5 件）の決定に，評価集合 `_COMPOUND_QUESTIONS` のペア別件数分布（legal×medical が 12 行で最多）
-  という**テスト集合由来の情報**が入っている．本文リークは無い（A7 max_jaccard=0.1667）が，
-  A7 では検出できない**設計レベルの弱いリーク**である．実際，5 件配分＝改善 17／悪化 1 に対し
-  3 件配分＝改善 21／悪化 10 と収支に差がある．
-- **R-B: 主基準の有意性は legal 絡みの寄与に相当程度依存する**．legal 絡み 60 ペアを除くと
-  exact p=0.0708（+7.9pt，方向は一貫）．ただし最大寄与ペア legal×medical を除いても p=0.0043 で
-  有意であり，改善は 45 ペア種中 26 ペア種に分散している．「単一ペアの偶然」ではないが，
-  「legal 非依存」とも言えない．
-- **R-C: education が唯一明確に退行している**（自身の被覆 9/20→4/20，rank_2=education の選択が
-  23→2 に激減）．事前登録の非退行条件に education の項目が無いため FAIL ではないが，education は
-  Iter32〜53 で 10 回以上レバーを振っても動かなかった問題ドメインであり，改善の裏で犠牲が出ている
-  ことは記録しておく．なお基準線は rank_2=education を 1600 行中 421 行と過剰に出しており，
-  その過剰さが偶然 education compound 行を拾っていた側面がある．
-- 補足: 合成 153 件のうち 7 件（4.6%）がプロンプト文言の echo（低品質行）である．これは
-  悪化方向の交絡であり，効果を水増しする方向ではない（フィルタ強化の伸びしろ）．
-
-**本番経路への配線: 今回は実施しない（保留．要人間判断）**
-
-`models/dispatch_multilabel_head.joblib` は本番経路から参照されない状態のまま保持する
-（`config.yaml`・`node.py`・`http_server.py` は本イテレーションで無変更．`models/domain_classifier.joblib`
-は md5 `b360ef827e258256888113a8293625a0` で不変）．配線を見送る理由は 2 つ:
-(1) 配線は `config.yaml` の**スキーマ変更**（多ラベルヘッドのパス・使用フラグの新設）を伴い，
-skill の自律判断ポリシー上ユーザー確認が必要である．(2) Iter58 と同型の no-op を避けるには
-`node.py:214` と `run_experiment.py:93` を**同時に**変更する必要があり，これは単一レバー原則の下では
-それ自体を 1 イテレーションとして設計すべき作業量である．R-A の追試で効果量の内部妥当性を固めてから
-配線する方が，実機 1600 問（約 100 分）の投資に見合う．
-
-**学び（次の自分への申し送り）**
-
-1. **2 イテレーション連続の陰性の「対偶」を狙う設計は情報量が大きい**．Iter58・Iter59 は
-   「単一ラベルデータの加工では多ラベル性は生まれない」を独立に 2 度示した．Iter60 はその裏
-   （教師信号を多ラベル化すれば生まれる）を，**Iter59 と 1 変数だけ違う構成**で検証した．
-   陰性結果を対照群として設計に組み込めたことが，本研究で初めて因果的主張を可能にした．
-   今後も陰性が出たら「同じ枠組みで 3 度目」ではなく「その命題の対偶を検証できる最小差分の設計」を
-   探すこと．
-2. **A7（本文の 3-gram Jaccard 監査）はリーク監査として不十分である**．本文の剽窃は検出できるが，
-   「合成件数のペア配分」のような**設計パラメータ経由のテスト集合情報の流入**は素通りする．
-   今後リーク監査を設計する際は「生成物のテキスト」だけでなく「生成の設計判断がテスト集合の
-   統計を参照していないか」をチェックリストに入れること（今回はこれを見落とし，事後の分析で
-   初めて気づいた）．
-3. **rank_2 の順位付けは教師信号の構成に極端に敏感である**．訓練データの 10.7%（153/1580）を
-   足しただけで rank_2 の 45.6% が動いた．しかも flip の収支は一方向（compound 行の rank_2 的中
-   28→55）で，Iter59 の「flip はするが収支ゼロ」とは質が違う．**flip rate は発火の証拠にはなるが
-   改善の証拠にはならない**ので，今後も必ず「flip した行の的中収支」まで見ること．
-4. **機械的フィルタ F1〜F4（文字数・四択マーカー・完全一致重複・複数行）はプロンプト echo を
-   通す**．「〜の両方の知識が必要な相談文：」がそのまま query になった行が 7 件（4.6%）残った．
-   LLM 生成データを使う次のイテレーションでは，プロンプト由来の定型句との部分一致チェックを
-   フィルタに追加すること．
-5. **残るボトルネックは rank_1 側である**．固定 k=2・rank_1 凍結下のオラクル上限は 0.705 で，
-   今回はその残余ギャップ 36.0pt のうち 13.5pt（37.5%）を埋めた．上限そのものを上げるには
-   compound 行での rank_1 正解率 41/100 を動かす必要があり，これは本レバーの外側の問題である．
-
-**次の一手**
-
-`multilabel_training_signal` は values が単一値（`synthetic_two_domain_training_examples`）のため
-**今回でクローズ（試し切り）**．skill の停止条件 1 に従い，本イテレーションの学び（留保 R-A・R-B）
-から新レバーを考案し，config.yml の levers 末尾へ追記した．
-
-- **新レバー**: `multilabel_pair_allocation = uniform_three_per_pair`
-  （45 ペア一律 3 件＝135 件で再生成・再訓練し，legal 優遇 +2 件を除去する）．
-- **選定理由**: 分析フェーズが挙げた候補 (a)〜(d) のうち，(a) が **R-A（設計リーク）と R-B
-  （legal 依存）を同時に，1 変数の変更だけで切り分けられる唯一の設計**である．オフライン完結・
-  決定論的・実機トラフィックは生成分のみ（135 件）でコストが小さく，Iter60 が対照群として
-  そのまま機能する．ここで有意性が残れば adopted の効力範囲を「汎化可能な効果」まで広げられ，
-  失われれば「効果は legal 絡みの厚い配分に依存」と主張を正しく弱められる．いずれに転んでも
-  結論が確定する．(b) 件数スケールアップと (c) フィルタ強化は，配分という交絡を残したまま
-  件数・品質を動かすと帰属が曖昧になるため後回し．(d) 配線は上記のとおり要ユーザー確認．
-- **次イテレーション名**: 「合成ペア配分の均一化による設計リークの切り分け」．
-
-**要人間判断**
-
-1. **実行時経路への配線（`config.yaml` のスキーマ変更）**．adopted の成果を実機に反映するには
-   `config.yaml` に多ラベルヘッドの設定項目を新設し，`node.py:214` と `run_experiment.py:93` を
-   同時に変更する必要がある．スキーマ変更は自律判断の範囲外のため承認を求める．
-   推奨は「次イテレーション（配分の均一化）の結果を見てから配線する」．
-2. **効果量の対外記述**．R-A のとおり +13.5pt は設計リークを含む値である．論文・報告で引用する
-   場合は「legal 絡みを除くと +7.9pt（p=0.0708）」を必ず併記するか，次イテレーションの
-   均一配分での値を正式値とするか，方針の確認が要る．
-
-**コミット**: `b36cc3f`（本記録の追記は後続コミット）
-
----
 

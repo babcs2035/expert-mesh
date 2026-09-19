@@ -2,15 +2,30 @@
 re-ranking of rank_2 dispatch candidates using the OvR head, without running
 any of run_experiment.py's probe/dispatch/LLM-generation flow.
 
-rank_1 (the production classifier's argmax) is taken verbatim from a
---baseline results.jsonl (a fixed dispatch_top_k=2 run, i.e. produced
-BEFORE Iter58's gap-threshold escalation; see journal Iter59 investigation
-finding 6 for why results/20260918_202613/results.jsonl, not the latest
-run, is the required baseline) and is never recomputed here -- this
-guarantees rank_1 invariance by construction, not just by assertion (A1
-below is a redundant safety check on top of this construction, per Iter58's
-"レバーを読むコードに到達しない" lesson: catch a reintroduced recomputation
-bug even if someone edits build_new_rows() later).
+rank_1 (the production classifier's argmax) is, by default (--rank1-source
+baseline), taken verbatim from a --baseline results.jsonl (a fixed
+dispatch_top_k=2 run, i.e. produced BEFORE Iter58's gap-threshold
+escalation; see journal Iter59 investigation finding 6 for why
+results/20260918_202613/results.jsonl, not the latest run, is the required
+baseline) and is never recomputed -- this guarantees rank_1 invariance by
+construction, not just by assertion (A1 below is a redundant safety check
+on top of this construction, per Iter58's "レバーを読むコードに到達しない"
+lesson: catch a reintroduced recomputation bug even if someone edits
+build_new_rows() later).
+
+Iter63 (rank1_source=multilabel_head_argmax) adds a second mode
+(--rank1-source head_argmax) in which rank_1 is instead the domain with
+the highest score among ALL 10 domains in --head's own head_scores (i.e.
+the production classifier is not consulted for rank_1 at all in this
+mode). This is a single CLI-flag-gated variable: the default (baseline)
+mode is byte-for-byte identical to Iter59-62's behavior (see A10 in
+journal.md Iter63 plan), and A1 (rank_1 invariance against --baseline) is
+only enforced in that default mode. In head_argmax mode, A9 takes A1's
+place: it asserts every row's rank_1 truly is argmax(head_scores), i.e.
+the same "verify the by-construction invariant" role, applied to the new
+source of rank_1 instead of the old one. rank_2 selection is unchanged in
+both modes (the highest-scoring domain among the 9 domains other than
+rank_1); which 9 domains that excludes therefore differs by mode.
 
 Only rank_2 is replaced: for each row, the trained
 models/dispatch_candidate_ranking_head.joblib (an uncalibrated
@@ -91,6 +106,14 @@ _EXPECTED_BASELINE_DISPATCH_COUNT = 2
 # quietly losing single-domain argmax accuracy; this threshold (Iter59's
 # measured value was 0.610) is reported for every --head, not just Iter60's.
 _N5_SINGLE_DOMAIN_ARGMAX_ACCURACY_FLOOR = 0.590
+
+# rank1_source modes (journal.md Iter63 plan, decision 1): which source
+# decides rank_1 for build_new_rows(). Named constants rather than inline
+# string literals so a typo in either the CLI choices or the comparisons
+# below raises immediately rather than silently falling through to the
+# baseline branch.
+_RANK1_SOURCE_BASELINE = "baseline"
+_RANK1_SOURCE_HEAD_ARGMAX = "head_argmax"
 
 
 def _read_jsonl(path: str) -> list[dict]:
@@ -195,8 +218,25 @@ def build_new_rows(
     model: OneVsRestClassifier,
     classes: list[str],
     embeddings_by_id: dict[str, list[float]],
+    rank1_source: str = _RANK1_SOURCE_BASELINE,
 ) -> list[dict]:
-    """Recompute rank_2 for every baseline row; rank_1 is copied through unchanged.
+    """Recompute rank_2 (and, in head_argmax mode, rank_1 too) for every baseline row.
+
+    In the default `rank1_source="baseline"` mode, rank_1 is copied through
+    from --baseline unchanged (Iter59-62 behavior) and `selected_domain` is
+    passed through verbatim. In `rank1_source="head_argmax"` mode (journal.md
+    Iter63 plan, decisions 1 and 3), rank_1 becomes argmax(head_scores)
+    instead, and `selected_domain` is overwritten with that new rank_1 --
+    without the overwrite, metrics.compute_top1_accuracy() (which only reads
+    selected_domain) would trivially equal the baseline's value regardless of
+    this lever, making N2' a no-op check (see journal.md Iter63 investigation
+    finding 3 and Iter59's `selected_domain == dispatched_domains[0]`
+    invariant, which held on 1600/1600 baseline rows and is preserved here).
+
+    Either way, rank_2 is the highest-scoring domain among the 9 domains
+    other than rank_1 -- since rank_1 itself changes source in head_argmax
+    mode, the excluded domain (and hence the resulting rank_2) tracks it
+    automatically; rank_1 == rank_2 cannot occur (see A2).
 
     Each output row carries `dispatched_domains = [rank_1, rank_2_new]` (for
     direct reuse by metrics.compute_compound_coverage_metrics), plus
@@ -205,9 +245,14 @@ def build_new_rows(
     """
     new_rows = []
     for row in baseline_rows:
-        rank_1 = row["dispatched_domains"][0]
         rank2_baseline = row["dispatched_domains"][1]
         head_scores = _head_scores(model, classes, embeddings_by_id[row["id"]])
+        if rank1_source == _RANK1_SOURCE_BASELINE:
+            rank_1 = row["dispatched_domains"][0]
+            selected_domain = row["selected_domain"]
+        else:
+            rank_1 = max(head_scores, key=lambda domain: head_scores[domain])
+            selected_domain = rank_1
         rank2_new = max(
             (domain for domain in head_scores if domain != rank_1),
             key=lambda domain: head_scores[domain],
@@ -216,7 +261,7 @@ def build_new_rows(
             {
                 "id": row["id"],
                 "expected_domains": row["expected_domains"],
-                "selected_domain": row["selected_domain"],
+                "selected_domain": selected_domain,
                 "dispatched_domains": [rank_1, rank2_new],
                 "head_scores": head_scores,
                 "rank2_baseline": rank2_baseline,
@@ -238,6 +283,43 @@ def _assert_rank1_unchanged(baseline_rows: list[dict], new_rows: list[dict]) -> 
             f"A1 (rank_1 invariance) failed on {len(mismatches)}/{len(baseline_rows)} rows, "
             f"e.g. {mismatches[:5]}"
         )
+
+
+def _assert_rank1_matches_head_argmax(new_rows: list[dict]) -> None:
+    """A9: in head_argmax mode, every row's rank_1 must exactly equal argmax(head_scores).
+
+    Takes over A1's role (verify the by-construction invariant on rank_1)
+    for the new source: rank_1 is no longer copied from --baseline, so what
+    must never silently regress is instead "rank_1 really is the head's own
+    top-scoring domain" (e.g. if build_new_rows() is later edited to select
+    rank_1 some other way while still calling this in head_argmax mode).
+    """
+    mismatches = []
+    for row in new_rows:
+        head_argmax = max(row["head_scores"], key=row["head_scores"].get)
+        if row["dispatched_domains"][0] != head_argmax:
+            mismatches.append((row["id"], row["dispatched_domains"][0], head_argmax))
+    if mismatches:
+        raise AssertionError(
+            f"A9 (rank_1 == argmax(head_scores)) failed on {len(mismatches)}/{len(new_rows)} "
+            f"rows, e.g. {mismatches[:5]}"
+        )
+
+
+def _compute_rank1_change_count(baseline_rows: list[dict], new_rows: list[dict]) -> int:
+    """S4 (journal.md Iter63 plan): non-fatal count of rows whose rank_1 changed vs. --baseline.
+
+    Unlike A1/A9 (which raise), this only reports -- head_argmax mode is
+    expected to disagree with the baseline router on a nontrivial fraction
+    of rows (that disagreement is the entire point of the lever), so this
+    is evidence the lever fired, not an invariant to enforce. Mirrors
+    _compute_rank2_flip_rate()'s single-value, report-only shape.
+    """
+    return sum(
+        1
+        for base, new in zip(baseline_rows, new_rows)
+        if base["dispatched_domains"][0] != new["dispatched_domains"][0]
+    )
 
 
 def _assert_cost_neutral(new_rows: list[dict]) -> float:
@@ -358,6 +440,7 @@ async def _run(
     embedding_cache_path: str | None,
     output: TextIO,
     iter59_predictions_path: str | None = None,
+    rank1_source: str = _RANK1_SOURCE_BASELINE,
 ) -> None:
     baseline_rows = _read_jsonl(baseline_path)
     for row in baseline_rows:
@@ -375,9 +458,18 @@ async def _run(
         ollama_client, embedding_model, baseline_rows, embedding_cache_path
     )
 
-    new_rows = build_new_rows(baseline_rows, model, classes, embeddings_by_id)
+    new_rows = build_new_rows(baseline_rows, model, classes, embeddings_by_id, rank1_source)
 
-    _assert_rank1_unchanged(baseline_rows, new_rows)
+    # A1/A9 (journal.md Iter63 plan, decision 2): whichever source decided
+    # rank_1, verify it did so correctly, at the same AssertionError
+    # strength as before -- baseline mode keeps A1 (rank_1 == --baseline),
+    # head_argmax mode swaps in A9 (rank_1 == argmax(head_scores)).
+    rank1_change_count = None
+    if rank1_source == _RANK1_SOURCE_BASELINE:
+        _assert_rank1_unchanged(baseline_rows, new_rows)
+    else:
+        _assert_rank1_matches_head_argmax(new_rows)
+        rank1_change_count = _compute_rank1_change_count(baseline_rows, new_rows)
     mean_dispatch = _assert_cost_neutral(new_rows)
     _assert_head_scores_are_domain_names(new_rows, classes)
     rank2_flip_rate = _compute_rank2_flip_rate(new_rows)
@@ -415,6 +507,11 @@ async def _run(
     }
     if a5_result is not None:
         summary["a5_iter59_disagreement"] = a5_result
+    if rank1_change_count is not None:
+        # S4 (journal.md Iter63 plan): non-fatal evidence that head_argmax
+        # mode actually diverges from --baseline's rank_1 on some rows.
+        summary["rank1_change_count"] = rank1_change_count
+        summary["rank1_change_rate"] = rank1_change_count / len(new_rows) if new_rows else 0.0
     print(json.dumps(summary, ensure_ascii=False, indent=2), file=sys.stderr)
     print(
         f"[evaluate_dispatch_candidate_ranking] wrote {len(new_rows)} rows (head={head_path})",
@@ -456,6 +553,17 @@ def _parse_args() -> argparse.Namespace:
         help="Optional: Iter59's predictions JSONL (results/iter59_ovr_ranking_predictions.jsonl), "
         "for A5's rank_2 disagreement report against the single-label-trained head",
     )
+    parser.add_argument(
+        "--rank1-source",
+        choices=[_RANK1_SOURCE_BASELINE, _RANK1_SOURCE_HEAD_ARGMAX],
+        default=_RANK1_SOURCE_BASELINE,
+        help=(
+            "Where rank_1 comes from (journal.md Iter63 plan): 'baseline' (default, Iter59-62 "
+            "behavior) copies rank_1 from --baseline unchanged; 'head_argmax' instead takes the "
+            "highest-scoring domain in --head's own head_scores, and also overwrites "
+            "selected_domain with that new rank_1 (see build_new_rows())"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -473,6 +581,7 @@ def main() -> None:
                 args.embedding_cache,
                 f,
                 iter59_predictions_path=args.iter59_predictions,
+                rank1_source=args.rank1_source,
             )
         )
 

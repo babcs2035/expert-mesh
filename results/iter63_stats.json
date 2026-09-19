@@ -1,0 +1,91 @@
+{
+  "baseline_compound_domain_set_recall": 0.345,
+  "new_compound_domain_set_recall": 0.49,
+  "matches_implementation_phase_diagnostic_recall": false,
+  "S1_primary_criterion": {
+    "n_pairs": 200,
+    "improved_pairs": 43,
+    "regressed_pairs": 14,
+    "discordant_pairs": 57,
+    "chi2_statistic_continuity_corrected": 13.75438596491228,
+    "p_value_continuity_corrected": 0.00020833380892648634,
+    "p_value_exact_binomtest": 0.0001538890224443423,
+    "pass": true
+  },
+  "S2_effect_size_floor": {
+    "baseline_recall": 0.345,
+    "new_recall": 0.49,
+    "delta_pt": 0.14500000000000002,
+    "floor_pt": 0.04,
+    "pass": true
+  },
+  "S3_cost_neutrality": {
+    "n_rows": 1600,
+    "length_distribution": {
+      "2": 1600
+    },
+    "duplicate_rank1_rank2_count": 0,
+    "mean_dispatch": 2.0,
+    "pass": true
+  },
+  "S4_flip_rate_evidence_of_firing": {
+    "n_rows": 1600,
+    "flips": 901,
+    "rank2_flip_rate": 0.563125,
+    "matches_implementation_phase_value": false,
+    "implementation_phase_value": 0.356875,
+    "pass": true
+  },
+  "N1_rank1_invariance": {
+    "n_rows": 1600,
+    "mismatch_count": 380,
+    "mismatch_ids": [
+      "business_economics-001",
+      "business_economics-005",
+      "business_economics-007",
+      "business_economics-014",
+      "business_economics-015",
+      "business_economics-020",
+      "business_economics-021",
+      "business_economics-024",
+      "business_economics-027",
+      "business_economics-030"
+    ],
+    "pass": false
+  },
+  "N2_top1_accuracy_invariance": {
+    "baseline_top1_accuracy": 0.5975,
+    "new_top1_accuracy": 0.60375,
+    "exact_match": false,
+    "caveat": "new_rows' selected_domain is copied verbatim from the baseline row by build_new_rows(), not re-derived from the new dispatched_domains via aggregator.select_best_dispatch_response. In the live system, select_best_dispatch_response depends on which nodes were actually dispatched (it selects among the dispatched nodes' live LLM responses), so this check confirms field preservation under the offline scoring script, not that the live aggregator's output is invariant to a rank_2 change -- that would require an online re-run not performed in this iteration.",
+    "pass": false
+  },
+  "N3_legal_non_regression": {
+    "n_legal_involving_pairs": 30,
+    "baseline_legal_self_coverage": 8,
+    "new_legal_self_coverage": 17,
+    "expected_baseline_value": 8,
+    "baseline_matches_journal_record": true,
+    "pass": true
+  },
+  "N4_improvement_breakdown_by_domain_category": {
+    "legal_involving": {
+      "n_pairs": 60,
+      "improved": 14,
+      "regressed": 3,
+      "unchanged": 43
+    },
+    "medical_involving": {
+      "n_pairs": 32,
+      "improved": 3,
+      "regressed": 2,
+      "unchanged": 27
+    },
+    "other": {
+      "n_pairs": 108,
+      "improved": 26,
+      "regressed": 9,
+      "unchanged": 73
+    }
+  }
+}
