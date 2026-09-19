@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 69,
-  "iteration_name": "conformal predictionのq_hat修正版による予測集合被覆の再測定",
+  "iteration": 70,
+  "iteration_name": "conformal予測集合の構成規則をAPS標準へ修正して被覆を再測定",
   "phase": "reflect",
   "status": "running",
-  "current_lever": "routing_confidence_calibration_method=conformal_prediction_true_class_qhat",
-  "experiment_dir": "results/20260919_202700",
-  "experiment_deadline": null,
+  "current_lever": "conformal_set_construction",
+  "experiment_dir": "results/20260919_211708",
+  "experiment_deadline": 1789829528,
   "updated_at": 1789806078,
-  "last_slack_ts": "1789818817.553739",
-  "iteration_thread_ts": "1789816498.691649",
+  "last_slack_ts": "1789821213.745259",
+  "iteration_thread_ts": "1789819512.699769",
   "notion_toggle_created": true,
-  "last_commit": "3578525"
+  "last_commit": "ac29070"
 }

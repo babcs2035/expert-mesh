@@ -15,6 +15,45 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B106 [auto-decided 2026-09-19] Iter70 は rejected 確定・`conformal_set_construction` クローズ（ただしコードは維持）．新レバー `conformal_qhat_quantile_direction=alpha_lower_quantile` を config へ追加し Iter71 の単一レバーとする
+
+- **状況**: Iter70（`conformal_set_construction=corrected_aps`）は事前登録 3 指標の AND が不成立で
+  rejected（coverage=0.763750 が帯下限 0.87 に -10.63pt．二項 SE=0.01062 の 10.01 倍でノイズ外．
+  mean_set_size=1.943750・ECE=0.062998 は合格）．`values` は単一値のためこれでクローズとなり，
+  config の levers は再び全て試行済みになった．SKILL.md 停止条件に従い，(1) 学びから新レバーを
+  考案できるか，(2) できなければ調査フェーズから再探索，(3) いずれも不可なら converged，の順で
+  次の一手を決める必要があった．
+- **自動選択**: **停止条件 1 を適用**し，新レバー
+  **`conformal_qhat_quantile_direction: [alpha_lower_quantile]`** を config.yml の
+  `conformal_set_construction` 直下（levers 22 番目）へ追加した．Iter71 の単一レバーはこれとする．
+  iteration_name 案: **「conformal予測のq_hat分位点方向を補数スコアのα分位点へ修正して被覆保証を検証」**．
+  `status` は `running` を維持．あわせて，棄却された Iter70 の実装（`_compute_prediction_set()` の
+  集合構成修正）は **revert せず維持する**と決定した．
+- **根拠**: (a) Iter70 の分析(解釈) §4 が，未達の真因は分類器性能ではなく
+  `scripts/evaluate_classifier_calibration.py:_compute_prediction_set()`（L94-107 相当）の
+  **q_hat の分位点方向が逆**（補数スコア `1-cumsum` に対して α 分位点ではなく (1-α) 分位点を
+  取っている）という第 2 の独立した欠陥であることを，被覆条件の導出と閾値掃引の両方で示している．
+  (b) 真クラス順位の累積は top3=0.8237 / top4=0.8831 で，帯を満たす動作点（累積確率閾値
+  0.832〜0.880）が同一データ上に実在する．分類器性能は帯の成立を妨げていないため
+  「手法的限界」という結論は出せない．(c) 修正は 1 箇所・オフライン完結・分類器再訓練なし・
+  `config.yaml` スキーマ変更なしで自律着手できる．(d) 集合構成の修正は `set_size` の中間サイズが
+  66.3% の行で出現し mean_set_size 4.0319→1.9438・coverage +10.81pt と単体で有効であり，
+  棄却レバーの一部であってもコードとして残す価値がある（既定値 `broken` により Iter56/69 の
+  出力はバイト単位で再現可能なまま）．
+- **単一レバー原則の守り方**: 動かすのは分位点方向 1 点のみ．集合構成は `corrected_aps` に，
+  母集団は `true_class` に固定する．**名目水準 `--confidence-level` はレバーに含めない**．
+  主判定は名目 0.90 固定で「被覆保証の妥当性（0.88 ≤ coverage ≤ 0.95）」を見る．名目を
+  0.70〜0.95 で振った coverage/mean_set_size 曲線は付随報告とし判定には用いない．
+- **要レビュー**: (1) 成功条件を従来の帯（coverage 0.87-0.93 ∧ mean_set_size 1.5-4.0）から
+  「被覆保証の妥当性」へ組み替えた点．根拠は Iter70 の掃引で，この帯は本分類器では名目 0.78〜0.83
+  相当の動作点に対応し，名目 0.90 とは両立しない（名目 0.90 相当の閾値では mean_set_size≈5.52 で
+  上限 4.0 超）ことが判明したため．帯のまま維持すべきなら着手前に指示されたい．
+  (2) Iter56→69→70 と 3 度続けて原因帰属を誤っている点（方法的限界 → 母集団選択 → 集合構成）．
+  Iter71 でも成立しなければ，欠陥の列挙を続けず「標準ライブラリ（MAPIE 等）での追試」か
+  「conformal 系列を閉じる」かを人間に諮る方針を config note に明記した．
+  (3) B104（A1: 複合評価集合の拡充 / A2: 実行時経路への配線）は未回答のまま維持．Iter70 の結果は
+  A1/A2 の判断材料に直接ならないため再 @mention はしていない．
+
 ## B105 [auto-decided 2026-09-19] Iter69 は rejected 確定・`routing_confidence_calibration_method` クローズ．新レバー `conformal_set_construction=corrected_aps` を config へ追加し Iter70 の単一レバーとする
 
 - **状況**: Iter69（`conformal_prediction_true_class_qhat`）は成功条件 3 指標の AND が不成立で

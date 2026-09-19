@@ -68,6 +68,7 @@ def _compute_prediction_set(
     cp_data: dict,
     confidence_level: float = 0.90,
     qhat_source: str = "all",
+    set_construction: str = "broken",
 ) -> tuple[list[int], int]:
     """Compute a conformal prediction set using cumulative APS method.
 
@@ -83,16 +84,36 @@ def _compute_prediction_set(
       to under-cover its nominal confidence level.
     - "true_class": only the TRUE-CLASS nonconformity score for each
       calibration sample (n_cal values), per the standard APS procedure.
-    Prediction set: include classes in decreasing probability order
-    while score (1 - cumsum) <= q_hat.
 
-    This ensures the top class is always included (smallest score),
-    and lower classes are added while the score stays below q_hat.
+    Prediction set construction (classes visited in decreasing probability
+    order, cumsum = running cumulative probability), controlled by
+    set_construction:
+    - "broken": the pre-Iter70 implementation. Appends a class to the
+      prediction set only AFTER checking `1 - cumsum <= q_hat`, i.e. the
+      break decision is made before the append. Since `1 - cumsum` is
+      monotonically decreasing as cumsum grows, this collapses to a single
+      binary gate on the top class alone (`1 - p_max <= q_hat`): either
+      every class passes and the loop never breaks (set_size = n_classes),
+      or the very first class fails and the loop breaks immediately with an
+      empty set that falls through to the top-class fallback below
+      (set_size = 1). Intermediate set sizes (2..n_classes-1) cannot occur.
+      Kept as the default to preserve prior runs' byte-for-byte output.
+    - "corrected_aps": the standard APS construction (Romano et al., 2020).
+      Each class is appended to the prediction set BEFORE the cumsum-based
+      break check, so the set grows one class at a time until the
+      cumulative probability first reaches the (1 - q_hat) coverage mass.
+      The top class (rank 1) is therefore always included, and intermediate
+      set sizes occur whenever the desired coverage mass falls strictly
+      between two classes' cumulative probabilities.
 
     Returns (list of class indices in prediction set, set size).
     """
     if qhat_source not in ("all", "true_class"):
         raise ValueError(f"qhat_source must be 'all' or 'true_class', got {qhat_source!r}")
+    if set_construction not in ("broken", "corrected_aps"):
+        raise ValueError(
+            f"set_construction must be 'broken' or 'corrected_aps', got {set_construction!r}"
+        )
 
     alpha = 1.0 - confidence_level
     if qhat_source == "true_class":
@@ -106,18 +127,25 @@ def _compute_prediction_set(
     target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(flat_scores)))
     q_hat = float(np.quantile(flat_scores, target, method="higher"))
 
-    # Include classes in decreasing probability order while score <= q_hat
-    # Score for class j = 1 - cumsum_prob_up_to_j (top class has smallest score)
+    # Score for class j = 1 - cumsum_prob_up_to_j (monotonically decreasing).
     sorted_indices = np.argsort(-probabilities)  # descending
     pred_set: list[int] = []
     cumsum = 0.0
-    for idx in sorted_indices:
-        cumsum += probabilities[idx]
-        score = 1.0 - cumsum
-        if score <= q_hat:
-            pred_set.append(int(idx))
-        else:
-            break
+    if set_construction == "corrected_aps":
+        for idx in sorted_indices:
+            cumsum += probabilities[idx]
+            pred_set.append(int(idx))  # append BEFORE the break check (Iter70 fix)
+            score = 1.0 - cumsum
+            if score <= q_hat:
+                break
+    else:  # "broken": pre-Iter70 behavior, kept verbatim for reproducibility
+        for idx in sorted_indices:
+            cumsum += probabilities[idx]
+            score = 1.0 - cumsum
+            if score <= q_hat:
+                pred_set.append(int(idx))
+            else:
+                break
 
     # Fallback: if no class meets threshold, include top class
     if len(pred_set) == 0:
@@ -138,6 +166,7 @@ async def predict_calibrated_rows(
     calibration_dataset_path: str | None = None,
     confidence_level: float = 0.90,
     qhat_source: str = "all",
+    set_construction: str = "broken",
 ) -> list[dict]:
     """Recompute (selected_domain, confidence) for every dataset row via the calibrated classifier.
 
@@ -244,7 +273,8 @@ async def predict_calibrated_rows(
         _diag_q_hat = float(np.quantile(_diag_scores, _diag_target, method="higher"))
         print(
             f"[evaluate_classifier_calibration] qhat_source={qhat_source} "
-            f"q_hat={_diag_q_hat:.4f} population_size={len(_diag_scores)}",
+            f"q_hat={_diag_q_hat:.4f} population_size={len(_diag_scores)} "
+            f"set_construction={set_construction}",
             file=sys.stderr,
         )
 
@@ -282,7 +312,8 @@ async def predict_calibrated_rows(
             # Compute conformal prediction set (uses original predict_proba probabilities)
             if conformal_prediction and cp_data is not None:
                 pred_set, set_size = _compute_prediction_set(
-                    probabilities, cp_data, confidence_level, qhat_source=qhat_source
+                    probabilities, cp_data, confidence_level,
+                    qhat_source=qhat_source, set_construction=set_construction,
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -317,7 +348,8 @@ async def predict_calibrated_rows(
             # Compute conformal prediction set (uses original predict_proba probabilities)
             if conformal_prediction and cp_data is not None:
                 pred_set, set_size = _compute_prediction_set(
-                    probabilities, cp_data, confidence_level, qhat_source=qhat_source
+                    probabilities, cp_data, confidence_level,
+                    qhat_source=qhat_source, set_construction=set_construction,
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -348,6 +380,7 @@ async def _run(
     calibration_dataset_path: str | None = None,
     confidence_level: float = 0.90,
     qhat_source: str = "all",
+    set_construction: str = "broken",
 ) -> None:
     dataset = _read_jsonl(dataset_path)
     classifier = load_domain_classifier(classifier_path)
@@ -361,6 +394,7 @@ async def _run(
         calibration_dataset_path=calibration_dataset_path,
         confidence_level=confidence_level,
         qhat_source=qhat_source,
+        set_construction=set_construction,
     )
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -434,6 +468,17 @@ def main() -> None:
              "standard APS calibration procedure). Default 'all' preserves prior behavior.",
     )
     parser.add_argument(
+        "--set-construction",
+        choices=["broken", "corrected_aps"],
+        default="broken",
+        help="Prediction set construction rule: 'broken' (pre-Iter70 implementation, "
+             "append happens after the break check and collapses to a binary "
+             "1-p_max<=q_hat gate) or 'corrected_aps' (standard APS: append happens "
+             "before the break check, so classes are greedily added until cumulative "
+             "probability reaches the coverage mass). Default 'broken' preserves prior "
+             "behavior.",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write the calibrated-side JSONL to (default: stdout)",
@@ -456,6 +501,7 @@ def main() -> None:
                 calibration_dataset_path=args.calibration_dataset,
                 confidence_level=args.confidence_level,
                 qhat_source=args.qhat_source,
+                set_construction=args.set_construction,
             )
         )
     else:
@@ -475,6 +521,7 @@ def main() -> None:
                     calibration_dataset_path=args.calibration_dataset,
                     confidence_level=args.confidence_level,
                     qhat_source=args.qhat_source,
+                    set_construction=args.set_construction,
                 )
             )
 
