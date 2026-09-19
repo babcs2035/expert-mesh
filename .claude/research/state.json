@@ -1,15 +1,16 @@
 {
   "repo": "expert-mesh",
-  "iteration": 65,
-  "iteration_name": "2ドメイン合成訓練事例の用量反応（9→18件/ペア）",
+  "iteration": 66,
+  "iteration_name": "合成文の質量比のみをIter64水準へ戻す（単一ドメイン行の2重化）",
   "phase": "reflect",
   "status": "running",
-  "current_lever": "multilabel_synthetic_volume_dose_response=uniform_eighteen_per_pair",
+  "last_judgment": "partial",
+  "current_lever": "multilabel_training_mixture_ratio=single_domain_rows_duplicated_x2",
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1789785734,
-  "last_slack_ts": "1789800846.249289",
-  "iteration_thread_ts": "1789798064.434059",
+  "last_slack_ts": "1789803658.903819",
+  "iteration_thread_ts": "1789801736.674859",
   "notion_toggle_created": true,
-  "last_commit": "afb7985"
+  "last_commit": "73a0e3a"
 }
