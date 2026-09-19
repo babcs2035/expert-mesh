@@ -69,6 +69,7 @@ def _compute_prediction_set(
     confidence_level: float = 0.90,
     qhat_source: str = "all",
     set_construction: str = "broken",
+    qhat_quantile_direction: str = "upper",
 ) -> tuple[list[int], int]:
     """Compute a conformal prediction set using cumulative APS method.
 
@@ -106,6 +107,25 @@ def _compute_prediction_set(
       set sizes occur whenever the desired coverage mass falls strictly
       between two classes' cumulative probabilities.
 
+    qhat_quantile_direction controls which side of the nonconformity score
+    population q_hat is drawn from, per the finite-sample-corrected quantile
+    definitions in Angelopoulos & Bates (2021, arXiv:2107.07511) and
+    Barber et al. (2021, "Predictive Inference with the Jackknife+", Annals
+    of Statistics), which for a score population v of size n define:
+        q-hat+_{n,alpha}{v} = ceil((n+1)(1-alpha)) / n   (upper)
+        q-hat-_{n,alpha}{v} = floor((n+1)*alpha) / n = -q-hat+_{n,alpha}{-v}  (lower)
+    - "upper" (default): the (1-alpha) quantile, i.e. q-hat+. This repo's
+      score S(x, j) = 1 - cumulative_prob_up_to_j is the COMPLEMENT of the
+      standard APS score (cumulative_prob_up_to_j itself), so taking the
+      upper quantile of this complement corresponds to the LOWER quantile of
+      the standard score -- the wrong side (Iter71 investigation Q1/Q2),
+      producing under-coverage. Kept as the default to preserve prior runs'
+      byte-for-byte output.
+    - "alpha_lower": the alpha quantile, i.e. q-hat-. Because Y = 1 - X maps
+      X's (1-alpha) quantile to Y's alpha quantile, this is the correct side
+      to draw q_hat from when the score is the complement (1 - cumsum), as
+      implemented in this repo.
+
     Returns (list of class indices in prediction set, set size).
     """
     if qhat_source not in ("all", "true_class"):
@@ -113,6 +133,11 @@ def _compute_prediction_set(
     if set_construction not in ("broken", "corrected_aps"):
         raise ValueError(
             f"set_construction must be 'broken' or 'corrected_aps', got {set_construction!r}"
+        )
+    if qhat_quantile_direction not in ("upper", "alpha_lower"):
+        raise ValueError(
+            f"qhat_quantile_direction must be 'upper' or 'alpha_lower', "
+            f"got {qhat_quantile_direction!r}"
         )
 
     alpha = 1.0 - confidence_level
@@ -122,10 +147,15 @@ def _compute_prediction_set(
         all_scores = cp_data["all_scores"]  # shape=(n_cal, n_classes)
         flat_scores = all_scores.flatten()
 
-    # q_hat = (1-alpha) quantile of the selected nonconformity score population,
-    # with the standard finite-sample correction (1-alpha)*(1+1/n).
-    target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(flat_scores)))
-    q_hat = float(np.quantile(flat_scores, target, method="higher"))
+    # q_hat = finite-sample-corrected quantile of the selected nonconformity
+    # score population; direction controlled by qhat_quantile_direction (see
+    # docstring above for the upper/alpha_lower definitions and rationale).
+    if qhat_quantile_direction == "alpha_lower":
+        target = alpha * (1.0 + 1.0 / len(flat_scores))
+        q_hat = float(np.quantile(flat_scores, target, method="lower"))
+    else:  # "upper"
+        target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(flat_scores)))
+        q_hat = float(np.quantile(flat_scores, target, method="higher"))
 
     # Score for class j = 1 - cumsum_prob_up_to_j (monotonically decreasing).
     sorted_indices = np.argsort(-probabilities)  # descending
@@ -167,6 +197,7 @@ async def predict_calibrated_rows(
     confidence_level: float = 0.90,
     qhat_source: str = "all",
     set_construction: str = "broken",
+    qhat_quantile_direction: str = "upper",
 ) -> list[dict]:
     """Recompute (selected_domain, confidence) for every dataset row via the calibrated classifier.
 
@@ -269,12 +300,17 @@ async def predict_calibrated_rows(
             _diag_scores = true_class_scores
         else:
             _diag_scores = all_scores.flatten()
-        _diag_target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(_diag_scores)))
-        _diag_q_hat = float(np.quantile(_diag_scores, _diag_target, method="higher"))
+        if qhat_quantile_direction == "alpha_lower":
+            _diag_target = alpha * (1.0 + 1.0 / len(_diag_scores))
+            _diag_q_hat = float(np.quantile(_diag_scores, _diag_target, method="lower"))
+        else:  # "upper"
+            _diag_target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(_diag_scores)))
+            _diag_q_hat = float(np.quantile(_diag_scores, _diag_target, method="higher"))
         print(
             f"[evaluate_classifier_calibration] qhat_source={qhat_source} "
             f"q_hat={_diag_q_hat:.4f} population_size={len(_diag_scores)} "
-            f"set_construction={set_construction}",
+            f"set_construction={set_construction} "
+            f"qhat_quantile_direction={qhat_quantile_direction}",
             file=sys.stderr,
         )
 
@@ -314,6 +350,7 @@ async def predict_calibrated_rows(
                 pred_set, set_size = _compute_prediction_set(
                     probabilities, cp_data, confidence_level,
                     qhat_source=qhat_source, set_construction=set_construction,
+                    qhat_quantile_direction=qhat_quantile_direction,
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -350,6 +387,7 @@ async def predict_calibrated_rows(
                 pred_set, set_size = _compute_prediction_set(
                     probabilities, cp_data, confidence_level,
                     qhat_source=qhat_source, set_construction=set_construction,
+                    qhat_quantile_direction=qhat_quantile_direction,
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -381,6 +419,7 @@ async def _run(
     confidence_level: float = 0.90,
     qhat_source: str = "all",
     set_construction: str = "broken",
+    qhat_quantile_direction: str = "upper",
 ) -> None:
     dataset = _read_jsonl(dataset_path)
     classifier = load_domain_classifier(classifier_path)
@@ -395,6 +434,7 @@ async def _run(
         confidence_level=confidence_level,
         qhat_source=qhat_source,
         set_construction=set_construction,
+        qhat_quantile_direction=qhat_quantile_direction,
     )
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -479,6 +519,16 @@ def main() -> None:
              "behavior.",
     )
     parser.add_argument(
+        "--qhat-quantile-direction",
+        choices=["upper", "alpha_lower"],
+        default="upper",
+        help="Which side of the nonconformity score population q_hat is drawn from: "
+             "'upper' (the (1-alpha) quantile, the original implementation) or "
+             "'alpha_lower' (the alpha quantile, correct for this repo's complement "
+             "score S=1-cumsum per Iter71 investigation). Default 'upper' preserves "
+             "prior behavior.",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write the calibrated-side JSONL to (default: stdout)",
@@ -502,6 +552,7 @@ def main() -> None:
                 confidence_level=args.confidence_level,
                 qhat_source=args.qhat_source,
                 set_construction=args.set_construction,
+                qhat_quantile_direction=args.qhat_quantile_direction,
             )
         )
     else:
@@ -522,6 +573,7 @@ def main() -> None:
                     confidence_level=args.confidence_level,
                     qhat_source=args.qhat_source,
                     set_construction=args.set_construction,
+                    qhat_quantile_direction=args.qhat_quantile_direction,
                 )
             )
 

@@ -15,6 +15,51 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B107 [auto-decided 2026-09-19] Iter71 は rejected 確定（過被覆）・`conformal_qhat_quantile_direction` クローズ．新レバー `conformal_calibration_exchangeability=eval_holdout_split` を config へ追加し Iter72 の単一レバーとする
+
+- **状況**: Iter71（`conformal_qhat_quantile_direction=alpha_lower_quantile`）は主基準 coverage が
+  0.996875 で帯 0.88–0.95 の上限を大きく超える**過被覆**となり rejected（帯上限から +0.046875，
+  事前登録 SE=0.006 の 7.81 倍・実測比率 SE=0.00140 の 33.6 倍，Wilson 95%CI [0.99271,0.99866] が
+  帯と非重複）．非退行条件 1〜5 と ECE ≤0.0680 は全て充足し，不成立は主基準のみ．
+  `values` は単一値のためこれでクローズとなり，config の levers は再び全て試行済みになった．
+  SKILL.md 停止条件に従い (1) 学びから新レバーを考案 → (2) 調査フェーズから再探索 → (3) converged，
+  の順で次の一手を決める必要があった．
+- **自動選択**: **停止条件 1 を適用**し，新レバー
+  **`conformal_calibration_exchangeability: [eval_holdout_split]`** を config.yml の
+  `conformal_qhat_quantile_direction` 直下（levers 23 番目）へ追加した．Iter72 の単一レバーはこれとする．
+  **iteration_name: 「conformal校正集合を評価データの層化ホールドアウトへ変更し交換可能性を回復して被覆を再測定」**．
+  `status` は `running` を維持．Iter71 の実装（`--qhat-quantile-direction`）は棄却レバーであっても
+  **revert せず維持する**（既定値 `upper` が Iter69/70 出力を md5 単位で再現する後方互換設計であり，
+  Iter72 では `alpha_lower` を固定値として使う）．
+- **根拠**: (a) Iter71 の実装は上側・下側の両分位点が一次資料の式（`q̂+=⌈(n+1)(1-α)⌉/n`,
+  `q̂-=⌊(n+1)α⌋/n`）と一致し，ユニットテストと後方互換 md5 で裏が取れているため，
+  残る原因は実装ではなく q_hat の**値**＝校正集合の分布に限定される（invalid ではない）．
+  (b) コード読解で具体的な機序が特定できた: 校正スコアは `classifier.estimator`（素の
+  LogisticRegression）の 5-fold 再学習モデルの OOF 確率から作られる一方，評価スコアは
+  `CalibratedClassifierCV`（全データ学習・確率較正済み）から作られる．学習データ量・確率較正の有無・
+  元データの 3 点が同時に異なり，split conformal の交換可能性が破れている．較正なしの LR は真クラスへ
+  過信的なため補数スコアが 0 側へ偏り，q_hat=0.000980 という 1〜2 桁小さい値になった．
+  (c) 名目水準を 0.70 まで下げても coverage=0.9875（付随報告）という形は「α の選び方」ではなく
+  「校正側の分布ずれ」でしか説明できず，(b) と整合する．
+  (d) 計画節の q_hat 掃引表が示すとおり 0.04 ≤ q_hat ≤ 0.145 なら帯に入る動作点は同一データ上に
+  実在するため，「conformal は本タスクに不適」という結論はまだ出せない．
+  (e) 提案レバーはオフライン完結・分類器再訓練なし・`config.yaml` スキーマ変更なしで自律着手でき，
+  かつ校正 1,427 行の埋め込み計算が不要になるためコストは Iter71 より下がる．
+- **単一レバー原則の守り方**: 動かすのは校正集合の取り方 1 点のみ．分位点方向 `alpha_lower`・
+  集合構成 `corrected_aps`・名目水準 0.90・分類器・埋め込みは全て固定する．
+- **要レビュー**: (1) **config の `conformal_qhat_quantile_direction` note の「不成立の場合」節は
+  「MAPIE 等での追試」か「conformal 系列を閉じる」かを人間に諮ると定めており，本イテレーションは
+  形式的にこれに該当する**．しかし Iter71 の計画節（事前登録）がより具体的に「`coverage > 0.95` なら
+  次レバー候補は『校正集合の交換可能性（OOF vs ホールドアウト）』」と定めていたため，後発かつ
+  具体的なこちらを優先して Iter72 を自律着手する判断とした．「ここで系列を閉じる」または
+  「MAPIE 追試へ切り替える」と判断する場合は Iter72 着手前に指示されたい．
+  (2) 評価データ自身を 50/50 に割るため coverage の n が 1,600 → 800 に半減し，二項 SE が 0.006 →
+  0.0096 へ拡大する点（帯 0.88–0.95 の幅 0.07 に対しては十分な分解能と判断した）．
+  (3) `classifier_train.jsonl` と `dataset.jsonl` の query 重複 72 件（実測）．両半に同程度で混入する
+  ため両半の交換可能性は壊さないが，分類器が既見の行を含む点は結果の注記に留める判断とした．
+  (4) B104（A1: 複合評価集合の拡充 / A2: 実行時経路への配線）は未回答のまま維持．Iter71 の結果は
+  A1/A2 の判断材料に直接ならないため再 @mention はしていない．
+
 ## B106 [auto-decided 2026-09-19] Iter70 は rejected 確定・`conformal_set_construction` クローズ（ただしコードは維持）．新レバー `conformal_qhat_quantile_direction=alpha_lower_quantile` を config へ追加し Iter71 の単一レバーとする
 
 - **状況**: Iter70（`conformal_set_construction=corrected_aps`）は事前登録 3 指標の AND が不成立で

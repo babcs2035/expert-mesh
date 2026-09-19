@@ -885,6 +885,59 @@ levers:
             追試する』か『conformal 系列そのものを閉じる』かの判断を人間に諮る
             （Iter56→69→70 と 3 度続いた原因帰属の誤りを 4 度繰り返さないため）．"}
 
+  - {name: conformal_calibration_exchangeability, values: [eval_holdout_split],
+     note: "[2026-09-19 Iter71 reflector 新設 / backlog B107] Iter71（分位点方向の修正）は
+            coverage=0.996875 で帯上限 0.95 を +0.0469（実測比率 SE=0.00140 の 33.6 倍，
+            Wilson 95%CI [0.99271,0.99866] が帯と非重複）超える**過被覆**により rejected．
+            実装は 2 つとも正しい（後方互換 md5 一致・ユニットテスト・一次資料の式と整合）ため，
+            残る原因は q_hat の**値**，すなわち校正集合のスコア分布である．
+            **欠陥の内容（journal Iter71 考察 §2）**: `scripts/evaluate_classifier_calibration.py:
+            predict_calibrated_rows()` は，校正スコアを `classifier.estimator`（素の
+            LogisticRegression）を 5-fold で再学習した fold モデルの predict_proba（OOF）から作る
+            一方，評価スコアは `models/domain_classifier.joblib`（CalibratedClassifierCV，全データ
+            学習済み）の predict_proba から作る．校正と評価で (a) 学習データ量（4/5 vs 全体），
+            (b) **確率較正の有無**（生 LR vs 較正済み），(c) 元データ（classifier_train.jsonl vs
+            dataset.jsonl）の 3 点が同時に異なり，split conformal が要求する交換可能性が破れている．
+            較正されていない LR は真クラスへ過信的（cumsum≈1 ⟹ 補数スコア≈0）なため，校正側の
+            下側 10% 分位点が q_hat=0.000980 まで落ち，実効閾値 1-q_hat≈0.999 で 10 クラス中 9〜10 個を
+            毎回含む自明な集合になった．名目水準を 0.70 まで下げても coverage=0.9875 に留まる
+            （Iter71 付随報告）という形は，この機序でしか説明できない．
+            **レバーの内容**: 校正集合の取り方を `oof_train`（現行既定）→ `eval_holdout_split` へ
+            切り替える．`data/dataset.jsonl`（1,600 行）を `expected_domains[0]` で層化した
+            50/50 分割（seed 42）とし，**校正半 800 行のスコアを評価と同一の
+            models/domain_classifier.joblib の predict_proba で計算**して q_hat を取り，
+            **評価半 800 行**で coverage・mean_set_size を測る．これにより上記 (a)(b)(c) の差が
+            同時に消え，校正半と評価半は同一分布・同一モデル・同一前処理の交換可能な 2 標本になる．
+            **単一レバー原則**: 動かすのは校正集合の取り方 1 点のみ．分位点方向は `alpha_lower`，
+            集合構成は `corrected_aps`，名目水準は `--confidence-level 0.90` に固定し，
+            分類器・埋め込み・argmax・confidence・`config.yaml` は変更しない．
+            **実装方針**: CLI に `--calibration-source {oof_train,eval_holdout}`（既定 `oof_train`
+            ＝現行挙動を温存）と `--holdout-seed`（既定 42）を追加．`eval_holdout` のとき
+            `--calibration-dataset` は使わず，評価データ自身を
+            StratifiedShuffleSplit(test_size=0.5, random_state=seed) で分け，校正半は
+            `classifier.predict_proba` の確率から真クラス補数スコアを作る（埋め込みは評価 1,600 行分
+            のみで足り，校正 1,427 行の埋め込み計算が不要になるためコストはむしろ下がる）．
+            出力 jsonl には行ごとに `split=cal|eval` を付与し，集計は eval 半のみで行う．
+            CLI の `--output` 有無 2 分岐**両方**への伝播は Iter69〜71 で 3 回警告された落とし穴なので
+            必ずチェックリスト化すること．
+            **成功条件（事前登録）**: 名目 0.90・評価半 n=800 に対し **0.88 <= coverage <= 0.95**
+            （主基準）．副基準として mean_set_size を報告（判定には用いない）．
+            同一性アンカー: eval 半 800 行の `selected_domain`・`confidence`・`probabilities` が
+            `results/20260919_215923/Iter71_qhat_alpha_lower.jsonl` の同 id 行と一致（許容差 1e-9），
+            ECE は eval 半で報告（母集団が変わるため閾値判定には用いない）．後方互換として
+            `--calibration-source oof_train` での再実行が Iter71 出力と md5 一致すること．
+            **ノイズ幅**: n=800・p≈0.92 で二項 SE≈0.0096．帯端からの逸脱は SE の何倍かを併記する．
+            付随報告として 2 分割の役割を入れ替えた反対側（cross-fit）の coverage も算出し，
+            分割由来のばらつきを示す（判定には用いない）．
+            **到達コードパス**: CLI 直接起動のオフライン評価のみ（`config.yaml` 非経由，実機ノード
+            wafl500〜509 不使用，埋め込み計算のみ wafl-ctrl5 の ollama `127.0.0.1:11435`）．
+            **既知の留保**: `classifier_train.jsonl` と `dataset.jsonl` は query 文字列で 72 件重複する
+            （Iter71 考察時に実測）．この重複は校正半・評価半の両方に同程度で混入するため両半の
+            交換可能性自体は壊さないが，分類器が既見の行を含む点は結果の解釈に注記すること．
+            **不成立の場合**: 交換可能性を揃えても被覆保証が成立しないなら，実装欠陥の列挙は打ち切り，
+            『本データ・本分類器では conformal prediction の有効な動作点が存在しない』として
+            conformal 系列を閉じる判断を人間に諮る（MAPIE 等での追試を行うかを含めて）．"}
+
   # --- 【3番目・要ユーザー確認】複合ドメイン compound_domain_set_recall の改善 ---
   - {name: dispatch_policy, values: [adaptive_confidence_gap],
      note: "[2026-08-08 docs/d0007 §3] `aggregation_method` レバー（Iter48 でクローズ．

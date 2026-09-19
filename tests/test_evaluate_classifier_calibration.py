@@ -1,5 +1,5 @@
-"""Tests for scripts/evaluate_classifier_calibration.py's qhat_source (Iter69) and
-set_construction (Iter70) switches.
+"""Tests for scripts/evaluate_classifier_calibration.py's qhat_source (Iter69),
+set_construction (Iter70), and qhat_quantile_direction (Iter71) switches.
 
 Regression guard against the Iter56 q_hat bug: `_compute_prediction_set()` originally
 computed q_hat from ALL (sample, class) nonconformity scores instead of the standard
@@ -15,6 +15,16 @@ the cumsum-based break check, which collapses to a binary `1 - p_max <= q_hat` g
 the top class alone and can never produce an intermediate set size. The Iter70 tests
 below verify that `set_construction="corrected_aps"` (append BEFORE the break check)
 actually reaches a different, intermediate-sized prediction set on the same input.
+
+Regression guard against the Iter56-70 q_hat quantile-direction bug (diagnosed
+Iter71): this repo's nonconformity score is the COMPLEMENT of the standard APS score
+(`score = 1 - cumsum`, not `cumsum` itself), so q_hat must be drawn from the score
+population's alpha quantile (`qhat_quantile_direction="alpha_lower"`), not the
+(1-alpha) quantile the pre-Iter71 implementation used
+(`qhat_quantile_direction="upper"`, kept as default for backward compatibility). The
+Iter71 tests below verify the new argument actually reaches the quantile computation
+and that its finite-sample correction matches the standard `floor((n+1)*alpha)/n`
+rank statistic (Angelopoulos & Bates 2021; Barber et al. 2021).
 """
 
 import numpy as np
@@ -211,4 +221,113 @@ def test_set_construction_rejects_unknown_value() -> None:
         _compute_prediction_set(
             _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
             set_construction="bogus",
+        )
+
+
+# --- Iter71: qhat_quantile_direction ("upper" vs "alpha_lower") -----------------
+
+# Reuse the 10-class true-class score population from the qhat_source tests above
+# (n_cal=12, true_class_scores=_TRUE_CLASS_COLUMN). For confidence_level=0.90
+# (alpha=0.10): q_hat("upper") = quantile(scores, min(1, 0.9*13/12), method="higher")
+# = 0.95 (the max score); q_hat("alpha_lower") = quantile(scores, 0.1*13/12,
+# method="lower") = 0.60. Under "corrected_aps" construction and
+# _QUERY_PROBABILITIES (top-class cumsum=0.30, score=0.70), the top class alone
+# satisfies score<=q_hat("upper")=0.95 (set size 1), but score=0.70 > q_hat
+# ("alpha_lower")=0.60 requires one more class (cumsum=0.41, score=0.59<=0.60,
+# set size 2) -- the two directions must diverge, and the correct ("alpha_lower")
+# direction must yield the LARGER set (it needs more cumulative probability mass,
+# 1 - 0.60 = 0.40, vs 1 - 0.95 = 0.05 for "upper").
+def test_qhat_quantile_direction_upper_and_alpha_lower_yield_different_q_hat() -> None:
+    """The two qhat_quantile_direction modes must produce numerically distinct q_hat,
+    with alpha_lower's resulting prediction set strictly larger than upper's.
+
+    Direct regression check for the Iter56-70 quantile-direction bug (diagnosed
+    Iter71): "upper" draws q_hat from the (1-alpha) quantile of the complement
+    score, which is the wrong side and under-covers; "alpha_lower" draws it from
+    the alpha quantile, the correct side for a complement score.
+    """
+    pred_set_upper, size_upper = _compute_prediction_set(
+        _QUERY_PROBABILITIES, _CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="corrected_aps",
+        qhat_quantile_direction="upper",
+    )
+    pred_set_alpha_lower, size_alpha_lower = _compute_prediction_set(
+        _QUERY_PROBABILITIES, _CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="corrected_aps",
+        qhat_quantile_direction="alpha_lower",
+    )
+    assert size_upper != size_alpha_lower, (
+        "qhat_quantile_direction='upper' and 'alpha_lower' produced the same "
+        "prediction set size; the qhat_quantile_direction branch is not actually "
+        "being reached (Iter71 no-op guard)."
+    )
+    assert size_upper == 1
+    assert pred_set_upper == [0]
+    assert size_alpha_lower == 2
+    assert pred_set_alpha_lower == [0, 1]
+    assert size_alpha_lower > size_upper, (
+        "alpha_lower must draw a smaller q_hat than upper for this complement-score "
+        "population, requiring MORE cumulative probability mass and thus a LARGER "
+        "prediction set."
+    )
+
+
+def test_qhat_quantile_direction_alpha_lower_matches_finite_sample_rank_statistic() -> None:
+    """alpha_lower's q_hat must equal the standard floor((n+1)*alpha)/n rank
+    statistic (Angelopoulos & Bates 2021; Barber et al. 2021), not an ad hoc
+    approximation.
+
+    Uses a synthetic true-class score population of n=19 evenly spaced values
+    (0.05, 0.10, ..., 0.95) where the finite-sample-corrected rank
+    floor((19+1)*0.10) = 2 picks out the 2nd-smallest score, 0.10, exactly
+    (verified independently via np.quantile in this test's setup, matching the
+    journal Iter71 plan's Q3 derivation). Query-time probabilities are crafted
+    with a wide margin (score=0.15 just before the expected crossing, score=0.05
+    just after) so the assertion is robust to floating-point rounding rather than
+    depending on an exact equality at the crossing point.
+    """
+    n = 19
+    alpha = 0.10  # confidence_level=0.90
+    evenly_spaced_scores = np.array([i / 20 for i in range(1, n + 1)])
+    expected_q_hat = 0.10  # floor((n+1)*alpha)/n-th order statistic, see docstring
+    assert float(np.quantile(evenly_spaced_scores, alpha * (1 + 1 / n), method="lower")) == expected_q_hat
+
+    cp_data = {
+        "all_scores": np.zeros((1, 6)),  # unused by qhat_source="true_class"
+        "true_class_scores": evenly_spaced_scores,
+    }
+    # cumsum: 0.30, 0.50, 0.70, 0.85, 0.95, 1.00 -> score: 0.70, 0.50, 0.30, 0.15, 0.05, 0.00
+    probabilities = np.array([0.30, 0.20, 0.20, 0.15, 0.10, 0.05])
+    pred_set, size = _compute_prediction_set(
+        probabilities, cp_data, confidence_level=0.90,
+        qhat_source="true_class", set_construction="corrected_aps",
+        qhat_quantile_direction="alpha_lower",
+    )
+    # Rank-4 prefix (cumsum=0.85, score=0.15) must NOT yet satisfy score<=q_hat=0.10;
+    # rank-5 prefix (cumsum=0.95, score=0.05) must be where the loop breaks.
+    assert size == 5
+    assert pred_set == [0, 1, 2, 3, 4]
+
+
+def test_qhat_quantile_direction_default_is_upper_for_backward_compatibility() -> None:
+    """Omitting qhat_quantile_direction must reproduce the pre-Iter71 'upper' behavior exactly."""
+    pred_set_default, size_default = _compute_prediction_set(
+        _QUERY_PROBABILITIES, _CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="corrected_aps",
+    )
+    pred_set_explicit_upper, size_explicit_upper = _compute_prediction_set(
+        _QUERY_PROBABILITIES, _CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="corrected_aps",
+        qhat_quantile_direction="upper",
+    )
+    assert pred_set_default == pred_set_explicit_upper
+    assert size_default == size_explicit_upper
+
+
+def test_qhat_quantile_direction_rejects_unknown_value() -> None:
+    """An unsupported qhat_quantile_direction string must raise, not silently fall back to 'upper'."""
+    with pytest.raises(ValueError):
+        _compute_prediction_set(
+            _QUERY_PROBABILITIES, _CP_DATA, confidence_level=0.90,
+            qhat_quantile_direction="bogus",
         )

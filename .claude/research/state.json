@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 70,
-  "iteration_name": "conformal予測集合の構成規則をAPS標準へ修正して被覆を再測定",
+  "iteration": 71,
+  "iteration_name": "conformal予測のq_hat分位点方向を補数スコアのα分位点へ修正して被覆保証を検証",
   "phase": "reflect",
   "status": "running",
-  "current_lever": "conformal_set_construction",
-  "experiment_dir": "results/20260919_211708",
-  "experiment_deadline": 1789829528,
+  "current_lever": "conformal_qhat_quantile_direction",
+  "experiment_dir": "results/20260919_215923",
+  "experiment_deadline": 1789832364,
   "updated_at": 1789806078,
-  "last_slack_ts": "1789821213.745259",
-  "iteration_thread_ts": "1789819512.699769",
+  "last_slack_ts": "1789823770.937619",
+  "iteration_thread_ts": "1789821897.781199",
   "notion_toggle_created": true,
-  "last_commit": "ac29070"
+  "last_commit": "e6cfa67"
 }
