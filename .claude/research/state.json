@@ -1,18 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 67,
-  "iteration_name": "rank_1を単一ドメイン分類器に戻す2ヘッド構成",
+  "iteration": 68,
+  "iteration_name": "rank_2訓練データへのecho除去フィルタ適用",
   "phase": "reflect",
   "status": "running",
-  "last_judgment": "partial",
-  "current_lever": "multilabel_head_architecture=two_head_rank1_single_domain_classifier",
-  "next_lever": "multilabel_synthetic_data_quality=echo_filtered_synthetic_rows",
-  "next_iteration_name": "rank_2訓練データへのecho除去フィルタ適用",
+  "current_lever": "multilabel_synthetic_data_quality",
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1789806078,
-  "last_slack_ts": "1789804052.110569",
-  "iteration_thread_ts": "1789804312.969669",
+  "last_slack_ts": "1789806905.924919",
+  "iteration_thread_ts": "1789806567.083989",
   "notion_toggle_created": true,
   "last_commit": "0574fe5"
 }
