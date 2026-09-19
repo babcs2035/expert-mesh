@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 68,
-  "iteration_name": "rank_2訓練データへのecho除去フィルタ適用",
-  "phase": "reflect",
+  "iteration": 69,
+  "iteration_name": "conformal predictionのq_hat修正版による予測集合被覆の再測定",
+  "phase": "investigate",
   "status": "running",
-  "current_lever": "multilabel_synthetic_data_quality",
+  "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1789806078,
-  "last_slack_ts": "1789806905.924919",
-  "iteration_thread_ts": "1789806567.083989",
-  "notion_toggle_created": true,
-  "last_commit": "0574fe5"
+  "last_slack_ts": "1789816123.677679",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
+  "last_commit": "3578525"
 }
