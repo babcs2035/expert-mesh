@@ -25,12 +25,23 @@ population's alpha quantile (`qhat_quantile_direction="alpha_lower"`), not the
 Iter71 tests below verify the new argument actually reaches the quantile computation
 and that its finite-sample correction matches the standard `floor((n+1)*alpha)/n`
 rank statistic (Angelopoulos & Bates 2021; Barber et al. 2021).
+
+Regression guard against the Iter56-71 exchangeability bug (diagnosed Iter72): the
+calibration nonconformity scores came from a freshly-refit OOF LogisticRegression
+while evaluation scores came from the already-fitted CalibratedClassifierCV -- two
+different models, violating the exchangeability assumption split conformal requires.
+The Iter72 tests below verify the new `calibration_source` argument actually reaches
+`predict_calibrated_rows()` and produces a stratified 50/50 calibration/evaluation
+split scored by the SAME classifier used for evaluation.
 """
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
 
-from scripts.evaluate_classifier_calibration import _compute_prediction_set
+from scripts.evaluate_classifier_calibration import _compute_prediction_set, predict_calibrated_rows
 
 # 10-class toy calibration data (matching the production classifier's 10 domain
 # classes), deliberately constructed with all non-true-class columns kept small
@@ -330,4 +341,139 @@ def test_qhat_quantile_direction_rejects_unknown_value() -> None:
         _compute_prediction_set(
             _QUERY_PROBABILITIES, _CP_DATA, confidence_level=0.90,
             qhat_quantile_direction="bogus",
+        )
+
+
+# --- Iter72: calibration_source ("oof_train" vs "eval_holdout") -----------------
+
+# A 20-row synthetic dataset, perfectly balanced 10/10 across two classes, so a
+# stratified 50/50 split must land exactly 5/5 per class (10/10 overall) with no
+# rounding ambiguity. classifier.predict_proba is mocked to a fixed 2-column
+# array (ignores the actual embedding values), matching the fake OllamaClient's
+# fixed-length embedding stub below.
+_ITER72_N_ROWS = 20
+_ITER72_DATASET = [
+    {
+        "id": i,
+        "query": f"query {i}",
+        "expected_domains": ["a"] if i % 2 == 0 else ["b"],
+    }
+    for i in range(_ITER72_N_ROWS)
+]
+
+
+def _make_iter72_classifier() -> MagicMock:
+    """A classifier stub whose predict_proba always returns a fixed 2-class distribution.
+
+    The exact probabilities don't matter for the split/reproducibility tests
+    below (they only inspect cp_data population size and the `split` field),
+    so a constant matrix keeps the stub simple.
+    """
+    classifier = MagicMock()
+    classifier.classes_ = ["a", "b"]
+
+    def _predict_proba(embeddings: np.ndarray) -> np.ndarray:
+        return np.tile([0.9, 0.1], (len(embeddings), 1))
+
+    classifier.predict_proba.side_effect = _predict_proba
+    return classifier
+
+
+def _make_iter72_ollama_client() -> MagicMock:
+    """A fake OllamaClient whose embed() returns a fixed-length placeholder vector."""
+    client = MagicMock()
+    client.embed = AsyncMock(return_value=[1.0, 0.0])
+    return client
+
+
+def test_calibration_source_eval_holdout_splits_50_50_stratified() -> None:
+    """eval_holdout must produce a stratified 50/50 (10/10) calibration/evaluation split.
+
+    Regression guard for the Iter72 lever: the calibration population size
+    (n_cal) must be exactly half of the dataset, matching the plan's
+    StratifiedShuffleSplit(test_size=0.5) configuration.
+    """
+    rows = asyncio.run(
+        predict_calibrated_rows(
+            _make_iter72_ollama_client(), "fake-embed-model",
+            _make_iter72_classifier(), _ITER72_DATASET,
+            conformal_prediction=True, confidence_level=0.90,
+            qhat_source="true_class", set_construction="corrected_aps",
+            calibration_source="eval_holdout", holdout_seed=42,
+        )
+    )
+    splits = [row["split"] for row in rows]
+    assert splits.count("cal") == _ITER72_N_ROWS // 2
+    assert splits.count("eval") == _ITER72_N_ROWS // 2
+    cal_domains = [
+        row["expected_domains"][0] for row in rows if row["split"] == "cal"
+    ]
+    # Stratification: each class must be split evenly (5/5) into the cal half.
+    assert cal_domains.count("a") == 5
+    assert cal_domains.count("b") == 5
+
+
+def test_calibration_source_eval_holdout_is_reproducible_for_same_seed() -> None:
+    """The same holdout_seed must produce an identical cal/eval assignment across runs."""
+    kwargs = dict(
+        conformal_prediction=True, confidence_level=0.90,
+        qhat_source="true_class", set_construction="corrected_aps",
+        calibration_source="eval_holdout", holdout_seed=42,
+    )
+    rows_a = asyncio.run(
+        predict_calibrated_rows(
+            _make_iter72_ollama_client(), "fake-embed-model",
+            _make_iter72_classifier(), _ITER72_DATASET, **kwargs,
+        )
+    )
+    rows_b = asyncio.run(
+        predict_calibrated_rows(
+            _make_iter72_ollama_client(), "fake-embed-model",
+            _make_iter72_classifier(), _ITER72_DATASET, **kwargs,
+        )
+    )
+    assert [r["split"] for r in rows_a] == [r["split"] for r in rows_b]
+
+
+def test_calibration_source_rejects_unknown_value() -> None:
+    """An unsupported calibration_source string must raise, not silently fall back to 'oof_train'."""
+    with pytest.raises(ValueError):
+        asyncio.run(
+            predict_calibrated_rows(
+                _make_iter72_ollama_client(), "fake-embed-model",
+                _make_iter72_classifier(), _ITER72_DATASET,
+                conformal_prediction=True, calibration_source="bogus",
+            )
+        )
+
+
+def test_calibration_source_default_is_oof_train_for_backward_compatibility() -> None:
+    """Omitting calibration_source must take the pre-Iter72 oof_train code path.
+
+    The oof_train path requires calibration_dataset_path to point at a real
+    JSONL file (data/classifier_train.jsonl in production); passing None (the
+    default) must surface as a TypeError from the file-open call inside
+    _read_jsonl(), not as a silent eval_holdout fallback that would ignore the
+    missing calibration dataset entirely.
+    """
+    with pytest.raises(TypeError):
+        asyncio.run(
+            predict_calibrated_rows(
+                _make_iter72_ollama_client(), "fake-embed-model",
+                _make_iter72_classifier(), _ITER72_DATASET,
+                conformal_prediction=True, calibration_dataset_path=None,
+            )
+        )
+
+
+def test_calibration_source_eval_holdout_rejects_qhat_source_all() -> None:
+    """eval_holdout only supports qhat_source='true_class'; 'all' must raise, not silently ignore."""
+    with pytest.raises(ValueError):
+        asyncio.run(
+            predict_calibrated_rows(
+                _make_iter72_ollama_client(), "fake-embed-model",
+                _make_iter72_classifier(), _ITER72_DATASET,
+                conformal_prediction=True, calibration_source="eval_holdout",
+                qhat_source="all",
+            )
         )

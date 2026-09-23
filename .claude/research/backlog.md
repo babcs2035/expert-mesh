@@ -15,6 +15,56 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B108 [auto-decided 2026-09-23] Iter72 は adopted 確定（coverage=0.940 で帯内）・`conformal_calibration_exchangeability` クローズ．新レバー `conformal_set_size_reduction=[randomized_aps, raps_penalty]` を config へ追加し Iter73 の単一レバーを `randomized_aps` とする
+
+- **状況**: Iter72（`conformal_calibration_exchangeability=eval_holdout`）は主基準
+  coverage=0.940000（評価半 n=800）が事前登録の帯 0.88–0.95 に入り，非退行条件 1〜5 を全充足して
+  **adopted**．二項 SE=0.008396 に対し帯下限から +7.15 SE・帯上限まで -1.19 SE，Wilson 95%CI は
+  [0.92135, 0.95445]．q_hat は 0.000980 → 0.051766（52.8 倍），mean_set_size は 9.66 → 5.52．
+  実測は事前シミュレーションの予測値（coverage 0.9400 / mss 5.521 / q_hat 0.051766）と完全一致し，
+  cross-fit も予測 0.9487 に対し実測 0.94875 と一致した．`values` は単一値のためクローズとなり，
+  config の levers は再び全て試行済みになった．SKILL.md 停止条件に従い (1) 学びから新レバーを考案 →
+  (2) 調査フェーズから再探索 → (3) converged の順で次の一手を決める必要があった．
+- **自動選択**: **停止条件 1 を適用**し，新レバー
+  **`conformal_set_size_reduction: [randomized_aps, raps_penalty]`** を config.yml の
+  `conformal_calibration_exchangeability` 直下（levers 24 番目）へ追加した．Iter73 の単一レバーは
+  **`randomized_aps`** とする．
+  **iteration_name: 「conformal予測集合にランダム化APSを導入し被覆を保ったまま集合サイズを縮小する」**．
+  `status` は `running` を維持．Iter72 の実装（`--calibration-source` / `--holdout-seed`）は
+  **revert せず維持**する（既定 `oof_train` が Iter71 出力を md5 単位で再現する後方互換設計であり，
+  Iter73 以降は `eval_holdout --holdout-seed 42` を固定値として使う）．
+- **根拠**: (a) Iter72 で被覆保証は達成されたが mean_set_size=5.52（10 ドメイン中 5.5 個，
+  set_size<=2 は 44/800＝5.5% のみ）であり，dispatch 先の絞り込みには使えない．複合設問は
+  2 ドメインなので top-2 dispatch へ流用するには set_size≈2 が要る．**実用上の障壁が被覆から
+  サイズへ移った**ため，次に振るべき変数は集合サイズである．
+  (b) 残る +4.0pt の過被覆が非ランダム化 APS の離散化に帰属することは Iter72 の実測で特定済み
+  （校正半 0.94875 と評価半 0.94000 がほぼ一致＝交換可能性の残存破れではない．かつ過被覆量が
+  α とともに拡大 +4.0/+11.5/+16.5pt）．Romano et al. (2020) の U 項を入れれば被覆が名目 0.90 へ
+  下がり，その分だけ集合も縮むという因果が既に言える．
+  (c) randomized_aps は**非適合スコアへの単一の U 項の追加**という最小変更で，単一レバー原則の
+  粒度として適切．RAPS（k_reg, λ の 2 ハイパラ）を先に試さないのは粒度が粗いためで，まず無償で
+  得られる縮小分を取り切ってから残差へ当てる順序が正しい．
+  (d) オフライン完結・分類器再訓練なし・`config.yaml` スキーマ変更なしで自律着手できる．
+- **単一レバー原則の守り方**: 動かすのは集合構成のランダム化 1 点のみ．校正集合の取り方
+  `eval_holdout`・分割 seed 42・分位点方向 `alpha_lower`・q_hat 母集団 `true_class`・
+  名目水準 0.90・分類器・埋め込みは全て固定する．
+- **要レビュー**: (1) Iter72 の coverage は帯上限まで 1.19 SE しか余裕がなく，Wilson CI 上限
+  0.95445 は 0.95 をわずかに超える．「有意に過少被覆ではない」は強く言えるが「有意に 0.95 以下」
+  とまでは言えない．事前登録どおり点推定で判定した（seed=42 固定，振り直しなし）が，より厳格な
+  判定基準を採るなら再評価の余地がある．
+  (2) **B104 A2（conformal を実行時経路 `http_server.py` / `classifier.py` へ配線するか）は
+  未回答のまま維持**．被覆保証は得られたが mean_set_size=5.52 では dispatch に使えないため，
+  配線の是非は集合サイズ縮小（Iter73 以降）の結果を見てから諮るのが妥当と判断し，今回新たに
+  @mention はしていない．
+  (3) B104 A1（複合評価集合の検出力）も未回答のまま維持．Iter72 の評価半 800 行に含まれる複合
+  設問は 46 行しかなく，複合ドメインに関する結論はこの実験から導けない．
+  (4) `classifier_train.jsonl` と `dataset.jsonl` の query 重複 72 件は校正半 40・評価半 32 と
+  ほぼ均等で両半の交換可能性は壊れていないが，「分類器が既見の行を含む」こと自体は未解消．
+- **未コミットのまま残したもの**: `config.yaml` の `central_router.embed_node_host` を
+  `wafl502` → `wafl-ctrl5` へ変える変更（ファイル mtime 2026-09-19 21:53，Iter71 作業中に生じた
+  もので Iter72 の変更ではない）と，`results/iter45_preliminary/logs/wafl50*/expert-mesh.log` の
+  差分は，本イテレーションと無関係のため add していない．
+
 ## B107 [auto-decided 2026-09-19] Iter71 は rejected 確定（過被覆）・`conformal_qhat_quantile_direction` クローズ．新レバー `conformal_calibration_exchangeability=eval_holdout_split` を config へ追加し Iter72 の単一レバーとする
 
 - **状況**: Iter71（`conformal_qhat_quantile_direction=alpha_lower_quantile`）は主基準 coverage が

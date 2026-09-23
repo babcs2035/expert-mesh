@@ -1,3 +1,210 @@
+## Iteration 72: conformal校正集合を評価データの層化ホールドアウトへ変更し交換可能性を回復して被覆を再測定
+
+### 調査 (Iter72)
+
+**問い**
+
+- Q1: split conformal の被覆保証が要求する交換可能性とは具体的に何であり，本実装の校正経路（`classifier_train.jsonl` の OOF・素の LogisticRegression）はそのどこを破っているのか．
+- Q2: 校正集合を**評価データ自身の層化ホールドアウト**から取る構成は，conformal の手続きとして正当か（校正データがモデル適合に使われていないと言えるか）．
+- Q3: その構成にしたとき名目 0.90 に対する実測被覆はどこへ着地するか（本実行前に着地点を言語化する，Iter71 で有効だった手順）．
+
+**Q1: 交換可能性の要件と本実装の破れ（出典付き）**
+
+- split conformal の有限標本被覆 `P(Y ∈ C(X)) ≥ 1-α` は，校正点 n 個とテスト点 1 個の**非適合スコアが交換可能**であることのみから従う（Angelopoulos & Bates, "A Gentle Introduction to Conformal Prediction", arXiv:2107.07511, 2021）．スコアは**同一の固定されたモデル**から計算され，かつそのモデルの学習にどちらの点も使われていないことが前提である．
+- 交換可能性が破れると「校正集合の適合スコア分布がテスト分布と一致しなくなる」ことが被覆逸脱の直接の原因になる（"Ensuring Calibration Robustness in Split Conformal Prediction Under Adversarial Attacks", arXiv:2511.18562, 2025，Introduction．同論文は Barber et al. 2023 の beyond-exchangeability 系の議論を引く）．
+- 本実装（`scripts/evaluate_classifier_calibration.py:predict_calibrated_rows()` L226-292）は，校正スコアを `classifier.estimator`（素の `LogisticRegression`）を `StratifiedKFold(5)` で**再学習**した fold モデルの `predict_proba`（OOF）から作る一方，評価スコアは `models/domain_classifier.joblib`（`CalibratedClassifierCV`，全データ学習・temperature 較正済み）の `predict_proba` から作る．**スコア関数そのものが校正側と評価側で別物**であり，上記の前提が明確に破れている（Iter71 考察 §2 で実測とともに確定済み．q_hat=0.000980）．これは「分布シフト」以前の，スコア関数の不一致という基本的な破れである．
+
+**Q2: 評価データの層化ホールドアウトを校正集合にすることの正当性**
+
+- split conformal が禁じるのは「**モデルの学習に使った**データでスコアを作ること」であり，校正データが評価データと同じプールから取られること自体は禁じられていない．むしろ校正半と評価半を同一プールからランダムに割れば，交換可能性は構成上ほぼ自明に成立する．
+- 本リポジトリでは分類器 `models/domain_classifier.joblib` は `data/classifier_train.jsonl`（1,427 行）のみで学習されており，`data/dataset.jsonl`（1,600 行）は学習に一切使われていない．したがって dataset.jsonl の任意の部分集合は分類器にとって held-out であり，校正集合として適格である．
+- 留保（事実として記録）: `classifier_train.jsonl` と `dataset.jsonl` は query 文字列で **72 件重複**する（Iter71 考察時に実測）．この 72 件は校正半・評価半へほぼ同率で散るため両半の交換可能性は壊さないが，「分類器が既見の行を含む」点は結果の解釈に付記する．
+
+**Q3: 非ランダム化 APS の過被覆と，事前シミュレーションによる着地点の予測**
+
+- Romano et al. (2020) の APS はスコアに一様乱数 U を混ぜることで被覆を名目値へ厳密に一致させるが，**本実装は非ランダム化版**であり，閾値をまたいだクラスを丸ごと集合に含めるため構造的に名目を上回る（過被覆する）．APS 系が大きな集合を生むことは Angelopoulos et al., "Uncertainty Sets for Image Classifiers using Conformal Prediction"（RAPS，arXiv:2009.14193, 2021）でも報告されており，同論文はホールドアウトで閾値を選び直す運用（例: α=10% で 93% の推定確率質量を使う）を APS と呼んでいる．本イテレーションの構成はまさにこの運用に対応する．なお「非ランダム化版が過被覆する」という因果の説明部分は一次資料の記述そのものではなく，打ち切り規則からの当方の導出である．
+- **事前シミュレーション（本実行前に実施．`results/20260919_215923/Iter71_qhat_alpha_lower.jsonl` の `probabilities` 1,600 行を使用）**: 本レバーは `probabilities` を一切変えないため，被覆は既存出力から**ほぼ厳密に再現計算できる**（Iter70 の掃引が評価集合自身で閾値を選んだ「楽観値」だったのとは性質が異なる）．`expected_domains[0]` で層化した `StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=seed)` の第 1 返値を校正半・第 2 返値を評価半とし，校正半の真クラス補数スコアの `⌊(n+1)α⌋/n` 分位点（n=800, α=0.10 ⟹ 80/800 ＝昇順 80 番目）を q_hat とした結果:
+
+| seed | 役割 | q_hat | coverage（評価半 n=800） | mean_set_size |
+|---|---|---|---|---|
+| **42** | **本実験の構成** | **0.051766** | **0.9400** | **5.521** |
+| 42 | cross-fit（役割入替） | 0.052441 | 0.9487 | 5.532 |
+| 1 | A / cross | 0.052567 / 0.051766 | 0.9513 / 0.9375 | 5.548 / 5.501 |
+| 7 | A / cross | 0.054988 / 0.050475 | 0.9400 / 0.9513 | 5.430 / 5.586 |
+| 2026 | A / cross | 0.056042 / 0.049520 | 0.9425 / 0.9463 | 5.322 / 5.702 |
+| 123 | A / cross | 0.059741 / 0.046794 | 0.9387 / 0.9537 | 5.291 / 5.725 |
+
+  q_hat は Iter71 の 0.000980 から **0.05 前後**へ 1〜2 桁移動し，Iter71 計画節の掃引表が示した帯（0.04 ≤ q_hat ≤ 0.145）の内側に入る．**10 分割中 coverage が帯 0.88–0.95 に収まるのは 7/10，上限 0.95 を超えるのは 3/10** であり，**本構成（seed=42）の予測値は coverage=0.9400・mean_set_size≈5.52 で合格側**だが，帯上限まで 1.0pt（二項 SE 0.0084 の 1.2 倍）しか余裕がなく**分割の引き次第で判定が反転しうる**．この事実を判定前に事前登録しておく（seed は 42 に固定し，結果が帯外でも seed を振り直して合格を探すことはしない）．
+- 副次的に確認した事実: 全 1,600 行を校正に使った場合の q_hat は 0.052250 で，半分にしても中心値はほぼ変わらない（分割半減の影響は q_hat の**ばらつき** 0.0468–0.0597 に現れる）．
+
+### 計画 (Iter72)
+
+**仮説**
+
+Iter71 の過被覆（coverage=0.996875）の原因は実装の第 4 の欠陥ではなく，**校正スコアと評価スコアが別の確率モデル（生 LR の OOF vs 較正済み CalibratedClassifierCV）から出ていること**である（調査 Q1）．校正集合を評価データ自身の層化ホールドアウトに置き換え，校正半のスコアを**評価と同一の `models/domain_classifier.joblib` の `predict_proba`** で計算すれば，学習データ量・確率較正の有無・元データという 3 つの差が同時に消えて交換可能性が回復し，q_hat は 0.000980 から 0.05 前後へ移動して coverage は名目 0.90 の近傍（非ランダム化 APS の過被覆分を含め 0.93〜0.95）へ着地する．
+
+**単一レバー**
+
+`conformal_calibration_exchangeability`: 校正集合の取り方を `oof_train`（現行既定．`data/classifier_train.jsonl` 1,427 行を生 LR の 5-fold OOF で採点）→ `eval_holdout`（`data/dataset.jsonl` 1,600 行を `expected_domains[0]` で層化 50/50 分割し，校正半 800 行を評価と同一の分類器で採点）へ変更する．動かすのはこの 1 点のみ．
+
+**固定する構成（直近の最良構成に固定）**
+
+- 分位点方向: `--qhat-quantile-direction alpha_lower`（Iter71 で実装確定．レバーではなく固定値として使う）．
+- 集合構成: `--set-construction corrected_aps`（Iter70 で修正・維持と決定）．
+- q_hat の母集団: `--qhat-source true_class`（Iter69 で確定）．
+- 名目水準: `--confidence-level 0.90`（**レバーに含めない**．名目を振った曲線は付随報告）．
+- 評価データ `data/dataset.jsonl`（1,600 行），分類器 `models/domain_classifier.joblib`，埋め込み `nomic-embed-text:latest`（wafl-ctrl5 の `127.0.0.1:11435`），`--education-logit-bias 0.0` / `--education-threshold 0.0`，`--fine-tuned-embed-model` は指定しない（ollama 分岐を通す）．
+- `config.yaml`・`http_server.py`・`classifier.py`・`aggregator.py`・`mise.toml` は変更しない．実機ノード wafl500〜509 は使用しない．
+
+**変更箇所（`scripts/evaluate_classifier_calibration.py` 1 ファイル＋テスト．行番号は 2026-09-23 計画時点，全 582 行）**
+
+1. CLI に 2 引数を追加する（`main()` L521-530 の `--qhat-quantile-direction` の直後）:
+   - `--calibration-source`（`choices=["oof_train", "eval_holdout"]`, `default="oof_train"` ＝現行挙動を温存）
+   - `--holdout-seed`（`type=int`, `default=42`）
+2. `main()` の `--output` 有無による**2 分岐の両方**へ渡す．**Iter69・70・71 と 3 回連続で警告されている伝播漏れ箇所であり，今回もチェックリストとして実装完了時に明示確認すること**:
+   - [ ] stdout 側 `if args.output is None:`（**L538-557** の `_run(...)`）
+   - [ ] ファイル出力側 `with open(args.output, "w", ...)`（**L558-578** の `_run(...)`）※本実験が通るのはこちら
+3. `_run()`（L407-444）のシグネチャへ `calibration_source: str = "oof_train"` / `holdout_seed: int = 42` を追加し，`predict_calibrated_rows()` 呼び出し（L427-438）へ伝播する．
+4. `predict_calibrated_rows()`（L187-404）を `calibration_source` で分岐させる．**現行の `oof_train` 経路（L226-292）は一切書き換えず，`if calibration_source == "oof_train":` の下へそのまま置く**（後方互換の md5 一致を壊さないため）．`eval_holdout` 経路は次の順序で実装する:
+   1. 評価データ全 1,600 行の埋め込みを先に計算し（ollama 分岐．`local_model` 側も同じ構造で通す），`classifier.predict_proba` で確率行列を得る．**校正 1,427 行の埋め込み計算は不要になるためコストはむしろ下がる**．
+   2. `labels = [classes.index(r["expected_domains"][0]) for r in dataset]`（複合設問 100 行も先頭ドメインを真クラスとする．coverage の定義と一致させる）で層化し，`StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=holdout_seed)` を 1 回 `split` する．**第 1 返値（train index）を校正半，第 2 返値（test index）を評価半とする**（この対応を逆にすると seed=42 の予測値 0.9400 が cross-fit 側 0.9487 に変わるため，実装時に必ず確認する）．
+   3. 校正半 800 行について真クラス補数スコア `1 - cumsum`（確率降順で真クラスに到達した時点）を計算し，`cp_data = {"true_class_scores": ...}` を作る（`all_scores` は `true_class` 固定のため不要だが，キーの欠落で `qhat_source="all"` が落ちないよう `all_scores` も同形で埋めるか，`eval_holdout` では `qhat_source="all"` を `ValueError` で拒否するかを実装時に決め，どちらにしたか journal に記す）．
+   4. 各行の出力 dict に `"split": "cal" | "eval"` を付与する．予測集合は全 1,600 行について計算してよいが，**集計は eval 半のみで行う**．
+5. 既存の stderr 診断 print（L309-315）へ `calibration_source` と `n_cal` を追加する（`eval_holdout` では `n_cal=800`，`q_hat≈0.05` が出るはず＝**レバー発火の証拠**．`oof_train` のままなら `n_cal=1427`，`q_hat=0.000980`）．
+6. `tests/test_evaluate_classifier_calibration.py` へ既存の `test_qhat_source_*` / `test_set_construction_*` / `test_qhat_quantile_direction_*` に倣い追加する:
+   (a) 層化分割が 800/800 かつ両半のドメイン構成比が一致すること，(b) 同一 seed で分割が再現すること，(c) 未知の `calibration_source` で `ValueError`，(d) 既定値 `oof_train` の回帰テスト（現行経路を通ること）．
+
+**到達コードパス**
+
+CLI `--conformal-prediction --calibration-source eval_holdout --holdout-seed 42 --qhat-quantile-direction alpha_lower --set-construction corrected_aps --qhat-source true_class --confidence-level 0.90 --output ...`
+→ `main()` L558（ファイル出力分岐）→ `_run()` L407 → `predict_calibrated_rows()` L187 → **新設の `eval_holdout` 校正ブロック（q_hat の値が変わる唯一の地点）** → 評価 1,600 行ループ（ollama 分岐 L368-403）→ `_compute_prediction_set()` L387 → 出力 jsonl の `prediction_set` / `set_size` / `split` → eval 半 800 行で coverage・mean_set_size を集計．`config.yaml` を経由しないため「デプロイ漏れ」型の失敗は構造上起こらない．唯一のリスクは変更箇所 2 の CLI 2 分岐伝播漏れであり，予備実行（先頭 20〜40 行）の stderr で `calibration_source=eval_holdout n_cal=800 q_hat≈0.05` を目視確認して潰す．
+
+**成功条件（事前登録）**
+
+名目 0.90，評価半 n=800．比較対象は `results/20260919_215923/Iter71_qhat_alpha_lower.jsonl`（Iter71 実測 coverage=0.996875）．
+
+| 指標 | 定義 | Iter71 実測 | 合格条件 |
+|---|---|---|---|
+| coverage（主基準） | eval 半で `mean(expected_domains[0] in prediction_set)` | 0.996875（n=1600） | **0.88 ≤ coverage ≤ 0.95** |
+| mean_set_size（副基準） | eval 半の `mean(set_size)` | 9.66375（n=1600，実測再計算） | 報告のみ（判定に用いない） |
+| ECE | eval 半で `metrics.py:compute_ece()` | 0.062998（n=1600） | 報告のみ（母集団が変わるため閾値判定に用いない） |
+
+- **adopted**: coverage が 0.88–0.95 に入り，かつ下記の非退行条件を全て満たすこと．
+- **rejected**: coverage が帯外であること．外れ方の向きで解釈を分ける（事前登録）:
+  - `coverage > 0.95`（過被覆）: 交換可能性は回復したが非ランダム化 APS の過被覆が支配的，という解釈になる．次の候補は randomized APS（Romano et al. 2020 の U 項）だが，これは**別レバー**であり本イテレーションでは扱わない．
+  - `coverage < 0.88`（過少被覆）: 交換可能性以外の要因が残っていることになり，config note のとおり「本データ・本分類器では有効な動作点が存在しない」として conformal 系列を閉じる判断を人間に諮る．
+- **非退行条件**（いずれも eval 半 800 行について）:
+  1. `selected_domain` が Iter71 出力の同 id 行と完全一致すること．
+  2. `confidence`・`probabilities` が同 id 行と一致すること（許容差 1e-9）．
+  3. `set_size` が 1 以上 10 以下で，`prediction_set` に重複がないこと．
+  4. 後方互換: `--calibration-source oof_train` での再実行が Iter71 出力（`Iter71_qhat_alpha_lower.jsonl`）と **md5 一致**すること．
+  5. 予備実行の stderr に `calibration_source=eval_holdout` と `n_cal=800` が出ること（発火証拠）．
+- **ノイズ幅**: n=800・p≈0.94 で二項 SE≈0.0084．帯端からの逸脱は SE の何倍かを必ず併記する．事前シミュレーションでは分割由来のばらつきが coverage で 0.9375〜0.9537（10 分割）あり，**SE と同程度以上の分割ノイズが乗る**ことを前提に解釈する．
+- **付随報告（判定に用いない）**: (i) 役割を入れ替えた cross-fit の coverage（予測値 0.9487），(ii) 名目水準を 0.70〜0.95 で振った coverage/mean_set_size 曲線，(iii) 実測 q_hat と校正半スコア分布の分位点，(iv) `classifier_train.jsonl` と重複する 72 件が校正半・評価半それぞれに何件入ったか．
+
+**期待効果**
+
+Iter56 以来 4 反復続いた conformal 系列について，「実装欠陥の列挙」ではなく「交換可能性という統計的前提」で決着をつける．成立すれば conformal prediction は adopted で系列を閉じ（ただし mean_set_size≈5.5 は top-2 dispatch への流用には大きすぎるため，実行時経路への配線は別途判断），不成立なら系列を閉じる判断を人間に諮る．
+
+**コスト**: 1 実行 10〜30 分（埋め込み 1,600 行のみ）．GPU 実機占有なし，分類器再訓練なし．
+
+### 実装 (Iter72)
+
+変更したファイルは 2 つのみ（`config.yaml`・`http_server.py`・`classifier.py`・`aggregator.py`・`mise.toml` は不変．実機ノード wafl500〜509 は不使用）．
+
+1. `scripts/evaluate_classifier_calibration.py`
+   - CLI に `--calibration-source {oof_train,eval_holdout}`（既定 `oof_train`）と `--holdout-seed`（既定 42）を追加．
+   - `main()` の **stdout 分岐・ファイル出力分岐の両方**へ伝播（Iter69〜71 で 3 回連続して警告されていた箇所．計画のチェックリストどおり実装完了時に両分岐を目視確認した）．
+   - `_run()` → `predict_calibrated_rows()` へ伝播．
+   - `predict_calibrated_rows()` を `calibration_source` で分岐．**`oof_train` 経路は 1 行も書き換えず** `if conformal_prediction and calibration_source == "oof_train":` の下へそのまま残した（後方互換 md5 一致のため）．`eval_holdout` 経路は「全 1,600 行を評価と同一の `classifier.predict_proba` で採点 → `expected_domains[0]` で層化 `StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=42)` → 第 1 返値を校正半・第 2 返値を評価半 → 校正半 800 行の真クラス補数スコアで q_hat」の順で構成した．
+   - 計画 4-3 で保留していた `qhat_source="all"` の扱いは，**`ValueError` で明示的に拒否する**方を選んだ（`all_scores` をダミーで埋めると「動いたが意味のない q_hat」を生む危険があるため）．
+   - 各行に `"split": "cal" | "eval"` を付与．集計は eval 半のみ．
+   - stderr 診断 print に `calibration_source` と `n_cal` を追加．
+2. `tests/test_evaluate_classifier_calibration.py`: 層化分割の 800/800・両半のドメイン構成比一致・同一 seed での再現・未知値の `ValueError`・既定値 `oof_train` の回帰，の 5 件を追加（既存 13 件と合わせ 18 件 PASS）．
+
+**実装中に発見・修正した既存バグ**: `eval_holdout` 経路を追加した際，評価ループ側が `oof_train` 経路でのみ定義される局所変数を参照しており `UnboundLocalError` が出た．既存テストはこの分岐を一度も通らないため検出できていなかった（**新経路を足すときに「既存経路でしか初期化されない局所変数」を洗い出す**という手順が要る，という学び）．
+
+### 実験・分析(実行) (Iter72)
+
+結果ディレクトリ `results/20260923_132431/`．2 実行を行った（GPU 実機占有なし・分類器再訓練なし・所要は 2 実行合計で約 6 分）．
+
+- A（後方互換アンカー）: `--calibration-source oof_train` → `Iter72_oof_train_backcompat.jsonl`．stderr は `calibration_source=oof_train ... q_hat=0.0010 n_cal=1427`．
+- B（本実行）: `--calibration-source eval_holdout --holdout-seed 42 --qhat-quantile-direction alpha_lower --set-construction corrected_aps --qhat-source true_class --confidence-level 0.90` → `Iter72_eval_holdout.jsonl`．stderr は `calibration_source=eval_holdout ... q_hat=0.0518 n_cal=800`（**レバー発火の証拠**）．
+
+| 指標 | Iter71 実測（n=1600） | Iter72 実測（eval 半 n=800） | 合格条件 | 判定 |
+|---|---|---|---|---|
+| coverage（主基準） | 0.996875 | **0.940000** | 0.88 ≤ coverage ≤ 0.95 | **PASS** |
+| mean_set_size（副基準） | 9.66375 | 5.52125 | 報告のみ | — |
+| ECE | 0.062998 | 0.076460 | 報告のみ（母集団が変わる） | — |
+| q_hat | 0.000980 | 0.051766 | — | — |
+
+- set_size 範囲 1〜9（上限 10 以内），分布 `{1:9, 2:35, 3:54, 4:97, 5:175, 6:179, 7:176, 8:68, 9:7}`．
+- 非退行条件 1〜5 は全て充足: (1) `selected_domain` が Iter71 出力の同 id 行と完全一致，(2) `probabilities` の最大差 9.99e-16（許容 1e-9），(3) set_size 1〜9・`prediction_set` に重複なし，(4) A の md5 = `575594c7a973fe615202485de7fe0a8f` が Iter71 出力と一致，(5) stderr の発火証拠あり．
+- テスト 18 passed / `uv run ruff check scripts/evaluate_classifier_calibration.py tests/test_evaluate_classifier_calibration.py` All checks passed（リポジトリ全体の ruff 23 件は `scripts/analyze_iter43.py` 等の既存指摘で本変更と無関係）．
+
+**付随報告（判定に用いない．いずれも本実行 jsonl の `probabilities` からの再計算）**
+
+- cross-fit（校正半と評価半の役割を入替）: q_hat=0.052441, coverage=0.94875, mean_set_size=5.5325（事前登録の予測値 0.9487 と一致）．
+- 名目水準を振った曲線（校正半で q_hat を取り直し評価半で測定）: α=0.05→coverage 0.97375 / mss 6.90，α=0.10→**0.94000 / 5.52**，α=0.20→0.91500 / 4.27，α=0.30→0.86500 / 3.40．
+- 校正半（in-sample 相当）の coverage=0.94875．
+- `classifier_train.jsonl` と重複する 72 件の内訳: 校正半 40 件・評価半 32 件（ほぼ均等に散っており，どちらかの半へ偏ってはいない）．
+
+### 分析(解釈) (Iter72)
+
+**1. 主基準は PASS．ただし帯上限側の余裕は薄い（事前登録どおり）**
+
+coverage=0.940000 は帯 0.88–0.95 の内側．二項 SE = √(0.94·0.06/800) = 0.008396 として，**帯下限 0.88 からは +7.15 SE，帯上限 0.95 までは -1.19 SE**．Wilson 95%CI は [0.92135, 0.95445] で上限がわずかに 0.95 を超える．すなわち「有意に過少被覆ではない」ことは強く言えるが，「有意に 0.95 以下」とまでは言えない．事前シミュレーション（10 分割で 0.9375〜0.9537，7/10 が帯内）が予告していた**分割由来のばらつきが SE と同程度以上**という状況が実測でもそのまま再現している．事前登録で seed=42 に固定し「帯外でも振り直さない」と宣言していたため，この 1 点で判定する．
+
+**2. 実測値が事前シミュレーションと完全一致した — 実装は仕様どおり動いている**
+
+計画節の表が予告した seed=42 の予測値は coverage=0.9400・mean_set_size≈5.521・q_hat=0.051766 であり，本実行の実測は coverage=0.940000・mean_set_size=5.52125・q_hat=0.051766 で**すべて一致**した．cross-fit も予測 0.9487 に対し実測 0.94875 と一致する．本レバーは `probabilities` を一切変えないため被覆が既存出力から厳密に再現計算できるという計画の前提が正しく，かつ実装が意図した分割・分位点・集合構成をそのまま実現していることが裏付けられた．Iter16/20/21/22/27 系列の「設定は変えたのにコードへ到達しない」型の失敗ではないことは，stderr の `n_cal=800 q_hat=0.0518` と，A 実行の md5 一致（現行経路を壊していない）の両方で二重に確認できている．
+
+**3. 仮説は支持された — 真因は交換可能性の破れだった**
+
+q_hat は Iter71 の 0.000980 から 0.051766 へ **52.8 倍**移動し，Iter71 計画節の掃引表が「帯に入る動作点」として示していた区間 0.04 ≤ q_hat ≤ 0.145 の内側へ着地した．coverage は 0.996875 → 0.940000（-5.69pt），mean_set_size は 9.66 → 5.52（-4.14 クラス）．計画の仮説「校正スコアと評価スコアが別の確率モデルから出ていることが過被覆の原因」は，予測した方向・予測した大きさの両方で一致した．
+
+決定的なのは**名目水準を振ったときの応答**である．Iter71 では α を 0.30 まで上げても coverage=0.9875 で動かなかった（＝校正分布が評価分布と噛み合っておらず，α が被覆を制御できていなかった）．Iter72 では α=0.05/0.10/0.20/0.30 に対し coverage が 0.974/0.940/0.915/0.865 と**単調に応答する**．conformal の制御レバーとしての α が初めて機能した，というのがこの反復の実質的な成果である．
+
+**4. 残る +4.0pt の過被覆は非ランダム化 APS の離散化で説明でき，交換可能性の残存破れではない**
+
+名目 0.90 に対し実測 0.940（+4.0pt）だが，これを「まだ交換可能性が破れている」と読むのは誤りである．根拠は 2 つ．(a) 校正半自身での coverage も 0.94875 であり，評価半（0.94000）とほぼ同じ量だけ名目を上回る．交換可能性の破れなら両半で乖離が出るはずだが出ていない．(b) 過被覆量は α とともに拡大する（α=0.10 で +4.0pt，0.20 で +11.5pt，0.30 で +16.5pt）．これは「閾値をまたいだクラスを丸ごと集合へ入れる」という非ランダム化 APS の打ち切り規則から予想される振る舞いそのもので（調査 Q3，Romano et al. 2020 の U 項を持たない版），α が大きいほど 1 クラスあたりの確率質量が効いて過剰分が増える．したがって残差の帰属先は**集合構成の離散化**であり，校正集合の取り方ではない．
+
+**5. 実用上の限界は被覆ではなく集合サイズに移った**
+
+mean_set_size=5.52 は 10 ドメイン中 5.5 個を「可能性あり」と返すことを意味し，dispatch 先の絞り込みとしてはほぼ情報がない（無情報な全集合は 10，ランダム 5.5 個選択と同等の粒度）．set_size 分布も最頻値が 6 で，set_size ≤ 2 はわずか 44/800（5.5%）にとどまる．複合設問は 2 ドメインなので top-2 dispatch へ流用するには set_size ≈ 2 が要る．**被覆保証は得られたが，得られた集合は現状の運用目的には大きすぎる**．これが次の一手を規定する．
+
+**6. 留保（結果の解釈に付記する事実）**
+
+- n が 1,600 → 800 へ半減したため SE は 0.006 → 0.0084 に拡大している．Iter71 以前の coverage と同じ土俵で比較する際は注意が要る．ECE=0.076460 も母集団が異なるため Iter71 の 0.062998 との差（+0.013）を「悪化」と読んではならない（判定に用いない旨を事前登録済み）．
+- `classifier_train.jsonl` と query が重複する 72 件は校正半 40・評価半 32 とほぼ均等で，どちらかの半に偏っていない（両半の交換可能性は壊れていない）．ただし「分類器が既見の行を含む」こと自体は解消していない．
+- 評価半 800 行のうち複合設問は 46 行しかない．複合ドメインに関する結論をこの実験から導くことはできない（B104 A1 の検出力問題は未解消のまま）．
+
+### 考察 (Iter72)
+
+**判定: adopted**．主基準 coverage=0.940000 が事前登録の帯 0.88–0.95 に入り，非退行条件 1〜5 を全て充足した．`conformal_calibration_exchangeability` は単一値 `eval_holdout` を試し切ったのでレバーをクローズする．実装は **revert せず維持**する（既定 `oof_train` が Iter71 出力を md5 単位で再現する後方互換設計であり，以降のイテレーションは `eval_holdout` を固定値として使う）．
+
+**この反復で確定した知見**
+
+1. Iter56 以来 5 反復続いた conformal 系列の過被覆・過少被覆は，**分位点方向（Iter71）でも集合構成（Iter70）でも q_hat の母集団（Iter69）でもなく，校正スコアと評価スコアが別モデルから出ていたこと**が支配的な原因だった．Iter69〜71 の 3 反復は「式の細部」を順に潰したが，実際の効き幅（q_hat 52.8 倍）はこの 1 点が桁違いに大きい．**split conformal を実装したら，まず『校正スコアと評価スコアを生んだモデルが同一の固定モデルか』を確認する**のが最短経路である．この確認は 1 行の stderr（`n_cal` と `q_hat` の桁）で可能だった．
+2. 「α を振っても coverage が動かない」は交換可能性の破れの**診断シグナル**として使える．Iter71 の付随報告（α=0.30 でも 0.9875）は当時「名目の選び方では説明できない」と記録されていたが，これを真因特定の手がかりとして読み切れていなかった．今後 conformal 系の実験では，本走の前に α 掃引曲線が単調応答するかを見ることで交換可能性の破れを安価に検出できる．
+3. 評価データ自身を層化 50/50 に割る構成は正当だが（分類器は `dataset.jsonl` を学習に使っていない），**coverage の n が半減し分割由来のばらつきが二項 SE と同程度乗る**．本実験でも帯上限までの余裕は 1.19 SE しかなく，seed を引き直せば判定が反転しうる範囲だった．事前にシミュレーションで着地点と分割ばらつきを出し，seed を固定して事前登録するという Iter71 由来の手順が，結果の恣意的な選択を防いだ．
+4. 新しい分岐を既存関数へ足すとき，**既存分岐でのみ初期化される局所変数**が `UnboundLocalError` の温床になる．既存テストは新分岐を通らないので検出できない．今後は分岐追加時にその関数内で定義される全ローカル変数の初期化位置を確認する．
+
+**次の一手（停止条件 1 を適用）**
+
+config の levers はこれで再び全て試行済みになるが，本反復の学び 5（集合サイズが実用上の限界に移った）から**次の有望なレバーを具体的に考案できる**ため，SKILL.md の停止条件 1 に従い新レバーを config へ追記して継続する．
+
+- 新レバー **`conformal_set_size_reduction: [randomized_aps, raps_penalty]`**．Iter73 の単一レバーは **`randomized_aps`**．
+- 根拠: 分析 4 で残る +4.0pt の過被覆は非ランダム化 APS の打ち切り規則に帰属することが（校正半・評価半の一致と α 依存性から）特定できている．Romano et al. (2020) の APS は打ち切り時のクラスを確率 U で含める／含めないと決めることでこの離散化を消し，被覆を名目へ厳密に一致させる．被覆が 0.94 → 0.90 へ下がる分だけ集合も小さくなるはずで，**単一の U 項の追加という最小変更**で確認できる．先に RAPS（サイズ正則化項 k_reg・λ）を試さない理由は，RAPS がハイパラ 2 個を持ち単一レバー原則の粒度として粗いためで，まず無償で得られる縮小分を取り切ってから残差に対して RAPS を当てる順序が正しい．
+- Iter73 の想定成功条件（planner が確定する）: coverage が 0.88–0.95 の帯に留まったまま mean_set_size が 5.52 から有意に減少すること．非退行は本反復と同型（`selected_domain` 一致・`probabilities` 一致・既定値での md5 一致）．
+
+**人間判断を要する事項（新規に確定させない）**
+
+- conformal prediction を**実行時経路（`http_server.py` / `classifier.py`）へ配線するか**は B104 A2 として未回答のまま維持する．本反復で被覆保証は得られたが mean_set_size=5.52 では dispatch の絞り込みに使えないため，配線の是非は集合サイズ縮小（Iter73 以降）の結果を見てから諮るのが妥当である．今回新たに @mention はしない．
+- B104 A1（複合評価集合 n=100 の検出力．評価半では 46 行）も未回答のまま維持する．
+
+---
+
 ## Iteration 71: conformal予測のq_hat分位点方向を補数スコアのα分位点へ修正して被覆保証を検証
 
 ### 計画 (Iter71)
@@ -1379,673 +1586,6 @@ SKILL.md 停止条件の優先順位 1（学びから次の有望なレバーを
 名目 0.90 を主判定（coverage ≈ 0.90 ± 2pt の妥当性検証）とし，名目を 0.70〜0.95 で振った
 coverage/mean_set_size 曲線は「どの名目水準なら帯に入るか」を示す付随報告として記録する
 （曲線は判定に用いない）．詳細は `config.yml` の同レバー note と backlog B106 を参照．
-
----
-
-## Iteration 69: conformal predictionのq_hat修正版による予測集合被覆の再測定
-
-### 計画 (Iter69)
-
-**仮説**
-
-Iter56 で `conformal_prediction` を rejected と記録した根拠（coverage=0.6056）は，q_hat を
-「全 (sample, class) ペアの非適合スコア 14,270 件」の 90th percentile（0.3865）から算出した
-実装誤りに起因する．APS（Adaptive Prediction Sets）の理論どおり **真ラベルクラスの非適合スコア
-1,427 件**の 90th percentile（Iter56 の手計算では 0.5956）を q_hat に用いれば，名目信頼水準 0.90 に
-対する実測 coverage は 0.6056 から大きく上振れする．ただし 10 クラス問題かつ OOF accuracy 57.32% と
-いう分類器性能では，被覆を満たすために予測集合が肥大化し（Iter56 の手計算シミュレーションで
-mean_set_size=7.31），coverage（0.8025）も名目水準に届かない見込みが強い．
-本イテレーションの目的は「採択の獲得」ではなく，**バグ入りの invalid な記録を，正しい実装による
-再現可能な判定（採択または棄却）へ置き換えること**である．
-
-**単一レバー**
-
-`routing_confidence_calibration_method`: `conformal_prediction`（q_hat = 全スコア 14,270 件の
-90th percentile）→ `conformal_prediction_true_class_qhat`（q_hat = 真クラススコア 1,427 件の
-90th percentile）．変更するのは q_hat の算出母集団のみで，分類器・埋め込み・argmax・confidence は
-一切変更しない．
-
-**変更箇所（`scripts/evaluate_classifier_calibration.py` 1 ファイルのみ）**
-
-1. `predict_calibrated_rows()` L200-207 の `all_scores` 構築直後・L209 の `cp_data = {...}` の手前に
-   真クラススコア抽出を追加し，`cp_data` に `"true_class_scores"`（1,427 要素の 1 次元 ndarray）を
-   持たせる．`labels`（L158-161）が同スコープに既にあるためそのまま利用できる．
-2. `_compute_prediction_set()`（L66-110）に引数 `qhat_source: str = "all"` を追加し，
-   `"true_class"` のとき L89 の `flat_scores = all_scores.flatten()` を
-   `cp_data["true_class_scores"]` に差し替える．L90-91 の有限標本補正
-   `target = min(1.0, (1-alpha)*(1+1/n))` はそのまま（n は選んだ母集団のサイズ）．docstring の
-   「q_hat = (1-alpha) quantile of ALL calibration scores」も両モードを記す形へ更新する．
-3. 呼び出し側 L242-246（fine-tuned embedding 分岐）と L277-281（ollama 分岐）へ `qhat_source` を伝播．
-   本実験が通るのは **ollama 分岐（L277-281）** である（`--fine-tuned-embed-model` は指定しない）．
-4. CLI に `--qhat-source`（`choices=["all", "true_class"]`, default `"all"`）を 1 つ追加し，
-   `main()` → `_run()` → `predict_calibrated_rows()` へ受け渡す．既存フラグ
-   `--conformal-prediction` / `--confidence-level` / `--calibration-dataset` は変更しない．
-5. q_hat の値と算出母集団サイズを stderr に 1 行 print する（発火証拠の恒久化）．
-6. `tests/test_evaluate_classifier_calibration.py`（新規）に `_compute_prediction_set()` の単体テストを
-   追加する: 同一の `cp_data` に対し `qhat_source="all"` と `"true_class"` で **q_hat が異なり，
-   得られる予測集合サイズが異なる**ことを小さな合成配列で検証する（レバーが分岐として機能する証明）．
-
-`config.yaml`・`http_server.py`・`classifier.py`・`aggregator.py`・`mise.toml` は変更しない．
-
-**到達コードパス（d0004 §4 の no-op 6 連発への対処）**
-
-CLI `--qhat-source true_class` → `main()` L391 `args` → `_run()` L297-322 →
-`predict_calibrated_rows()` L113 → `if conformal_prediction:` L150-209（ここで `true_class_scores` を
-構築）→ 評価 1,600 行のループ L260-293 → `_compute_prediction_set()` L279-281（**ここで q_hat の
-母集団切替が実際に効く唯一の地点**）→ 出力 jsonl の `prediction_set` / `set_size` → 集計スクリプト．
-本レバーは config.yaml を経由しないため「デプロイ漏れで実行時に読まれない」型の失敗は構造的に
-起こり得ない．代わりの唯一のリスクは「`qhat_source="true_class"` 分岐に入らないまま既定値 `"all"` で
-走る」ことであり，下記の予備実行で潰す．
-
-**成功条件（事前登録．`fallback_rate` は Iter28 の fallback 廃止で常に 0 のため使用しない）**
-
-名目信頼水準は `--confidence-level 0.90`．評価は `data/dataset.jsonl` 1,600 行．
-
-| 指標 | 定義 | 基準線（Iter56 バグ版実測） | 合格条件 |
-|---|---|---|---|
-| coverage | `mean(expected_domains[0] in prediction_set)` | 0.6056 | **0.87 ≤ coverage ≤ 0.93** |
-| mean_set_size | `mean(set_size)` | 1.51 | **1.5 ≤ mean_set_size ≤ 4.0** |
-| ECE | `metrics.py:compute_ece()` | 0.0630 | **ECE ≤ 0.0680**（＝基準線 +0.005 以内の非退行） |
-
-- **adopted の条件**: 上記 3 つを**すべて**満たすこと．
-- **rejected の条件**: coverage または mean_set_size のいずれかが範囲外であること
-  （このとき Iter56 の invalid 記録は，正しい実装に基づく正式な棄却の記録へ置き換わる）．
-- **ノイズ幅の見積もり**: パイプラインは `StratifiedKFold(random_state=42)` で決定的であり，
-  変動源は ollama 埋め込みの数値再現性のみ．coverage は n=1600・p≈0.8 の二項標本誤差で
-  SE≈0.010 のため ±2pt を超える差のみを実質的な差とみなす．mean_set_size は 10 クラス上限で
-  離散的に動くため ±0.1 を目安とする．
-- **ECE についての事前の但し書き**: 本レバーは `confidence`（= argmax 確率）を一切変えないため，
-  ECE は原理的に Iter56 と同一値（0.0630）になるはずである．したがって ECE は「改善を期待する指標」
-  ではなく **パイプラインの他部分が意図せず変わっていないことを確認する同一性アンカー**として
-  事前登録する．0.0630 から 0.005 を超えて動いた場合は，レバー以外の混入を疑い原因を特定するまで
-  判定を確定させない．
-
-**非退行条件**
-
-1. `selected_domain`（argmax）が全 1,600 行で Iter56 の
-   `results/20260808_000000/Iter56_conformal_prediction.jsonl` と**ビット単位で一致**すること
-   （不一致 0 件）．q_hat は予測集合のみに影響し argmax には影響しないため，一致しなければ実装ミス．
-2. `top1_accuracy` が 0.6056 から不変であること（条件 1 の系）．
-3. `confidence` および `probabilities` が Iter56 出力と一致すること（許容差 1e-9．埋め込み再計算に
-   由来する微差が出た場合はその大きさを journal に記録する）．
-4. 予測集合の rank_2 候補源への流用は本イテレーションでは**行わない**（config note の指示どおり
-   スコープ外．mean_set_size が top-2 dispatch に対して大きすぎるため）．
-
-**実行手順**
-
-本実験は **オフライン完結**である．10 ノードの実機ディスパッチ（`run_experiment.py` 1,600 問の
-LLM 生成）は一切行わず，埋め込み計算のみ `127.0.0.1:11435`（SSH ローカルフォワード先の ollama，
-`nomic-embed-text:latest` 在中を確認済み）を使う．LLM 生成・probe・dispatch トラフィックは発生しない．
-
-1. **実装**: 上記 1〜6 を実施し，`uv run pytest tests/test_evaluate_classifier_calibration.py` と
-   既存テスト・lint を通す．既定値 `qhat_source="all"` により Iter56 の挙動は温存する．
-2. **予備実行（発火確認．d0004 §4 の教訓）**: 評価データセットの**先頭 20 行**のみを
-   `/tmp/iter69_head20.jsonl` に切り出し，`--qhat-source all` と `--qhat-source true_class` の
-   2 通りで実行し，stderr に出る q_hat を記録する．
-   - 期待: `all` → q_hat ≈ 0.3865（母集団 14,270），`true_class` → q_hat ≈ 0.5956（母集団 1,427）．
-   - **2 つの q_hat が異なることを確認できるまで本実行に進まない**．値が一致した，または
-     `true_class` 側で母集団サイズが 14,270 と表示された場合は分岐未到達であり実装をやり直す．
-3. **本実行 A（基準線の再現）**: 全 1,600 行を `--qhat-source all` で実行し，coverage=0.6056・
-   mean_set_size=1.51・q_hat=0.3865 が再現することを確認する（埋め込み経路の同一性検証を兼ねる）．
-   再現しない場合は，差分の原因（ollama バージョン・digest 差）を特定して journal に記録してから進む．
-4. **本実行 B（レバー）**: 同一コマンドの `--qhat-source true_class` のみを変えて実行する．
-5. **分析**: 出力 jsonl から coverage・mean_set_size・set_size 分布（1〜10 のヒストグラム）を
-   10 行程度の集計スクリプトで算出し，ECE は `metrics.py:compute_ece()` を流用する．
-   A と B の `selected_domain` / `confidence` を突き合わせ，非退行条件 1〜3 を検証する．
-   成功条件表の 3 指標と非退行条件の結果を journal に記録し，adopted / rejected を判定する．
-
-- **コスト見積もり**: 埋め込み 1,427（校正）＋1,600（評価）件の逐次計算で 1 実行あたり 10〜30 分．
-  A・B の 2 実行と予備実行で計 1 時間程度．GPU の実機占有・LLM 生成は不要．
-- **出力先**: `results/<timestamp>/Iter69_conformal_qhat_all.jsonl` および
-  `Iter69_conformal_qhat_true_class.jsonl`．
-
----
-
-### 調査 (Iter69)
-
-**背景**: レバー `routing_confidence_calibration_method=conformal_prediction_true_class_qhat` は
-config.yml:718-761（backlog B103）で既に決定済み．本節はレバー選定ではなく，計画フェーズ（rc-planner）
-が実験設計を確定するための一次情報確認（実装箇所・再現性・計測方法・到達コードパス）を行う．
-
-**Q1: q_hat 計算の実装場所の特定**（`scripts/evaluate_classifier_calibration.py`）
-
-- **バグ箇所（現行 = Iter56 の全スコア版）**: `_compute_prediction_set()` L66-110．
-  L85 `all_scores = cp_data["all_scores"]`（shape=(1427, 10)，n_cal×n_classes）を
-  L89 `flat_scores = all_scores.flatten()` で **14,270 要素すべて**平坦化し，L90-91 で
-  その 90th percentile を q_hat とする．これが「全スコア14,270件」の実体．
-- **cp_data 構築箇所**: `predict_calibrated_rows()` L139-209．真ラベルのクラス index は
-  L158-161 の `labels`（`classes.index(cal_row["domain"])`，1427 要素）としてこの関数スコープ内に
-  既に存在する．L196-207 で `all_scores[i, idx] = 1.0 - cumsum`（各サンプル i の全 10 クラス分の
-  非適合スコアを格納）を計算しているが，**真クラスのみを抽出する処理は現状存在しない**．
-- **修正すべき具体箇所**: L200-207 の直後（cp_data 構築を `{"all_scores": all_scores}` としている
-  L209 の手前）に，
-  `true_class_scores = np.array([all_scores[i, labels[i]] for i in range(n_cal)])` を追加し，
-  cp_data に `"true_class_scores": true_class_scores`（1,427 要素）を持たせる．
-  `_compute_prediction_set()` には q_hat の算出元を切り替える引数（例: `qhat_source: str = "all"`，
-  `"true_class"` のとき L89 の `flat_scores` を `cp_data["true_class_scores"]` に差し替える）を追加する．
-  CLI 側は新規フラグ（例 `--qhat-source true_class`）を 1 つ足すだけで済み，既存の
-  `--conformal-prediction` / `--confidence-level` / `--calibration-dataset` はそのまま流用できる．
-  変更ファイルは本スクリプト 1 本のみ（単一レバー原則との相性は良好）．
-
-**Q2: Iter56 修正シミュレーションの再現性確認**
-
-- journal_archive.md:6656-6659 および 6704-6710 に coverage=0.8025・mean_set_size=7.31（真クラス
-  90th percentile=0.5956 使用）の記載があるが，**算出に使った具体的なコマンド・スクリプト名は
-  journal に明記されていない**（「シミュレーション」とのみ記述）．
-- 一次情報として確認できたこと: 校正データセットは `data/classifier_train.jsonl`（1,427 行，
-  `md5sum` = `fa2c9f57cf32ca7f1cb08384c7f49800`，更新日時 2026-07-30，**Iter56 実行日 2026-08-08 より
-  前で内容不変**）．評価データセットは `data/dataset.jsonl`（1,600 行，education 77 件等の内訳は
-  journal_archive.md:15356 と整合）．OOF 予測は `StratifiedKFold(n_splits=5, shuffle=True,
-  random_state=42)`（L162）で決定的にシードされており，同一データ・同一シードなら再現可能．
-  `results/20260808_000000/Iter56_conformal_prediction.jsonl`（933,688 バイト，現存）は当時の
-  「全スコア版」の出力で，各行の `probabilities` フィールドは q_hat の取り方に依存しないため，
-  **このファイルの `probabilities` と `expected_domains` を読み直すだけでも真クラス版 q_hat・
-  prediction_set を事後計算できる**（cp_data の OOF 再学習をやり直す必要はない）．
-  ただし厳密な再現には Q1 の修正版コードを実際に実行し，`_compute_prediction_set()` の出力
-  `prediction_set`/`set_size` をログとして残すほうが「シミュレーション」より検証可能性が高い．
-- **結論**: オフライン完結・実機（ollama ノードでの embedding 計算）不要で再現可能．
-  校正データが 1,427 件と小さいため 5-fold OOF 学習は数秒〜数十秒で完了する．
-
-**Q3: ECE・coverage・mean_set_size の計測方法**
-
-- **ECE**: `metrics.py:486-521` `compute_ece(results)` をそのまま流用可能．`evaluate_classifier_
-  calibration.py` の出力行はいずれも `confidence`/`selected_domain`/`expected_domains` を持つため
-  （L248-254, L283-289），追加実装は不要．Iter56 でも同じ関数系のロジックで ECE=0.0630 が算出されている
-  （L517-518 の判定式 `selected_domain in expected_domains` は単一ドメインデータセットで問題なく機能）．
-- **coverage・mean_set_size**: `metrics.py` 内に該当関数は**存在しない**（`grep -n "coverage" metrics.py`
-  でヒットするのは `compute_compound_coverage_metrics()` のみで，これは複合ドメイン行の候補集合被覆
-  用であり，conformal prediction の prediction set 被覆とは定義が異なる）．Iter56 でも同様にアドホック
-  集計だったとみられる（journal に metrics.py 関数呼び出しの記載がない）．**新規に軽量な集計処理が
-  必要**: `coverage = mean(row["expected_domains"][0] in row["prediction_set"] for row in rows)`，
-  `mean_set_size = mean(row["set_size"] for row in rows)`．データセットが単一ドメインのみのため
-  `expected_domains[0]` で真ラベルが一意に定まる．この 2 指標は `evaluate_classifier_calibration.py`
-  の出力 jsonl（`prediction_set`/`set_size` フィールドが既に付与されている，L255-257, L290-292）を
-  読むだけで計算できる 10 行程度のスクリプトで足り，新規のモジュール実装は不要．
-
-**Q4: 単一レバー原則の到達確認**
-
-- `routing_confidence_calibration_method`（および両方の値 `conformal_prediction` /
-  `conformal_prediction_true_class_qhat`）は `config.yaml`・`http_server.py`・`classifier.py`・
-  `mise.toml` のいずれにも出現しない（`grep -rn` で 0 件，`.claude/research` 配下のみヒット）．
-  Iter56 も本イテレーションも，**実行時経路（config.yaml デプロイ・http_server 起動・実機 1600 問）を
-  一切経由しない**．実行はすべて `scripts/evaluate_classifier_calibration.py` の CLI 直接起動
-  （`--conformal-prediction` 等のフラグ）によるオフライン評価であり，`results/20260808_000000/` は
-  その出力である．
-- **到達コードパス**: CLI 引数（新設 `--qhat-source true_class`）→ `main()` L331 以降 → `_run()`
-  L297 → `predict_calibrated_rows()` L113 → `if conformal_prediction:` ブロック L150-209（ここに
-  Q1 の `true_class_scores` 追加）→ 各行ループ内 `_compute_prediction_set()` 呼び出し L242-246 /
-  L277-281（ここで q_hat 算出元の切り替えが実際に効く）→ 出力 jsonl の `prediction_set`/`set_size` →
-  Q3 の新規集計（coverage・mean_set_size）および `metrics.compute_ece()`．
-- **d0004 §4 教訓との関係**: 過去 6 回の失敗パターンは「config.yaml を正しく変えたのにコードが実行時に
-  その変更を読まない（デプロイ漏れ等）」というものだったが，本レバーはそもそも **config.yaml を一切
-  変更しない**オフライン限定の実験であるため，同種の失敗リスクは構造的に存在しない．代わりに注意すべき
-  リスクは「新設した `qhat_source="true_class"` 分岐が実際に呼ばれたか」の確認漏れであり，
-  rc-experimenter は本走前に少数サンプル（例: 先頭 20 行）で q_hat の値そのもの（0.5956 付近になる
-  はず）を print・記録して発火を確認すること．
-
-**次フェーズ（計画）への示唆**
-
-- 成功条件は fallback_rate を使わず，config note（Iter68 reflector追記）の指示どおり
-  **ECE・coverage・mean_set_size の 3 つ**で事前登録する．Iter56 バグ版の実測値
-  （coverage=0.6056, mean_set_size=1.51, ECE=0.0630）と Iter56 の手計算シミュレーション
-  （coverage=0.8025, mean_set_size=7.31）を基準線・期待レンジの参考値として使える．
-- 予測集合の rank_2 候補源への流用は対象外（config note に明記済み，本調査でも変更不要と確認）．
-- 変更ファイルは `scripts/evaluate_classifier_calibration.py` 1 本（`_compute_prediction_set()` の
-  q_hat 算出元切り替え＋ cp_data への `true_class_scores` 追加＋ CLI フラグ 1 つ）に閉じられる見込み．
-  新規の coverage/mean_set_size 集計は別のワンライナー的スクリプトで良く，`metrics.py` の改変は不要
-  （ECE のみ既存関数を再利用）．
-
-### 実装 (Iter69)
-
-**変更ファイルは計画どおり `scripts/evaluate_classifier_calibration.py` 1 本のみ**（`config.yaml`
-は無変更）．実装前にコードを Read して行番号を照合したところ，計画時点の見積り
-（L66-110 / L200-207 / L209 / L242-246 / L277-281 / L158-161）はいずれも実装時点の行番号と
-**完全に一致**しており，ズレはなかった．
-
-1. `predict_calibrated_rows()` の `cp_data = {"all_scores": all_scores}`（旧 L209）の手前に，
-   `true_class_scores = np.array([all_scores[i, labels[i]] for i in range(n_cal)])` を追加し，
-   `cp_data = {"all_scores": all_scores, "true_class_scores": true_class_scores}` とした．
-2. `_compute_prediction_set()` に `qhat_source: str = "all"` を追加し，未知の値には
-   `ValueError` を送出するガードを入れた．`"true_class"` のとき `flat_scores` を
-   `cp_data["true_class_scores"]` に差し替え，有限標本補正 `(1-alpha)*(1+1/n)` はそのまま
-   （n は選んだ母集団のサイズに追随）．docstring を APS の標準手続き（Romano et al., 2020,
-   "Classification with Valid and Adaptive Coverage sets"）に基づく true-class 版と，旧実装の
-   all 版の両方を説明する形に更新した．
-3. 呼び出し元 2 箇所（fine-tuned embedding 分岐・ollama 分岐）双方の `_compute_prediction_set()`
-   呼び出しへ `qhat_source=qhat_source` を伝播．`predict_calibrated_rows()` → `_run()` →
-   `main()`（CLI 分岐）まで一貫して引数を通した．
-4. CLI に `--qhat-source`（`choices=["all", "true_class"]`, default `"all"`）を追加．
-5. **発火証拠の恒久化**: `cp_data` 構築直後（校正データに対して 1 回だけ），選択された
-   `qhat_source` の q_hat 値と算出母集団サイズを stderr に 1 行 print するようにした
-   （行ごとに 1600 回出さず，校正時に 1 回のみ．ノイズを避けつつ発火確認は可能）．
-6. 新規テスト `tests/test_evaluate_classifier_calibration.py`（4 ケース）を作成した．
-   10 クラスの toy 校正データ（true class 列だけ非適合スコアを高く設定）を用い，
-   (a) `qhat_source="all"` と `"true_class"` で予測集合サイズが異なること（1 vs 10，
-   q_hat が分岐として機能する直接証拠），(b) `"true_class"` モードが `cp_data["all_scores"]`
-   に一切触れないこと（空配列を仕込んでも例外が出ないことで確認），(c) 引数省略時の挙動が
-   `qhat_source="all"` 明示指定と完全一致すること（後方互換），(d) 未知の `qhat_source` 文字列で
-   `ValueError` が送出されることを検証した．
-
-**実装中に発見し，その場で修正した不整合（計画には記載のなかった追加修正）**: `main()` の
-CLI 分岐は `--output` 指定の有無で `_run()` 呼び出しが 2 箇所に分かれている
-（L443-460「stdout 出力」・L461-478「ファイル出力」）．最初の実装で stdout 側にのみ
-`qhat_source=args.qhat_source` を渡し，ファイル出力側（実験で実際に使う経路）への伝播を
-書き漏らした．CLI 引数を追加する既存の 2 箇所組を見落とすと，計画が警告する「config を
-正しく変えたがコードに到達しない」と同型の分岐未到達バグを新規コードに作り込むところだった．
-2 箇所を Read で突き合わせて発見し，実装直後に修正済み（テストでは検出できない類のバグのため，
-後続の予備実行での q_hat 実測確認が実際に効いた）．
-
-**単体テスト結果**: `uv run pytest tests/test_evaluate_classifier_calibration.py -v` は
-4/4 passed．
-
-**既存テストへの影響確認**: `uv run pytest tests/ -q` は 12 failed / 266 passed。失敗した 12 件
-（`test_build_dataset.py` 9 件・`test_train_domain_classifier.py` 3 件）はすべて
-`scripts/train_domain_classifier.py:201` の `calibrated_model.classes_` が
-`AttributeError: 'CalibratedClassifierCV' object has no attribute 'classes_'` で落ちるという，
-sklearn バージョン起因の**本変更と無関係な既存の失敗**であることを `git stash` で本変更前の
-状態に戻して同じ 12 件が同様に失敗することを確認して切り分けた（本変更のコミットに起因しない）．
-`uv run ruff check scripts/evaluate_classifier_calibration.py tests/test_evaluate_classifier_calibration.py`
-は all checks passed．
-
-**後方互換の確認**: 先頭 20 行（`/tmp/iter69_head20.jsonl`，`data/dataset.jsonl` 冒頭）を
-`models/domain_classifier.joblib` + `data/classifier_train.jsonl`（1,427 行）+
-`nomic-embed-text`（127.0.0.1:11435）で `--conformal-prediction --confidence-level 0.90` により
-実行し，(1) `--qhat-source` を省略した出力と (2) `--qhat-source all` を明示した出力を
-`diff` で比較したところ **バイト単位で完全一致**した．既定値 `"all"` により旧挙動が温存されている
-ことを確認した．
-
-**予備実行（発火確認）**: 同じ先頭 20 行に対し `--qhat-source all` と `--qhat-source true_class`
-を実行し，stderr の診断出力を記録した:
-- `qhat_source=all q_hat=0.1133 population_size=14270`
-- `qhat_source=true_class q_hat=0.3865 population_size=1427`
-
-母集団サイズ（14,270 / 1,427）は計画どおりで，2 つの q_hat（0.1133 と 0.3865）は明確に異なり，
-分岐は実際に発火していることを確認した．**ただし実測値は journal Iter56/Iter69 計画節が挙げた
-見積り（all≈0.3865, true_class≈0.5956）とは一致しなかった**（本実装での true_class 実測値
-0.3865 は，むしろ Iter56 の「all（バグ版）」の実測値と数値が一致するという偶然の符合がある）。
-原因として考えられるのは，Iter56 実行時（2026-08-08）に使われた `models/domain_classifier.joblib`
-と現在の同名ファイルが同一でない可能性，または classifier.estimator のハイパーパラメータ・
-校正データの差異である．**この数値差の切り分けは本実装フェーズの範囲外**とし，次フェーズ
-（rc-experimenter）が計画の「本実行 A（基準線の再現）」で `--qhat-source all` の全 1,600 行実行を
-行い，Iter56 実測（coverage=0.6056, mean_set_size=1.51, q_hat=0.3865）と一致するか確認する際に
-合わせて検証すること．一致しない場合は計画の指示どおり差分の原因（ollama バージョン・
-classifier joblib の版・digest 差）を特定してから本実行 B（true_class）に進むこと．
-なお，先頭 20 行はいずれも `business_economics` ドメインの高確信度な行だったため
-`set_size` は all・true_class 双方で 1（同一）だった．prediction set サイズの分岐は
-q_hat が実際に異なることをもって代えて確認済みであり（上記診断出力），かつ toy データによる
-単体テストで q_hat 差が prediction set サイズ差に反映されることも別途証明済みである．
-
-**実験を開始してよい状態か**: 実装・単体テスト・後方互換・発火確認はすべて完了しており，
-コード面では次フェーズ（rc-experimenter）による本実行に進んでよい．ただし上記の q_hat 実測値と
-Iter56 見積りの不一致は，本実行 A（基準線再現）で解消するか原因を特定するまで，最終的な
-adopted/rejected 判定を確定させないこと．
-
-### 実験 (Iter69)
-
-**実行環境**: オフライン完結．実機ノード wafl500〜509 は不使用．埋め込み計算のみ
-`127.0.0.1:11435`（SSH ローカルフォワード先，wafl-ctrl5 の ollama，`nomic-embed-text` 在中）を使用．
-LLM 生成・probe・dispatch トラフィックは発生していない．
-
-**実行コマンド（A・B とも `--qhat-source` のみ変更）**:
-```
-uv run python -m scripts.evaluate_classifier_calibration \
-  --dataset data/dataset.jsonl \
-  --classifier models/domain_classifier.joblib \
-  --embedding-model nomic-embed-text \
-  --ollama-host 127.0.0.1 --ollama-port 11435 \
-  --conformal-prediction --confidence-level 0.90 \
-  --calibration-dataset data/classifier_train.jsonl \
-  --qhat-source [all|true_class] \
-  --output results/20260919_202700/Iter69_conformal_qhat_[all|true_class].jsonl
-```
-
-**本実行 A（`--qhat-source all`，基準線の再現，開始前に最優先で確認）**
-
-- 出力: `results/20260919_202700/Iter69_conformal_qhat_all.jsonl`（1,600 行）
-- stderr 診断: `q_hat=0.1133 population_size=14270`
-- **q_hat の生値（0.1133）は Iter56 の記録値（0.3865）および Iter69 実装フェーズの予備実行での
-  見積りと一致しなかった**が，これは実装フェーズ時点で判明していた既知の懸念であり，本実行では
-  この不一致自体の原因切り分けを行った（詳細は下記「q_hat 数値不一致の原因調査」）．
-- **成功条件表・非退行条件で実際に使う指標（selected_domain・confidence・probabilities・
-  top1_accuracy・coverage・mean_set_size・ECE）はいずれも Iter56 の記録と一致した**
-  （数値は「分析(実行) (Iter69)」節に記載）．
-
-**本実行 B（`--qhat-source true_class`，レバー）**
-
-- 出力: `results/20260919_202700/Iter69_conformal_qhat_true_class.jsonl`（1,600 行）
-- stderr 診断: `q_hat=0.3865 population_size=1427`
-- **偶然の符合**: この true_class の q_hat 実測値（0.3865）は，Iter56 が記録した all モードの
-  q_hat（0.3865）と数値が一致する．一方，Iter56 の手計算シミュレーションが見積もった
-  true_class の q_hat（0.5956）とは一致しない．
-
-**q_hat 数値不一致の原因調査（本実行 A 実施前後に実施）**
-
-計画で指示された「一致しない場合は原因を特定してから本実行 B に進む」に従い，以下を確認した:
-
-1. **入力ファイルの不変性**: `models/domain_classifier.joblib`（mtime: Aug 2 23:41，Iter56 実行
-   `2026-08-08` より前）・`data/classifier_train.jsonl`（mtime: Jul 30 14:44，同様に Iter56 より前）
-   はいずれも Iter56 実行以降に更新されていない．
-2. **コードの不変性**: `git log --oneline --follow -- scripts/evaluate_classifier_calibration.py`
-   の最新ヒットは Iter56 のコミット `1e63d67` そのものであり，`--qhat-source` を追加した Iter69 の
-   差分（未コミット）を除けば，OOF 較正処理（`StratifiedKFold(random_state=42, shuffle=True)`・
-   `fold_clf = type(base_estimator)(max_iter=1000)`・スコア計算式）は Iter56 実行時点から
-   一切変更されていない．
-3. **ライブラリバージョンの不変性**: `uv.lock` の `scikit-learn`（1.9.0）は Iter43 以降コミットが
-   なく，Iter56 実行時と同一バージョンである．
-4. **決定性の確認**: 校正データセット（1,427 行）に対する OOF 較正を独立に 2 回実行
-   （`/tmp/iter69_head5.jsonl` を評価対象に使い，校正部分だけを比較），いずれも
-   `q_hat=0.1133 population_size=14270` と完全に一致し，現行環境・現行入力のもとでは
-   再現性がある（非決定的な揺らぎではない）．
-5. **eval 行の再現性（決定的な一次証拠）**: 本実行 A の 1,600 行すべてについて，
-   `selected_domain`・`confidence`・`probabilities` を Iter56 の記録
-   （`results/20260808_000000/Iter56_conformal_prediction.jsonl`）と突き合わせたところ，
-   **1,600 行全てでビット単位（許容差 1e-9）で一致した**（0 件不一致，詳細は次節）．
-   これは，凍結済み分類器（`classifier.predict_proba`）を通る eval 行の経路については，
-   embedding 計算（`127.0.0.1:11435` 経由）・分類器アーティファクト・データセット行順序が
-   Iter56 実行時と実質的に同一であることを示す一次証拠である．
-6. **結論（切り分けの限界）**: 上記 1〜5 により，コード・データ・ライブラリ・embedding
-   経路のいずれも変化していないことを確認したが，OOF 較正専用の再学習経路
-   （`fold_clf.fit(cal_embeddings[train_idx], ...)`）が生成する q_hat の生値そのものが
-   Iter56 記録（0.3865）と異なる根本原因は，Iter56 当時の生の OOF 確率や校正スコア配列自体が
-   一切保存されていない（journal・results のいずれにも persist されていない）ため，
-   **これ以上の一次情報による特定はできなかった**．ただし，この q_hat の生値の差は，
-   下記「分析(実行)」節が示すとおり，coverage・mean_set_size・ECE・top1_accuracy という
-   実際に成功条件判定で使う指標には実質的な影響を与えていない（Iter56 記録とノイズ帯内で
-   一致，または完全一致）．計画が定めた「本実行 A が基準線と一致することを確認してから
-   本実行 B に進む」という条件は，この「使用指標が一致する」という基準で満たしたと判断し，
-   本実行 B に進んだ．
-
-### 分析(実行) (Iter69)
-
-**集計方法**: 出力 jsonl から `coverage = mean(expected_domains[0] in prediction_set)`・
-`mean_set_size = mean(set_size)` を 10 行程度のワンライナー相当のスクリプト
-（`/tmp/iter69_aggregate.py`，本フェーズで新規作成）で算出し，ECE は `metrics.py:compute_ece()`
-をそのまま流用した．
-
-**本実行 A（`--qhat-source all`）の実測値と Iter56 基準線との対比**
-
-| 指標 | Iter56 記録 | 本実行 A 実測 | 差分 |
-|---|---|---|---|
-| q_hat（生値） | 0.3865（population 14,270） | 0.1133（population 14,270） | 一致せず（原因未特定，上記参照） |
-| coverage | 0.6056 | 0.5988 | -0.68pt（事前登録ノイズ帯 ±1pt 以内） |
-| mean_set_size | 1.51 | 1.5063 | -0.0037（事前登録ノイズ帯 ±0.1 以内） |
-| ECE | 0.0630 | 0.0630 | 差分なし |
-| top1_accuracy | 0.603125（recompute） | 0.603125 | 差分なし |
-| set_size 分布 | size=1: 94.4%, size=10: 5.6% | size=1: 1510/1600(94.375%), size=10: 90/1600(5.625%) | 一致 |
-| selected_domain（1,600 行） | - | Iter56 との不一致 0 件 | 完全一致 |
-| confidence（1,600 行，許容差 1e-9） | - | Iter56 との不一致 0 件 | 完全一致 |
-| probabilities（1,600 行，各ドメイン成分，許容差 1e-9） | - | Iter56 との不一致 0 件 | 完全一致 |
-
-**本実行 B（`--qhat-source true_class`）の実測値**
-
-| 指標 | 実測値 |
-|---|---|
-| q_hat（生値，population 1,427） | 0.3865 |
-| coverage | 0.6556 |
-| mean_set_size | 4.0319 |
-| ECE | 0.0630 |
-| top1_accuracy | 0.603125 |
-| set_size 分布 | size=1: 1061/1600(66.31%), size=10: 539/1600(33.69%) |
-
-**selected_domain の非退行確認（A vs B）**
-
-A（1,600 行）と B（1,600 行）を id で突き合わせたところ，`selected_domain` の不一致は
-**0 件 / 1,600 行**，`confidence` の不一致（許容差 1e-9）も **0 件 / 1,600 行** だった．
-q_hat（＝母集団の切替）が argmax・confidence・probabilities に影響を与えないという計画の
-事前想定（q_hat は `prediction_set`/`set_size` のみに作用する）が，A・B 双方の全行で
-実測により裏付けられた．
-
-**生成した結果ファイル**
-
-- `results/20260919_202700/Iter69_conformal_qhat_all.jsonl`（本実行 A，1,600 行）
-- `results/20260919_202700/Iter69_conformal_qhat_true_class.jsonl`（本実行 B，1,600 行）
-- `results/20260919_202700/run_A.log` / `run_B.log`（stderr 診断ログ）
-- `/tmp/iter69_aggregate.py`（coverage・mean_set_size 集計と A/B・Iter56 突き合わせ用の
-  読み取り専用スクリプト，リポジトリ外の一時ファイル）
-
-**実行/ログ上の異常の有無**: プロセスは A・B とも正常終了（各 1,600 行出力，途中エラー・
-OOM・タイムアウトなし）．q_hat の生値が Iter56 記録と数値的に異なる点のみ「異常」として
-上記「q_hat 数値不一致の原因調査」節に記録したが，成功条件判定に使う指標（coverage・
-mean_set_size・ECE・top1_accuracy・selected_domain・confidence・probabilities）には
-実質的な影響がないことを確認済みである．採否判定は次フェーズ（分析(解釈)）に委ねる．
-
-### 分析(解釈) (Iter69)
-
-本節は出力 jsonl（`results/20260919_202700/*.jsonl` および
-`results/20260808_000000/Iter56_conformal_prediction.jsonl`）を一次データとして直接再集計した
-結果に基づく．採否の確定・config.yml への記録・次レバー選定は次フェーズ（rc-reflector）の仕事で
-あり，本節は「何が起きたか・なぜ起きたか・ノイズか有意か」の解釈に限る．
-
-#### 1. 事前登録した成功条件との機械的対比（本実行 B）
-
-| 指標 | 合格条件 | 本実行 B 実測 | 判定 | 条件境界からの距離 |
-|---|---|---|---|---|
-| coverage | 0.87 ≤ x ≤ 0.93 | 0.6556 | **不合格** | 下限に対し **-21.44pt** |
-| mean_set_size | 1.5 ≤ x ≤ 4.0 | 4.0319 | **不合格** | 上限を **+0.0319** 超過 |
-| ECE | ≤ 0.0680 | 0.0630 | 合格 | 0.0050 の余裕 |
-
-3 条件の AND が成立条件であるため，**成功条件は不成立**である．未達の主因は coverage であり，
--21.44pt は本実験の統計誤差（n=1600，p=0.6556 の二項 SE=0.0119，95% CI=[0.6323, 0.6789]）の
-18 倍に相当する．CI の上端でも下限 0.87 に 19.1pt 届かない．mean_set_size の +0.0319 超過は
-事前登録したノイズ目安（±0.1）の範囲内でありそれ単独では判定に足りないが，coverage の判定を
-覆すものではない．
-
-非退行条件は 4 件とも充足している（`selected_domain` 不一致 0/1600，`confidence`・
-`probabilities` の不一致 0/1600（許容差 1e-9），`top1_accuracy`=0.603125 で A・B 同値，
-rank_2 流用は未実施）．
-
-#### 2. 「実験不成立」（d0004 §4 対策 C）に該当するか → **該当しない．有効な測定である**
-
-d0004 §4 対策 C が定める既定解釈は「主要指標が小数点 6 桁まで基準線と一致し，かつ McNemar
-discordant=0 ならレバーは発火していない」である．今回はいずれの条件にも当てはまらない．
-
-- **レバー発火の直接証拠（3 系統）**: (a) stderr 診断が母集団サイズの切替を記録している
-  （A: population_size=14270 / B: population_size=1427），(b) q_hat の生値が 0.1133 と 0.3865 で
-  異なる，(c) 出力の `set_size` が A・B で実際に変化した行が **449 行 / 1,600 行**ある
-  （1→10 が 449 件，10→1 が 0 件）．
-- **主要指標も一致していない**: coverage 0.5988→0.6556（+5.69pt），mean_set_size 1.5063→4.0319．
-  被覆の変化を行ごとに対応づけると discordant は「B のみ被覆」91 件・「A のみ被覆」0 件で，
-  McNemar 正確検定 **p=8.08e-28**．ノイズではなく決定的な差である（q_hat が単調に集合を
-  拡大するため，被覆の低下は原理的に起こり得ず片側にしか discordant が出ない）．
-
-したがって本イテレーションは「実験不成立」ではなく，**正しく発火したレバーに対する有効な測定**
-である．Iter56 の invalid な記録を，再現可能な実装に基づく正式な判定へ置き換えるという当初の
-目的自体は達成されている．
-
-#### 3. q_hat 生値の不一致は解決した — Iter56 journal の記録誤りであり，パイプラインは同一
-
-実装・実験フェーズが原因を特定できなかった「本実行 A の q_hat=0.1133 が Iter56 記録の 0.3865 と
-一致しない」問題は，一次データの照合により決着した．
-
-1. **本実行 A の出力ファイルは Iter56 の出力ファイルとバイト単位で同一**である
-   （md5sum が両者とも `2e0a1533a754e5f853d429ef57836616`，`diff` も差分なし）．つまり
-   校正・埋め込み・分類器・集合構成のすべてが Iter56 実行時と完全に一致しており，
-   パイプラインの変化は存在しない．
-2. **Iter56 の出力ファイル自身から，当時の q_hat を逆算できる**．本実装の集合構成規則は決定的で，
-   `set_size=10` となる条件は `1 - max(prob) ≤ q_hat` に完全に一致する（1,600/1,600 行で規則が
-   的中することを実測確認）．Iter56 出力における `size=10` 行の `1-p_max` 最大値は 0.1130，
-   `size=1` 行の `1-p_max` 最小値は 0.1136 であり，**当時の q_hat は (0.1130, 0.1136] の区間に
-   確定する**．本実行 A の 0.1133 はこの区間内にある．
-3. 対偶として，仮に Iter56 が本当に q_hat=0.3865 で走っていたなら，出力は決定的に
-   coverage=0.6556・mean_set_size=4.0319（＝今回の本実行 B と同値）になっていたはずであり，
-   Iter56 が記録した 1.51 とは両立しない．
-4. **結論**: Iter56 journal の「q_hat=0.3865」は誤記であり（0.3865 は真クラス版の q_hat，
-   すなわち今回の本実行 B の値である），実際の Iter56 の q_hat は 0.1133 だった．Iter69 計画節が
-   Iter56 から引き継いだ見積り（all≈0.3865, true_class≈0.5956）も，この誤記を前提としていたため
-   まとめてずれていた．**判定を無効化する要因ではない**．
-5. 付随して判明した軽微な定義差: Iter56 の記録 coverage=0.6056 は
-   `any(d in prediction_set for d in expected_domains)` 定義の値であり，Iter69 計画が採用した
-   `expected_domains[0] in prediction_set` 定義では同一ファイルから 0.5988 が得られる
-   （同ファイルで cov_any=0.6056, cov_first=0.5988）．**A と Iter56 の -0.68pt の差はノイズでは
-   なく，被覆の定義差そのもの**である（複合設問 100 行の扱いの違い．差は 11 行）．どちらの定義を
-   採っても成功条件 0.87 には遠く及ばないため判定に影響しない．なお計画節の非退行条件 2 が
-   「top1_accuracy が 0.6056 から不変」としていたのも同じ誤記の連鎖で，実測 top1_accuracy は
-   A・B とも 0.603125 である（Iter56 出力から再計算しても同値）．
-
-#### 4. coverage が Iter56 事前予測（0.8025）よりさらに低い機序 — 集合構成の符号が逆転している
-
-Iter56 のシミュレーション予測（coverage=0.8025, mean_set_size=7.31）と実測（0.6556, 4.0319）の
-乖離，および coverage が名目 0.90 に遠く及ばない理由は，**q_hat の算出母集団の問題ではなく，
-予測集合の構成ループ自体が退化していること**にある．一次データから以下を確認した．
-
-- **set_size が 1 と 10 の 2 値しかとらない**（A: size1=1510 / size10=90，B: size1=1061 /
-  size10=539．2〜9 は A・B とも 0 件）．適応的な集合サイズという APS の眼目が機能していない．
-- **機序**: `_compute_prediction_set()` は確率降順に走査しながら `score = 1 - cumsum` を
-  q_hat と比較するが，`cumsum` は走査に伴い単調増加するため `score` は**単調減少**する
-  （docstring の「the top class gets the SMALLEST score」は逆で，実際には先頭クラスが最大値
-  `1 - p_max` を取る）．結果として，先頭クラスが閾値を通れば以降のすべてのクラスも必ず通り
-  集合サイズは 10 に，先頭クラスが落ちれば即 `break` して空集合となり fallback（L122-124）で
-  サイズ 1 になる．**判定式は実質的に `1 - p_max ≤ q_hat` という単一の二値ゲートに縮退している**
-  （1,600/1,600 行で一致を確認）．
-- **この規則の下では coverage が構造的に頭打ちになる**．coverage は
-  `r + (1-r) × (size1 行の top1 正解率)` に分解でき，実測では
-  B: 0.3369×1.000 + 0.6631×0.4807 = 0.6556 と完全に一致する．つまり**被覆の伸びは「サイズ 10 に
-  跳ね上がった行の割合 r」だけが担っており，中間サイズによる効率的な被覆獲得が一切ない**．
-- **帰結として，本実装のままでは成功条件 2 つを同時に満たすことが数学的に不可能である**．
-  q_hat を掃引した実測フロンティア（同一の 1,600 行で再集計）:
-
-  | q_hat | size10 割合 | coverage | mean_set_size |
-  |---|---|---|---|
-  | 0.1133（=A） | 0.0563 | 0.5988 | 1.5063 |
-  | 0.3865（=B） | 0.3369 | 0.6556 | 4.0319 |
-  | 0.50 | 0.5162 | 0.7175 | 5.6463 |
-  | 0.60 | 0.7081 | 0.8063 | 7.3731 |
-  | 0.65 | 0.8106 | **0.8681** | 8.2956 |
-  | 0.70 | 0.8950 | **0.9256** | 9.0550 |
-
-  coverage 0.87 に到達するには mean_set_size が約 8.3 必要で，成功条件上限 4.0 の 2 倍を超える．
-  **どの q_hat を選んでも coverage∈[0.87,0.93] と mean_set_size≤4.0 は両立しない**．
-  Iter56 の事前予測（0.8025 / 7.31）は，この表の q_hat≈0.60 の行とほぼ一致しており，
-  「真クラス版の q_hat がもっと大きい（0.5956）」という誤った前提の下で同じ退化した規則を
-  シミュレートした結果だと説明できる．実測の真クラス q_hat が 0.3865 とより小さかったため，
-  実測 coverage は予測より低い 0.6556 に落ち着いた．**予測と実測の乖離は q_hat の見積り誤差で
-  説明でき，別種の異常ではない**．
-
-#### 5. 分類器性能の限界か，実装の限界か — 切り分け
-
-「10 クラス問題かつ分類器性能が低いため被覆が出ない」という計画時の仮説は，**部分的にしか
-正しくない**．同じ 1,600 行の確率で，標準的な APS（非適合スコア＝真クラスまでの累積確率，
-集合＝降順に累積確率が閾値に達するまで）を事後計算すると次の水準になる（閾値掃引．
-校正を評価集合自身で行った楽観的な推定である点に留保が要る）:
-
-| 閾値 | coverage | mean_set_size |
-|---|---|---|
-| 0.80 | 0.8544 | 3.0587 |
-| 0.90 | 0.9181 | 4.3444 |
-| 0.95 | 0.9463 | 5.6031 |
-
-補間すると coverage 0.87 は mean_set_size≈3.3，coverage 0.90 は ≈4.0 で到達する．
-参考として top-k 正解率は top1=0.5956, top2=0.7450, top3=0.8237, top4=0.8831, top5=0.9219 であり，
-被覆 0.87〜0.90 に必要な集合サイズは分類器性能から見て 3〜4 程度が下限である．
-すなわち **成功条件の帯（coverage 0.87-0.93 かつ mean_set_size 1.5-4.0）は分類器性能の観点からは
-ぎりぎり成立しうる領域であり，今回それを大きく外したのは集合構成の実装が退化しているため**である．
-ただし上記は評価集合自身で校正した楽観値で，実際の校正（`classifier_train.jsonl` の OOF，
-OOF accuracy 57.32% と評価集合 top1 59.56% より低い）を使えば q_hat はより大きくなり，
-動作点は上表より右（集合が大きい側）へずれるため，**修正実装でも成功条件の上限 4.0 を
-超える可能性は十分にある**．この点は本イテレーションの一次データだけでは確定できない．
-
-#### 6. 仮説との整合
-
-- 計画の仮説「真クラス版 q_hat にすれば coverage は 0.6056 から大きく上振れする」→
-  **方向は一致するが幅が不足**．+5.69pt（0.5988→0.6556）にとどまり，「大きく上振れ」とは言えない．
-  原因は §4 のとおり，真クラス版の q_hat 実測（0.3865）が見積り（0.5956）より小さかったこと，
-  および集合構成が二値ゲートに縮退していることの二つである．
-- 計画の仮説「被覆を満たすには集合が肥大化し，coverage も名目水準に届かない見込みが強い」→
-  **的中**．実測でも名目 0.90 に対し 0.6556 で，同時達成は不可能であることを§4 の掃引で定量化した．
-- ECE は事前の但し書きどおり 0.0630 のまま完全不変で，同一性アンカーとして機能した．
-  パイプラインの他部分に意図しない混入がないことが確認できている．
-- 想定外の挙動: `set_size` が 1 と 10 の 2 値に縮退していた点（計画・実装・実験のいずれの
-  フェーズでも明示的に確認されていなかった）．これは本イテレーションで新たに特定した
-  **実装上の欠陥**であり，Iter56 の結論も同じ欠陥の上に乗っていた（Iter56 の判定は q_hat の
-  母集団誤りだけが原因だと考えられていたが，実際にはより根の深い集合構成の誤りが併存していた）．
-
-#### 7. 判定の確信度と，次フェーズへの示唆
-
-- **確信度は高い．追加反復は不要**と考える．根拠: (a) パイプラインは決定的で，本実行 A が
-  Iter56 出力とバイト単位で一致し再現性が確認済み，(b) coverage の未達幅 -21.44pt は二項 SE の
-  18 倍で，ノイズでは説明できない，(c) q_hat をどう選んでも成功条件が両立しないことを
-  同一データ上の掃引で示せており，1 回の測定に依存した判断ではない．
-- 次フェーズ（rc-reflector）への示唆: **rejected 相当**．ただし棄却の理由は
-  「conformal prediction という手法がこの分類器に不適」ではなく，
-  **「`_compute_prediction_set()` の集合構成が二値ゲートに縮退しており，APS として機能していない」**
-  である．config.yml へ記録する際は，Iter56 の記録誤り（q_hat=0.3865 は真クラス版の値）と
-  この実装欠陥の 2 点を残さないと，将来同じ誤解が再生産される．
-  なお §5 の事後計算は「集合構成を修正すれば成功条件の帯に入りうる」ことを示唆するが，
-  それは本イテレーションのレバー（q_hat の母集団）とは別の変更であり，追試するなら
-  別レバー（例: `conformal_set_construction=corrected_aps`）として単一レバー原則の下で
-  立てるべきである．採用可否・優先度の判断は rc-reflector に委ねる．
-
-### 考察 (Iter69)
-
-#### 判定: `routing_confidence_calibration_method=conformal_prediction_true_class_qhat` は **rejected**．本レバーはクローズ
-
-事前登録した 3 指標の AND が不成立である（coverage=0.6556 は合格帯下限 0.87 に対し -21.44pt，
-二項 SE=0.0119 の 18 倍で，95% CI の上端 0.6789 でも 19.1pt 届かない．mean_set_size=4.0319 は
-上限 4.0 を +0.0319 超過．ECE=0.0630 のみ合格）．レバーの発火は 3 系統
-（母集団 14,270 vs 1,427・q_hat 0.1133 vs 0.3865・set_size 変化 449/1,600 行，McNemar p=8.08e-28）で
-確認済みであり，d0004 §4 の「実験不成立」には該当しない．**有効な測定による棄却**である．
-追加反復は不要と判断した（パイプラインは決定的で，本実行 A は Iter56 出力と md5 一致．
-かつ q_hat を掃引しても成功条件が両立しないことを同一データ上で示せており，単発測定に依存しない）．
-値 `conformal_prediction` は Iter56 で試行済みのため，**`routing_confidence_calibration_method` は
-両値とも試行済みとなりクローズを確定**した（config.yml:718- の note に追記済み）．
-
-Iter68 の当初目的「バグ入りの invalid な記録を，正しい実装による正式な判定へ置き換える」は
-達成されている．B88 が付していた「invalid のまま放置されている」状態は解消した．
-
-#### 学び 1: Iter56 の q_hat 記録は誤記であり，パイプラインは Iter56 から一切変わっていない
-
-実装・実験フェーズが「原因未特定」として持ち越した q_hat の不一致（0.1133 vs 記録 0.3865）は，
-一次データの照合で決着した．本実行 A の出力は Iter56 出力と md5 一致
-（`2e0a1533a754e5f853d429ef57836616`）であり，そこから逆算した当時の q_hat は (0.1130, 0.1136] に
-確定する．記録されていた 0.3865 は真クラス版の値（＝今回の本実行 B の q_hat）であり，
-journal への転記時点で取り違えていた．Iter56 の修正シミュレーション（q_hat=0.5956 →
-coverage=0.8025 / mean_set_size=7.31）もこの誤記の連鎖で，実測とは一致しない．
-**非自明な教訓**: 「原因未特定」で止まった数値差でも，出力ファイルさえ残っていれば
-決定的な集合構成規則から当時のハイパラを逆算できる．実験フェーズは q_hat そのものを
-persist していなかったが，出力の `set_size`/`probabilities` から区間として復元できた．
-今後は校正で得た q_hat を出力 jsonl のメタ行に書き出しておくと，この復元作業自体が不要になる．
-
-#### 学び 2（本イテレーション最大の収穫）: 棄却理由は手法ではなく既存コードの実装欠陥だった
-
-`scripts/evaluate_classifier_calibration.py:_compute_prediction_set()` は確率降順に走査しながら
-`score = 1 - cumsum` を q_hat と比較するが，`cumsum` が単調増加するため `score` は**単調減少**する．
-それにもかかわらず「score が q_hat を超えたら break」する設計になっているため，判定は実質
-`1 - p_max ≤ q_hat` という**二値ゲートに縮退**していた（set_size は 1 か 10 しか取らず，
-A・B とも中間サイズ 0 件．1,600/1,600 行でこの規則が的中することを実測確認）．
-この欠陥は今回のレバー（q_hat の母集団）とは**独立の既存バグ**であり，Iter56 の結論も同じ欠陥の
-上に乗っていた．つまり Iter56 以来「10 クラス問題での APS の方法的限界」と記録してきた解釈は
-**誤りを含む**．同一データで標準的な APS を事後計算すると coverage 0.87 は mean_set_size≈3.3，
-0.90 は ≈4.0 で到達し（top-k 正解率 top3=0.8237 / top4=0.8831 とも整合），
-**成功条件の帯は分類器性能の観点からは成立しうる**．
-**非自明な教訓**: 「手法が効かない」という結論を出す前に，その手法の**特徴量的な内部量**
-（ここでは set_size の分布）が想定どおりの自由度を持っているかを確認すべきだった．
-主要指標（coverage・mean_set_size）だけを見ていると，平均値としては尤もらしい 1.51 や 4.03 が
-出るため，分布が 2 値に潰れていることに 2 イテレーション（Iter56・Iter69 の計画/実装/実験）
-気づけなかった．今後の事前登録には「主要指標に加え，レバーが作用する内部量の分布を必ず出す」
-ことを含める．
-
-#### 次の一手: 新レバー `conformal_set_construction=corrected_aps` を config へ追加した
-
-config の levers は Iter69 着手前の時点で未試行値を使い切っていたが，SKILL.md の停止条件 1
-（journal/backlog の学びから次の有望なレバーを自分で考案できるならそれを追記して継続）に該当する．
-本イテレーションの学び 2 が，(a) 具体的な実装欠陥の所在，(b) 修正後に成功条件の帯へ入りうる
-定量的な事前根拠（閾値掃引表と top-k 正解率），(c) オフライン完結・分類器再訓練なし・
-`config.yaml` スキーマ変更なしという着手容易性，を同時に与えているため，
-`conformal_set_construction: [corrected_aps]` を config.yml に新設し，成功条件の帯
-（coverage 0.87-0.93 ∧ mean_set_size 1.5-4.0 ∧ ECE ≤ 0.0680）と非退行条件を事前登録した．
-**Iter70 の単一レバーはこれとする**（iteration_name 案:
-「conformal予測集合の構成規則をAPS標準へ修正して被覆を再測定」）．
-期待値は Iter69 より明確に高いが，実際の OOF 校正では q_hat が楽観値より大きくなるため
-mean_set_size が上限 4.0 を超えて rejected になる可能性も相応にある．いずれに転んでも，
-「conformal prediction がこの分類器で使えるか」という Iter56 以来の問いに確定的な答えが出る．
-
-#### B104（A1: 複合評価集合の拡充 / A2: R-F の実行時配線）の扱い
-
-`status="blocked"` にはしない．理由は 2 つある．(i) Iter69 の結果（conformal 系列の棄却理由が
-実装欠陥に帰着し，方法自体の当落は未確定）は A1/A2 の判断材料に直接ならず，人間へ提示する
-情報は Iter68 時点から**実質的に変化していない**ため，SKILL.md「起動時の手順」の運用ルールに
-従い再 @mention はしない．(ii) 上記の新レバーにより自律着手できる作業が存在し，研究サイクルは
-停止しない．B104 は `[needs-human]` のまま維持し，回答が得られた時点で Iter71 以降の方針へ反映する．
 
 ---
 

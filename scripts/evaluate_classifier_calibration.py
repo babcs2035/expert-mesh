@@ -198,6 +198,8 @@ async def predict_calibrated_rows(
     qhat_source: str = "all",
     set_construction: str = "broken",
     qhat_quantile_direction: str = "upper",
+    calibration_source: str = "oof_train",
+    holdout_seed: int = 42,
 ) -> list[dict]:
     """Recompute (selected_domain, confidence) for every dataset row via the calibrated classifier.
 
@@ -207,16 +209,33 @@ async def predict_calibrated_rows(
     train_domain_classifier.py's build_training_features and
     fit_embedding_whitening.py's existing pattern for single-node
     offline embedding jobs.
+
+    calibration_source controls where the conformal calibration nonconformity
+    scores come from (Iter72 investigation):
+    - "oof_train" (default): calibration scores are computed from
+      `calibration_dataset_path` (classifier_train.jsonl) via a freshly
+      refit 5-fold OOF LogisticRegression -- the pre-Iter72 implementation,
+      kept verbatim below for byte-for-byte reproducibility.
+    - "eval_holdout": calibration scores instead come from a stratified 50/50
+      split of `dataset` itself, scored by the SAME already-fitted
+      `classifier.predict_proba` used for the evaluation half. This removes
+      the oof_train path's exchangeability violation (calibration scores from
+      a different, unfitted model than the evaluation scores; Iter72
+      investigation Q1) at the cost of halving the evaluation population that
+      contributes to the final coverage/mean_set_size aggregates.
     """
     from sentence_transformers import SentenceTransformer
 
     classes = list(classifier.classes_)
     rows = []
 
+    if calibration_source not in ("oof_train", "eval_holdout"):
+        raise ValueError(
+            f"calibration_source must be 'oof_train' or 'eval_holdout', "
+            f"got {calibration_source!r}"
+        )
+
     # Pre-compute conformal prediction calibration data (APS method).
-    # Uses out-of-fold predictions from the CalibratedClassifierCV's internal
-    # 5-fold CV to avoid the data-overlap problem (in-sample predictions are
-    # overconfident, producing empty prediction sets).
     #
     # Non-conformity score for class j (sorted by prob descending):
     #   S(x, j) = 1 - cumulative_prob_up_to_class_j
@@ -224,7 +243,9 @@ async def predict_calibrated_rows(
     # alpha-quantile of TRUE-CLASS scores as q_hat. This ensures the top class
     # is included in the prediction set when its score <= q_hat.
     cp_data: dict | None = None
-    if conformal_prediction:
+    holdout_split: dict[int, str] | None = None  # dataset row index -> "cal" | "eval"
+    precomputed_eval_holdout: dict | None = None  # set below only for calibration_source="eval_holdout"
+    if conformal_prediction and calibration_source == "oof_train":
         cal_dataset = _read_jsonl(calibration_dataset_path)  # type: ignore[arg-type]
         n_cal = len(cal_dataset)
         n_classes = len(classes)
@@ -290,16 +311,108 @@ async def predict_calibrated_rows(
         true_class_scores = np.array([all_scores[i, labels[i]] for i in range(n_cal)])
 
         cp_data = {"all_scores": all_scores, "true_class_scores": true_class_scores}
+    elif conformal_prediction:  # calibration_source == "eval_holdout"
+        if qhat_source == "all":
+            raise ValueError(
+                "calibration_source='eval_holdout' only supports qhat_source="
+                "'true_class' (the standard APS calibration population); "
+                "'all' is rejected rather than silently ignored (Iter72 plan step 3)."
+            )
+        from sklearn.model_selection import StratifiedShuffleSplit
 
+        n_eval = len(dataset)
+        n_classes = len(classes)
+        eval_labels = [
+            classes.index(row["expected_domains"][0])
+            if row["expected_domains"][0] in classes
+            else 0
+            for row in dataset
+        ]
+
+        # Score ALL 1,600 rows with the SAME already-fitted classifier used
+        # for evaluation, so calibration and evaluation scores come from one
+        # fixed model that never saw the calibration half during fitting
+        # (Iter72 investigation Q2). No calibration-set-only embeddings need
+        # to be computed here; the evaluation loop below recomputes each
+        # row's embedding once, and we reuse those below to avoid a second
+        # embedding pass.
+        all_embeddings = []
+        if fine_tuned_embed_model is not None:
+            local_model = SentenceTransformer(
+                fine_tuned_embed_model, trust_remote_code=True, device="cpu"
+            )
+            try:
+                local_model.load_adapter(fine_tuned_embed_model, "default")
+                local_model.set_adapter("default")
+            except ValueError:
+                pass
+            for row in dataset:
+                all_embeddings.append(
+                    local_model.encode(row["query"], normalize_embeddings=True,
+                                       show_progress_bar=False)
+                )
+        else:
+            for row in dataset:
+                all_embeddings.append(
+                    await ollama_client.embed(embedding_model, row["query"])
+                )
+        all_embeddings = np.array(all_embeddings)
+        all_probs = classifier.predict_proba(all_embeddings)
+
+        splitter = StratifiedShuffleSplit(
+            n_splits=1, test_size=0.5, random_state=holdout_seed
+        )
+        # First returned index array is the calibration half, second is the
+        # evaluation half (Iter72 plan: reversing this changes the seed=42
+        # prediction from coverage=0.9400 to the cross-fit value 0.9487).
+        cal_idx, eval_idx = next(splitter.split(np.zeros(n_eval), eval_labels))
+        holdout_split = {}
+        for i in cal_idx:
+            holdout_split[int(i)] = "cal"
+        for i in eval_idx:
+            holdout_split[int(i)] = "eval"
+
+        true_class_scores = np.zeros(len(cal_idx))
+        for pos, i in enumerate(cal_idx):
+            probs = all_probs[i]
+            sorted_idx = np.argsort(-probs)  # descending
+            cumsum = 0.0
+            for idx in sorted_idx:
+                cumsum += probs[idx]
+                if idx == eval_labels[i]:
+                    true_class_scores[pos] = 1.0 - cumsum
+                    break
+
+        n_cal = len(cal_idx)
+        cp_data = {
+            # qhat_source="all" is rejected above, so all_scores is never read;
+            # kept as an empty-shaped placeholder purely so any future code
+            # path that accesses cp_data["all_scores"] fails loudly instead of
+            # KeyError-ing silently.
+            "all_scores": np.zeros((0, n_classes)),
+            "true_class_scores": true_class_scores,
+        }
+
+        # Cache the already-computed embeddings/probabilities so the main
+        # per-row loop below (fine_tuned or ollama branch) can reuse them
+        # instead of recomputing an embedding for each of the same 1,600
+        # queries a second time.
+        precomputed_eval_holdout = {
+            "embeddings": all_embeddings,
+            "probabilities": all_probs,
+        }
+
+    if conformal_prediction:
         # Print which q_hat population is actually used, and its resulting
-        # value, so a mis-wired qhat_source is visible instead of silently
-        # falling back to the default (Iter69: past no-op failures were only
-        # caught by an independent post-hoc recomputation).
+        # value, so a mis-wired qhat_source/calibration_source is visible
+        # instead of silently falling back to the default (Iter69: past
+        # no-op failures were only caught by an independent post-hoc
+        # recomputation).
         alpha = 1.0 - confidence_level
         if qhat_source == "true_class":
-            _diag_scores = true_class_scores
+            _diag_scores = cp_data["true_class_scores"]
         else:
-            _diag_scores = all_scores.flatten()
+            _diag_scores = cp_data["all_scores"].flatten()
         if qhat_quantile_direction == "alpha_lower":
             _diag_target = alpha * (1.0 + 1.0 / len(_diag_scores))
             _diag_q_hat = float(np.quantile(_diag_scores, _diag_target, method="lower"))
@@ -307,8 +420,9 @@ async def predict_calibrated_rows(
             _diag_target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(_diag_scores)))
             _diag_q_hat = float(np.quantile(_diag_scores, _diag_target, method="higher"))
         print(
-            f"[evaluate_classifier_calibration] qhat_source={qhat_source} "
-            f"q_hat={_diag_q_hat:.4f} population_size={len(_diag_scores)} "
+            f"[evaluate_classifier_calibration] calibration_source={calibration_source} "
+            f"qhat_source={qhat_source} "
+            f"q_hat={_diag_q_hat:.4f} n_cal={len(cp_data['true_class_scores'])} "
             f"set_construction={set_construction} "
             f"qhat_quantile_direction={qhat_quantile_direction}",
             file=sys.stderr,
@@ -327,10 +441,13 @@ async def predict_calibrated_rows(
         except ValueError:
             # No adapter files (e.g., Dense projection head model).
             pass
-        for row in dataset:
-            query_embedding = local_model.encode(row["query"], normalize_embeddings=True,
-                                                 show_progress_bar=False)
-            probabilities = classifier.predict_proba([query_embedding])[0]
+        for row_idx, row in enumerate(dataset):
+            if precomputed_eval_holdout is not None:
+                probabilities = precomputed_eval_holdout["probabilities"][row_idx].copy()
+            else:
+                query_embedding = local_model.encode(row["query"], normalize_embeddings=True,
+                                                     show_progress_bar=False)
+                probabilities = classifier.predict_proba([query_embedding])[0]
             # Apply post-hoc logit bias to education class
             if education_logit_bias != 0.0:
                 edu_idx = classes.index("education") if "education" in classes else -1
@@ -360,14 +477,19 @@ async def predict_calibrated_rows(
                 "confidence": float(probabilities[best_index]),
                 "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
             }
+            if holdout_split is not None:
+                row_dict["split"] = holdout_split[row_idx]
             if conformal_prediction:
                 row_dict["prediction_set"] = [classes[i] for i in pred_set]
                 row_dict["set_size"] = set_size
             rows.append(row_dict)
     else:
-        for row in dataset:
-            query_embedding = await ollama_client.embed(embedding_model, row["query"])
-            probabilities = classifier.predict_proba([query_embedding])[0]
+        for row_idx, row in enumerate(dataset):
+            if precomputed_eval_holdout is not None:
+                probabilities = precomputed_eval_holdout["probabilities"][row_idx].copy()
+            else:
+                query_embedding = await ollama_client.embed(embedding_model, row["query"])
+                probabilities = classifier.predict_proba([query_embedding])[0]
             # Apply post-hoc logit bias to education class
             if education_logit_bias != 0.0:
                 edu_idx = classes.index("education") if "education" in classes else -1
@@ -397,6 +519,8 @@ async def predict_calibrated_rows(
                 "confidence": float(probabilities[best_index]),
                 "probabilities": {domain: float(p) for domain, p in zip(classes, probabilities)},
             }
+            if holdout_split is not None:
+                row_dict["split"] = holdout_split[row_idx]
             if conformal_prediction:
                 row_dict["prediction_set"] = [classes[i] for i in pred_set]
                 row_dict["set_size"] = set_size
@@ -420,6 +544,8 @@ async def _run(
     qhat_source: str = "all",
     set_construction: str = "broken",
     qhat_quantile_direction: str = "upper",
+    calibration_source: str = "oof_train",
+    holdout_seed: int = 42,
 ) -> None:
     dataset = _read_jsonl(dataset_path)
     classifier = load_domain_classifier(classifier_path)
@@ -435,6 +561,8 @@ async def _run(
         qhat_source=qhat_source,
         set_construction=set_construction,
         qhat_quantile_direction=qhat_quantile_direction,
+        calibration_source=calibration_source,
+        holdout_seed=holdout_seed,
     )
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -529,6 +657,25 @@ def main() -> None:
              "prior behavior.",
     )
     parser.add_argument(
+        "--calibration-source",
+        choices=["oof_train", "eval_holdout"],
+        default="oof_train",
+        help="Where conformal calibration nonconformity scores come from: "
+             "'oof_train' (the original implementation: a fresh 5-fold OOF refit of "
+             "the base LogisticRegression over data/classifier_train.jsonl) or "
+             "'eval_holdout' (a stratified 50/50 split of --dataset itself, scored by "
+             "the SAME already-fitted classifier used for evaluation, restoring "
+             "calibration/evaluation score exchangeability per Iter72 investigation). "
+             "Default 'oof_train' preserves prior behavior.",
+    )
+    parser.add_argument(
+        "--holdout-seed",
+        type=int,
+        default=42,
+        help="random_state for the --calibration-source=eval_holdout stratified 50/50 "
+             "split (ignored for 'oof_train').",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write the calibrated-side JSONL to (default: stdout)",
@@ -553,6 +700,8 @@ def main() -> None:
                 qhat_source=args.qhat_source,
                 set_construction=args.set_construction,
                 qhat_quantile_direction=args.qhat_quantile_direction,
+                calibration_source=args.calibration_source,
+                holdout_seed=args.holdout_seed,
             )
         )
     else:
@@ -574,6 +723,8 @@ def main() -> None:
                     qhat_source=args.qhat_source,
                     set_construction=args.set_construction,
                     qhat_quantile_direction=args.qhat_quantile_direction,
+                    calibration_source=args.calibration_source,
+                    holdout_seed=args.holdout_seed,
                 )
             )
 

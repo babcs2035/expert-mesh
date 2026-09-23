@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 71,
-  "iteration_name": "conformal予測のq_hat分位点方向を補数スコアのα分位点へ修正して被覆保証を検証",
-  "phase": "reflect",
+  "iteration": 72,
+  "iteration_name": "conformal校正集合を評価データの層化ホールドアウトへ変更し交換可能性を回復して被覆を再測定",
+  "phase": "evaluate",
   "status": "running",
-  "current_lever": "conformal_qhat_quantile_direction",
-  "experiment_dir": "results/20260919_215923",
-  "experiment_deadline": 1789832364,
-  "updated_at": 1789806078,
-  "last_slack_ts": "1789823770.937619",
-  "iteration_thread_ts": "1789821897.781199",
+  "current_lever": "conformal_calibration_exchangeability",
+  "experiment_dir": "results/20260923_132431",
+  "experiment_deadline": 1790146765,
+  "updated_at": 1790138800,
+  "last_slack_ts": "1789824124.422319",
+  "iteration_thread_ts": "1790137129.795489",
   "notion_toggle_created": true,
-  "last_commit": "e6cfa67"
+  "last_commit": "224e520"
 }

@@ -936,7 +936,74 @@ levers:
             交換可能性自体は壊さないが，分類器が既見の行を含む点は結果の解釈に注記すること．
             **不成立の場合**: 交換可能性を揃えても被覆保証が成立しないなら，実装欠陥の列挙は打ち切り，
             『本データ・本分類器では conformal prediction の有効な動作点が存在しない』として
-            conformal 系列を閉じる判断を人間に諮る（MAPIE 等での追試を行うかを含めて）．"}
+            conformal 系列を閉じる判断を人間に諮る（MAPIE 等での追試を行うかを含めて）．
+            [2026-09-23 Iter72 reflector追記] **adopted 確定・本レバークローズ**．
+            主基準 coverage=0.940000（評価半 n=800，帯 0.88-0.95 の内側．二項 SE=0.008396 として
+            帯下限から +7.15 SE，帯上限まで -1.19 SE．Wilson 95%CI [0.92135,0.95445]）．
+            mean_set_size 9.66→5.52，q_hat 0.000980→0.051766（52.8 倍），ECE=0.076460（母集団が
+            変わるため判定には不使用）．非退行条件 1〜5 は全充足（`selected_domain` 完全一致，
+            `probabilities` 最大差 9.99e-16，set_size 1〜9，`--calibration-source oof_train` の
+            再実行が Iter71 出力と md5 一致 `575594c7a973fe615202485de7fe0a8f`，stderr に
+            `calibration_source=eval_holdout n_cal=800 q_hat=0.0518` の発火証拠）．
+            実測は事前シミュレーションの予測値（coverage 0.9400 / mss 5.521 / q_hat 0.051766）と
+            完全一致し，cross-fit も予測 0.9487 に対し実測 0.94875 と一致した．
+            **決定的な証拠**: 名目水準を振ると coverage が 0.974/0.940/0.915/0.865
+            （α=0.05/0.10/0.20/0.30）と**単調に応答する**．Iter71 では α=0.30 でも 0.9875 で
+            動かなかった．α が conformal の制御レバーとして初めて機能した．
+            **残る +4.0pt の過被覆は非ランダム化 APS の離散化に帰属**（校正半自身の coverage も
+            0.94875 で評価半とほぼ同量だけ名目を上回る＝交換可能性の残存破れではない．かつ
+            過被覆量が α とともに拡大する）．
+            **実装は revert せず維持**（既定 `oof_train` が後方互換 md5 を保つ．以降は
+            `--calibration-source eval_holdout --holdout-seed 42` を固定値として使う）．
+            **実用上の限界は被覆からサイズへ移った**: mean_set_size=5.52（10 ドメイン中 5.5 個）は
+            dispatch の絞り込みに使えず，set_size<=2 は 44/800（5.5%）のみ．次レバーは下記
+            `conformal_set_size_reduction`．"}
+
+  # --- 【2026-09-23 Iter72 reflector 新設 / backlog B108】conformal の被覆保証は Iter72 で
+  #     達成した（coverage=0.940）．残る実用上の障壁は mean_set_size=5.52 という集合の大きさ ---
+  - {name: conformal_set_size_reduction, values: [randomized_aps, raps_penalty],
+     note: "[2026-09-23 Iter72 reflector 新設 / backlog B108] Iter72 で split conformal の
+            交換可能性が回復し coverage=0.940000（名目 0.90，帯 0.88-0.95 内）が得られた一方，
+            mean_set_size=5.52（10 ドメイン中 5.5 個，set_size<=2 は 5.5% のみ）で，予測集合は
+            dispatch 先の絞り込みには大きすぎる．複合設問は 2 ドメインなので top-2 dispatch へ
+            流用するには set_size≈2 が要る．**被覆を帯に保ったまま集合サイズを縮めることが，
+            conformal を研究の本線（ルーティング）へ接続できるかを決める唯一の残り変数である**．
+            **randomized_aps（Iter73 の単一レバー）**: Romano et al. (2020) の APS は
+            非適合スコアに一様乱数 U を混ぜ，打ち切り位置のクラスを確率 U で含める／含めないと
+            決めることで被覆を名目へ厳密に一致させる．本実装は非ランダム化版であり，
+            Iter72 の分析で**残る +4.0pt の過被覆がこの離散化に帰属すること**が
+            （校正半 0.94875 と評価半 0.94000 の一致，および過被覆量の α 依存性から）特定済み．
+            したがって U 項を入れれば coverage は名目 0.90 近傍へ下がり，その分 mean_set_size も
+            縮むはずである．**変更は非適合スコアへの単一の U 項の追加のみ**で，分類器・埋め込み・
+            argmax・confidence・`config.yaml` は一切変えない．
+            **実装方針**: CLI に `--set-construction randomized_aps` を追加（既定
+            `corrected_aps` を温存し後方互換 md5 を保つ）．校正側スコアは
+            `S = 1 - cumsum + U * p_true`，評価側も同じ U 付き規則で打ち切る．
+            U は `--randomization-seed`（既定 42）で固定し再現性を確保する．
+            `--calibration-source eval_holdout --holdout-seed 42 --qhat-quantile-direction
+            alpha_lower --qhat-source true_class --confidence-level 0.90` は Iter72 の値に固定．
+            CLI の `--output` 有無 2 分岐**両方**への伝播は Iter69〜72 で 4 回警告された
+            落とし穴なので必ずチェックリスト化すること．また Iter72 で `UnboundLocalError` を
+            出した教訓から，**新分岐を足すときは既存分岐でのみ初期化される局所変数を洗い出す**こと．
+            **成功条件（planner が事前登録で確定）**: 主基準は coverage が 0.88 <= coverage <= 0.95
+            の帯に留まったまま mean_set_size が 5.52125 から有意に減少すること（減少幅の有意性は
+            対応ありの 800 行で評価する）．非退行は Iter72 と同型（`selected_domain` 完全一致・
+            `probabilities` 一致 1e-9・既定値での再実行が Iter72 出力と md5 一致・stderr 発火証拠）．
+            **ノイズ幅**: n=800・p≈0.90 で二項 SE≈0.0106．分割由来のばらつきが SE と同程度乗る
+            （Iter72 実測で 10 分割の coverage は 0.9375-0.9537）ため，seed は 42 に固定し
+            結果が帯外でも振り直して合格を探さないこと．
+            **raps_penalty（次点，randomized_aps の結果を見てから）**: Angelopoulos et al.
+            (arXiv:2009.14193) の RAPS はスコアへサイズ正則化項（k_reg 番目以降のクラスに
+            ペナルティ λ を加算）を足して集合を明示的に小さくする．**ハイパラが 2 個（k_reg, λ）
+            あり単一レバーの粒度として粗い**ため，まず randomized_aps で無償に得られる縮小分を
+            取り切り，それでも mean_set_size が実用域に届かない場合に残差へ当てる順序とする．
+            着手する場合は k_reg をルーティングの要求（<=2）から先に固定し，λ の 1 次元だけを
+            振ること．
+            **不成立の場合**（randomized_aps でも mean_set_size が実質的に縮まない，または
+            coverage が帯を割る）: 『本分類器の確率分布では，名目 0.90 の被覆を保ったまま
+            ルーティングに使える大きさの予測集合は作れない』という結論になるため，raps_penalty
+            へ進むか conformal 系列を閉じるかを人間に諮る（B104 A2 の実行時配線の可否と併せて）．
+            **コスト**: オフライン完結・分類器再訓練なし・実機ノード不使用．1 実行 5〜10 分．"}
 
   # --- 【3番目・要ユーザー確認】複合ドメイン compound_domain_set_recall の改善 ---
   - {name: dispatch_policy, values: [adaptive_confidence_gap],
