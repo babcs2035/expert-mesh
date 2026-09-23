@@ -1786,6 +1786,97 @@ levers:
             research_frontier 相当・人間判断），(ii) R-F（実行時経路への配線．11 反復目の見送り）．
             詳細は journal.md『### 計画 (Iter68)』・backlog B101/B102．"}
 
+  # --- 【2026-09-23 Iter76 調査フェーズ新設・backlog B113】停止条件 2（levers 使い切り→調査から
+  #     再探索）で追加した新レバー．conformal 系列（Iter69〜75）で得た予測集合を，dispatch の
+  #     絞り込み（Iter74 で不可能と確定）ではなく**棄権・人手エスカレーションの判定**へ転用できるか
+  #     を測る．B112 要レビュー (1)＝B104 A2 の人間判断に必要な数値を供給することが目的 ---
+  - {name: routing_abstention_signal, values: [conformal_set_size],
+     note: "[2026-09-23 Iter76 調査フェーズ / backlog B112・B113] **問題**: conformal 系列は
+            被覆保証（Iter72）と実行時分布での外的妥当性（Iter75）を得たが，mean_set_size=4.26 では
+            dispatch 先の絞り込みに使えないことが Iter74 で確定した（構成法の掃引全域で λ→0 が最小，
+            サイズ最適な LAC/THR でも名目 0.90 で 3.825 が床）．残る用途は『予測集合の大きさを
+            ルーティングの棄権（人手エスカレーション）判定に使う』であり，これは B104 A2 で
+            人間判断待ちの論点そのものである．
+            **先行研究**: Tayebati et al., 'Learning Conformal Abstention Policies for Adaptive
+            Risk Management in Large Language and Vision-Language Models', arXiv:2502.06884（2025）
+            が『予測集合サイズ >1 なら棄権』という conformal abstention を定式化している．評価は
+            選択的分類の標準枠組（Geifman & El-Yaniv, NeurIPS 2017 / 素の max softmax probability が
+            強い基準線であることは Hendrycks & Gimpel 2017 以来繰り返し報告されている）で，
+            指標は risk-coverage 曲線と AURC，および Traub et al., 'Overcoming Common Flaws in the
+            Evaluation of Selective Classification Systems', NeurIPS 2024, arXiv:2407.01032 が
+            提案する AUGRC（generalized risk）を用いる．
+            **単一レバー**: ルーティングの棄権スコアを `max_probability`（基準線＝実行時に既に
+            存在する confidence）→ `conformal_set_size`（Iter75 adopted 構成の予測集合サイズ）へ
+            変更する．動かすのはこの 1 点のみで，分類器・埋め込み・conformal の構成
+            （randomized_aps / eval_holdout seed42 / alpha_lower / true_class / 0.90 /
+            education_threshold 0.05）はすべて固定する．
+            **レバーを読むコード行と到達条件（過去 6 回の実装不成立を繰り返さないための必須事項）**:
+            新規スクリプト `scripts/evaluate_selective_routing.py` の `--abstention-signal`
+            （`{max_probability, conformal_set_size, margin, negative_entropy}`）を
+            スコア関数テーブルで引く 1 箇所．入力は Iter75 の出力
+            `results/20260923_161147/Iter75_variantA_edu005.jsonl`（`probabilities` /
+            `expected_domains` / `set_size` / `split` を全 1,600 行が持つ）．
+            到達条件は CLI 実行そのもの（既存コードの分岐に依存しない）．発火証拠は
+            `--abstention-signal` ごとに AURC/AUGRC が異なる値で出ること，および
+            set_size 分布が Iter75 実測 {1:24,2:72,3:144,4:194,5:207,6:115,7:43,8:1}（eval 半）と
+            一致すること．**実行時経路（`http_server.py` / `classifier.py` / `config.yaml`）は
+            一切変更しない**（配線の是非は B104 A2 の人間判断事項のまま）．
+            **事前シミュレーション（Iter76 調査フェーズで実測済み．本実行はこの再現確認である）**:
+            eval 半 n=800 で AURC は max_probability 0.218717 に対し conformal_set_size 0.252187，
+            AUGRC は 0.138450 に対し 0.153391．対応ありブートストラップ（B=10,000, seed 42）で
+            ΔAUGRC=+0.014941（95%CI [0.007923, 0.022549]，改善方向の確率 0.0001）．
+            **すなわち予測は『棄権信号としては conformal 集合サイズの方が有意に劣る』という反証**で
+            あり，Iter74 と同じく反証を事前登録して閉じるための実験である．
+            **同時に得る肯定的な成果**: 選択的ルーティング自体の risk-coverage を本研究で初めて
+            数値化する（max_probability で棄権 20% → ルーティング誤り 0.3950→0.3219，棄権 50% →
+            0.2200）．B104 A2 を人間へ諮る際の運用点の表になる．
+            **成功条件**: 主基準は eval 半 n=800 の AUGRC で conformal_set_size < max_probability，
+            対応ありブートストラップ 95%CI が 0 を跨がないこと（予測: FAIL）．副基準は
+            size<=k 閾値が到達する coverage に max_probability を揃えた対比較（discordant 行の
+            二項検定）．非退行は『rank_1（argmax）不変』＝定義上不変（棄権は選択を変えないため，
+            変化したら実装バグ）．
+            **コスト**: オフライン完結・埋め込み再計算なし・実機ノード不使用．実行 1 分未満．
+            **不成立（＝予測どおり劣る）の場合の解釈**: conformal を実行時経路へ配線する理由は
+            棄権用途にも無い（実行時に既にある confidence で足りる）ことになり，conformal 系列
+            （Iter69〜76）は『被覆保証は厳密に得たが本線のルーティングには接続しない』という
+            結論で閉じる．次に諮るべきは複合設問データセットの拡充（research_frontier 相当）．"}
+  - {name: routing_abstention_scorer, values: [learned_deferral_head],
+     note: "[2026-09-23 Iter76 考察フェーズ / backlog B114．停止条件 1（学びからの新レバー考案）]
+            **前提**: Iter76 で `routing_abstention_signal=conformal_set_size` は rejected
+            （eval 半 n=800 の AUGRC 0.153391 対 max_probability 0.138450，ΔAUGRC=+0.014941，
+            95%CI [0.007923, 0.022549]＝有意に劣る）．手組みの margin（+0.004042，有意に劣る）・
+            negative_entropy（+0.002047，判定不能）も基準線を上回らなかった．
+            **本レバーの仮説**: 集合サイズが劣った機序は『conformal であること』ではなく
+            『1〜8 の 8 段階という解像度の粗さ』（size<=4 と size<=5 の間で coverage が
+            0.5425→0.8013 へ飛び中間の運用点が無い．同点を max_probability で解くと
+            AUGRC が 0.145975 へ改善する）．そこで既存特徴（max_probability / margin /
+            negative_entropy / conformal set_size / 上位確率の形状）を**校正半 800 行だけで
+            学習した post-hoc スコア器**（ロジスティック回帰等の低容量モデル．目的変数は
+            `argmax in expected_domains` の誤り）で連続値へ束ね，基準線を上回るかを測る．
+            **単一レバー**: 棄権スコアの生成方法を `max_probability`（基準線）→
+            `learned_deferral_head` へ変更する 1 点のみ．入力 jsonl・正誤定義・split・
+            分類器・埋め込み・実行時経路はすべて Iter76 と同一に固定する．
+            **レバーを読むコード行と到達条件**: `scripts/evaluate_selective_routing.py` の
+            スコア関数テーブル `_SIGNALS` へ 1 エントリ追加し，`--abstention-signal
+            learned_deferral_head` で引く 1 箇所．到達条件は CLI 実行そのもの．
+            **必須の設計上の縛り（これを破ると測っているものが変わる）**: 学習は
+            `split == 'calibration'` の 800 行のみで行い，評価は `split == 'eval'` の 800 行で
+            行う（in-sample 評価は禁止．Iter76 の基準線 0.138450 と同一の 800 行上で比較する）．
+            **成功条件**: 主基準は eval 半 n=800 の AUGRC で learned_deferral_head <
+            max_probability かつ対応ありブートストラップ（B=10,000, seed 42）の ΔAUGRC 95%CI が
+            0 を跨がないこと．**Iter76 の教訓により符号まで事前登録すること**（CI が 0 を
+            跨がないだけでは合格条件にならない）．検出力は ΔAUGRC の SE≈0.0037 から
+            0.008 程度以上の効果なら検出できる．非退行は rank_1（argmax）不変＝定義上不変
+            （eval top1=0.605000 / 全体 0.597500 / argmax 一致 800/800・1,600/1,600）と，
+            coverage=1.0 の誤り率 0.3950 が全信号で一致すること．
+            **必ず事前シミュレーションで着地点を数値化してから本実行する**（Iter71 以降の慣行）．
+            学習型が n=800 の校正半で過学習して基準線に届かない可能性が高いことを踏まえ，
+            反証形での事前登録を推奨する．
+            **コスト**: オフライン完結・実機ノード不使用・埋め込み再計算なし・実行数分．
+            **不成立の場合**: 『棄権信号は実行時 confidence（temperature 較正済み MSP）で
+            足りる』が本リポジトリで確定し，選択的ルーティング系列も閉じる．その場合の次は
+            複合設問データセットの拡充（research_frontier 相当・人間判断）となる．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #

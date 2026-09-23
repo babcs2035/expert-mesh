@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 75,
-  "iteration_name": "conformal評価の入力分布を実行時と同一のeducation+0.05へ揃えて被覆保証の外的妥当性を検証する",
+  "iteration": 76,
+  "iteration_name": "conformal予測集合サイズを棄権信号に使う選択的ルーティングの価値を測る",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "conformal_runtime_distribution_alignment=education_threshold_0.05",
-  "experiment_dir": "results/20260923_161147",
-  "experiment_deadline": 1790154699,
-  "updated_at": 1790148328,
-  "last_slack_ts": "1790146297.654369",
-  "iteration_thread_ts": "1790147261.607309",
+  "current_lever": "routing_abstention_signal=conformal_set_size",
+  "experiment_dir": null,
+  "experiment_deadline": null,
+  "updated_at": 1790148899,
+  "last_slack_ts": "1790148438.132429",
+  "iteration_thread_ts": "1790148990.336639",
   "notion_toggle_created": true,
-  "last_commit": "6f7ee19"
+  "last_commit": "c5ddaac"
 }
