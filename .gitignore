@@ -25,3 +25,5 @@ config/embedding_whitening.json
 .claude/research/agent.json
 .claude/research/model_mode
 .claude/research/.watchdog_*
+.claude/research/.claude_turn_state
+.claude/research/.hook_debug.log

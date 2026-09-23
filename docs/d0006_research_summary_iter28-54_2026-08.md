@@ -21,6 +21,12 @@
 
 ## 1. 到達点（収束時点の構成と数値）
 
+> **[2026-09-23 追記] `classifier_head_adaptation`（education 固有の intercept_delta・threshold 補正）
+> は，ユーザーの恒久方針転換（backlog B115・B116）により撤去が決定した．精度が悪化しても
+> education だけを特別扱いする方向へは戻さない．下表・次項の数値は Iter54 時点の記録として
+> 保持するが，`classifier_head_adaptation` はもはや「採用された構成」ではない．詳細は
+> `docs/d0008_policy_change_and_next_directions_2026-09.md` を参照．**
+
 ### 採用された構成
 
 | 項目 | 値 | 確定したイテレーション |
@@ -28,11 +34,11 @@
 | `routing_method` | `supervised_classifier` | Iter17 |
 | `fallback_policy` | `disabled`（`confidence_threshold=0.0`） | Iter28 |
 | `classifier_calibration` | `temperature` | Iter31 |
-| `classifier_head_adaptation` | `education_boundary_tuning`（intercept_delta=+0.7）<br>＋ `per_class_threshold_optimization`（threshold=0.05） | Iter44 / Iter53 |
+| `classifier_head_adaptation`（**2026-09-23 撤去決定．B115/B116**） | `education_boundary_tuning`（intercept_delta=+0.7）<br>＋ `per_class_threshold_optimization`（threshold=0.05） | Iter44 / Iter53 |
 | `dispatch_top_k` | 2 | Iter45 |
 | `dispatch_candidate_threshold` | 0.0 | Iter45（新設） |
 | `aggregation_method` | `max_confidence` | Iter48（llm_judge 棄却により確定） |
-| embedding model | `nomic-embed-text`（freeze） | 全期間で固定 |
+| embedding model | `nomic-embed-text`（freeze．**2026-09-23 見直し検討中．B115** `embedding_model_replacement` 参照） | 全期間で固定 |
 
 ### 最終的な数値（評価データセット 1600 問）
 
@@ -157,7 +163,7 @@ distillation だけが 15% を下回る根拠がないためである．`status=
 | `classifier_training_data_composition` | 6 | **全値 rejected**（Iter32〜38） |
 | `class_weight_adjustment` | 1 | rejected（no-op，Iter39） |
 | `embedding_adaptation` | 4 | **全値 rejected**（Iter40〜43） |
-| `classifier_head_adaptation` | 5 | 3 adopted / 1 exhausted / 1 skip，**クローズ** |
+| `classifier_head_adaptation` | 5 | 3 adopted / 1 exhausted / 1 skip，クローズ．**→ 2026-09-23 撤去決定（B115/B116）．education_specific_correction_removal として次イテレーションで実施** |
 | `aggregation_method` | 3 | 全値試行済み，`max_confidence` adopted（Iter48） |
 
 ---

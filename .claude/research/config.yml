@@ -24,6 +24,42 @@ repo_name: expert-mesh
 # 積極的にフルスペックで実行する方針を貫くこと．事前シミュレーション（Iter71以降の慣行．
 # probabilitiesの再利用によるハイパラ掃引・着地点予測）は本実行の代替ではなく，本実行1点を
 # 絞り込むための事前登録手段に留める．
+# 【2026-09-23 ユーザー指示（恒久的な運用ルール．backlog B115）】(1) ドメイン固有の後付け
+# 補正（特定ドメインだけを狙い撃ちにした閾値・intercept・訓練データ調整等）は今後追加しない．
+# 既存の education 固有補正（intercept_delta=+0.7・education_threshold=0.05）は撤去し，
+# 10 ドメイン均一な扱いへ戻す（レバー education_specific_correction_removal）．
+# (2) ルーティングにおいて人間へ棄権・エスカレーションする方針は完全に廃止する．
+# routing_abstention_signal / routing_abstention_scorer 系のレバーは着手しない
+# （B104 A2 は完全クローズ）．conformal 系列（Iter69〜76）の被覆保証という成果自体は無効に
+# ならないが，実行時経路への配線（棄権用途）はこれ以上検討しない．
+# (3) その上で，全自動での top1_accuracy 向上を引き続き追求する．次の優先順位は
+# 複合評価集合の拡充（research_frontier 最上位） > 埋め込みモデルの差し替え検討
+# （embedding_model_replacement） > 全ドメイン共通ルールでの訓練データ拡充
+# （cross_domain_training_data_augmentation）．詳細な経緯・調査根拠は docs/d0008 参照．
+#
+# 【2026-09-23 ユーザー追加指示（backlog B116）】上記 B115 を次の 3 点で確定・拡張する．
+# (1) **education_specific_correction_removal は，撤去後に top1_accuracy が悪化しても
+# 特別扱いへ戻さない**．これは B115 で「要レビュー」としていた論点への回答である．
+# 悪化した場合でも撤去を維持し，弱いドメインへの手当ては（もし行うなら）10 ドメイン共通の
+# 枠組み（cross_domain_training_data_augmentation 等）でのみ検討する．精度悪化を理由に
+# education だけへ戻すことは今後一切しない．
+# (2) **データセット（複合設問に限らず，訓練・評価データ全般）を拡充する際は，まず
+# インターネット上に信頼性のある既存データセットが無いか調査（tavily-search 等）すること．
+# 適切なものが見つからない場合に限り LLM 生成へ切り替える**．人手作成
+# （`build_dataset.py:_COMPOUND_QUESTIONS` 方式）を唯一の選択肢として固定しない．
+# 出典・ライセンス・ドメインとの適合性を調査結果に明記すること．
+# (3) **embedding_model_replacement（config.yaml のスキーマ変更を伴う）は，本レバーに限り
+# 自律着手してよい**．着手前の追加のユーザー確認は不要（B115 で課していたゲートを解除する）．
+#
+# 【2026-09-23 ユーザー指示（絶対条件．research-cycle 全体に例外なく適用する）】
+# (A) **どのレバーであれ，変更を適用したら wafl500〜509 を用いた 1600 問のフルスペック本実験を
+# 必ず実施し，指標を計測・評価し続けること**．オフラインの事前シミュレーションや一部ノードだけの
+# 簡易確認で判定を確定させ，本実験を省略してはならない（2026-09-23 の既存ルールをさらに強め，
+# 「事前シミュレーション後」だけでなく「何らかの施策を適用した後は常に」本実験必須とする）．
+# (B) **単一 GPU で完結するサブ実験（合成データ生成，埋め込み計算，judge_model 呼び出し，
+# 分類器の訓練・評価等）は，wafl500 を含む実験ドメインノード（wafl500〜509）を絶対に使わず，
+# 必ず wafl-ctrl5 を用いること**．wafl500 は「依頼者兼任」で誤って使われやすいため明示的に
+# 禁止する．例外は認めない．
 tasks:
   setup:   "mise run setup"
   deploy:  "mise run deploy"
@@ -1841,7 +1877,13 @@ levers:
             （Iter69〜76）は『被覆保証は厳密に得たが本線のルーティングには接続しない』という
             結論で閉じる．次に諮るべきは複合設問データセットの拡充（research_frontier 相当）．"}
   - {name: routing_abstention_scorer, values: [learned_deferral_head],
-     note: "[2026-09-23 Iter76 考察フェーズ / backlog B114．停止条件 1（学びからの新レバー考案）]
+     note: "**[2026-09-23 backlog B115 によりクローズ．未着手のまま停止]** ユーザーが
+            『振り分けにおいて人間に頼る方針は完全に廃止する』と恒久指示したため，棄権・人手
+            エスカレーションを前提とする本レバーは目的を失った．Iter77 はこの調査フェーズで
+            停止していたが，本指示により実行しない．B104 A2（多ラベル/conformal の実行時経路への
+            配線＝棄権用途）は完全クローズとする．以下は Iter76 時点で考案されたレバー定義の
+            記録（歴史的経緯として保持，実行しない）．
+            [2026-09-23 Iter76 考察フェーズ / backlog B114．停止条件 1（学びからの新レバー考案）]
             **前提**: Iter76 で `routing_abstention_signal=conformal_set_size` は rejected
             （eval 半 n=800 の AUGRC 0.153391 対 max_probability 0.138450，ΔAUGRC=+0.014941，
             95%CI [0.007923, 0.022549]＝有意に劣る）．手組みの margin（+0.004042，有意に劣る）・
@@ -1877,6 +1919,88 @@ levers:
             足りる』が本リポジトリで確定し，選択的ルーティング系列も閉じる．その場合の次は
             複合設問データセットの拡充（research_frontier 相当・人間判断）となる．"}
 
+  # --- 【2026-09-23 backlog B115．ユーザーの恒久方針転換を受けて新設】(1) ドメイン固有の
+  #     後付け補正は今後追加しない・既存分は撤去して均一な扱いへ戻す，(2) 振り分けにおける
+  #     人間への棄権は完全に廃止する（B104 A2 クローズ・routing_abstention_* 系は上記のとおり
+  #     停止），(3) その上で全自動の top1_accuracy 向上を追求する，という 3 点が確定した．
+  #     以下 3 レバーは tavily-search による調査（docs/d0008 参照）を根拠に，ユーザー承認済みの
+  #     優先順位で追加する．いずれも「単一ドメインを狙い撃ちにしない」という制約の下で設計する ---
+  - {name: education_specific_correction_removal, values: [revert_intercept_delta_and_threshold],
+     note: "[2026-09-23 backlog B115] ユーザー指示により，education ドメインだけを狙い撃ちにした
+            後付け補正を撤去し，10 ドメイン均一な扱いへ戻す．対象は次の 2 点．
+            (a) `train_domain_classifier.py` の education 固有 `intercept_delta=+0.7`（Iter44
+            adopted，訓練時の decision boundary 調整）．
+            (b) `education_threshold=0.05`（Iter52/53 adopted．ただし backlog B88 により
+            実行時経路 `classifier.py:estimate_confidence_classifier()` には未反映と判明済み．
+            したがって実行時への影響は現状ゼロだが，オフライン評価スクリプト
+            `scripts/evaluate_classifier_calibration.py` 側の既定値・conformal 系列
+            （Iter69〜76）が参照する `--education-threshold 0.05` の扱いも合わせて見直す必要が
+            ある．conformal 系列は棄権用途がクローズしたため，この既定値を使う理由も消える）．
+            **[2026-09-23 backlog B116 で確定．再考の余地なし]** 撤去により education_recall は
+            Iter44/52/53 以前の水準（0.4059 付近）へ戻る可能性が高く，top1_accuracy 自体が
+            有意に悪化する可能性もある．**その場合でも撤去を維持し，education だけを特別扱いする
+            方向へは戻さない**．弱いドメインへの手当てを行うならば，10 ドメイン共通の枠組み
+            （下記 cross_domain_training_data_augmentation 等，全ドメイン同一パラメータで
+            適用するレバー）でのみ検討する．精度悪化は「実験結果として報告する」対象であり，
+            「撤去の是非を問い直す」対象ではない．rc-analyst はこの点を判定に混同しないこと．
+            **成功条件**: 撤去後，intercept_delta・threshold 加算が実行時経路のどこにも
+            残っていないことをコード上で確認する（grep で `intercept_delta`・
+            `education_threshold` の呼び出し箇所を洗い出し，全て除去済みであることを示す）．
+            非退行は他 9 ドメインの recall/precision が変化しないこと（定義上，education 以外の
+            訓練には触れないため恒等的に成立するはずだが，`class_weight='balanced'` は
+            全クラス相互依存のため実測で確認する．Iter32 の教訓を参照）．
+            **単一レバー原則との関係**: 分類器の再訓練を伴うため，本レバー 1 回の反復で
+            (a)(b) 両方をまとめて撤去し，1 回の実機比較で完了させる（個別に撤去すると
+            『どちらの撤去が top1 に効いたか』を切り分ける意味がなく，むしろ実機コストが
+            倍になるため）．"}
+  - {name: embedding_model_replacement, values: [qwen3_embedding_0.6b, qwen3_embedding_4b],
+     note: "[2026-09-23 backlog B115 / docs/d0008] 現行 `nomic-embed-text`（768次元，MTEB
+            multilingual 62.28）を，Ollama で配布されている既製の多言語埋め込みモデルへ
+            丸ごと差し替える．fine-tuning ではなくモデル差し替えのため，Iter39〜43
+            （SetFit/LoRA fine-tuning は argmax flip rate 過大で単一レバー原則と両立せず
+            rejected）とは異なる軸のレバーである．全ドメイン一律に効くため，ドメイン固有の
+            後付け補正ではない．
+            **候補（GPU 制約: wafl-ctrl5 は RTX 3060 12GB．ユーザー承認により 12GB で動く
+            小型モデルに絞って調査済み）**:
+            - `qwen3-embedding:0.6b`（639MB，MTEB multilingual 64.33）: 現行比 +2.05pt，
+              リスク最小．まずこちらで着手する．
+            - `qwen3-embedding:4b`（MTEB multilingual 69.45）: 現行比 +7.17pt，12GB に
+              十分収まる見込みだが，wafl-ctrl5 上の他プロセス（合成データ生成用 Ollama 等，
+              2026-09-19 ユーザー指示で同居）との VRAM 競合を実機で確認すること．
+            `qwen3-embedding:8b`（MTEB multilingual 70.58，Iter39〜43 世代の調査で見つかった
+            最上位）は量子化なし FP16 で 15GB 要求のため対象外（ユーザー判断により見送り）．
+            **単一レバー**: `router.py` / `expert_backend.py` / `http_server.py` が呼ぶ
+            embedding モデル名（現行 `nomic-embed-text:latest`）を config.yaml
+            `central_router.embed_model` 相当のフィールドで切り替える．**分類器の再訓練を伴う**
+            （埋め込み次元・分布が変わるため `models/domain_classifier.joblib` の作り直しが必要．
+            `data/classifier_train.jsonl` の埋め込み再計算も必要）．
+            **[2026-09-23 backlog B116] config.yaml のスキーマ変更を伴うが，本レバーに限り
+            ユーザーが事前承認済みであり，着手前の追加確認は不要（自律着手してよい）**．
+            **成功条件**: 1600 問本走で top1_accuracy が現行基準（0.595625 実機実測，Iter75
+            本走）を McNemar で有意に上回ること．非退行は per-domain 20 指標の BH 補正後有意
+            退行 0 件．
+            **コスト**: 中．埋め込み再計算・分類器再訓練はオフラインで完結するが，最終確認は
+            1600 問の実機本走（約 90〜150 分）を要する（2026-09-23 ユーザー指示により省略しない）．
+            出典: docs/d0008（Ollama embedding モデル比較，2026年）．"}
+  - {name: cross_domain_training_data_augmentation, values: [hard_negative_mining_all_domains],
+     note: "[2026-09-23 backlog B115 / docs/d0008] 訓練データの質向上を，education 等の特定
+            ドメインではなく **10 ドメイン全てに同一ルールを適用する**形で試みる．
+            Iter32 で判明した『`class_weight='balanced'` は `sample_weight` と数式レベルで
+            結合しており，1 ドメインだけ重みを操作すると他ドメインへ副作用が波及する』という
+            機序を踏まえ，**全ドメイン同時に同一の抽出・重み付けルールを適用する**ことで
+            この結合バグの影響を回避する（1 ドメインだけ動かす設計は再度同型の失敗を招くため
+            禁止）．
+            **具体的な手法（tavily-search で確認した定石）**: hard negative mining
+            （分類器が誤りやすい行＝他ドメインとの境界に近い行を優先的に訓練データへ追加する）．
+            `models/domain_classifier.joblib` の現行分類器で `data/classifier_train.jsonl`
+            全 1427 件の予測確信度を計算し，正解クラスの確率が低い（＝hard な）行を
+            各ドメイン同数ずつ追加抽出する．
+            **成功条件**: 次回の計画フェーズで具体化する（education だけを狙い撃ちにした過去の
+            resampling 系（Iter32〜34，rejected）とは異なり，全ドメイン均等の抽出のため，
+            education_recall 単体ではなく top1_accuracy 全体を主基準とすること）．
+            **単一レバー原則との関係**: 抽出ルールを 1 つ決めたら，全ドメインへ同一パラメータ
+            （追加件数・閾値）で適用し，ドメインごとにパラメータを変えない．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #
@@ -1884,6 +2008,29 @@ levers:
 # ところ，項目1・3は既にコード実装済みであり，本節の記述が古いだけだったと判明した（backlog B44参照）．
 # 各項目に現状を注記する．
 research_frontier:
+  - "[2026-09-23 backlog B104 A1・B115 でユーザー承認．**優先度最上位**] 複合設問評価集合
+     （現状 100 行）の拡充．Iter63〜68 の 6 反復が『判定不能（検出力不足）』で終わった真因は
+     レバー側ではなく測定系そのもの（discordant 15〜19 行では ±3〜4 行を検出できない．R-H）．
+     これを解消しない限り，今後どの複合ドメイン改善策を試しても同型の判定不能が繰り返される．
+     **[2026-09-23 backlog B116 でデータ調達方針を確定]** 新規複合設問（および今後データセットを
+     拡充する場面全般）の作成方法は次の優先順位で決める．
+     **(i) まずインターネット上に信頼性のあるデータセットが既に存在しないか tavily-search 等で
+     調査すること**（例: 複数ドメインにまたがる日本語の実務相談・司法試験過去問・医事法制の
+     判例解説等，2 ドメイン同時に問う既存の公開データセット・ベンチマークが無いか）．出典の
+     信頼性（発行元，ライセンス，本研究の 10 ドメイン定義との適合性）を調査結果に明記すること．
+     **(ii) 適切な既存データセットが見つからない場合に限り LLM 生成へ切り替える**．
+     その際は rank_2 の合成訓練データ生成器と生成器を共有しない（循環的な妥当性の問題を
+     避けるため，生成モデル・プロンプトを分離する）．
+     **(iii) 人手作成（`build_dataset.py:_COMPOUND_QUESTIONS` 方式）は (i)(ii) が両方とも
+     不成立の場合の最終手段とする**（唯一の選択肢として固定しない）．
+     **着手前に決めること（未解決のまま）**:
+     (1) 上記 (i)〜(iii) のどれに該当するかの調査結果，
+     (2) 目標件数（検出力の目安: 二項検定で ±3〜4 行の変化を有意と判定するには概ね n=300〜400
+     以上が必要），
+     (3) 拡充は 1,600 問基準線との比較可能性を壊すため，過去の全基準線（Iter28 以降）を実機で
+     再取得するコスト（1 回あたり約 90〜150 分）を許容するか．
+     ユーザーは本件を優先度 1 として承認済み．次の research-cycle 反復の調査フェーズで
+     (1)〜(3) を具体化し，計画フェーズへ進めること．"
   - "[完了・2026-07-30確認] 新規専門ドメインの追加: 192.168.15.100〜109（最大10台）を使い，Iter18（E10
      domain_lora 採用）で10ドメイン全て稼働中（general/education/legal/medical/business_economics/
      computer_science/natural_science/mathematics/history_culture/social_science，wafl500〜509）．
