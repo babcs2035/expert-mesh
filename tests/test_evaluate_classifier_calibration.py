@@ -33,6 +33,15 @@ different models, violating the exchangeability assumption split conformal requi
 The Iter72 tests below verify the new `calibration_source` argument actually reaches
 `predict_calibrated_rows()` and produces a stratified 50/50 calibration/evaluation
 split scored by the SAME classifier used for evaluation.
+
+Regression guard against the Iter72 residual over-coverage bug (diagnosed Iter73):
+the non-randomized "corrected_aps" construction implicitly mixes a calibration-side
+score computed as if u=0 with an evaluation-side rule equivalent to u=1, always
+admitting the crossing class wholesale. The Iter73 tests below verify the new
+`set_construction="randomized_aps"` argument (a) reduces to "corrected_aps" at
+randomization_u=1.0, (b) is monotonically non-increasing in randomization_u,
+(c)/(d) rejects a missing u and an incompatible calibration_source rather than
+silently falling back, and (e) is reproducible for a fixed randomization_seed.
 """
 
 import asyncio
@@ -477,3 +486,110 @@ def test_calibration_source_eval_holdout_rejects_qhat_source_all() -> None:
                 qhat_source="all",
             )
         )
+
+
+# --- Iter73: set_construction="randomized_aps" (Romano et al., 2020 U-term) -----
+
+# Reuse the Iter70 5-class toy input/cp_data (q_hat fixed at 0.15 by construction).
+
+
+def test_randomized_aps_at_u_1_matches_corrected_aps() -> None:
+    """randomization_u=1.0 must reproduce 'corrected_aps' exactly for any input.
+
+    Both constructions reduce algebraically to "1 - cumsum_before_idx >= q_hat"
+    at u=1 (see scripts/evaluate_classifier_calibration.py's _compute_prediction_set
+    docstring); this is the u=1 equivalence the Iter73 plan registered as the
+    primary correctness check for the new branch.
+    """
+    pred_set_corrected, size_corrected = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="corrected_aps",
+    )
+    pred_set_randomized, size_randomized = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="randomized_aps",
+        randomization_u=1.0,
+    )
+    assert pred_set_randomized == pred_set_corrected
+    assert size_randomized == size_corrected
+
+
+def test_randomized_aps_at_u_0_is_smaller_or_equal_to_u_1() -> None:
+    """Set size must be monotonically non-increasing in randomization_u.
+
+    Lowering u drops the `+ u*probabilities[idx]` slack term from the crossing
+    class's score, making the >= q_hat append condition strictly harder to
+    satisfy, so the resulting prediction set can only shrink or stay the same.
+    """
+    _, size_u0 = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="randomized_aps",
+        randomization_u=0.0,
+    )
+    _, size_u1 = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="randomized_aps",
+        randomization_u=1.0,
+    )
+    assert size_u0 <= size_u1
+
+
+def test_randomized_aps_requires_randomization_u() -> None:
+    """Omitting randomization_u must raise, not silently fall back to a fixed u."""
+    with pytest.raises(ValueError):
+        _compute_prediction_set(
+            _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+            qhat_source="true_class", set_construction="randomized_aps",
+        )
+
+
+def test_randomized_aps_rejects_oof_train_calibration_source() -> None:
+    """randomized_aps requires calibration_source='eval_holdout' (shared row-indexed u).
+
+    'oof_train' calibrates over a separate dataset (classifier_train.jsonl) with
+    no shared row indexing against the evaluation dataset, so the same u cannot
+    be applied on both sides; this must raise rather than silently using a
+    mismatched u.
+    """
+    with pytest.raises(ValueError):
+        asyncio.run(
+            predict_calibrated_rows(
+                _make_iter72_ollama_client(), "fake-embed-model",
+                _make_iter72_classifier(), _ITER72_DATASET,
+                conformal_prediction=True, calibration_source="oof_train",
+                calibration_dataset_path=None,
+                qhat_source="true_class", set_construction="randomized_aps",
+            )
+        )
+
+
+def test_randomized_aps_is_reproducible_for_same_randomization_seed() -> None:
+    """The same randomization_seed must produce identical prediction sets across runs."""
+    kwargs = dict(
+        conformal_prediction=True, confidence_level=0.90,
+        qhat_source="true_class", set_construction="randomized_aps",
+        calibration_source="eval_holdout", holdout_seed=42, randomization_seed=7,
+    )
+    rows_a = asyncio.run(
+        predict_calibrated_rows(
+            _make_iter72_ollama_client(), "fake-embed-model",
+            _make_iter72_classifier(), _ITER72_DATASET, **kwargs,
+        )
+    )
+    rows_b = asyncio.run(
+        predict_calibrated_rows(
+            _make_iter72_ollama_client(), "fake-embed-model",
+            _make_iter72_classifier(), _ITER72_DATASET, **kwargs,
+        )
+    )
+    assert [r["prediction_set"] for r in rows_a] == [r["prediction_set"] for r in rows_b]
+    assert [r["set_size"] for r in rows_a] == [r["set_size"] for r in rows_b]
+
+
+def test_set_construction_default_still_broken_with_randomized_aps_added() -> None:
+    """Adding the 'randomized_aps' choice must not disturb the 'broken' default."""
+    pred_set_default, size_default = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90, qhat_source="true_class"
+    )
+    assert pred_set_default == [0]
+    assert size_default == 1

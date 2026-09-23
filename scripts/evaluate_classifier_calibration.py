@@ -70,6 +70,7 @@ def _compute_prediction_set(
     qhat_source: str = "all",
     set_construction: str = "broken",
     qhat_quantile_direction: str = "upper",
+    randomization_u: float | None = None,
 ) -> tuple[list[int], int]:
     """Compute a conformal prediction set using cumulative APS method.
 
@@ -106,6 +107,19 @@ def _compute_prediction_set(
       The top class (rank 1) is therefore always included, and intermediate
       set sizes occur whenever the desired coverage mass falls strictly
       between two classes' cumulative probabilities.
+    - "randomized_aps": the RANDOMIZED APS construction (Romano, Sesia &
+      Candès, 2020, arXiv:2006.02544). Requires `randomization_u` (a single
+      uniform draw shared by the calibration score for this row and this
+      prediction-set computation; see predict_calibrated_rows()'s
+      `randomization_seed`). A class is appended to the prediction set while
+      `1 - cumsum + randomization_u * probabilities[idx] >= q_hat` holds; the
+      first class for which this fails is NOT appended and the loop breaks
+      (unlike "corrected_aps", which always appends the crossing class).
+      This removes the +4.0pt over-coverage the non-randomized "corrected_aps"
+      construction exhibited (Iter72 investigation), by letting the
+      threshold-crossing class be included only with probability
+      proportional to how much of its probability mass is needed to reach
+      the coverage mass, instead of being included wholesale.
 
     qhat_quantile_direction controls which side of the nonconformity score
     population q_hat is drawn from, per the finite-sample-corrected quantile
@@ -126,13 +140,29 @@ def _compute_prediction_set(
       to draw q_hat from when the score is the complement (1 - cumsum), as
       implemented in this repo.
 
+    randomization_u is the single uniform draw required by
+    set_construction="randomized_aps" (ignored otherwise). It must be the
+    SAME value used to compute this row's calibration true-class score
+    (predict_calibrated_rows()'s randomization_seed-derived u), so that the
+    calibration and evaluation halves apply the identical randomized rule
+    (Romano et al., 2020) rather than the mismatched u=0/u=1 combination the
+    non-randomized "corrected_aps" construction implicitly uses (Iter73
+    investigation Q2).
+
     Returns (list of class indices in prediction set, set size).
     """
     if qhat_source not in ("all", "true_class"):
         raise ValueError(f"qhat_source must be 'all' or 'true_class', got {qhat_source!r}")
-    if set_construction not in ("broken", "corrected_aps"):
+    if set_construction not in ("broken", "corrected_aps", "randomized_aps"):
         raise ValueError(
-            f"set_construction must be 'broken' or 'corrected_aps', got {set_construction!r}"
+            f"set_construction must be 'broken', 'corrected_aps', or 'randomized_aps', "
+            f"got {set_construction!r}"
+        )
+    if set_construction == "randomized_aps" and randomization_u is None:
+        raise ValueError(
+            "set_construction='randomized_aps' requires randomization_u (a uniform "
+            "draw shared with the calibration score); refusing to silently fall back "
+            "to a non-randomized rule."
         )
     if qhat_quantile_direction not in ("upper", "alpha_lower"):
         raise ValueError(
@@ -168,6 +198,23 @@ def _compute_prediction_set(
             score = 1.0 - cumsum
             if score <= q_hat:
                 break
+    elif set_construction == "randomized_aps":
+        # Randomized APS (Romano et al., 2020): class idx is appended only
+        # while `1 - cumsum + u*probabilities[idx] >= q_hat` holds (cumsum
+        # updated INCLUSIVE of idx before the check, same update order as
+        # "corrected_aps"); the first class for which this fails is NOT
+        # appended and the loop breaks there. At randomization_u=1.0 this is
+        # algebraically identical to "corrected_aps" for any input (both
+        # reduce to "1 - cumsum_before_idx >= q_hat"); at randomization_u=0.0
+        # it matches the non-randomized true-class calibration score
+        # (1 - cumsum, no u term), so u interpolates between the two.
+        for idx in sorted_indices:
+            cumsum += probabilities[idx]
+            score = 1.0 - cumsum + randomization_u * probabilities[idx]
+            if score >= q_hat:
+                pred_set.append(int(idx))
+            else:
+                break
     else:  # "broken": pre-Iter70 behavior, kept verbatim for reproducibility
         for idx in sorted_indices:
             cumsum += probabilities[idx]
@@ -200,6 +247,7 @@ async def predict_calibrated_rows(
     qhat_quantile_direction: str = "upper",
     calibration_source: str = "oof_train",
     holdout_seed: int = 42,
+    randomization_seed: int = 42,
 ) -> list[dict]:
     """Recompute (selected_domain, confidence) for every dataset row via the calibrated classifier.
 
@@ -223,6 +271,16 @@ async def predict_calibrated_rows(
       a different, unfitted model than the evaluation scores; Iter72
       investigation Q1) at the cost of halving the evaluation population that
       contributes to the final coverage/mean_set_size aggregates.
+
+    randomization_seed (Iter73 investigation) seeds the per-dataset-row
+    uniform draws `u_all = np.random.default_rng(randomization_seed).random(
+    len(dataset))` used by set_construction="randomized_aps". The SAME u_all
+    (indexed by dataset row position) is used for both the calibration
+    true-class score (only for calibration_source="eval_holdout", the sole
+    supported combination -- see the ValueError below) and the evaluation
+    row's prediction-set construction, per Romano et al. (2020)'s requirement
+    that calibration and test share the same u. Ignored for any other
+    set_construction value.
     """
     from sentence_transformers import SentenceTransformer
 
@@ -233,6 +291,14 @@ async def predict_calibrated_rows(
         raise ValueError(
             f"calibration_source must be 'oof_train' or 'eval_holdout', "
             f"got {calibration_source!r}"
+        )
+    if set_construction == "randomized_aps" and calibration_source != "eval_holdout":
+        raise ValueError(
+            "set_construction='randomized_aps' requires calibration_source="
+            "'eval_holdout': the calibration and evaluation halves must share "
+            "dataset row indices so the same per-row uniform draw u can be applied "
+            "on both sides (Iter73 plan); 'oof_train' calibrates over a separate "
+            "dataset (classifier_train.jsonl) with no such shared indexing."
         )
 
     # Pre-compute conformal prediction calibration data (APS method).
@@ -245,6 +311,7 @@ async def predict_calibrated_rows(
     cp_data: dict | None = None
     holdout_split: dict[int, str] | None = None  # dataset row index -> "cal" | "eval"
     precomputed_eval_holdout: dict | None = None  # set below only for calibration_source="eval_holdout"
+    u_all: np.ndarray | None = None  # set below only for set_construction="randomized_aps"
     if conformal_prediction and calibration_source == "oof_train":
         cal_dataset = _read_jsonl(calibration_dataset_path)  # type: ignore[arg-type]
         n_cal = len(cal_dataset)
@@ -372,6 +439,14 @@ async def predict_calibrated_rows(
         for i in eval_idx:
             holdout_split[int(i)] = "eval"
 
+        # For set_construction="randomized_aps" (Iter73), draw one uniform
+        # value per dataset row (dataset order, not cal/eval order) so the
+        # SAME u is used for a row's calibration true-class score below and
+        # its evaluation prediction-set construction further down (Romano et
+        # al., 2020's requirement that calibration and test share u).
+        if set_construction == "randomized_aps":
+            u_all = np.random.default_rng(randomization_seed).random(n_eval)
+
         true_class_scores = np.zeros(len(cal_idx))
         for pos, i in enumerate(cal_idx):
             probs = all_probs[i]
@@ -380,7 +455,10 @@ async def predict_calibrated_rows(
             for idx in sorted_idx:
                 cumsum += probs[idx]
                 if idx == eval_labels[i]:
-                    true_class_scores[pos] = 1.0 - cumsum
+                    if set_construction == "randomized_aps":
+                        true_class_scores[pos] = 1.0 - cumsum + u_all[i] * probs[idx]
+                    else:
+                        true_class_scores[pos] = 1.0 - cumsum
                     break
 
         n_cal = len(cal_idx)
@@ -424,7 +502,8 @@ async def predict_calibrated_rows(
             f"qhat_source={qhat_source} "
             f"q_hat={_diag_q_hat:.4f} n_cal={len(cp_data['true_class_scores'])} "
             f"set_construction={set_construction} "
-            f"qhat_quantile_direction={qhat_quantile_direction}",
+            f"qhat_quantile_direction={qhat_quantile_direction} "
+            f"randomization_seed={randomization_seed}",
             file=sys.stderr,
         )
 
@@ -468,6 +547,7 @@ async def predict_calibrated_rows(
                     probabilities, cp_data, confidence_level,
                     qhat_source=qhat_source, set_construction=set_construction,
                     qhat_quantile_direction=qhat_quantile_direction,
+                    randomization_u=(u_all[row_idx] if u_all is not None else None),
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -510,6 +590,7 @@ async def predict_calibrated_rows(
                     probabilities, cp_data, confidence_level,
                     qhat_source=qhat_source, set_construction=set_construction,
                     qhat_quantile_direction=qhat_quantile_direction,
+                    randomization_u=(u_all[row_idx] if u_all is not None else None),
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -546,6 +627,7 @@ async def _run(
     qhat_quantile_direction: str = "upper",
     calibration_source: str = "oof_train",
     holdout_seed: int = 42,
+    randomization_seed: int = 42,
 ) -> None:
     dataset = _read_jsonl(dataset_path)
     classifier = load_domain_classifier(classifier_path)
@@ -563,6 +645,7 @@ async def _run(
         qhat_quantile_direction=qhat_quantile_direction,
         calibration_source=calibration_source,
         holdout_seed=holdout_seed,
+        randomization_seed=randomization_seed,
     )
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -637,14 +720,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--set-construction",
-        choices=["broken", "corrected_aps"],
+        choices=["broken", "corrected_aps", "randomized_aps"],
         default="broken",
         help="Prediction set construction rule: 'broken' (pre-Iter70 implementation, "
              "append happens after the break check and collapses to a binary "
-             "1-p_max<=q_hat gate) or 'corrected_aps' (standard APS: append happens "
-             "before the break check, so classes are greedily added until cumulative "
-             "probability reaches the coverage mass). Default 'broken' preserves prior "
-             "behavior.",
+             "1-p_max<=q_hat gate), 'corrected_aps' (standard non-randomized APS: "
+             "append happens before the break check, so classes are greedily added "
+             "until cumulative probability reaches the coverage mass), or "
+             "'randomized_aps' (Romano et al., 2020: same as corrected_aps but mixes "
+             "in a per-row uniform draw u so the crossing class is included only "
+             "fractionally, removing corrected_aps's structural over-coverage; "
+             "requires --calibration-source eval_holdout, see --randomization-seed). "
+             "Default 'broken' preserves prior behavior.",
     )
     parser.add_argument(
         "--qhat-quantile-direction",
@@ -676,6 +763,13 @@ def main() -> None:
              "split (ignored for 'oof_train').",
     )
     parser.add_argument(
+        "--randomization-seed",
+        type=int,
+        default=42,
+        help="Seed for the per-dataset-row uniform draws used by "
+             "--set-construction randomized_aps (ignored otherwise).",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write the calibrated-side JSONL to (default: stdout)",
@@ -702,6 +796,7 @@ def main() -> None:
                 qhat_quantile_direction=args.qhat_quantile_direction,
                 calibration_source=args.calibration_source,
                 holdout_seed=args.holdout_seed,
+                randomization_seed=args.randomization_seed,
             )
         )
     else:
@@ -725,6 +820,7 @@ def main() -> None:
                     qhat_quantile_direction=args.qhat_quantile_direction,
                     calibration_source=args.calibration_source,
                     holdout_seed=args.holdout_seed,
+                    randomization_seed=args.randomization_seed,
                 )
             )
 

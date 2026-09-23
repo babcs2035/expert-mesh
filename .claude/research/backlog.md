@@ -15,6 +15,14 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B109 [auto-decided 2026-09-23] Iter73 は adopted 確定（coverage=0.90375・mean_set_size=4.00125）．Iter74 の単一レバーは `conformal_set_size_reduction=raps_penalty`
+
+- **状況**: Iter73（`conformal_set_size_reduction=randomized_aps`）は事前登録の主基準 2 つ（coverage が 0.88-0.95 の帯内／mean_set_size が 5.52125 から有意に減少）と非退行 6 項目をすべて満たした．レバー `conformal_set_size_reduction` には未試行値 `raps_penalty` が残っており，levers 使い切りではないため新レバー考案・再探索は不要．次の単一レバーを選ぶだけの可逆な判断である．
+- **自動選択**: Iter74 の単一レバーを **`conformal_set_size_reduction=raps_penalty`** とする．`iteration_name` は **「conformal予測集合へRAPSのサイズ正則化を導入し被覆を保ったまま集合サイズを2近傍へ縮める」**．実施時の制約を 3 点付す．(1) ハイパラは 2 個あるので **k_reg はルーティング要求から 2 に先に固定し λ の 1 次元だけを振る**（config の lever note に記載済み）．(2) λ は Iter72/73 出力の `probabilities` から事前シミュレーションで掃引し，**本実行は 1 点に絞って事前登録**する（Iter71 以降 3 反復連続で実測と一致している手順）．(3) 付随報告に**複合設問 46 行の 2 ドメイン同時被覆を必ず含める**．
+- **根拠**: 不整合解消＋ランダム化で無償に得られる縮小分は Iter73 で取り切った（5.52 → 4.00，増加行 0）が，dispatch への流用に要る mean_set_size ≈ 2 には届かない．残差へ明示的なサイズ正則化を当てる順序は B108／config の note で事前登録した方針そのままであり，変更する理由がない．制約 (3) を足したのは，Iter73 で複合設問の 2 ドメイン同時被覆が 0.478 → 0.283 へ下がったという新しい観測（conformal の保証は第 1 ドメインの周辺被覆のみで，多ラベル同時被覆は保証外）があり，さらなる縮小がこの量を犠牲にする公算が高いためである．
+- **要レビュー**: 「集合サイズをさらに縮める」方向自体の妥当性．Iter73 の分析 5 のとおり，予測集合を top-k dispatch へ流用する構想は conformal が保証している量（第 1 ドメインの周辺被覆）と目的（2 ドメイン同時網羅）がずれている．raps_penalty で size≈2 を達成しても複合設問の同時被覆は下がる見込みで，その場合 conformal 系列は「被覆保証は得たが本線のルーティングには接続しない」という結論で閉じる判断があり得る．却下する場合はこの項目を編集し，raps_penalty をスキップして conformal 系列をクローズする旨に差し替えること．
+- **人間判断の持ち越し（今回も未回答のまま維持）**: B104 A2（conformal を実行時経路へ配線するか）・B104 A1（複合評価集合 n の検出力）．Iter73 では mean_set_size=4.00 で依然 dispatch に使えないため，配線の是非は raps_penalty の結果を見てから諮る．今回 @mention は行っていない．
+
 ## B108 [auto-decided 2026-09-23] Iter72 は adopted 確定（coverage=0.940 で帯内）・`conformal_calibration_exchangeability` クローズ．新レバー `conformal_set_size_reduction=[randomized_aps, raps_penalty]` を config へ追加し Iter73 の単一レバーを `randomized_aps` とする
 
 - **状況**: Iter72（`conformal_calibration_exchangeability=eval_holdout`）は主基準

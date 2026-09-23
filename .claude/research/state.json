@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 72,
-  "iteration_name": "conformal校正集合を評価データの層化ホールドアウトへ変更し交換可能性を回復して被覆を再測定",
-  "phase": "evaluate",
+  "iteration": 73,
+  "iteration_name": "conformal予測集合にランダム化APSを導入し被覆を保ったまま集合サイズを縮小する",
+  "phase": "reflect",
   "status": "running",
-  "current_lever": "conformal_calibration_exchangeability",
-  "experiment_dir": "results/20260923_132431",
-  "experiment_deadline": 1790146765,
-  "updated_at": 1790138800,
-  "last_slack_ts": "1789824124.422319",
-  "iteration_thread_ts": "1790137129.795489",
+  "current_lever": "conformal_set_size_reduction=randomized_aps",
+  "experiment_dir": "results/20260923_135653",
+  "experiment_deadline": 1790148713,
+  "updated_at": 1790140101,
+  "last_slack_ts": "1790139803.172009",
+  "iteration_thread_ts": "1790138919.678079",
   "notion_toggle_created": true,
-  "last_commit": "224e520"
+  "last_commit": "c87287e"
 }
