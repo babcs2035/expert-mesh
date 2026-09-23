@@ -474,6 +474,19 @@ async def predict_calibrated_rows(
                 )
         all_embeddings = np.array(all_embeddings)
         all_probs = classifier.predict_proba(all_embeddings)
+        # Apply the education per-class threshold here, once, so it reaches
+        # BOTH the calibration true-class scores below AND the evaluation
+        # probabilities cached into precomputed_eval_holdout. Previously this
+        # correction was applied only in the per-row evaluation loop further
+        # down, which broke exchangeability between calibration and
+        # evaluation scores under calibration_source="eval_holdout" (Iter75
+        # investigation Q1). The per-row loop below skips re-applying
+        # education_threshold whenever precomputed_eval_holdout is set, to
+        # avoid double-counting (+0.10 instead of +0.05).
+        if education_threshold > 0.0:
+            edu_idx = classes.index("education") if "education" in classes else -1
+            if edu_idx >= 0:
+                all_probs[:, edu_idx] += education_threshold
 
         splitter = StratifiedShuffleSplit(
             n_splits=1, test_size=0.5, random_state=holdout_seed
@@ -559,7 +572,8 @@ async def predict_calibrated_rows(
             f"set_construction={set_construction} "
             f"qhat_quantile_direction={qhat_quantile_direction} "
             f"randomization_seed={randomization_seed} "
-            f"raps_lambda={raps_lambda} raps_k_reg={raps_k_reg}",
+            f"raps_lambda={raps_lambda} raps_k_reg={raps_k_reg} "
+            f"education_threshold={education_threshold}",
             file=sys.stderr,
         )
 
@@ -592,8 +606,13 @@ async def predict_calibrated_rows(
                     logits_max = np.max(logits)
                     exp_logits = np.exp(logits - logits_max)
                     probabilities = exp_logits / np.sum(exp_logits)
-            # Apply per-class threshold to education class (lowers decision boundary)
-            if education_threshold > 0.0:
+            # Apply per-class threshold to education class (lowers decision boundary).
+            # Skipped here when precomputed_eval_holdout supplied the probabilities,
+            # because that path already applied education_threshold once at L476-489
+            # (Iter75): re-applying it here would double-count it (+0.10 instead of
+            # +0.05) and, worse, leave the calibration true-class scores using the
+            # uncorrected distribution while evaluation used the corrected one.
+            if education_threshold > 0.0 and precomputed_eval_holdout is None:
                 edu_idx = classes.index("education") if "education" in classes else -1
                 if edu_idx >= 0:
                     probabilities[edu_idx] += education_threshold
@@ -636,8 +655,13 @@ async def predict_calibrated_rows(
                     logits_max = np.max(logits)
                     exp_logits = np.exp(logits - logits_max)
                     probabilities = exp_logits / np.sum(exp_logits)
-            # Apply per-class threshold to education class (lowers decision boundary)
-            if education_threshold > 0.0:
+            # Apply per-class threshold to education class (lowers decision boundary).
+            # Skipped here when precomputed_eval_holdout supplied the probabilities,
+            # because that path already applied education_threshold once at L476-489
+            # (Iter75): re-applying it here would double-count it (+0.10 instead of
+            # +0.05) and, worse, leave the calibration true-class scores using the
+            # uncorrected distribution while evaluation used the corrected one.
+            if education_threshold > 0.0 and precomputed_eval_holdout is None:
                 edu_idx = classes.index("education") if "education" in classes else -1
                 if edu_idx >= 0:
                     probabilities[edu_idx] += education_threshold

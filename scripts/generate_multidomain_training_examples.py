@@ -26,12 +26,15 @@ which is a post-hoc near-duplicate detector, not a selector that
 influences what gets generated or kept; the import for it is local to
 _audit_leak() so it never executes during normal generation.
 
-Usage (module mode; requires a live ollama node, e.g. via
-`ssh -fNT -L 11435:localhost:11434 wafl500`):
+Usage (module mode; requires a live ollama node. This is auxiliary
+(non-main-experiment) LLM generation traffic, so per config.yml's
+permanent operating rule it must go through the control host wafl-ctrl5,
+not a domain node -- e.g. via
+`ssh -fNT -L 11499:localhost:11434 wafl-ctrl5`):
     uv run python -m scripts.generate_multidomain_training_examples \\
         --train-data data/classifier_train.jsonl \\
         --model schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m \\
-        --ollama-host 127.0.0.1 --ollama-port 11435 \\
+        --ollama-host 127.0.0.1 --ollama-port 11499 \\
         --per-pair 3 --per-pair-legal 5 \\
         --output data/classifier_train_multidomain.jsonl
 

@@ -63,14 +63,16 @@ No LLM generation, probe, or dispatch traffic is produced. An embedding
 cache (--embedding-cache, an .npz keyed by row id) avoids re-embedding all
 1600 rows on repeated invocations while iterating on this script.
 
-Usage (module mode; requires a live ollama node reachable for embeddings,
-e.g. via the project's standard SSH local port forward,
-`ssh -fNT -L 11435:localhost:11434 wafl500`):
+Usage (module mode; requires a live ollama node reachable for embeddings.
+This is auxiliary (non-main-experiment) traffic, so per config.yml's
+permanent operating rule it must go through the control host wafl-ctrl5,
+not a domain node -- e.g. via the project's standard SSH local port
+forward, `ssh -fNT -L 11499:localhost:11434 wafl-ctrl5`):
     uv run python -m scripts.evaluate_dispatch_candidate_ranking \\
         --baseline results/20260918_202613/results.jsonl \\
         --head models/dispatch_candidate_ranking_head.joblib \\
         --embedding-model nomic-embed-text \\
-        --ollama-host 127.0.0.1 --ollama-port 11435 \\
+        --ollama-host 127.0.0.1 --ollama-port 11499 \\
         --embedding-cache results/iter59_query_embeddings.npz \\
         --output results/iter59_ovr_ranking_predictions.jsonl
 """

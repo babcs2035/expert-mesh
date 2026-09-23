@@ -58,9 +58,11 @@ from node import FALLBACK_MAX_TOKENS, FALLBACK_PROMPT_TEMPLATE  # noqa: E402
 # to invoke the Ollama HTTP API remotely.
 #
 # The target user and node mappings are read from config.yaml's
-# `central_router` section (keys: `ssh_user`, `domain_nodes`).
-# Embeddings are fetched from the first expert node (wafl500/general)
-# since nomic-embed-text is available on all nodes.
+# `central_router` section (keys: `ssh_user`, `embed_node_host`, `domain_nodes`).
+# Embeddings are fetched from `embed_node_host` (a config value, not hardcoded
+# here); per config.yml's permanent operating rule this auxiliary traffic is
+# routed to the control host wafl-ctrl5 rather than a domain node, and
+# `embed_node_host` is set accordingly.
 
 
 class SshEmbeddingClient:

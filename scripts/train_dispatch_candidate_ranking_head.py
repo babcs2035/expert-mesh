@@ -41,13 +41,15 @@ degenerate legal head (e.g. near-random ROC-AUC) is visible before the
 evaluation phase runs, rather than only surfacing much later as an
 unexplained compound_domain_set_recall regression.
 
-Usage (module mode; requires a live ollama node reachable for embeddings,
-e.g. via the project's standard SSH local port forward,
-`ssh -fNT -L 11435:localhost:11434 wafl500`):
+Usage (module mode; requires a live ollama node reachable for embeddings.
+This is auxiliary (non-main-experiment) traffic, so per config.yml's
+permanent operating rule it must go through the control host wafl-ctrl5,
+not a domain node -- e.g. via the project's standard SSH local port
+forward, `ssh -fNT -L 11499:localhost:11434 wafl-ctrl5`):
     uv run python -m scripts.train_dispatch_candidate_ranking_head \\
         --train-data data/classifier_train.jsonl \\
         --embedding-model nomic-embed-text \\
-        --ollama-host 127.0.0.1 --ollama-port 11435 \\
+        --ollama-host 127.0.0.1 --ollama-port 11499 \\
         --output models/dispatch_candidate_ranking_head.joblib
 """
 

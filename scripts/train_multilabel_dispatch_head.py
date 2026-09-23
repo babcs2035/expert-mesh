@@ -24,13 +24,15 @@ payload ({"model": ..., "classes": ...}) instead of Iter59's bare
 `joblib.dump(model, ...)`; scripts/evaluate_dispatch_candidate_ranking.py's
 _load_head() understands both formats.
 
-Usage (module mode; requires a live ollama node reachable for embeddings,
-e.g. via `ssh -fNT -L 11435:localhost:11434 wafl500`):
+Usage (module mode; requires a live ollama node reachable for embeddings.
+This is auxiliary (non-main-experiment) traffic, so per config.yml's
+permanent operating rule it must go through the control host wafl-ctrl5,
+not a domain node -- e.g. via `ssh -fNT -L 11499:localhost:11434 wafl-ctrl5`):
     uv run python -m scripts.train_multilabel_dispatch_head \\
         --train-data data/classifier_train.jsonl \\
         --multilabel-train-data data/classifier_train_multidomain.jsonl \\
         --embedding-model nomic-embed-text \\
-        --ollama-host 127.0.0.1 --ollama-port 11435 \\
+        --ollama-host 127.0.0.1 --ollama-port 11499 \\
         --output models/dispatch_multilabel_head.joblib
 """
 
