@@ -42,6 +42,16 @@ admitting the crossing class wholesale. The Iter73 tests below verify the new
 randomization_u=1.0, (b) is monotonically non-increasing in randomization_u,
 (c)/(d) rejects a missing u and an incompatible calibration_source rather than
 silently falling back, and (e) is reproducible for a fixed randomization_seed.
+
+Iter74 adds `set_construction="raps_penalty"` (RAPS size regularization,
+Angelopoulos et al. 2021, arXiv:2009.14193): the same randomized-APS inclusion
+rule plus a rank-based penalty `raps_lambda * max(0, rank - raps_k_reg)`. The
+Iter74 tests below verify (a) it degenerates to "randomized_aps" exactly at
+raps_lambda=0.0, (b) increasing raps_lambda can only shrink or hold the set size
+(monotonicity), (c) it rejects a missing raps_lambda/raps_k_reg/randomization_u
+rather than silently falling back to the un-penalized rule, and (d) it rejects an
+incompatible calibration_source (the same "oof_train" restriction as
+randomized_aps, since raps_penalty is built on top of it).
 """
 
 import asyncio
@@ -588,6 +598,111 @@ def test_randomized_aps_is_reproducible_for_same_randomization_seed() -> None:
 
 def test_set_construction_default_still_broken_with_randomized_aps_added() -> None:
     """Adding the 'randomized_aps' choice must not disturb the 'broken' default."""
+    pred_set_default, size_default = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90, qhat_source="true_class"
+    )
+    assert pred_set_default == [0]
+    assert size_default == 1
+
+
+# --- Iter74: set_construction="raps_penalty" (RAPS size regularization) ---------
+
+# Reuse the Iter70 5-class toy input/cp_data (q_hat fixed at 0.15 by construction).
+
+
+def test_raps_penalty_at_lambda_0_matches_randomized_aps() -> None:
+    """raps_lambda=0.0 must reproduce 'randomized_aps' exactly for any raps_k_reg.
+
+    The penalty term `raps_lambda * max(0, rank - raps_k_reg)` vanishes at
+    raps_lambda=0.0 regardless of raps_k_reg, so this is the plan's step 5(a)
+    degeneracy check for the new branch.
+    """
+    pred_set_randomized, size_randomized = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="randomized_aps",
+        randomization_u=0.5,
+    )
+    pred_set_raps, size_raps = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="raps_penalty",
+        randomization_u=0.5, raps_lambda=0.0, raps_k_reg=2,
+    )
+    assert pred_set_raps == pred_set_randomized
+    assert size_raps == size_randomized
+
+
+def test_raps_penalty_set_size_is_monotonically_non_increasing_in_lambda() -> None:
+    """Set size must be monotonically non-increasing as raps_lambda grows.
+
+    Raising raps_lambda only ever subtracts more from a class's score (the
+    penalty is non-negative and non-decreasing in rank), making the >= q_hat
+    append condition strictly harder to satisfy at every rank beyond
+    raps_k_reg, so the resulting prediction set can only shrink or stay the
+    same (Iter74 investigation Q2's monotonicity argument).
+    """
+    _, size_lambda_0 = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="raps_penalty",
+        randomization_u=1.0, raps_lambda=0.0, raps_k_reg=2,
+    )
+    _, size_lambda_small = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="raps_penalty",
+        randomization_u=1.0, raps_lambda=0.05, raps_k_reg=2,
+    )
+    _, size_lambda_large = _compute_prediction_set(
+        _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+        qhat_source="true_class", set_construction="raps_penalty",
+        randomization_u=1.0, raps_lambda=1.0, raps_k_reg=2,
+    )
+    assert size_lambda_large <= size_lambda_small <= size_lambda_0
+
+
+def test_raps_penalty_requires_raps_lambda_and_raps_k_reg() -> None:
+    """Omitting raps_lambda or raps_k_reg must raise, not silently use un-penalized randomized_aps."""
+    with pytest.raises(ValueError):
+        _compute_prediction_set(
+            _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+            qhat_source="true_class", set_construction="raps_penalty",
+            randomization_u=1.0, raps_lambda=None, raps_k_reg=2,
+        )
+    with pytest.raises(ValueError):
+        _compute_prediction_set(
+            _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+            qhat_source="true_class", set_construction="raps_penalty",
+            randomization_u=1.0, raps_lambda=0.02, raps_k_reg=None,
+        )
+
+
+def test_raps_penalty_requires_randomization_u() -> None:
+    """Omitting randomization_u must raise, since raps_penalty is built on randomized_aps."""
+    with pytest.raises(ValueError):
+        _compute_prediction_set(
+            _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90,
+            qhat_source="true_class", set_construction="raps_penalty",
+            raps_lambda=0.02, raps_k_reg=2,
+        )
+
+
+def test_raps_penalty_rejects_oof_train_calibration_source() -> None:
+    """raps_penalty requires calibration_source='eval_holdout' (shared row-indexed u),
+    the same restriction randomized_aps enforces since raps_penalty reuses its u_all draw.
+    """
+    with pytest.raises(ValueError):
+        asyncio.run(
+            predict_calibrated_rows(
+                _make_iter72_ollama_client(), "fake-embed-model",
+                _make_iter72_classifier(), _ITER72_DATASET,
+                conformal_prediction=True, calibration_source="oof_train",
+                calibration_dataset_path=None,
+                qhat_source="true_class", set_construction="raps_penalty",
+                raps_lambda=0.02, raps_k_reg=2,
+            )
+        )
+
+
+def test_set_construction_default_still_broken_with_raps_penalty_added() -> None:
+    """Adding the 'raps_penalty' choice must not disturb the 'broken' default."""
     pred_set_default, size_default = _compute_prediction_set(
         _ITER70_PROBABILITIES, _ITER70_CP_DATA, confidence_level=0.90, qhat_source="true_class"
     )

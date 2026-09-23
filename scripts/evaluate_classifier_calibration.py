@@ -71,6 +71,8 @@ def _compute_prediction_set(
     set_construction: str = "broken",
     qhat_quantile_direction: str = "upper",
     randomization_u: float | None = None,
+    raps_lambda: float | None = None,
+    raps_k_reg: int | None = None,
 ) -> tuple[list[int], int]:
     """Compute a conformal prediction set using cumulative APS method.
 
@@ -120,6 +122,23 @@ def _compute_prediction_set(
       threshold-crossing class be included only with probability
       proportional to how much of its probability mass is needed to reach
       the coverage mass, instead of being included wholesale.
+    - "raps_penalty": Regularized Adaptive Prediction Sets (RAPS; Angelopoulos,
+      Bates, Malik & Jordan, 2021, ICLR Spotlight, arXiv:2009.14193). Same
+      randomized-APS inclusion rule as "randomized_aps", but the score is
+      additionally penalized by `raps_lambda * max(0, rank - raps_k_reg)`,
+      where `rank` is the class's 1-indexed position in the descending
+      probability order (so the top `raps_k_reg` classes are unpenalized and
+      each class beyond that adds one more unit of `raps_lambda`). Requires
+      both `raps_lambda` and `raps_k_reg` (in addition to `randomization_u`,
+      since this construction is built on top of "randomized_aps"). At
+      `raps_lambda=0.0` this is algebraically identical to "randomized_aps"
+      for any input (the penalty term vanishes), which is exercised as a
+      degeneracy regression test (Iter74 plan step 5a). The penalty is
+      monotonically non-decreasing in rank, so the score
+      `1 - cumsum + u*p - lambda*max(0, rank-k_reg)` remains monotonically
+      decreasing in rank and the same greedy "append while score >= q_hat,
+      break on first failure" scan used by "randomized_aps" stays correct
+      (Iter74 investigation Q2).
 
     qhat_quantile_direction controls which side of the nonconformity score
     population q_hat is drawn from, per the finite-sample-corrected quantile
@@ -153,16 +172,21 @@ def _compute_prediction_set(
     """
     if qhat_source not in ("all", "true_class"):
         raise ValueError(f"qhat_source must be 'all' or 'true_class', got {qhat_source!r}")
-    if set_construction not in ("broken", "corrected_aps", "randomized_aps"):
+    if set_construction not in ("broken", "corrected_aps", "randomized_aps", "raps_penalty"):
         raise ValueError(
-            f"set_construction must be 'broken', 'corrected_aps', or 'randomized_aps', "
-            f"got {set_construction!r}"
+            f"set_construction must be 'broken', 'corrected_aps', 'randomized_aps', or "
+            f"'raps_penalty', got {set_construction!r}"
         )
-    if set_construction == "randomized_aps" and randomization_u is None:
+    if set_construction in ("randomized_aps", "raps_penalty") and randomization_u is None:
         raise ValueError(
-            "set_construction='randomized_aps' requires randomization_u (a uniform "
+            f"set_construction={set_construction!r} requires randomization_u (a uniform "
             "draw shared with the calibration score); refusing to silently fall back "
             "to a non-randomized rule."
+        )
+    if set_construction == "raps_penalty" and (raps_lambda is None or raps_k_reg is None):
+        raise ValueError(
+            "set_construction='raps_penalty' requires both raps_lambda and raps_k_reg; "
+            "refusing to silently fall back to the un-penalized randomized_aps rule."
         )
     if qhat_quantile_direction not in ("upper", "alpha_lower"):
         raise ValueError(
@@ -215,6 +239,21 @@ def _compute_prediction_set(
                 pred_set.append(int(idx))
             else:
                 break
+    elif set_construction == "raps_penalty":
+        # RAPS (Angelopoulos et al., 2021): same randomized-APS inclusion
+        # rule as above, minus a size-regularization penalty that grows by
+        # raps_lambda for every rank beyond raps_k_reg (rank is 1-indexed,
+        # so the first raps_k_reg classes are unpenalized). See docstring
+        # above for the derivation of why the "append while score>=q_hat,
+        # break on first failure" scan remains valid under this penalty.
+        for rank, idx in enumerate(sorted_indices, start=1):
+            cumsum += probabilities[idx]
+            penalty = raps_lambda * max(0, rank - raps_k_reg)
+            score = 1.0 - cumsum + randomization_u * probabilities[idx] - penalty
+            if score >= q_hat:
+                pred_set.append(int(idx))
+            else:
+                break
     else:  # "broken": pre-Iter70 behavior, kept verbatim for reproducibility
         for idx in sorted_indices:
             cumsum += probabilities[idx]
@@ -248,6 +287,8 @@ async def predict_calibrated_rows(
     calibration_source: str = "oof_train",
     holdout_seed: int = 42,
     randomization_seed: int = 42,
+    raps_lambda: float = 0.0,
+    raps_k_reg: int = 2,
 ) -> list[dict]:
     """Recompute (selected_domain, confidence) for every dataset row via the calibrated classifier.
 
@@ -281,6 +322,14 @@ async def predict_calibrated_rows(
     row's prediction-set construction, per Romano et al. (2020)'s requirement
     that calibration and test share the same u. Ignored for any other
     set_construction value.
+
+    raps_lambda and raps_k_reg (Iter74 investigation) are the RAPS size
+    regularization hyperparameters (Angelopoulos et al., 2021, arXiv:2009.14193)
+    used by set_construction="raps_penalty" (ignored otherwise). Applied
+    identically to the calibration true-class score below (only for
+    calibration_source="eval_holdout", the sole supported combination since
+    raps_penalty reuses the u_all draw from randomized_aps) and to each
+    evaluation row's _compute_prediction_set() call.
     """
     from sentence_transformers import SentenceTransformer
 
@@ -292,9 +341,9 @@ async def predict_calibrated_rows(
             f"calibration_source must be 'oof_train' or 'eval_holdout', "
             f"got {calibration_source!r}"
         )
-    if set_construction == "randomized_aps" and calibration_source != "eval_holdout":
+    if set_construction in ("randomized_aps", "raps_penalty") and calibration_source != "eval_holdout":
         raise ValueError(
-            "set_construction='randomized_aps' requires calibration_source="
+            f"set_construction={set_construction!r} requires calibration_source="
             "'eval_holdout': the calibration and evaluation halves must share "
             "dataset row indices so the same per-row uniform draw u can be applied "
             "on both sides (Iter73 plan); 'oof_train' calibrates over a separate "
@@ -439,12 +488,13 @@ async def predict_calibrated_rows(
         for i in eval_idx:
             holdout_split[int(i)] = "eval"
 
-        # For set_construction="randomized_aps" (Iter73), draw one uniform
-        # value per dataset row (dataset order, not cal/eval order) so the
-        # SAME u is used for a row's calibration true-class score below and
-        # its evaluation prediction-set construction further down (Romano et
-        # al., 2020's requirement that calibration and test share u).
-        if set_construction == "randomized_aps":
+        # For set_construction="randomized_aps"/"raps_penalty" (Iter73/74),
+        # draw one uniform value per dataset row (dataset order, not
+        # cal/eval order) so the SAME u is used for a row's calibration
+        # true-class score below and its evaluation prediction-set
+        # construction further down (Romano et al., 2020's requirement that
+        # calibration and test share u).
+        if set_construction in ("randomized_aps", "raps_penalty"):
             u_all = np.random.default_rng(randomization_seed).random(n_eval)
 
         true_class_scores = np.zeros(len(cal_idx))
@@ -452,10 +502,15 @@ async def predict_calibrated_rows(
             probs = all_probs[i]
             sorted_idx = np.argsort(-probs)  # descending
             cumsum = 0.0
-            for idx in sorted_idx:
+            for rank, idx in enumerate(sorted_idx, start=1):
                 cumsum += probs[idx]
                 if idx == eval_labels[i]:
-                    if set_construction == "randomized_aps":
+                    if set_construction == "raps_penalty":
+                        penalty = raps_lambda * max(0, rank - raps_k_reg)
+                        true_class_scores[pos] = (
+                            1.0 - cumsum + u_all[i] * probs[idx] - penalty
+                        )
+                    elif set_construction == "randomized_aps":
                         true_class_scores[pos] = 1.0 - cumsum + u_all[i] * probs[idx]
                     else:
                         true_class_scores[pos] = 1.0 - cumsum
@@ -503,7 +558,8 @@ async def predict_calibrated_rows(
             f"q_hat={_diag_q_hat:.4f} n_cal={len(cp_data['true_class_scores'])} "
             f"set_construction={set_construction} "
             f"qhat_quantile_direction={qhat_quantile_direction} "
-            f"randomization_seed={randomization_seed}",
+            f"randomization_seed={randomization_seed} "
+            f"raps_lambda={raps_lambda} raps_k_reg={raps_k_reg}",
             file=sys.stderr,
         )
 
@@ -548,6 +604,7 @@ async def predict_calibrated_rows(
                     qhat_source=qhat_source, set_construction=set_construction,
                     qhat_quantile_direction=qhat_quantile_direction,
                     randomization_u=(u_all[row_idx] if u_all is not None else None),
+                    raps_lambda=raps_lambda, raps_k_reg=raps_k_reg,
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -591,6 +648,7 @@ async def predict_calibrated_rows(
                     qhat_source=qhat_source, set_construction=set_construction,
                     qhat_quantile_direction=qhat_quantile_direction,
                     randomization_u=(u_all[row_idx] if u_all is not None else None),
+                    raps_lambda=raps_lambda, raps_k_reg=raps_k_reg,
                 )
             best_index = max(range(len(classes)), key=lambda i: probabilities[i])
             row_dict = {
@@ -628,6 +686,8 @@ async def _run(
     calibration_source: str = "oof_train",
     holdout_seed: int = 42,
     randomization_seed: int = 42,
+    raps_lambda: float = 0.0,
+    raps_k_reg: int = 2,
 ) -> None:
     dataset = _read_jsonl(dataset_path)
     classifier = load_domain_classifier(classifier_path)
@@ -646,6 +706,8 @@ async def _run(
         calibration_source=calibration_source,
         holdout_seed=holdout_seed,
         randomization_seed=randomization_seed,
+        raps_lambda=raps_lambda,
+        raps_k_reg=raps_k_reg,
     )
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -720,17 +782,20 @@ def main() -> None:
     )
     parser.add_argument(
         "--set-construction",
-        choices=["broken", "corrected_aps", "randomized_aps"],
+        choices=["broken", "corrected_aps", "randomized_aps", "raps_penalty"],
         default="broken",
         help="Prediction set construction rule: 'broken' (pre-Iter70 implementation, "
              "append happens after the break check and collapses to a binary "
              "1-p_max<=q_hat gate), 'corrected_aps' (standard non-randomized APS: "
              "append happens before the break check, so classes are greedily added "
-             "until cumulative probability reaches the coverage mass), or "
+             "until cumulative probability reaches the coverage mass), "
              "'randomized_aps' (Romano et al., 2020: same as corrected_aps but mixes "
              "in a per-row uniform draw u so the crossing class is included only "
              "fractionally, removing corrected_aps's structural over-coverage; "
-             "requires --calibration-source eval_holdout, see --randomization-seed). "
+             "requires --calibration-source eval_holdout, see --randomization-seed), or "
+             "'raps_penalty' (Angelopoulos et al., 2021, arXiv:2009.14193: same as "
+             "randomized_aps but with an added size-regularization penalty; see "
+             "--raps-lambda / --raps-k-reg). "
              "Default 'broken' preserves prior behavior.",
     )
     parser.add_argument(
@@ -770,6 +835,22 @@ def main() -> None:
              "--set-construction randomized_aps (ignored otherwise).",
     )
     parser.add_argument(
+        "--raps-lambda",
+        type=float,
+        default=0.0,
+        help="RAPS size-regularization penalty weight (Angelopoulos et al., 2021), "
+             "used by --set-construction raps_penalty (ignored otherwise). "
+             "At 0.0, raps_penalty degenerates to randomized_aps.",
+    )
+    parser.add_argument(
+        "--raps-k-reg",
+        type=int,
+        default=2,
+        help="RAPS size-regularization rank cutoff: the first --raps-k-reg classes "
+             "(by descending probability) are unpenalized, used by "
+             "--set-construction raps_penalty (ignored otherwise).",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write the calibrated-side JSONL to (default: stdout)",
@@ -797,6 +878,8 @@ def main() -> None:
                 calibration_source=args.calibration_source,
                 holdout_seed=args.holdout_seed,
                 randomization_seed=args.randomization_seed,
+                raps_lambda=args.raps_lambda,
+                raps_k_reg=args.raps_k_reg,
             )
         )
     else:
@@ -821,6 +904,8 @@ def main() -> None:
                     calibration_source=args.calibration_source,
                     holdout_seed=args.holdout_seed,
                     randomization_seed=args.randomization_seed,
+                    raps_lambda=args.raps_lambda,
+                    raps_k_reg=args.raps_k_reg,
                 )
             )
 

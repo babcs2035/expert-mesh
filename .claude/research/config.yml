@@ -19,6 +19,11 @@ repo_name: expert-mesh
 # Ollama（Docker，`ollama/ollama:latest`イメージ，`--runtime nvidia`，他ノードと同じ
 # docker-compose.gpu.ymlのGPU構成を踏襲）をセットアップ済み（詳細はjournal.md「Iteration 64
 # 実行済み」節参照）．今後のイテレーションでも本体実験以外はwafl-ctrl5を優先すること．
+# 【2026-09-23 ユーザー指示（恒久的な運用ルール）】本体の実験（wafl500〜wafl509を用いた
+# 実際のルーティング本走）は，事前シミュレーションで着地点を数値で言語化した後も省略せず，
+# 積極的にフルスペックで実行する方針を貫くこと．事前シミュレーション（Iter71以降の慣行．
+# probabilitiesの再利用によるハイパラ掃引・着地点予測）は本実行の代替ではなく，本実行1点を
+# 絞り込むための事前登録手段に留める．
 tasks:
   setup:   "mise run setup"
   deploy:  "mise run deploy"
@@ -1003,7 +1008,87 @@ levers:
             coverage が帯を割る）: 『本分類器の確率分布では，名目 0.90 の被覆を保ったまま
             ルーティングに使える大きさの予測集合は作れない』という結論になるため，raps_penalty
             へ進むか conformal 系列を閉じるかを人間に諮る（B104 A2 の実行時配線の可否と併せて）．
-            **コスト**: オフライン完結・分類器再訓練なし・実機ノード不使用．1 実行 5〜10 分．"}
+            **コスト**: オフライン完結・分類器再訓練なし・実機ノード不使用．1 実行 5〜10 分．
+            [2026-09-23 Iter74 reflector追記] **全 2 値試行済み・本レバークローズ確定**．
+            `randomized_aps`（Iter73）adopted（coverage=0.90375, mean_set_size 5.52125→4.00125），
+            `raps_penalty`（Iter74，k_reg=2・λ=0.02）**rejected**（coverage=0.90750 は帯内だが
+            mean_set_size が 4.00125→4.16375 と **+0.1625 有意に増加**．対応あり 800 行の
+            `ttest_rel` t=-7.515, p=1.53e-13，減少 86・同数 507・増加 207）．
+            実測は事前シミュレーションの予測（coverage 0.90750 / mss 4.16375 / q_hat 0.032331 /
+            サイズ分布 [5,57,154,259,241,79,5]）と**最終桁まで一致**し，事前登録した解釈規則
+            （予測の ±0.02 以内なら実装は正しく発火したうえで手法が効かない）により
+            **実装不成立ではなく手法の無効**と判定した（非退行 6 項目も全充足．
+            `probabilities` 最大差 0.0，`randomized_aps` 再実行が Iter73 出力と md5 一致
+            `afde650eea9ac611a43f0bb20703c2e3`）．
+            **機序**: RAPS のペナルティは校正側の真クラススコアと評価側の各クラススコアの
+            両方へ同形に入るため，λ を上げると q_hat がほぼ同量下がって相殺する．残るのは
+            サイズ分布の圧縮（size 1 が 52→5 行，size 4〜5 に 360→500 行が集中）であって
+            平均の縮小ではない．RAPS が原論文（ImageNet 1,000 クラス）で平均を下げたのは
+            APS の重い裾を切ったからであり，10 クラス・最大サイズ 8 の本問題には切る裾が無い．
+            **構成法による size≈2 は到達不能（確定）**: サイズ最適性が証明されている LAC/THR
+            （Sadinle et al., JASA 2019）でも名目 0.90 では mean_set_size=3.825 が床であり，
+            size≈2 には被覆水準 0.80 前後（LAC で 2.24，ただし複合設問の 2 ドメイン同時被覆は
+            0.26→0.065 へ崩壊）まで落とすほかない．**予測集合を top-2 dispatch へ流用する構想の
+            障害は conformal の構成法ではなく分類器の確率分布の鋭さ（top1≈0.60）にある**．
+            実装（`--set-construction raps_penalty` / `--raps-lambda` / `--raps-k-reg`）は
+            **revert せず維持**する（既定 `broken`/`corrected_aps` が後方互換 md5 を保つ）．
+            次レバーは下記 `conformal_runtime_distribution_alignment`．"}
+
+  # --- 【2026-09-23 Iter74 reflector 新設 / backlog B110】Iter74 の実機本走で発見した，
+  #     オフライン conformal 系列の入力分布と実行時ルーティングの確率分布の education 側の乖離 ---
+  - {name: conformal_runtime_distribution_alignment, values: [education_threshold_0.05],
+     note: "[2026-09-23 Iter74 reflector 新設 / backlog B110] Iter74 の実機フルスペック本走
+            （`results/20260923_150540/`，1,600 問）で，`results.jsonl` の `probe_candidates`
+            （実行時ルーティングが実際に使う 10 ノード分の confidence）と
+            `models/domain_classifier.joblib.predict_proba()` を 1,600 行×10 ドメイン全件で
+            突き合わせた結果，**`education` ドメインのみ全行で厳密に +0.05 の系統差**があり，
+            他 9 ドメインは最大絶対差 1e-15 台（浮動小数点誤差のみ）だった．原因は
+            Iter52/53 で adopted され `production_deployment_gap` レバーで実行時経路
+            `classifier.py:estimate_confidence_classifier()` へ配線された
+            `education_per_class_threshold=0.05` である．`--education-threshold 0.05` を
+            指定して同じ突き合わせをやり直すと**全件で最大絶対差 0.0（ビット単位一致）**
+            になることを確認済み（`results/20260923_142619/Iter74_probs_only_edu005.jsonl`）．
+            **問題**: Iter56〜74 の conformal 系列（19 反復）は一貫して
+            `--education-threshold 0.0` で評価してきた．すなわち 10 ドメイン中 1 つについて
+            **実行時とは異なる分布**の上で被覆・集合サイズ・q_hat を議論してきたことになる．
+            この差が conformal の結論へ与える影響は未評価である．
+            **レバーの内容**: conformal 評価の入力分布を `--education-threshold 0.0`
+            （現行．Iter56〜74 の慣行）→ **`--education-threshold 0.05`（実行時と同一）**
+            へ揃える 1 点のみ．集合構成 `randomized_aps`・`--randomization-seed 42`・
+            `--calibration-source eval_holdout --holdout-seed 42`・
+            `--qhat-quantile-direction alpha_lower --qhat-source true_class`・
+            `--confidence-level 0.90` は Iter73 の adopted 構成に固定する．
+            分類器・埋め込み・`config.yaml`・実機構成は一切変更しない．
+            **到達コードパス**: 既存の `--education-threshold` は
+            `predict_calibrated_rows()` の `probabilities[edu_idx] += education_threshold`
+            （再正規化なし，Iter52 で adopted された形）にそのまま存在するため
+            **新規実装は不要**．発火証拠は stderr の `education_threshold=0.05` と，
+            education 行の確率が全行 +0.05 されることによる q_hat の変化である．
+            **事前シミュレーション（B109 制約 (2) の慣行を踏襲）**: 本実行前に
+            Iter73/74 の出力 `probabilities` から coverage・mean_set_size・q_hat の
+            着地点を数値で言語化し，1 点に事前登録すること．
+            **成功条件（planner が事前登録で確定する叩き台）**: 主基準は
+            実行時と同一の分布の下でも **0.88 <= coverage <= 0.95**（名目 0.90，eval 半 n=800）
+            が保たれること．副基準として (i) mean_set_size の Iter73（4.00125）からの変化，
+            (ii) **education を正解とする行に限った被覆と集合サイズ**（+0.05 が効くのは
+            この部分集合であり，ここが動かなければ「19 反復の議論は実行時分布でもそのまま
+            有効」と言える）を報告する．非退行は Iter73/74 と同型（`split` 一致・
+            `set_size` 範囲・`--education-threshold 0.0` での再実行が Iter73 出力と md5 一致）．
+            ただし `selected_domain`・`probabilities` は education に +0.05 する以上
+            **一致しない**ので，非退行条件から外し，代わりに
+            `probe_candidates` とのビット単位一致（Iter74 で確認済みの性質）を条件にする．
+            **これは新手法の検証ではなく，既存 19 反復の結論の外的妥当性の確認である**
+            （`production_deployment_gap` レバーと同じ性格）．
+            **この結果の使い道**: B104 A2（conformal を実行時経路へ配線するか）は人間判断
+            事項として未回答のまま持ち越されているが，**配線の是非を人間に諮る前に
+            『オフラインで測った被覆が実行時分布でも成立するか』を答えておく必要がある**．
+            本レバーはその前提条件を埋める．
+            **不成立の場合**（実行時分布では coverage が帯を割る）: Iter56〜74 の conformal の
+            結論はオフライン固有のものだったことになり，conformal 系列全体の位置づけを
+            人間に諮る．**成立した場合**: conformal 系列で自律的にできることは尽きるため，
+            次イテレーションは調査フェーズから再探索する（backlog B110 の申し送り参照）．
+            **コスト**: オフライン完結・分類器再訓練なし・実機ノード不使用・新規実装なし．
+            1 実行 10〜30 分（埋め込み 1,600 行）＋後方互換アンカー 1 実行．"}
 
   # --- 【3番目・要ユーザー確認】複合ドメイン compound_domain_set_recall の改善 ---
   - {name: dispatch_policy, values: [adaptive_confidence_gap],

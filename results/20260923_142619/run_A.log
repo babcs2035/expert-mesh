@@ -1,0 +1,2 @@
+[evaluate_classifier_calibration] calibration_source=eval_holdout qhat_source=true_class q_hat=0.0939 n_cal=800 set_construction=randomized_aps qhat_quantile_direction=alpha_lower randomization_seed=42 raps_lambda=0.0 raps_k_reg=2
+[evaluate_classifier_calibration] wrote 1600 rows (classifier=models/domain_classifier.joblib)

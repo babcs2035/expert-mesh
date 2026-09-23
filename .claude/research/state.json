@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 73,
-  "iteration_name": "conformal予測集合にランダム化APSを導入し被覆を保ったまま集合サイズを縮小する",
-  "phase": "reflect",
+  "iteration": 75,
+  "iteration_name": "conformal評価の入力分布を実行時と同一のeducation+0.05へ揃えて被覆保証の外的妥当性を検証する",
+  "phase": "research",
   "status": "running",
-  "current_lever": "conformal_set_size_reduction=randomized_aps",
-  "experiment_dir": "results/20260923_135653",
-  "experiment_deadline": 1790148713,
-  "updated_at": 1790140101,
-  "last_slack_ts": "1790139803.172009",
-  "iteration_thread_ts": "1790138919.678079",
-  "notion_toggle_created": true,
-  "last_commit": "c87287e"
+  "current_lever": null,
+  "experiment_dir": null,
+  "experiment_deadline": null,
+  "updated_at": 1790150000,
+  "last_slack_ts": "1790146297.654369",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
+  "last_commit": "PENDING"
 }

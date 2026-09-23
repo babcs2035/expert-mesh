@@ -1,3 +1,686 @@
+## Iteration 71: conformal予測のq_hat分位点方向を補数スコアのα分位点へ修正して被覆保証を検証
+
+### 計画 (Iter71)
+
+**仮説**
+
+Iter70 で集合構成（`corrected_aps`）は正したが coverage=0.7638 と名目 0.90 を大きく下回った．
+調査 (Iter71) Q1/Q2 のとおり，本実装の非適合スコアは `score = 1 - cumsum`（標準 APS スコアの**補数**）
+であるため，q_hat は補数スコアの **α 分位点（下側，10th percentile）**で取らねばならないのに，現行は
+**(1-α) 分位点（上側，90th percentile）**を取っている．この方向を α 側へ直せば，実効の累積確率閾値
+`1 - q_hat` が 0.6135 から 0.95 前後へ引き上がり，coverage は名目 0.90 近傍へ到達するはずである．
+本イテレーションの目的は Iter56 以来の conformal prediction 系列を，**実装が 2 つとも正しい状態での
+確定的判定**へ置き換えることである（backlog B106）．
+
+**単一レバー**
+
+`conformal_qhat_quantile_direction`: `upper`（現行．補数スコアの (1-α) 分位点，
+`target=min(1,(1-α)(1+1/n))` × `method="higher"`）→ `alpha_lower`（補数スコアの α 分位点，
+`target=α(1+1/n)` × `method="lower"`．順位統計量としては `⌊(n+1)α⌋/n = 142/1427 ≈ 0.099510`）．
+動かすのはこの分位点方向 1 点のみである．
+
+**固定する構成（直近の最良構成に固定）**
+
+- 集合構成: `--set-construction corrected_aps`（Iter70 で修正・維持と決定）．
+- q_hat の母集団: `--qhat-source true_class`（`data/classifier_train.jsonl` の OOF 真クラス
+  非適合スコア 1,427 件．Iter69 で確定）．
+- `--confidence-level 0.90`（名目水準はレバーに**含めない**），評価データ `data/dataset.jsonl`（1,600 行），
+  分類器 `models/domain_classifier.joblib`，埋め込み `nomic-embed-text:latest`（`127.0.0.1:11435`），
+  `--education-logit-bias 0.0` / `--education-threshold 0.0`（既定），`--fine-tuned-embed-model` は
+  指定しない（ollama 分岐を通す）．
+- `config.yaml`・`http_server.py`・`classifier.py`・`aggregator.py`・`mise.toml` は変更しない．
+- 入力データの同一性（計画時に確認済み）: `data/classifier_train.jsonl`（mtime 2026-07-30 14:44）・
+  `data/dataset.jsonl`（2026-09-19 00:49）・`models/domain_classifier.joblib`（2026-08-02 23:41）は
+  いずれも Iter70 本実行（2026-09-19 21:17）より前から変化していない．
+
+**変更箇所（`scripts/evaluate_classifier_calibration.py` 1 ファイル＋テスト．行番号は 2026-09-19 計画時点）**
+
+1. `_compute_prediction_set()`（L66-72 のシグネチャ）へ `qhat_quantile_direction: str = "upper"` を追加し，
+   L111-116 の検証ブロックへ `if qhat_quantile_direction not in ("upper", "alpha_lower"): raise ValueError(...)`
+   を既存 2 引数と同じ書き方で追加する．docstring に両方向の定義と「スコアが補数であるため α 側が
+   正しい」理由（Angelopoulos & Bates 2021 / Barber et al. 2021 の `q̂-_{n,α}{v}=⌊(n+1)α⌋/n`）を記す．
+2. q_hat 計算（L125-128）を分岐させる:
+   - `"upper"`（既定・現行挙動を温存）: `target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / n))`,
+     `np.quantile(flat_scores, target, method="higher")`．
+   - `"alpha_lower"`: `target = alpha * (1.0 + 1.0 / n)`, `np.quantile(flat_scores, target, method="lower")`．
+     （α<0.5 なので `min(1.0, ...)` のクランプは不要．上側実装と対称な `⌊(n+1)α⌋/n` 順位統計量に到達する．）
+   分位点の水準と `method` 以外は変更しない（`np.quantile` の使い方自体は標準的な実装パターンであり
+   作り替えない）．
+3. 診断 print 用の重複ロジック（L272-273 `_diag_target` / `_diag_q_hat`）へ同じ分岐を適用し，
+   L274-279 の print へ `qhat_quantile_direction={...}` を追加する（Iter70 で `set_construction` を
+   print へ足した前例に倣う．発火証拠の恒久化）．**この重複箇所の更新漏れは診断だけが旧値を出す
+   紛らわしい失敗になるため，実装時に L127-128 と L272-273 を必ず対で確認する．**
+4. `predict_calibrated_rows()`（L157-170）・`_run()`（L369-383）のシグネチャへ引数を追加し，
+   `_compute_prediction_set()` 呼び出し 2 箇所（L314-317 fine-tuned 分岐，L350-353 ollama 分岐）と
+   `_run()` 内の `predict_calibrated_rows()` 呼び出し（L397 付近）へ伝播する．
+5. CLI に `--qhat-quantile-direction`（`choices=["upper", "alpha_lower"]`, `default="upper"`）を追加し，
+   **`main()` の `--output` 有無による 2 分岐の両方へ渡す**．
+   - [ ] stdout 側: `if args.output is None:`（**L488**）配下の `_run(...)` 呼び出し
+   - [ ] ファイル出力側: `with open(args.output, "w", ...)`（**L508**）配下の `_run(...)` 呼び出し
+   本実験が通るのは**ファイル出力側**である．Iter69 実装フェーズでこの伝播漏れを実際に起こしており，
+   Iter69・Iter70・Iter71 と 3 回連続で注意喚起されている箇所であるため，上のチェックボックス 2 つを
+   実装完了時に明示的に確認し，さらに予備実行（下記手順 2）の stderr で実効値を目視確認する．
+6. `tests/test_evaluate_classifier_calibration.py` へ既存の `test_qhat_source_*` / `test_set_construction_*`
+   に倣い 4 件追加する:
+   (a) 同一の `flat_scores` に対し `"upper"` と `"alpha_lower"` で q_hat が異なり，
+       `q_hat(alpha_lower) < q_hat(upper)` であること，
+   (b) 小さな合成配列で `"alpha_lower"` の q_hat が `⌊(n+1)α⌋/n` 順位統計量（ソート済み配列の
+       `⌊(n+1)α⌋` 番目）と厳密一致すること，
+   (c) 既定値 `"upper"` の回帰テスト（現行 q_hat と一致），
+   (d) 未知の値で `ValueError`．
+
+**到達コードパス**
+
+CLI `--qhat-quantile-direction alpha_lower --set-construction corrected_aps --qhat-source true_class`
+→ `main()` L508（ファイル出力分岐）→ `_run()` → `predict_calibrated_rows()` → cp_data 構築
+（校正 1,427 行の OOF スコア，L230-260）→ 評価 1,600 行ループ → `_compute_prediction_set()` L350
+（ollama 分岐．**分位点方向の切替が実際に効く唯一の地点**）→ 出力 jsonl の `prediction_set` /
+`set_size` → coverage・mean_set_size 集計．`config.yaml` を経由しないため「デプロイ漏れ」型の失敗は
+構造上起こらない．唯一のリスクは変更箇所 5 の CLI 2 分岐伝播漏れであり，予備実行で潰す．
+
+**事前シミュレーション（計画時に実施．本実行の予測値）**
+
+Iter70 本実行 B の出力 `results/20260919_211708/Iter70_corrected_aps.jsonl`（1,600 行の
+`probabilities`）に対し，q_hat を掃引して `corrected_aps` 構成をオフライン適用した結果:
+
+| q_hat | 実効閾値 `1-q_hat` | coverage | mean_set_size |
+|---|---|---|---|
+| 0.0200 | 0.9800 | 0.9775 | 7.08 |
+| 0.0400 | 0.9600 | 0.9550 | 5.99 |
+| 0.0522 | 0.9478 | 0.9444 | 5.52 |
+| 0.0800 | 0.9200 | 0.9300 | 4.75 |
+| 0.1000 | 0.9000 | 0.9181 | 4.34 |
+| 0.1200 | 0.8800 | 0.9012 | 4.01 |
+| 0.1500 | 0.8500 | 0.8781 | 3.58 |
+| 0.3865（Iter70 実測） | 0.6135 | 0.7638 | 1.94 |
+
+すなわち **coverage が帯 0.88–0.95 に収まる q_hat の範囲は概ね 0.04 ≤ q_hat ≤ 0.145** である．
+問題は「校正集合（1,427 件 OOF）の真クラス補数スコアの α 分位点」が実際にどこへ落ちるかであり，
+これは埋め込みの再計算が必要なため計画時には確定できない．参考として**評価集合側**の真クラス補数
+スコア（Iter70 出力から事後計算，n=1600）の分位点は `⌊(n+1)α⌋/n` 位置で **0.05225**，
+上側 (1-α) 位置で 0.59568 である．一方 Iter69/70 実測の**校正集合**の上側 q_hat は 0.3865 であり，
+校正集合のスコア分布は評価集合より低い側に寄っている（0.3865 / 0.5957 ≈ 0.65）．同じ比で縮むと
+仮定すると校正集合の α 分位点は **0.03 前後**と見積もられ，その場合 coverage ≈ 0.96・
+mean_set_size ≈ 6.3 となり **帯の上限 0.95 を超える（過被覆）可能性がある**．
+したがって本実行の事前予測は「**coverage は 0.93〜0.97，mean_set_size は 5〜7**」であり，
+帯の下限は確実に超えるが上限で外れる目があることを，実測前に明記しておく．
+
+**成功条件（事前登録．config.yml `conformal_qhat_quantile_direction` note の案をそのまま採用）**
+
+名目信頼水準 `--confidence-level 0.90`，評価 1,600 行．比較対象は
+`results/20260919_211708/Iter70_corrected_aps.jsonl`（md5=`ee6fbf7d0e4dfd9408c76b2ff9fd1cdf`）．
+
+| 指標 | 定義 | 基準線（Iter70 実測） | 合格条件 |
+|---|---|---|---|
+| coverage（主基準） | `mean(expected_domains[0] in prediction_set)` | 0.7638 | **0.88 ≤ coverage ≤ 0.95** |
+| mean_set_size（副基準） | `mean(set_size)` | 1.9438 | 報告のみ（判定に用いない） |
+| ECE（同一性アンカー） | `metrics.py:compute_ece()` | 0.062998 | **ECE ≤ 0.0680** |
+
+- **adopted**: coverage が 0.88–0.95 に入り，かつ ECE ≤ 0.0680 と下記非退行条件 1〜4 を全て満たすこと．
+- **rejected**: coverage が帯外であること．ただし**外れ方の向きで解釈を分ける**（これも事前登録する）:
+  - `coverage < 0.88`: 分位点方向の修正でも過小被覆が残る．実装または校正手続きに第 3 の欠陥がある
+    可能性として扱い，本系列を閉じる前に原因を journal に記録する．
+  - `coverage > 0.95`: **過被覆**．分位点方向の修正自体は機能している（0.7638 → 0.95 超は
+    名目 0.90 を跨ぐ大幅な移動）が，校正集合（OOF スコア）と評価集合のスコア分布のずれにより
+    q_hat が小さすぎる，という**別の原因**に切り分けられる．この場合は本レバーを rejected とし，
+    次レバー候補として「校正集合の交換可能性（OOF vs ホールドアウト）」を backlog へ起票する．
+    **判定基準そのものは緩めない**（事後の帯の拡大はしない）．
+- **invalid**（判定保留）: 予備実行で `qhat_quantile_direction` の実効値 print が `alpha_lower` に
+  ならない，q_hat が Iter70 の 0.3865 から変化しない，または `set_size` 分布が Iter70 と同一である場合．
+  いずれも分岐未到達を意味するため，本実行に進まず実装をやり直す．
+- **ノイズ幅**: パイプラインは `StratifiedKFold(random_state=42)` で決定的であり，変動源は ollama
+  埋め込みの数値再現性のみ．coverage は n=1600・p≈0.94 の二項標本誤差で SE≈0.006，実質的な差は
+  ±1.2pt 超とする．帯端からの逸脱は SE の何倍かを併記して判定する．
+
+**非退行条件**（比較対象は `results/20260919_211708/Iter70_corrected_aps.jsonl`）
+
+1. `selected_domain` が全 1,600 行で一致（不一致 0 件）．q_hat は argmax に影響しないため，
+   不一致があれば実装ミスである．
+2. `confidence` および `probabilities` が一致（許容差 1e-9．埋め込み再計算由来の微差が出た場合は
+   その最大値を journal に記録する）．
+3. `top1_accuracy` が 0.603125 から不変（条件 1 の系）．
+4. 既定値 `--qhat-quantile-direction upper`（＋ `corrected_aps` / `true_class`）での再実行が Iter70 の
+   `Iter70_corrected_aps.jsonl` と **md5=`ee6fbf7d0e4dfd9408c76b2ff9fd1cdf`** で一致すること（後方互換）．
+5. 予測集合の rank_2 候補源への流用は本イテレーションでは行わない（スコープ外）．
+
+**実行手順**（オフライン完結．実機 10 ノードの LLM 生成・dispatch・probe は一切行わない．
+埋め込みのみ `127.0.0.1:11435` の ollama を使う）
+
+1. **実装**: 上記 1〜6 を実施し，`uv run pytest tests/test_evaluate_classifier_calibration.py` と
+   既存テスト・lint・型検査を通す．CLI 2 分岐のチェックボックスを確認する．
+2. **予備実行（発火確認・実測 q_hat の取得）**: `data/dataset.jsonl` の先頭 20 行を
+   `/tmp/iter71_head20.jsonl` に切り出し，`--qhat-source true_class --set-construction corrected_aps`
+   固定で `--qhat-quantile-direction` を `upper` と `alpha_lower` の 2 通り実行する（校正 1,427 件の
+   埋め込みは両方で必要なため 1 回あたり十数分）．
+   - 期待: stderr の print が `qhat_quantile_direction=upper q_hat=0.3865` と
+     `qhat_quantile_direction=alpha_lower q_hat=<新値>` をそれぞれ示し，母集団サイズは両方 1427，
+     `set_size` の分布が後者で明確に大きくなる．
+   - **ここで得た実測 q_hat を上の掃引表に当てはめ，本実行の coverage 予測値を journal に書き留めて
+     から手順 4 へ進む**（事前予測と実測の突き合わせを判定の一部とするため）．
+   - print が `upper` のままである・q_hat が変化しない場合は CLI 伝播漏れ（変更箇所 5）を疑い，
+     本実行に進まず実装をやり直す．
+3. **本実行 A（後方互換の確認）**: 全 1,600 行を `--qhat-quantile-direction upper --set-construction
+   corrected_aps --qhat-source true_class` で実行し，md5 が `ee6fbf7d0e4dfd9408c76b2ff9fd1cdf` と
+   一致することを確認する．不一致なら原因（ollama バージョン・digest 差）を特定し journal へ記録してから進む．
+4. **本実行 B（レバー）**: 同一コマンドの `--qhat-quantile-direction alpha_lower` のみを変えて実行する．
+5. **分析**: B の出力から coverage・mean_set_size・`set_size` 分布（1〜10 のヒストグラム）を集計し，
+   ECE は `metrics.py:compute_ece()` を流用する．手順 2 で立てた予測値との一致を確認し，
+   Iter70 出力との突き合わせで非退行条件 1〜4 を検証したうえで adopted / rejected / invalid を判定する．
+6. **付随報告（判定には用いない）**: `--confidence-level` を 0.70 / 0.80 / 0.95 に振ったときの
+   coverage・mean_set_size を B の `probabilities` からオフライン再計算し（埋め込み再実行は不要），
+   「どの名目水準なら実用的な集合サイズに収まるか」を曲線として記録する．次レバーの材料とする．
+
+- **コスト**: 埋め込み 1,427（校正）＋1,600（評価）件の逐次計算で本実行 1 回あたり 10〜30 分．
+  予備実行 2 回を含め計 1〜1.5 時間程度．GPU の実機占有・LLM 生成は不要．
+- **出力先**: `results/<timestamp>/Iter71_qhat_upper.jsonl`，`results/<timestamp>/Iter71_qhat_alpha_lower.jsonl`．
+
+---
+
+### 調査 (Iter71)
+
+**前提確認**: `state.json`（iteration=71, phase=investigate, current_lever=conformal_qhat_quantile_direction）・
+`config.yml` の `conformal_qhat_quantile_direction: [alpha_lower_quantile]`（Iter70 reflector 新設 /
+backlog B106）・backlog B106・journal Iter70 の「調査 (Iter70)」Q1〜Q3 を確認した．単一レバーは
+分位点方向 1 点のみ，集合構成は `corrected_aps` に固定（Iter70 で維持），q_hat の母集団は
+`true_class`（校正集合 1,427 件）に固定，分類器・埋め込み・argmax・confidence・`config.yaml` は変更しない．
+
+**Q1: 現行コードの q_hat 算出ロジックを読解し，config note の主張（分位点方向が逆）を数式で検証**
+
+`scripts/evaluate_classifier_calibration.py`（2026-09-19 Iter71 調査時点の行番号）:
+
+- `_compute_prediction_set()` 内 L127-128:
+  ```python
+  target = min(1.0, (1.0 - alpha) * (1.0 + 1.0 / len(flat_scores)))
+  q_hat = float(np.quantile(flat_scores, target, method="higher"))
+  ```
+  `alpha = 1.0 - confidence_level`（confidence_level=0.90 なら alpha=0.10）．`target ≈ 0.9006`
+  （n=1427 のとき），すなわち**補数スコア（`score = 1 - cumsum`）の (1-α) 分位点＝90th percentile**
+  を q_hat としている．同一ロジックが診断 print 用に L272-273 にも重複している（`_diag_target` /
+  `_diag_q_hat`）ため，修正はこの 2 箇所の両方に対して行う必要がある．
+- 集合構成（`corrected_aps`，Iter70 で修正済み・L134-140）は「確率降順に走査しながら
+  `cumsum` を加算 → 先に `pred_set.append` → `score = 1 - cumsum` が `q_hat` 以下になった回で
+  `break`」という順序．すなわち**打ち切り条件は `1 - cumsum <= q_hat` ⟺ `cumsum >= 1 - q_hat`**であり，
+  これは「累積確率が `1 - q_hat` という質量に達するまでクラスを追加する」という標準 APS の構成と
+  数式的に同じ形をしている．
+- 問題は「この `1 - q_hat` が正しい被覆質量（目標 `1 - α = 0.90`）に対応する値になっているか」である．
+  標準 APS では，校正セットの**標準スコア**（`S = cumsum`，真クラスまでの累積確率，単調増加）の
+  `(1-α)` 分位点 `q_hat_std` を求め，集合構成の打ち切り条件は `cumsum >= q_hat_std` である．
+  本実装のスコアは `score = 1 - cumsum`（標準スコアの補数）なので，`q_hat_std = 1 - q_hat_complement`
+  が成り立つべきだが，これは「補数スコアの分位点」と「標準スコアの分位点」が**単調減少変換で
+  写り合う**ことを意味する．一般に `Y = 1 - X` のとき，`X` の `p` 分位点 `x_p` に対応する `Y` の
+  分位点は `1 - x_p`（＝`Y` の `1-p` 分位点）である．すなわち `q_hat_std`（`X` の `(1-α)` 分位点）に
+  対応する `q_hat_complement`（`Y=1-X` 側の分位点）は，`X` の `(1-α)` 分位点の位置を `Y` 側に
+  写した **`Y` の `α` 分位点**でなければならない．
+  **現行コードは `Y`（補数スコア）の `(1-α)` 分位点（90th percentile）を取っており，
+  正しくは `α` 分位点（10th percentile）を取るべきである**．config note（backlog B106）の
+  主張と一致する．
+- 直感的な確認: `q_hat` が大きいほど打ち切り条件 `cumsum >= 1 - q_hat` の右辺（必要な累積確率）は
+  **小さく**なり，集合は小さく・被覆は低くなる．現行実装は補数スコアの 90th percentile
+  （＝相対的に**大きい**値）を q_hat に採用しているため，必要な累積質量 `1 - q_hat` が過小になり，
+  構造的に過小被覆（under-coverage）を招く．Iter70 実測の coverage=0.7638（目標 0.87-0.95 未達）は
+  この機序と整合する．
+
+**Q2: 標準 conformal prediction（split conformal / APS）における q_hat の分位点方向と
+有限標本補正式を一次資料で確認**（tavily-search）
+
+- Angelopoulos & Bates, "A Gentle Introduction to Conformal Prediction and Distribution-Free
+  Uncertainty Quantification" (arXiv:2107.07511, 2021・NeurIPS 2020 の Romano et al. APS 論文の
+  標準的な解説として広く引用される)．同論文の手順（`arxiv.org/html/2107.07511v6` より直接引用）:
+  「Compute `q̂` as the `⌈(n+1)(1-α)⌉/n` quantile of the calibration scores」．
+  これは非適合スコア `S`（大きいほど不適合＝標準スコアと同じ向き）に対する**上側**分位点
+  （`(1-α)` 側）であることを確認した．
+- `ConformalPrediction.jl` の公式ドキュメント（`taija.org/ConformalPrediction.jl/dev/explanation/
+  finite_sample_correction`）は Angelopoulos & Bates (2021) と Barber et al. (2021,
+  "Predictive Inference with the Jackknife+", Annals of Statistics) の記法を引用し，**上側分位点と
+  下側分位点の両方を式で定義**している:
+  ```
+  q̂+_{n,α}{v} = ⌈(n+1)(1-α)⌉ / n            （上側，標準スコアに対して使う分位点）
+  q̂-_{n,α}{v} = ⌊(n+1)α⌋ / n = -q̂+_{n,α}{-v}  （下側，符号反転したスコアに対して使う分位点）
+  ```
+  この第 2 式 `q̂-_{n,α}{v} = -q̂+_{n,α}{-v}` は，まさに Q1 で導出した「`Y=1-X` の分位点は `X` の
+  分位点の写像」という関係の一般形であり，**`α` 分位点（下側）を `⌊(n+1)α⌋/n` の位置で取る**という
+  補正式が一次資料で裏付けられた．
+- 補足（medium.com の実装解説記事）は現行コードと同型の実装トリック
+  （`q_level = ceil((n+1)*(1-alpha))/n; q_hat = np.quantile(scores, q_level, method='higher')`）を
+  示しており，本リポジトリの `_compute_prediction_set()` の書き方（`np.quantile(..., method="higher")`）
+  が標準的な実装パターンに沿っていることも確認した．したがって修正すべきは**分位点の水準と
+  補間方向（`method`）のみ**であり，`np.quantile` の使い方自体を作り替える必要はない．
+
+**Q3: n=1,427 に対する正しい有限標本補正式の確定**
+
+校正集合サイズ `n_cal = 1427`（`data/classifier_train.jsonl`，Iter69 で確定．journal Iter69/70 に
+既出）．`confidence_level=0.90` ⟹ `alpha=0.10`．
+
+- **現行（upper，(1-α) 側）**: `target = (1-α)(1+1/n) ≈ 0.9 × 1.0007009 ≈ 0.900631`，
+  `np.quantile(scores, target, method="higher")`．これは `⌈(n+1)(1-α)⌉/n = ⌈1428×0.9⌉/n
+  = ⌈1285.2⌉/n = 1286/1427 ≈ 0.901192` の近似実装（`method="higher"` の丸め上げでほぼ同じ
+  順位统計量に到達する設計）．
+- **修正後（`alpha_lower_quantile`，α 側）**: `⌊(n+1)α⌋/n = ⌊1428×0.10⌋/n = ⌊142.8⌋/n
+  = 142/1427 ≈ 0.099510`．実装は現行の `method="higher"` を上側専用の丸めトリックとして使っているのに
+  対応させ，下側は `target = α(1+1/n) ≈ 0.10 × 1.0007009 ≈ 0.100070`，
+  `np.quantile(scores, target, method="lower")`（丸め下げ）とすることで，上側実装と対称な
+  `⌊(n+1)α⌋/n` 順位統計量に到達する設計が，一次資料の式・現行コードの実装パターンの両方と整合する．
+  **`min(1.0, ...)` のクランプは下側では不要**（`α(1+1/n)` は α<0.5 なら 1.0 を超えない．
+  ただし `max(0.0, ...)` は理論上不要だが防御的に残してもよい）．
+- **具体値の実測は本イテレーションでは行っていない**（校正集合 1,427 件の埋め込み・OOF 予測の
+  再計算が必要で，これは実装・実験フェーズのコストに属する）．config note が挙げる
+  「評価集合の補数スコア q0.10=0.0524 / q0.90=0.5956」は**評価集合（1,600 行）の argmax
+  確率から事後計算した補数スコアの分位点**であり，**校正集合（1,427 行，真クラススコアのみ）から
+  計算される実際の q_hat とは異なる母集団**である点に注意．両者を混同すると q_hat の値を
+  誤って見積もるため，計画・実装フェーズでは校正集合の `true_class_scores` から直接
+  `np.quantile(scores, 0.100070, method="lower")` を計算し，実測値を journal に記録すること．
+
+**Q4: レバーを実際に発火させるための到達コードパスと変更箇所**
+
+`grep -n "conformal_qhat_quantile_direction"` は `.claude/research/config.yml` と本 journal 以外に
+0 件（`config.yaml`・`http_server.py`・`classifier.py`・`aggregator.py`・`mise.toml` のいずれにも
+未出現）．Iter69/70 と同型の CLI 直接起動オフライン評価であり，`config.yaml` を経由しない．
+
+変更が必要な箇所（すべて `scripts/evaluate_classifier_calibration.py`，Iter71 調査時点の行番号）:
+
+1. `_compute_prediction_set()` のシグネチャ（現 L66-72）に新引数
+   （例: `qhat_quantile_direction: str = "upper"`）を追加し，L127-128 の分位点計算を分岐させる:
+   - `"upper"`（既定・現行挙動）: `target = min(1.0, (1-alpha)*(1+1/n))`, `method="higher"`．
+   - `"alpha_lower"`（新値）: `target = alpha*(1+1/n)`, `method="lower"`．
+   未知の値は `ValueError`（既存の `qhat_source`・`set_construction` の検証パターン，
+   L111-116 相当，に揃える）．
+2. 診断 print 用の重複ロジック（L272-273 `_diag_target` / `_diag_q_hat`）にも同じ分岐を適用する
+   （Iter70 で `set_construction` を print へ追加した前例に倣い，`qhat_quantile_direction` の
+   実効値と結果 q_hat も print へ追加し，発火の証拠を残す）．
+3. `predict_calibrated_rows()`（L157-169 のシグネチャ）・`_run()`（L369-383 のシグネチャ）へ
+   引数を追加し，`_compute_prediction_set()` 呼び出し 2 箇所（L313 fine-tuned embedding 分岐，
+   L349 ollama 分岐）へ伝播する．**本実験で通るのは ollama 分岐（L349 相当）**．
+4. CLI に `--qhat-quantile-direction`（`choices=["upper", "alpha_lower"]`, `default="upper"`）を
+   追加し，`main()` の **`--output` 有無による 2 分岐（L488 `if args.output is None:` の stdout 側，
+   L508 `with open(args.output, ...)` のファイル出力側）の両方**へ渡す．
+   Iter69 実装フェーズでこの伝播漏れを一度起こしており（journal Iter69/70），Iter70 計画節も
+   同じ注意を明記している．**本イテレーションでも同じ落とし穴が存在する**ため，計画フェーズは
+   この 2 箇所を明示的にチェックリスト化すること．実験で使うのはファイル出力側（L508 相当）．
+5. `tests/test_evaluate_classifier_calibration.py` に，既存の `qhat_source`/`set_construction` の
+   テストパターン（`test_qhat_source_*`, `test_set_construction_*`）に倣い，
+   (a) 同一の `flat_scores` に対し `"upper"` と `"alpha_lower"` で異なる q_hat が出ること，
+   (b) `"alpha_lower"` の q_hat が `⌊(n+1)α⌋/n` 順位統計量と一致すること（小さな合成配列で検証），
+   (c) 既定値 `"upper"` の回帰テスト，(d) 未知の値で `ValueError`，を追加する．
+
+**到達コードパス（まとめ）**: CLI `--qhat-quantile-direction alpha_lower --set-construction
+corrected_aps --qhat-source true_class` → `main()` ファイル出力分岐（L508 相当）→ `_run()` →
+`predict_calibrated_rows()` → 評価 1,600 行ループ → `_compute_prediction_set()`（ollama 分岐，
+L349 相当，**分位点方向の切替が実際に効く唯一の地点**）→ 出力 jsonl の `prediction_set` /
+`set_size` → coverage・mean_set_size 集計．`config.yaml` を経由しないため「デプロイ漏れで実行時に
+読まれない」型の失敗は構造上起こらない．唯一のリスクは Q4-4 の CLI 2 分岐伝播漏れであり，
+Iter69/70 と同様に予備実行（先頭 20 行）で `set_construction` と `qhat_quantile_direction` の
+実効値 print・q_hat の値・`set_size` 分布の変化を必ず確認すること．
+
+**次フェーズへの示唆**
+
+- 単一レバーは分位点方向 1 点のみ．集合構成 `corrected_aps`・母集団 `true_class` は固定のまま，
+  `--qhat-quantile-direction alpha_lower` を追加する設計で config note の意図と整合する．
+- 有限標本補正式は `⌊(n+1)α⌋/n`（n=1427, α=0.10 のとき 142/1427≈0.09951）で確定．
+  実装は `target = alpha*(1+1/n)` と `np.quantile(..., method="lower")` の組で，現行の上側実装と
+  対称な形にできる．
+- 実測 q_hat（校正集合の `true_class_scores` に対する `alpha_lower` 分位点）は計画・実装フェーズで
+  必ず算出し，config note の楽観的見積り（q_hat≈0.05）と一致するか確認すること。評価集合の分位点
+  （q0.10=0.0524等）は校正集合とは異なる母集団であり参考値に留まる。
+- CLI の 2 分岐（stdout / ファイル出力）への伝播が Iter69 以来 3 回連続で注意喚起されている箇所
+  であり，予備実行での発火確認（stderr 診断 print の実効値・set_size 分布の変化）を計画に明記すること。
+- 成功条件は config note 記載のとおり（coverage 0.88-0.95，ECE≤0.0680 同一性アンカー，
+  `selected_domain`/`confidence`/`probabilities` の Iter70 出力との一致）を踏襲すればよく，
+  本調査で新たな懸念は見つからなかった。
+
+---
+
+### 実装 (Iter71)
+
+**変更ファイル**: `scripts/evaluate_classifier_calibration.py`（1 ファイル）＋
+`tests/test_evaluate_classifier_calibration.py`（テスト追加）．計画どおり `config.yaml` は変更していない．
+
+**変更内容（行番号は実装後）**:
+
+1. `_compute_prediction_set()` シグネチャ（L66-73）に `qhat_quantile_direction: str = "upper"` を追加．
+   docstring（L110-127）へ `q-hat+_{n,alpha}` / `q-hat-_{n,alpha}` の定義（Angelopoulos & Bates 2021
+   arXiv:2107.07511，Barber et al. 2021 Annals of Statistics）と，本実装のスコアが標準 APS スコアの
+   補数であるため `alpha_lower` が正しい理由を記載．検証ブロック（L137-141）へ
+   `qhat_source`/`set_construction` と同型の `ValueError` 分岐を追加．
+2. q_hat 計算（L150-158）を分岐化: `"alpha_lower"` は `target = alpha*(1+1/n)` を
+   `np.quantile(flat_scores, target, method="lower")` で評価，`"upper"`（既定）は現行式のまま温存．
+3. 診断 print 用の重複ロジック（旧 L272-273 相当，現 `predict_calibrated_rows()` 内）にも同一分岐を適用し，
+   print 文へ `qhat_quantile_direction={...}` を追加（L296-314 付近）．計画で指摘された「対で確認」を実施済み．
+4. `predict_calibrated_rows()`・`_run()` のシグネチャへ引数を追加し，`_compute_prediction_set()` 呼び出し
+   2 箇所（fine-tuned 分岐・ollama 分岐）と `_run()` 内 `predict_calibrated_rows()` 呼び出しへ伝播．
+5. CLI に `--qhat-quantile-direction`（`choices=["upper","alpha_lower"]`, `default="upper"`）を追加し，
+   `main()` の `--output` 有無 2 分岐（stdout 側 L529-548，ファイル出力側 L550-568 相当）**両方**へ
+   `qhat_quantile_direction=args.qhat_quantile_direction` を渡した．Edit の `replace_all` は
+   インデント差（16 スペース vs 20 スペース）のため 1 回で両方には反映されず，ファイル出力側は個別の
+   Edit で追加漏れがないことを確認した（計画で警告されていた 3 回連続の伝播漏れパターンを本イテレーションで再現しかけたが，
+   実装中に検知・修正済み）．
+6. `tests/test_evaluate_classifier_calibration.py` へ 4 件追加:
+   (a) `test_qhat_quantile_direction_upper_and_alpha_lower_yield_different_q_hat`: 既存 10 クラス
+       toy データ（n_cal=12）で `upper`（q_hat=0.95, set_size=1）と `alpha_lower`（q_hat=0.60,
+       set_size=2）が分岐し，`alpha_lower` の方が大きい集合になることを検証．
+   (b) `test_qhat_quantile_direction_alpha_lower_matches_finite_sample_rank_statistic`: n=19 の等間隔
+       合成スコア配列で `⌊(n+1)α⌋/n`（floor(20*0.1)=2 番目＝0.10）が厳密に一致することを
+       `np.quantile` 直接呼び出しで確認したうえで，浮動小数点境界を避けるため余裕を持たせた
+       確率配列（score 0.15→0.05 で交差）で `_compute_prediction_set()` 経由の集合サイズが
+       一致することを検証．
+   (c) `test_qhat_quantile_direction_default_is_upper_for_backward_compatibility`: 既定値回帰テスト．
+   (d) `test_qhat_quantile_direction_rejects_unknown_value`: 未知値で `ValueError`．
+
+**テスト結果**: `uv run pytest tests/test_evaluate_classifier_calibration.py -v` で全 13 件
+（既存 9 件＋新規 4 件）PASS．`uv run ruff check scripts/evaluate_classifier_calibration.py
+tests/test_evaluate_classifier_calibration.py` は "All checks passed"．
+`uv run pytest -q`（全体）は 275 passed / 12 failed だが，failed はいずれも
+`tests/test_build_dataset.py`・`tests/test_train_domain_classifier.py`（`scripts/train_domain_classifier.py`
+の `AttributeError`）であり，`git stash` で本イテレーションの変更を退避した状態でも同じ 12 件が
+失敗することを確認済み（本変更前から存在する既存不具合であり非退行）．型検査ツール（mypy 等）は
+`pyproject.toml` に設定がなく，リポジトリに lint/type task が mise に無いため実行していない
+（ruff のみ実行）．
+
+**予備実行（発火確認）**: `data/dataset.jsonl` 先頭 20 行を切り出し，`--qhat-source true_class
+--set-construction corrected_aps` 固定で `--qhat-quantile-direction` を `upper`／`alpha_lower` の
+2 通り実行（`--ollama-host 127.0.0.1 --ollama-port 11435`，wafl-ctrl5 の ollama 経由，実機ノード不使用）．
+
+- `upper`: stderr `qhat_source=true_class q_hat=0.3865 population_size=1427
+  set_construction=corrected_aps qhat_quantile_direction=upper`．q_hat=0.3865 は Iter69/70 実測値と
+  一致（後方互換の傍証）．`set_size` 分布（20 行）: `[2,3,4,2,4,2,4,2,2,2,3,4,2,3,3,4,2,3,2,2]`．
+- `alpha_lower`: stderr `qhat_source=true_class q_hat=0.0010 population_size=1427
+  set_construction=corrected_aps qhat_quantile_direction=alpha_lower`．`set_size` 分布（20 行）:
+  `[9,10,10,10,10,10,10,10,10,10,10,10,9,10,10,10,10,10,9,9]`．
+- 判定: `population_size` は両方とも 1427 で一致，`qhat_quantile_direction` の実効値表示が
+  それぞれのモードで正しく切り替わり，q_hat（0.3865→0.0010）・`set_size` 分布（2-4 個→9-10 個）が
+  明確に分岐している．計画の invalid 条件（q_hat 不変・set_size 分布が Iter70 と同一）には該当せず，
+  実装は発火していると判断する。
+- **実測 q_hat の計画予測との乖離を明記**: 計画の事前見積り（校正集合の α 分位点 ≈0.03 前後，
+  掃引表の 0.04〜0.145 帯）に対し，実測 q_hat=0.0010 は 1 桁以上小さい．校正集合（1,427 件の OOF
+  真クラス補数スコア）は，計画時の「評価集合との比 0.65 で縮小」という粗い外挿より大きく 0 側に
+  偏っている（多くの校正サンプルで分類器が真クラスにほぼ確信的＝`cumsum` がほぼ 1 に近く，
+  `score=1-cumsum` がほぼ 0 に近いサンプルが 10% 分位点を大きく下回るほど存在する，という解釈）．
+  この値自体は本フェーズで実装ミスによるものではない（`population_size=1427` の一致，ユニットテスト
+  (a)(b) での手計算との整合，`upper` 側が Iter70 実測と完全一致することから，計算経路は正しいと判断）．
+  ただし本実行 B（1,600 行）で `1-q_hat≈0.999` の質量を要求すると，予備実行の `set_size` 分布
+  （9〜10/10 クラス）から推定して **coverage は 0.95 の合格上限を大きく超える可能性が高い**
+  （over-coverage，10 クラス中 9〜10 個を毎回集合に含める状態）．この見立ては判定には用いず，
+  次の実験フェーズで 1,600 行の本実行により確定させる．
+
+**実験を開始してよい状態か**: はい．コード・テストとも計画どおり実装済み，回帰なし，CLI 2 分岐の
+伝播も確認済み．ただし上記のとおり予備実行の実測 q_hat は計画の想定レンジ外であり，本実行 B は
+「rejected（coverage>0.95，過被覆）」に着地する可能性が高いことを実験・分析フェーズへ申し送る．
+
+---
+
+### 実験・分析(実行) (Iter71)
+
+**実行環境**: オフライン完結．実機ノード wafl500〜509 は不使用．埋め込み計算のみ
+`127.0.0.1:11435`（SSH ローカルフォワード先，wafl-ctrl5 の ollama，`nomic-embed-text:latest` 在中）を
+使用．LLM 生成・probe・dispatch トラフィックは発生していない．入力（`data/dataset.jsonl`
+mtime 2026-09-19 00:49，`data/classifier_train.jsonl` mtime 2026-07-30 14:44，
+`models/domain_classifier.joblib` mtime 2026-08-02 23:41）はいずれも計画・実装フェーズの記録と一致し，
+実行直前に再確認した（変化なし）．
+
+**実行コマンド**（A・B とも `--qhat-quantile-direction` のみ変更，他は計画節固定パラメータのとおり）:
+
+```
+uv run python -m scripts.evaluate_classifier_calibration \
+  --dataset data/dataset.jsonl \
+  --classifier models/domain_classifier.joblib \
+  --embedding-model nomic-embed-text \
+  --ollama-host 127.0.0.1 --ollama-port 11435 \
+  --conformal-prediction --confidence-level 0.90 \
+  --calibration-dataset data/classifier_train.jsonl \
+  --qhat-source true_class \
+  --set-construction corrected_aps \
+  --qhat-quantile-direction [upper|alpha_lower] \
+  --output results/20260919_215923/Iter71_qhat_[upper|alpha_lower].jsonl
+```
+
+`--education-logit-bias`/`--education-threshold` は既定値 0.0，`--fine-tuned-embed-model` は指定なし
+（ollama 分岐）で，計画節の固定パラメータと一致する．
+
+**本実行 A（`--qhat-quantile-direction upper`，後方互換確認）**
+
+- 出力: `results/20260919_215923/Iter71_qhat_upper.jsonl`（1,600 行）
+- stderr 診断: `qhat_source=true_class q_hat=0.3865 population_size=1427
+  set_construction=corrected_aps qhat_quantile_direction=upper`
+- md5=`ee6fbf7d0e4dfd9408c76b2ff9fd1cdf`。比較対象
+  `results/20260919_211708/Iter70_corrected_aps.jsonl`（同 md5）と**バイト単位で完全一致**した。
+  手順 1（後方互換確認）は成功。原因調査は不要だった。
+
+**本実行 B（`--qhat-quantile-direction alpha_lower`，レバー）**
+
+- 出力: `results/20260919_215923/Iter71_qhat_alpha_lower.jsonl`（1,600 行，md5=`575594c7a973fe615202485de7fe0a8f`）
+- stderr 診断: `qhat_source=true_class q_hat=0.0010 population_size=1427
+  set_construction=corrected_aps qhat_quantile_direction=alpha_lower`。予備実行（先頭 20 行）の
+  実測値 q_hat=0.0010 と一致し，1,600 行の本実行でも変化しなかった（母集団は校正集合 1,427 件で
+  評価データ数に依存しないため，これは想定どおり）。
+
+**実測値**（`metrics.py:compute_ece()` を流用。coverage の定義は
+`expected_domains[0] in prediction_set` の平均値。判定は行わず数値のみ記録する。
+分析コード: `/tmp/iter71_analyze.py`，作業用の一時ファイルでリポジトリには含めていない）:
+
+| 指標 | A（upper） | B（alpha_lower） |
+|---|---|---|
+| coverage | 0.763750（1222/1600） | **0.996875（1595/1600）** |
+| mean_set_size | 1.943750 | 9.663750 |
+| set_size ヒストグラム（1〜10） | {1:539, 2:671, 3:332, 4:57, 5:1, 6:0, 7:0, 8:0, 9:0, 10:0} | {1:0, 2:0, 3:0, 4:0, 5:0, 6:5, 7:23, 8:65, 9:319, 10:1188} |
+| ECE | 0.062998 | 0.062998 |
+| top1_accuracy | 0.603125 | 0.603125 |
+
+A の数値は Iter70 の B（`corrected_aps`, `upper`）実測値（coverage=0.763750,
+mean_set_size=1.943750, ECE=0.062998）と完全一致し，md5 一致（本実行 A）とあわせて整合的である。
+ECE・top1_accuracy が A・B で不変なのは，`qhat_quantile_direction` が `confidence`/`selected_domain`
+（argmax）に影響しない設計どおりである。
+
+**非退行条件の検証**（比較対象: `results/20260919_211708/Iter70_corrected_aps.jsonl`，
+1,600 行を `id` で突き合わせ）:
+
+1. `selected_domain` 不一致件数 = **0**。
+2. `confidence` 不一致件数（許容差 1e-9 超）= **0**，実測最大差 = **0.000e+00**。
+3. `probabilities`（10 クラス×1,600 行 = 16,000 要素）不一致件数（許容差 1e-9 超）= **0**，
+   実測最大差 = **0.000e+00**。
+4. `top1_accuracy` は A・B とも **0.603125** で不変（条件 1 の系）。
+5. 既定値 `--qhat-quantile-direction upper`（本実行 A）は Iter70 出力（`--set-construction
+   corrected_aps` 側）と **md5 完全一致**（`ee6fbf7d0e4dfd9408c76b2ff9fd1cdf`）。
+
+非退行条件 1〜5 はすべて満たされた。分位点方向の切替（B）が `probabilities`・`confidence`・
+`selected_domain`・`top1_accuracy` に一切影響しないことが実測でも確認された。
+
+**手順 2（予備実行）で立てた予測との突き合わせ**: 予備実行時点で「coverage は 0.95 の合格上限を
+大きく超える可能性が高い」と申し送っていたとおり，本実行 B の実測 coverage=0.996875 は帯上限 0.95 を
+大きく超えた（過被覆）。計画の事前シミュレーション表（q_hat 掃引，0.04≤q_hat≤0.145 で coverage
+0.88–0.95）とは異なり，実測 q_hat=0.0010 は掃引表の最小値 0.0200 よりさらに 1 桁小さく，
+対応する `1-q_hat≈0.999` という極端に高い累積質量要求により，mean_set_size が 9.66/10（ほぼ全クラスを
+含む集合）まで拡大した。
+
+**付随報告（判定には用いない）: 名目水準振り**
+
+計画手順 6 のとおり，本実行 B の `probabilities`（評価データ側，再計算不要）はそのまま流用し，
+校正集合（1,427 件）の true-class 補数スコア配列のみを 1 回計算（`/tmp/iter71_qhat_sweep.py`，
+評価データ側の埋め込み・分類器推論の再実行はなし）して，`--confidence-level` を 0.70/0.80/0.90/0.95
+に振ったときの `alpha_lower` 方向 q_hat・coverage・mean_set_size をオフライン再計算した：
+
+| confidence_level | alpha | q_hat(alpha_lower) | coverage | mean_set_size | set_size ヒストグラム（1〜10） |
+|---|---|---|---|---|---|
+| 0.70 | 0.30 | 0.009681 | 0.987500 | 8.025625 | {1:1, 2:4, 3:9, 4:25, 5:56, 6:110, 7:246, 8:443, 9:561, 10:145} |
+| 0.80 | 0.20 | 0.003876 | 0.993750 | 8.910000 | {1:0, 2:0, 3:2, 4:5, 5:14, 6:41, 7:107, 8:262, 9:621, 10:548} |
+| 0.90 | 0.10 | 0.000980 | 0.996875 | 9.663750 | {1:0, 2:0, 3:0, 4:0, 5:0, 6:5, 7:23, 8:65, 9:319, 10:1188} |
+| 0.95 | 0.05 | 0.000353 | 1.000000 | 9.883125 | {1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:2, 8:24, 9:133, 10:1441} |
+
+`confidence_level=0.90` 行の q_hat=0.000980 は，本実行 B の stderr 診断値 `q_hat=0.0010`（小数第 4 位
+丸め表示）と一致し，sweep スクリプトの計算経路（本体実装 `_compute_prediction_set()` の
+`target=alpha*(1+1/n)`, `method="lower"` を再現）が本体実装と整合することの傍証になる。
+名目水準を 0.70 まで下げても coverage は 0.9875，mean_set_size は 8.0/10 に留まり，本データ・
+本分類器・本校正集合の組み合わせでは，いずれの名目水準でも実用的な集合サイズ（例えば
+mean_set_size≤3 程度）には到達しないことが判明した。
+
+**出力ファイル**: `results/20260919_215923/Iter71_qhat_upper.jsonl`，
+`results/20260919_215923/Iter71_qhat_alpha_lower.jsonl`，`results/20260919_215923/run_A.log`，
+`results/20260919_215923/run_B.log`。分析コード（作業用一時ファイル，リポジトリ未収録）:
+`/tmp/iter71_analyze.py`（coverage・mean_set_size・ヒストグラム・ECE・非退行条件），
+`/tmp/iter71_qhat_sweep.py`（名目水準振り）。
+
+---
+
+### 分析(解釈) (Iter71)
+
+**判定: rejected（過被覆．事前登録の `coverage > 0.95` パターンに該当）**
+
+#### 1. 数値の独立再検証
+
+実験フェーズの報告値を，出力 jsonl から独立に再集計して確認した（検証スクリプト
+`/tmp/iter71_verify.py`，一時ファイル）．
+
+| 指標 | A（upper） | B（alpha_lower） | Iter70 基準線 |
+|---|---|---|---|
+| coverage | 0.763750（1222/1600） | **0.996875（1595/1600）** | 0.763750 |
+| mean_set_size | 1.943750 | 9.663750 | 1.943750 |
+| top1_accuracy | 0.603125 | 0.603125 | 0.603125 |
+| ECE | 0.062998 | 0.062998 | 0.062998 |
+
+- `set_size` と `len(prediction_set)` の不一致は A・B とも 0 件（出力の自己整合性を確認）．
+- B の `set_size` ヒストグラム {6:5, 7:23, 8:65, 9:319, 10:1188} を再現．10 クラス中
+  9〜10 個を含む行が 1,507/1,600（94.2%）を占める．
+- B で被覆を外した 5 行は `education-020`・`compound-053`・`compound-064`・`compound-074`・
+  `compound-096`．複合設問側の全ラベル被覆（`all(expected_domains ⊆ prediction_set)`）も
+  0.996250 とほぼ同値であり，主基準の定義（`expected_domains[0]`）の取り方に依存する結論ではない．
+
+#### 2. ノイズか有意か — 帯上限からの逸脱幅
+
+- **実行系のノイズはこのイテレーションでは実測 0 である**．本実行 A は Iter70 出力と
+  md5 単位で完全一致（`ee6fbf7d0e4dfd9408c76b2ff9fd1cdf`），B と Iter70 の
+  `confidence`・`probabilities` の実測最大差も `0.000e+00`（1e-9 の許容差を使うまでもない）．
+  すなわち「ollama 埋め込みの数値再現性」という唯一の変動源も今回は発現しておらず，
+  A/B の差はレバーの効果のみに帰着する．
+- 残る不確実性は評価集合 1,600 問の標本誤差のみ．事前登録のノイズ幅 SE≈0.006（n=1600, p≈0.94）で
+  測ると，実測 coverage=0.996875 は帯上限 0.95 から **+0.046875 ＝ SE の 7.81 倍**離れている．
+  実測比率での SE（√(p̂(1-p̂)/n)=0.00140）で測れば **33.6 倍**であり，どちらの取り方でも
+  ノイズでは説明できない．
+- 件数で見ても，coverage ≤ 0.95 に収まるには被覆外れが 80 件必要なところ，実測は 5 件である．
+  Wilson 95% 信頼区間は **[0.99271, 0.99866]** で帯 0.88–0.95 と全く重ならない．
+- よって「帯の上を有意に外れた（過被覆）」という判定はノイズ由来ではなく信号である．
+
+#### 3. 非退行条件の再確認（比較対象 `results/20260919_211708/Iter70_corrected_aps.jsonl`）
+
+分析フェーズで独立に再計算した結果，実験フェーズの報告どおり全て充足していた．
+
+1. `selected_domain` 不一致 **0 件**（1,600 行を `id` で突き合わせ，id 欠落も 0）．
+2. `confidence` 実測最大差 **0.000e+00**（許容差 1e-9 以内），
+   `probabilities`（16,000 要素）実測最大差 **0.000e+00**．
+3. `top1_accuracy` は A・B とも **0.603125** で Iter70 から不変．
+4. 既定値 `upper` での再実行（本実行 A）が Iter70 出力と **md5 完全一致**（後方互換 OK）．
+5. rank_2 候補源への流用は行っていない（スコープ外の約束を遵守）．
+
+同一性アンカーの ECE=0.062998 も合格条件 ≤0.0680 を満たす．**すなわち adopted の 4 条件のうち，
+非退行条件と ECE は全て満たし，主基準 coverage のみが不成立である**．
+
+#### 4. 仮説との整合
+
+- **合っていた部分**: 「分位点方向を α 側へ直せば coverage は大きく上がる」という仮説の向きは
+  正しかった（0.763750 → 0.996875，+23.3pt．名目 0.90 を跨いで上方へ移動）．実装の発火も
+  予備実行・本実行の診断 print（`qhat_quantile_direction=alpha_lower`, `population_size=1427`）と
+  `set_size` 分布の激変（1〜5 個 → 6〜10 個）で確認済みであり，invalid 条件には該当しない．
+  Iter16 以降くり返してきた「設定は変えたが実行が到達しない」型の失敗ではない．
+- **外れた部分**: 大きさが合わなかった．計画の事前見積り（校正集合の α 分位点 ≈0.03，掃引表で
+  帯に入るのは 0.04≤q_hat≤0.145）に対し，実測 q_hat=0.000980 は **1〜2 桁小さい**．
+  計画時の外挿（校正集合は評価集合の 0.65 倍に縮む）が成り立たず，校正集合の真クラス補数スコアは
+  0 側に極端に偏っていた（`cumsum≈1`，すなわち OOF 予測が真クラスにほぼ確信的な校正サンプルが
+  下位 10% を埋め尽くしている）．結果として実効閾値 `1-q_hat≈0.999` を要求し，10 クラス中
+  9〜10 個を毎回含める自明な集合になった．計画節が実測前に明記していた「上限で外れる目がある」
+  という留保が，予想より極端な形で的中したことになる．
+- 名目水準振り（付随報告，判定外）はこの解釈を補強する．`confidence_level` を 0.70 まで下げても
+  coverage=0.9875・mean_set_size=8.03 であり，**名目水準をどう選んでも実測被覆が名目を大きく
+  上回る**（0.70→0.9875, 0.80→0.9938, 0.90→0.9969, 0.95→1.0000）．これは「α の選び方の問題」
+  ではなく，**校正集合のスコア分布が評価集合のそれと系統的にずれている**こと，すなわち
+  交換可能性（exchangeability）の前提が破れていることを示す形になっている．
+  OOF スコアは訓練データ上の交差検証値であり，未見データである評価集合より真クラスへ
+  確信的になりやすい，という機序と整合する．
+
+#### 5. 事前登録ルールの適用
+
+事前登録（`### 計画 (Iter71)` 成功条件）では，`coverage > 0.95` の場合は
+
+> **過被覆**．分位点方向の修正自体は機能している（…）が，校正集合（OOF スコア）と評価集合の
+> スコア分布のずれにより q_hat が小さすぎる，という**別の原因**に切り分けられる．この場合は
+> 本レバーを rejected とし，（…）**判定基準そのものは緩めない**（事後の帯の拡大はしない）．
+
+と定めていた．実測 coverage=0.996875 はこれに該当するため，**rejected** とする．
+帯（0.88–0.95）の事後的な拡大・主基準の差し替え・`mean_set_size` による救済はいずれも行わない．
+同時に，事前登録どおり「分位点方向の修正自体は機能しているが，校正集合の交換可能性の破れにより
+q_hat が小さすぎる」という解釈を採用し，次レバー候補は
+**「校正集合の交換可能性（OOF vs ホールドアウト）」**とする（起票は reflector の担当）．
+
+なお本判定は `coverage < 0.88` 側の分岐（「第 3 の実装欠陥の疑い」）には該当しない．
+今回の実装は上側・下側の両方向が一次資料の式（`q̂+=⌈(n+1)(1-α)⌉/n`, `q̂-=⌊(n+1)α⌋/n`）と
+ユニットテストで突き合わされており，A が Iter70 と md5 一致する後方互換も取れている．
+**「実装が 2 つとも正しい状態での確定的判定」という本イテレーションの目的自体は達成された**．
+
+#### 6. 確信度と追加反復の要否
+
+- **追加反復は不要**．パイプラインが決定的（`StratifiedKFold(random_state=42)`，md5 一致で実証）
+  であり，同一条件の再実行は同一値を返す．判定を覆すには 5 件の外れが 80 件へ 16 倍に増える必要が
+  あり，Wilson CI が帯と重ならないことから標本誤差でも到達しない．確信度は高い．
+- 単一レバー（分位点方向）の効果として因果的に言えるのは「coverage を 0.7638 → 0.9969 へ動かした」
+  ところまでである．「conformal prediction 自体が本タスクに不適」までは**一般化しない**：
+  掃引表が示すとおり q_hat が 0.04〜0.145 の範囲にあれば帯に入る構成は存在し，今回の不成立は
+  q_hat の**値**（校正集合の分布）に起因する．したがって系列を閉じる前に，校正集合の取り方を
+  変える 1 レバーを試す余地が残っている．
+
+---
+
+### 考察 (Iter71)
+
+**判定の確定: rejected（過被覆）**．`conformal_qhat_quantile_direction` レバー（`values:
+[alpha_lower_quantile]` の単一値）はこれでクローズとする．事前登録の帯（0.88 ≤ coverage ≤ 0.95）は
+事後に緩めない．実装（`scripts/evaluate_classifier_calibration.py` の `--qhat-quantile-direction`）は
+**revert せず維持する**（既定値 `upper` が Iter69/70 出力を md5 単位で再現する後方互換設計であり，
+次レバーで `alpha_lower` を固定値として使う必要があるため）．
+
+**このイテレーションで確定した学び**
+
+1. **conformal 系列の実装欠陥は 2 つとも潰れた**．集合構成（Iter70）・分位点方向（Iter71）の両方が
+   一次資料（Angelopoulos & Bates 2021 の `q̂+=⌈(n+1)(1-α)⌉/n`，Barber et al. 2021 の
+   `q̂-=⌊(n+1)α⌋/n`）と一致し，ユニットテストと後方互換 md5 で裏が取れている．
+   Iter56→69→70 と 3 度続いた「原因帰属の誤り」は，少なくとも**実装側では打ち止め**である．
+   今回の不成立は実装の第 4 の欠陥ではなく，**q_hat の値＝校正集合の分布**に起因する．
+2. **非自明な学び: 校正スコアと評価スコアが別の確率モデルから出ている**．
+   `predict_calibrated_rows()` の校正パス（L264-292）は，`classifier.estimator`
+   （素の `LogisticRegression`）を 5-fold で**再学習**した fold モデルの `predict_proba` から OOF
+   スコアを作る．一方，評価パス（L330 以降）は `models/domain_classifier.joblib`
+   （`CalibratedClassifierCV`，全データ学習済み）の `predict_proba` を使う．
+   すなわち校正と評価で (a) 学習データ量（4/5 vs 全体），(b) **確率較正の有無**（生 LR vs Platt/isotonic
+   較正済み），(c) 元データ（`classifier_train.jsonl` vs `dataset.jsonl`）の 3 点が同時に違う．
+   split conformal の被覆保証が要求する交換可能性はここで破れており，較正されていない LR は真クラスへ
+   過信的（`cumsum≈1` ⟹ 補数スコア `≈0`）になるため，校正スコアの下側 10% 分位点が
+   **q_hat=0.000980** という極端に小さい値へ落ちた．名目水準を 0.70 まで下げても coverage が 0.9875 に
+   留まる（実測被覆が名目を常に大きく上回る）という付随報告の形は，この「校正側だけがスコア 0 側に
+   偏っている」という機序でしか説明できない．
+3. **したがって次の一手は「校正集合の交換可能性」である**．q_hat 掃引表（計画節）が示すとおり
+   0.04 ≤ q_hat ≤ 0.145 なら帯に入る動作点は同一データ上に実在する．校正スコアを評価と同一の
+   確率モデル・同一分布から取れば q_hat はこのレンジへ移動しうる．
+4. **運用上の学び**: 予備実行（先頭 20 行）で実測 q_hat を取り，本実行前に着地点を予測して journal に
+   書き留める手順は今回機能した（「rejected に着地する可能性が高い」という申し送りが的中）．
+   1〜2 時間の本実行に入る前に着地点を言語化させる手順は今後も維持する．
+
+**次イテレーション（Iter72）の方針**
+
+config の levers は再び全て試行済みになった．SKILL.md 停止条件 1（学びから新レバーを考案できる）を
+適用し，新レバー **`conformal_calibration_exchangeability: [eval_holdout_split]`** を config.yml の
+`conformal_qhat_quantile_direction` 直下へ追加した（backlog B107）．
+`data/dataset.jsonl`（1,600 行）を層化 50/50 分割し，**校正半（800 行）のスコアを評価と同一の
+`models/domain_classifier.joblib` で計算**して q_hat を取り，**評価半（800 行）**で coverage を測る．
+分位点方向は `alpha_lower`，集合構成は `corrected_aps` に固定する（動かすのは校正集合の取り方 1 点のみ）．
+これは上記学び 2 の 3 つの差（学習量・較正の有無・元データ）を**同時に消す**唯一の構成であり，
+交換可能性が真因かどうかを 1 反復で決着させられる．成立すれば conformal 系列は adopted で閉じ，
+不成立なら「本実装系の欠陥ではなくデータ・分類器側の限界」として系列を閉じる判断を人間に諮る．
+
+**人間判断を要する申し送り（非ブロッキング）**: config の `conformal_qhat_quantile_direction` note の
+「不成立の場合」節は，分位点方向を正しても被覆保証が成立しなければ「MAPIE 等の標準ライブラリで追試」か
+「conformal 系列を閉じる」かを人間に諮る，と定めていた．本イテレーションは形式的にこれに該当するが，
+Iter71 の**計画節（事前登録）**がより具体的に「`coverage > 0.95` の場合は次レバー候補を
+『校正集合の交換可能性（OOF vs ホールドアウト）』とする」と定めており，後発かつ具体的なこちらを
+優先して Iter72 を自律着手する．人間が「ここで conformal 系列を閉じる」または「MAPIE 追試へ切り替える」
+と判断する場合は Iter72 着手前に指示されたい（backlog B107 の要レビュー項目）．
+
+---
+
 ## Iteration 70: conformal予測集合の構成規則をAPS標準へ修正して被覆を再測定
 
 ### 計画 (Iter70)
