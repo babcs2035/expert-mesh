@@ -47,7 +47,7 @@ import yaml
 # sys.path).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from expert_backend import OllamaClient  # noqa: E402
+from expert_backend import OllamaClient, embed_query_views  # noqa: E402
 
 SMOKE_QUERY = "スモークテスト用のダミー質問です。"
 SMOKE_PROBE_TIMEOUT_S = 130.0
@@ -167,8 +167,12 @@ async def run_probe_smoke_test(config: dict) -> bool:
     signal_method = config.get("confidence_signal_method", "self_report")
 
     ollama_client = OllamaClient()
-    query_embedding = await ollama_client.embed(
-        embedding_model, SMOKE_QUERY, instruction=config.get("embedding_instruction")
+    query_embedding = await embed_query_views(
+        ollama_client,
+        embedding_model,
+        SMOKE_QUERY,
+        instruction=config.get("embedding_instruction"),
+        concat_views=config.get("embedding_view_concat", False),
     )
 
     request_body = {

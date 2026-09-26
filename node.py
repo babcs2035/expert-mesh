@@ -18,7 +18,7 @@ from aggregator import (
     select_dispatch_targets,
     validate_aggregation_method,
 )
-from expert_backend import OllamaClient
+from expert_backend import OllamaClient, embed_query_views
 from http_client import PeerClient
 from http_server import (
     CONFIDENCE_ELICITATION_NUMERIC_SCALAR,
@@ -199,8 +199,12 @@ async def run_ask_flow(
 
     request_id = str(uuid.uuid4())
     query_summary = query[:QUERY_SUMMARY_MAX_LENGTH]
-    query_embedding = await ollama_client.embed(
-        config["embedding_model"], query, instruction=config.get("embedding_instruction")
+    query_embedding = await embed_query_views(
+        ollama_client,
+        config["embedding_model"],
+        query,
+        instruction=config.get("embedding_instruction"),
+        concat_views=config.get("embedding_view_concat", False),
     )
 
     probe_request = ProbeRequest(

@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 81,
-  "iteration_name": null,
-  "phase": "reflect",
+  "iteration": 82,
+  "iteration_name": "prefix 有無の埋め込み連結（2048 次元）による medical 退行の回避",
+  "phase": "analyze",
   "status": "running",
-  "current_lever": null,
-  "experiment_dir": null,
-  "experiment_deadline": 1790454398,
-  "updated_at": 1790450280,
-  "last_slack_ts": "1790442540.190269",
-  "iteration_thread_ts": "1790443159.733959",
+  "current_lever": "embedding_view_concatenation=prefix_and_noprefix_concat",
+  "experiment_dir": "results/20260927_050049",
+  "experiment_deadline": 1790462449,
+  "updated_at": 1790457763,
+  "last_slack_ts": "1790457388.337589",
+  "iteration_thread_ts": "1790451251.141379",
   "notion_toggle_created": true,
-  "last_commit": "6b7b056"
+  "last_commit": "6cdab75"
 }

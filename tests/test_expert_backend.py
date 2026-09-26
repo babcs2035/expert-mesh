@@ -3,8 +3,10 @@
 import json
 
 import httpx
+import pytest
+from unittest.mock import AsyncMock
 
-from expert_backend import OllamaClient
+from expert_backend import OllamaClient, embed_query_views
 
 
 def _client_with_transport(monkeypatch, handler) -> OllamaClient:
@@ -93,3 +95,43 @@ async def test_generate_parses_top_logprobs_alternatives_per_position(monkeypatc
     result = await client.generate("model", "prompt", logprobs=1, top_logprobs=5)
 
     assert result["token_logprobs"][0]["top_logprobs"] == {"A": -0.05, "B": -3.0}
+
+
+async def test_embed_query_views_without_concat_delegates_to_a_single_embed_call() -> None:
+    """concat_views=False (the default) is exactly one embed() call, unchanged from pre-Iter82."""
+    client = AsyncMock(spec=OllamaClient)
+    client.embed.return_value = [1.0, 2.0]
+
+    result = await embed_query_views(client, "model", "query", instruction="task")
+
+    assert result == [1.0, 2.0]
+    client.embed.assert_awaited_once()
+    call = client.embed.await_args
+    assert call.args == ("model", "query")
+    assert call.kwargs["instruction"] == "task"
+
+
+async def test_embed_query_views_concat_orders_plain_before_instructed() -> None:
+    """Iter82 (embedding_view_concatenation): concatenation order is fixed [plain, instructed],
+    regardless of call order, matching the order G1's CV (np.hstack([P0, P1])) used and the
+    order scripts/screen_embedding_models.py's `concat` pseudo-candidate uses.
+    """
+    client = AsyncMock(spec=OllamaClient)
+    client.embed.side_effect = [[0.1, 0.2], [0.9, 0.8]]  # plain, then instructed
+
+    result = await embed_query_views(client, "model", "query", instruction="task", concat_views=True)
+
+    assert result == [0.1, 0.2, 0.9, 0.8]
+    plain_call, instructed_call = client.embed.call_args_list
+    assert plain_call.kwargs["instruction"] is None
+    assert instructed_call.kwargs["instruction"] == "task"
+
+
+async def test_embed_query_views_concat_without_instruction_raises() -> None:
+    """concat_views=True with instruction=None indicates a config mistake (concatenating a
+    view with itself), so this must raise rather than silently produce a degenerate feature.
+    """
+    client = AsyncMock(spec=OllamaClient)
+
+    with pytest.raises(ValueError):
+        await embed_query_views(client, "model", "query", instruction=None, concat_views=True)

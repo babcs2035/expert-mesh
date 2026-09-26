@@ -174,3 +174,43 @@ class OllamaClient:
                     await asyncio.sleep(RETRY_DELAY_S)
                 else:
                     raise
+
+
+async def embed_query_views(
+    client: "OllamaClient",
+    model: str,
+    text: str,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    instruction: str | None = None,
+    concat_views: bool = False,
+) -> list[float]:
+    """Return the query embedding, optionally as a concatenation of two views.
+
+    Iter82 (embedding_view_concatenation): when `concat_views` is False, this
+    is equivalent to a single `client.embed(model, text, instruction=instruction)`
+    call, preserving the pre-Iter82 behavior exactly. When `concat_views` is
+    True, this embeds `text` twice — once without any instruction (the
+    "prefix なし" view) and once with `instruction` (the "prefix あり" view,
+    Iter81's selected P1 wording) — and concatenates the two 1024-dim vectors
+    into a single 2048-dim vector, ORDER FIXED as [plain, instructed].
+
+    The order is intentionally not a parameter: both the training path
+    (scripts/train_domain_classifier.py) and the runtime path (node.py) call
+    this same function, so hard-coding the order here is what guarantees they
+    stay consistent (see journal.md "Iteration 82" Q3 / backlog B129 (1) —
+    an Iter36-style train/eval mismatch would otherwise pass silently).
+
+    Raises ValueError if `concat_views` is True but `instruction` is None,
+    since that combination indicates a config mistake (concatenating a view
+    with itself) rather than a valid feature-view spec.
+    """
+    if not concat_views:
+        return await client.embed(model, text, timeout_s=timeout_s, instruction=instruction)
+    if instruction is None:
+        raise ValueError(
+            "embed_query_views: concat_views=True requires a non-None instruction "
+            "(embedding_view_concat and embedding_instruction must both be set)"
+        )
+    plain_view = await client.embed(model, text, timeout_s=timeout_s, instruction=None)
+    instructed_view = await client.embed(model, text, timeout_s=timeout_s, instruction=instruction)
+    return [*plain_view, *instructed_view]

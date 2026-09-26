@@ -2094,7 +2094,45 @@ levers:
             **リスク**: 2048 次元 × 訓練 1,427 行は p≫n がさらに進み，Iter80 の bge-m3 で見られた
             訓練 100% 適合（過学習）を招きうる．G1 CV が P1 を下回る場合は素直にその旨を記録する．
             **禁止事項**: ドメイン固有の重み付け・閾値による medical の救済は
-            2026-09-23 恒久運用ルールにより不可．連結は 10 ドメイン共通の特徴量設計である．"}
+            2026-09-23 恒久運用ルールにより不可．連結は 10 ドメイン共通の特徴量設計である．
+            **[2026-09-27 Iter82 分析フェーズ追記] 唯一の値 `prefix_and_noprefix_concat` は
+            判定 `adopted`（レバー消化済み・現行構成）**．全 1,915 行 top1 0.753003 → 0.792167
+            （+3.916pt，McNemar p=1.904e-10），per-domain 20 指標の BH 補正後の有意退行 0 件，
+            medical_recall 0.7842→0.7510（p=0.135593，非有意）．artifact sha256 `1cfcd3d8...`
+            （`n_features_in_`=2048）．学びは journal.md「Iteration 82 実行済み（分析・考察）」参照．"}
+
+  - {name: dispatch_gap_threshold_recalibration,
+     values: [matched_budget_sweep_for_concat_distribution],
+     note: "[2026-09-27 backlog B130（Iter82 分析フェーズ）で追加]
+            **起点となる実測**: Iter82 で採用した連結埋め込み（2048 次元）により probe の確信度
+            分布が鋭くなった．複合 415 行での実測は rank1 confidence 平均 0.6510→0.7084，
+            rank1−rank2 gap 平均 0.4769→0.5499（中央値 0.4449→0.5787），
+            **gap<0.29 の行の割合 33.49%→25.30%**．その結果，固定 `dispatch_gap_threshold=0.29`
+            の下で `compound_mean_dispatched_count` が 1.880→1.610 へ減り
+            `compound_domain_set_recall` が 0.548193→0.539759（-0.84pt）と微減した．
+            **これは埋め込みの劣化ではない**: `probe_candidates` から gap 閾値を掃引すると，
+            送出予算を基準線と同じ mean_k=1.880 に揃えた時点（**gt=0.357，mean_k=1.889**）で
+            **set_recall=0.581928** と基準線 0.548193 を **+3.37pt** 上回り，gt=0.40 では
+            mean_k=2.022・set_recall=0.598795（+5.06pt）になる．同型の事象は Iter81 学び 1 でも
+            観測されており（2 回目），**特徴量を変えるレバーの後には必ず gap 閾値の未較正が残る**．
+            **内容（単一レバー）**: `config.yaml:90` の `dispatch_gap_threshold` の値のみを，
+            連結埋め込みの確信度分布に合わせて再較正する．`dispatch_policy`
+            （=adaptive_confidence_gap，Iter58 で adopted）・`dispatch_top_k=2`・
+            `dispatch_gap_max_k=4`・埋め込み・分類器・訓練データ・評価集合は一切変えない．
+            再訓練も新規実装も不要で，変更は config 1 行である．
+            **事前ゲート（計画フェーズで具体値を事前登録すること）**: 基準線
+            `results/20260927_050049/` の `probe_candidates` から掃引を再現し，候補値と
+            予測 mean_k / set_recall を**本走前に journal へ記録する**（G2' と同型の事前登録．
+            gap 閾値の効果は probe_candidates から決定論的に再現できる）．候補は 1 値に絞ること．
+            **主基準の置き方（重要）**: 本レバーは **top1_accuracy を構造的に動かさない**
+            （top1 は rank 1 のみに依存し gap 閾値と独立）．したがって主基準は
+            `compound_domain_set_recall` に置き，**top1_accuracy は非退行条件（低下させないこと．
+            理論上は完全不変のはず．変わっていたら実装漏れか別要因の混入を疑う）**として扱う．
+            **リスク**: 送出数が +17〜26% 増えるため `mean_duration_ms`（非退行④の +20% 枠）と
+            `dispatch_failure_rate` が binding になりうる．`end_to_end_accuracy` は
+            送出候補が増えることで改善しうるが 3SD=2.6pt のノイズ床を適用する．
+            **禁止事項**: ドメインごとに閾値を変えることは 2026-09-23 恒久運用ルールにより不可．
+            閾値は 10 ドメイン共通の単一スカラーに限る．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

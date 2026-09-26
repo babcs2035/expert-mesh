@@ -34,7 +34,7 @@ import joblib
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 
-from expert_backend import OllamaClient
+from expert_backend import OllamaClient, embed_query_views
 
 # scikit-learn >=1.5 always fits a single softmax (multinomial-equivalent)
 # over all classes for multi-class LogisticRegression with the default
@@ -100,6 +100,7 @@ async def build_training_features(
     ollama_client: OllamaClient, embedding_model: str, rows: list[dict],
     fine_tuned_embed_model: str | None = None,
     instruction: str | None = None,
+    concat_views: bool = False,
 ) -> tuple[list[list[float]], list[str]]:
     """Embed every row's query text; return (embeddings, domain labels) in matching order.
 
@@ -108,12 +109,20 @@ async def build_training_features(
     Sequential (not concurrent) to mirror run_experiment.py's and
     fit_embedding_whitening.py's sequential embedding calls.
 
-    `instruction`, if given, is forwarded to OllamaClient.embed() so training
-    features are computed from the same Qwen3-Embedding instruct-prefixed
-    input as node.py's runtime query embedding (Iter81,
-    embedding_input_instruction_prefix). Only used on the Ollama path;
-    fine_tuned_embed_model callers ignore it (out of scope for this lever,
-    see journal.md Iteration 81 change table #4).
+    `instruction`, if given, is forwarded to OllamaClient.embed() (via
+    embed_query_views()) so training features are computed from the same
+    Qwen3-Embedding instruct-prefixed input as node.py's runtime query
+    embedding (Iter81, embedding_input_instruction_prefix). Only used on the
+    Ollama path; fine_tuned_embed_model callers ignore it (out of scope for
+    this lever, see journal.md Iteration 81 change table #4).
+
+    `concat_views`, if True, produces the Iter82 (embedding_view_concatenation)
+    2048-dim feature: `embed_query_views()` embeds each query twice (once
+    without `instruction`, once with it) and concatenates the two 1024-dim
+    vectors in the fixed order [plain, instructed]. This must match node.py's
+    runtime call exactly, since both call the same `embed_query_views()`
+    (see journal.md Iteration 82 Q3 — an Iter36-style train/eval mismatch
+    would otherwise occur silently). Only used on the Ollama path.
     """
     from sentence_transformers import SentenceTransformer
 
@@ -146,7 +155,10 @@ async def build_training_features(
         labels = []
         for row in rows:
             embeddings.append(
-                await ollama_client.embed(embedding_model, row["query"], instruction=instruction)
+                await embed_query_views(
+                    ollama_client, embedding_model, row["query"],
+                    instruction=instruction, concat_views=concat_views,
+                )
             )
             labels.append(row["domain"])
         return embeddings, labels
@@ -207,13 +219,14 @@ async def _train_and_save(
     train_data_path: str, embedding_model: str, ollama_host: str, ollama_port: int,
     output_path: str, fine_tuned_embed_model: str | None = None,
     instruction: str | None = None,
+    concat_views: bool = False,
 ) -> None:
     rows = _load_training_rows(train_data_path)
     sample_weight = _extract_sample_weights(rows)
     ollama_client = OllamaClient(host=f"http://{ollama_host}:{ollama_port}")
     embeddings, labels = await build_training_features(
         ollama_client, embedding_model, rows, fine_tuned_embed_model=fine_tuned_embed_model,
-        instruction=instruction,
+        instruction=instruction, concat_views=concat_views,
     )
     model = train_classifier(embeddings, labels, sample_weight=sample_weight)
     output_dir = os.path.dirname(output_path)
@@ -257,6 +270,15 @@ def main() -> None:
              "embedding_instruction so runtime query embeddings (node.py) and training "
              "features are computed from the same input distribution (Iter81).",
     )
+    parser.add_argument(
+        "--embedding-view-concat",
+        action="store_true",
+        help="Iter82 (embedding_view_concatenation): concatenate the plain (no "
+             "instruction) and instructed embeddings into a single 2048-dim feature "
+             "(fixed order [plain, instructed]). Requires --embedding-instruction to "
+             "also be set; must match config.yaml's embedding_view_concat so runtime "
+             "(node.py) and training features use the same feature-view spec.",
+    )
     args = parser.parse_args()
 
     asyncio.run(
@@ -264,6 +286,7 @@ def main() -> None:
             args.train_data, args.embedding_model, args.ollama_host, args.ollama_port,
             args.output, fine_tuned_embed_model=args.fine_tuned_embed_model,
             instruction=args.embedding_instruction,
+            concat_views=args.embedding_view_concat,
         )
     )
 

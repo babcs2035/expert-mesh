@@ -2,14 +2,20 @@
 # (host/port/domain/model names). Hostnames, IPs, model names, and deploy
 # paths are documented ONLY in this file — never hardcode them in code.
 embedding_model: qwen3-embedding:0.6b
-# Iter81 (embedding_input_instruction_prefix): the optional key
-# `embedding_instruction` prepends "Instruct: {value}\nQuery: {text}" to every
-# embedding input (expert_backend.py:OllamaClient.embed(), used by node.py and
-# scripts/train_domain_classifier.py --embedding-instruction). It is
-# intentionally ABSENT here: Iter81 was judged `rejected` by its pre-registered
-# rule (全1,915行 top1 +3.655pt / McNemar p=4.2e-7 だったが，per-domain 20 指標の
-# BH 補正後に medical_recall が有意退行したため非退行条件①に抵触した．
-# journal.md「Iteration 81 実行済み」節参照)．未設定＝prefix なしが現行動作．
+# Iter82 (embedding_view_concatenation=prefix_and_noprefix_concat): the query
+# embedding fed to the domain classifier is now the 2048-dim concatenation
+# [prefix なし, prefix あり] of two Ollama /api/embeddings calls, produced by
+# expert_backend.embed_query_views() (node.py / scripts/train_domain_classifier.py
+# / tools/smoke_check.py all call this same helper so the concatenation order
+# and both keys below stay in sync between training and runtime; see
+# journal.md "Iteration 82" Q3). `embedding_instruction` is the Iter81-selected
+# P1 wording (Iter81 alone was `rejected` for a per-domain medical_recall
+# regression; journal.md "Iteration 81 実行済み" 節参照). `embedding_view_concat`
+# switches embed_query_views() from a single embed() call to the two-call
+# concatenation; both keys must be set together (embed_query_views() raises
+# ValueError otherwise).
+embedding_instruction: "Given a user question, identify the single academic or professional domain it belongs to"
+embedding_view_concat: true
 confidence_threshold: 0.0
 # Threshold for rank 2+ candidates when dispatching to multiple nodes.
 # Defaults to the same value as confidence_threshold for backward

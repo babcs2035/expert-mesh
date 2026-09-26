@@ -71,7 +71,23 @@ JMMLU 由来ではない．
 ## E6 教師あり分類器
 
 生成コマンド（実機の ollama ノードが必要．scripts/train_domain_classifier.py の docstring 参照．
-**wafl-ctrl5 限定**（config.yml 絶対条件 B））:
+**wafl-ctrl5 限定**（config.yml 絶対条件 B））．
+
+**2026-09-27 更新（Iteration 82 実装フェーズ．現行の生成コマンド）**: `embedding_view_concatenation`
+（prefix なし ⊕ prefix あり の 2048 次元連結）採用により，`--embedding-instruction` と
+`--embedding-view-concat` を両方渡す（片方だけだと `embed_query_views()` が `ValueError`）:
+
+```
+uv run python -m scripts.train_domain_classifier \
+    --train-data data/classifier_train.jsonl \
+    --embedding-model qwen3-embedding:0.6b \
+    --embedding-instruction "Given a user question, identify the single academic or professional domain it belongs to" \
+    --embedding-view-concat \
+    --ollama-host 127.0.0.1 --ollama-port 11499 \
+    --output models/domain_classifier.joblib
+```
+
+Iteration 81 までの生成コマンド（prefix なし・1024 次元．参考として残す）:
 
 ```
 uv run python -m scripts.train_domain_classifier \
@@ -86,11 +102,13 @@ uv run python -m scripts.train_domain_classifier \
 **rejected** で判定され，基準線（`qwen3-embedding:0.6b`，artifact `21e16ec6...`）への復元まで
 実施済みである（journal.md「Iteration 80 実行済み」節・backlog B127）．MANIFEST 側が
 Iteration 80 の実装フェーズ時点の記述のまま更新されていなかった．Iteration 81 も rejected で
-復元済みのため，**現行の生成コマンドは上記（prefix なし・qwen3-embedding:0.6b）である**．
+復元済みのため，Iteration 82 開始時点の実機構成は上記（prefix なし・qwen3-embedding:0.6b，
+`21e16ec6...`）だった．
 
 | ファイル | sha256 |
 |---|---|
-| `models/domain_classifier.joblib`（現行，qwen3-embedding:0.6b，prefixなし，1024次元．Iter81 rejected により復元） | `21e16ec63db89f4c8435264e98e6a704382aec723548359f6a74f44753f6ca19` |
+| `models/domain_classifier.joblib`（現行．Iteration 82 実装フェーズで再訓練，qwen3-embedding:0.6b，prefix なし⊕prefix あり連結，2048次元，`n_features_in_`=2048） | `1cfcd3d836c5b5b421b8a47a487c3fb3ba996dd54aadcebae688cdfc8bcd0a48` |
+| `models/domain_classifier_pre_iter82_noconcat.joblib`（Iter82 直前の退避＝Iter81 rejected 後の復元状態，qwen3-embedding:0.6b，prefixなし，1024次元） | `21e16ec63db89f4c8435264e98e6a704382aec723548359f6a74f44753f6ca19` |
 | `models/domain_classifier_pre_iter81_noprefix.joblib`（Iter81 直前の退避，qwen3-embedding:0.6b，prefixなし，1024次元） | `21e16ec63db89f4c8435264e98e6a704382aec723548359f6a74f44753f6ca19` |
 | `models/domain_classifier_pre_iter80_qwen3_0.6b.joblib`（Iter80 直前の退避，qwen3-embedding:0.6b，1024次元） | `21e16ec63db89f4c8435264e98e6a704382aec723548359f6a74f44753f6ca19` |
 | `models/domain_classifier_pre_iter79_nomic.joblib`（Iter79 直前の退避，nomic-embed-text，768次元） | `02caf2b8e7a85972ff47867f05c8145e7d985e2000a2eb55662c6285db408905` |
@@ -224,6 +242,73 @@ artifact `21e16ec6...` を確認（smoke_check hashes/probe pass）．
 **注意**: prefix 版 artifact（`56d5a882...`）はこの復元で上書きされ現存しない．必要なら
 上記「再訓練コマンド」で決定論的に再生成できる（P1 文言・キャッシュ
 `data/embcache_qwen3-embedding_0.6b__p1.npy` も保存済み）．
+
+### Iteration 82（embedding_view_concatenation=prefix_and_noprefix_concat）
+
+分類器の入力特徴量を「prefix なし埋め込み（1024次元）」から「**prefix なし ⊕ prefix あり（P1文言）の
+2048次元**」へ変更．埋め込みモデル・instruction文言（P1，Iter81選定のまま再探索せず）・分類器ハイパラ・
+訓練データ・評価集合は無変更．連結順序は `expert_backend.embed_query_views()` 内部に
+`[prefix なし, prefix あり]` で固定（訓練側・実行時側とも同じ関数を呼ぶ．journal.md「Iteration 82」
+Q3 参照）．連結後のスケーリング（1/√2 単位ノルム化）は不採用（backlog B129 (2)）．
+
+再訓練コマンド: 本セクション冒頭「2026-09-27 更新」の生成コマンドを参照．
+
+キャッシュファイル（ビュー識別子つき．いずれも wafl-ctrl5 で実測，`ssh -fNT -L 11499:localhost:11434 wafl-ctrl5`）:
+- 訓練用（`data/classifier_train.jsonl` 1,427行）: `data/embcache_qwen3-embedding_0.6b.npy`（P0，Iter79
+  のキャッシュを再利用）・`data/embcache_qwen3-embedding_0.6b__p1.npy`（P1，Iter81 のキャッシュを再利用）．
+- 評価用（`data/dataset.jsonl` 1,915行，本反復で新規生成）: `data/embcache_eval_qwen3-embedding_0.6b.npy`（P0）・
+  `data/embcache_eval_qwen3-embedding_0.6b__p1.npy`（P1）．
+
+G1（`data/classifier_train.jsonl` 1,427行のみの5-fold StratifiedKFold CV，`scripts/screen_embedding_models.py`
+（Iter82 で `{p0, p1, concat}` の3候補へ差し替え），wafl-ctrl5）: p0（基準線）cv_accuracy=0.756123
+（macro-F1 0.756220），p1 cv_accuracy=0.771523（macro-F1 0.769056），**concat（p0⊕p1の2048次元）
+cv_accuracy=0.784844（macro-F1 0.784022，3候補中最良）**．計画時点の事前実測値（0.756132/0.771549/0.784863）
+と±1e-5で一致．
+
+F1（連結の直接証拠，wafl-ctrl5，実クエリ1件）: 戻り値 len=2048，前半1024がprefixなしembedと完全一致，
+後半1024がprefixありembedと完全一致，前半/後半のL2ノルムともに1.0±1e-5．4条件すべてPASS．
+
+G2-a（訓練側到達）: 旧artifact（`21e16ec6...`，`n_features_in_`=1024）を
+`models/domain_classifier_pre_iter82_noconcat.joblib`へ退避後に再訓練．新artifact
+`1cfcd3d8...`，`n_features_in_`=2048．PASS。
+
+G2-b（検出力，`data/dataset.jsonl`全1,915行のargmax replay）: 旧／新artifactのdiscordant行数
+n_d=195（必要偏り率`1.96/sqrt(195)`=0.1404）．合格ラインn_d≥30を満たす。
+
+G2'-a（replayの忠実度）: 旧artifactのreplay由来`selected_domain`が基準線`results/20260926_221822/`の
+実測`selected_domain`と1914/1915=99.95%一致（合格ライン99%以上）。
+
+G2'（本走前のper-domain非退行予測，`metrics.py`の既存統計関数をそのまま使用）: 新artifactのreplayで
+per-domain 20指標のBH補正（q=0.05）を算出．有意退行0件（予測）。medical_recallの予測値は
+0.7842→0.7552（p=0.190430，非有意）。合格条件なし（記録のみ，config.yml絶対条件Aにより本走は必ず実施）。
+
+F2（配布，deploy後wafl500〜509全10ノード）: `config.yaml`の`embedding_instruction`・
+`embedding_view_concat: true`行とartifact sha256 `1cfcd3d8...`が全ノードで一致。
+
+F3（実行時経路，先頭20問の予備実行 vs オフラインreplay）: `selected_domain`が20/20一致
+（dispatch失敗0件，分母20）。
+
+本走実測（`results/20260927_050049/`，1,915問フルスペック，実測176分。基準線`results/20260926_221822/`）:
+top1_accuracy 全1915行 0.753003→0.792167（+3.916pt，McNemar chi2=40.5630，p=1.904e-10，
+discordant_a_only(基準線正解→新誤り)=30／discordant_b_only(基準線誤り→新正解)=105）。
+既存1,600行部分集合（single 1500 + compound-001〜100）top1: 0.751250→0.786875。
+複合415行top1: 0.766265→0.816867。single_domain_top1: 0.749333→0.785333。
+Cohen's kappa: 0.721502→0.761499。非退行指標: fallback_rate 0.0→0.0，dispatch_failure_rate
+0.000522→0.000522，ECE 0.032745→0.025448，mean_duration_ms 2301.4→2217.1（embed呼び出しが1回
+増えたが所要時間は悪化しなかった）。報告のみ: answer_quality_accuracy 0.569333→0.572667，
+end_to_end_accuracy 0.335770→0.351958，compound_domain_set_recall 0.548193→0.539759，
+compound_mean_dispatched_count 1.880→1.610。
+
+per-domain recall/precision計20指標（BH補正q=0.05，`metrics.py`の`compute_domain_recall_mcnemar_test`／
+`compute_domain_precision_fisher_test`／`apply_benjamini_hochberg`を使用）: 有意差1件のみ—
+computer_science_recall（0.7273→0.8268，p=4.4e-5，改善方向）。**medical_recall（0.7842→0.7510，
+p=0.135593，非有意）は本反復の主目的である「有意退行を起こさない」を満たした**。他18指標も
+BH補正後有意差なし。
+
+G2'の予測（medical_recall 0.7842→0.7552，p=0.190430）と本走実測（0.7842→0.7510，p=0.135593）は
+方向・非有意という結論の両方で一致（点推定差0.0042pt）。
+
+**判定は分析・考察フェーズに委ねる**（本セクションは実装・実験フェーズの機械可読な実測値の記録のみ）。
 
 ## E10 ドメイン別 LoRA アダプタ
 
