@@ -7,9 +7,9 @@
   "current_lever": "embedding_model_replacement=qwen3_embedding_0.6b",
   "experiment_dir": "results/20260926_221822",
   "experiment_deadline": 1790438323,
-  "updated_at": 1790433826,
+  "updated_at": 1790433857,
   "last_slack_ts": "1790433410.377459",
   "iteration_thread_ts": "1790426770.038139",
   "notion_toggle_created": true,
-  "last_commit": "413312c"
+  "last_commit": "09a399f"
 }
