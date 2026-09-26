@@ -614,6 +614,17 @@ _RESTRICTED_LICENSE_TASKS: frozenset[str] = frozenset(
     }
 )
 
+# Iter78 (compound_eval_set_expansion=llm_generated_separate_generator): path
+# to the LLM-generated + independently-verified compound rows (315 rows,
+# ids compound-101 onward) produced by
+# scripts/generate_compound_eval_questions.py. Like the rest of data/, this
+# file is gitignored; its sha256 and generation commands are pinned in
+# data/MANIFEST.md instead (mise run setup calls build_dataset.py on every
+# run, so once the file exists locally the generation result stays fixed
+# rather than being regenerated each time — otherwise the evaluation set
+# would be non-deterministic across runs). See _load_generated_compound_questions().
+_DEFAULT_GENERATED_COMPOUND_QUESTIONS_PATH = "data/compound_questions_generated.jsonl"
+
 # Hand-authored compound-domain questions (design doc 4.3: "questions
 # spanning multiple domains"). JMMLU's four-choice questions each belong to
 # a single task and cannot express genuine cross-domain ambiguity, so these
@@ -1118,13 +1129,37 @@ def _build_jmmlu_backed_groups(
     }
 
 
+def _load_generated_compound_questions(path: str | None) -> list[tuple[str, list[str]]]:
+    """Load Iter78's LLM-generated compound rows from `path`, or return [] if path is None or missing.
+
+    Missing-file returns [] (not an error) so that a clean checkout without
+    data/compound_questions_generated.jsonl (or a caller that omits `path`,
+    e.g. the existing test suite's direct _build_rows() calls) still
+    produces the pre-Iter78 1,600-row dataset unchanged.
+    """
+    if path is None:
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [line for line in f if line.strip()]
+    except FileNotFoundError:
+        return []
+    return [(json.loads(line)["query"], json.loads(line)["expected_domains"]) for line in lines]
+
+
 def _build_rows(
     jmmlu_zip_path: str | None,
     domain_target_size: int,
     exclude_restricted_license_tasks: bool,
     domain_task_map: dict[str, list[str]],
+    generated_compound_questions_path: str | None = None,
 ) -> list[dict]:
-    """Assemble JMMLU-derived single-domain rows and hand-authored compound rows."""
+    """Assemble JMMLU-derived single-domain rows and hand-authored + LLM-generated compound rows.
+
+    generated_compound_questions_path defaults to None (skip) so existing
+    callers that don't pass it are unaffected by Iter78's expansion; main()
+    passes the real data/compound_questions_generated.jsonl path.
+    """
     zip_bytes = _load_jmmlu_zip_bytes(jmmlu_zip_path)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         domain_groups = _build_jmmlu_backed_groups(
@@ -1148,6 +1183,16 @@ def _build_rows(
         rows.append(
             {
                 "id": f"compound-{index:03d}",
+                "query": query,
+                "expected_domains": expected_domains,
+                "is_compound": True,
+            }
+        )
+    generated_compound_questions = _load_generated_compound_questions(generated_compound_questions_path)
+    for offset, (query, expected_domains) in enumerate(generated_compound_questions, start=1):
+        rows.append(
+            {
+                "id": f"compound-{len(_COMPOUND_QUESTIONS) + offset:03d}",
                 "query": query,
                 "expected_domains": expected_domains,
                 "is_compound": True,
@@ -1355,7 +1400,18 @@ def main() -> None:
         default=None,
         help="Override _DOMAIN_TASK_MAP for eval dataset only (JSON string)",
     )
+    parser.add_argument(
+        "--generated-compound-questions",
+        default=_DEFAULT_GENERATED_COMPOUND_QUESTIONS_PATH,
+        help=(
+            "Iter78: JSONL of LLM-generated + verified compound rows to append after "
+            "_COMPOUND_QUESTIONS (ids compound-101+). Missing file falls back to the "
+            "pre-Iter78 1,600-row dataset; pass '' to disable explicitly."
+        ),
+    )
     args = parser.parse_args()
+
+    generated_compound_questions_path = args.generated_compound_questions or None
 
     eval_task_map = None
     if args.domain_task_map_for_eval is not None:
@@ -1367,6 +1423,7 @@ def main() -> None:
         args.domain_target_size,
         args.exclude_restricted_license_tasks,
         eval_task_map if eval_task_map is not None else _DOMAIN_TASK_MAP,
+        generated_compound_questions_path=generated_compound_questions_path,
     )
     if args.output is None:
         for row in eval_rows:

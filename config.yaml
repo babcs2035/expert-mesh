@@ -189,7 +189,7 @@ nodes:
 # Each domain maps to the expert node that holds its LoRA model.
 central_router:
   ssh_user: denjo
-  embed_node_host: wafl502
+  embed_node_host: wafl-ctrl5
   domain_nodes:
     general:            {host: wafl500, model: expert-mesh-general-lora:latest}
     education:          {host: wafl501, model: expert-mesh-education-lora:latest}

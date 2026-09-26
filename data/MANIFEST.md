@@ -25,12 +25,48 @@ uv run python build_dataset.py \
 サンプリングシード・タスクマップとも無変更）と分類器訓練データは影響を受けず，
 `data/classifier_train.jsonl` のハッシュは変更前と完全一致することを確認済み．
 
+**2026-09-26 更新（Iteration 78, `compound_eval_set_expansion=llm_generated_separate_generator`）**:
+LLM 生成 + 独立検証済みの複合設問 315 行（45 ドメインペア × 7 件，`compound-101`〜`compound-415`）を
+`data/compound_questions_generated.jsonl` として純追加し，評価データセットを 1600 行→1915 行へ拡張した．
+既存 100 行の複合設問（`compound-001`〜`compound-100`）と単一ドメイン 1500 行はビット単位で無変更
+（`build_dataset.py:_build_rows()` の `_COMPOUND_QUESTIONS` ループの**後**に append するため）．
+分類器訓練データ（`data/classifier_train.jsonl`）も無変更（ハッシュ一致，上表参照）．
+
+生成コマンド（`scripts/generate_compound_eval_questions.py` の docstring 参照．生成器は
+`judge_model` とは別系統の `qwen3.5:9b`，検証器は `judge_model`＝Swallow 8B．**wafl-ctrl5 限定**
+（config.yml 絶対条件 B））:
+
+```
+# 第1パス（45ペア x 12件生成 -> 検証 -> 各ペア7件に切り詰め；16ペアが目標未達で270/315行）
+uv run python -m scripts.generate_compound_eval_questions \
+    --generator-model qwen3.5:9b \
+    --verifier-model schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m \
+    --ollama-host 127.0.0.1 --ollama-port 11499 \
+    --per-pair 12 --target-per-pair 7 \
+    --output data/compound_questions_generated.jsonl \
+    --multidomain-dedup-file data/classifier_train_multidomain.jsonl \
+    --multidomain-dedup-file data/classifier_train_multidomain_iter61.jsonl \
+    --multidomain-dedup-file data/classifier_train_multidomain_iter64.jsonl \
+    --multidomain-dedup-file data/classifier_train_multidomain_iter65.jsonl
+
+# 第2パス（不足16ペアだけを対象に、generate_all_rows()の同一実装をペア単体で再呼び出し。
+# コード変更なし。近重複参照に第1パスの採択済み315件を含める。journal.md Iter78「実装・実験」節参照）
+# -> 45行を追加生成し、第1パスの270行とマージして315行を確定。
+
+uv run python build_dataset.py \
+    --output data/dataset.jsonl \
+    --classifier-train-output data/classifier_train.jsonl
+```
+
 | ファイル | sha256 | 行数 |
 |---|---|---|
-| `data/dataset.jsonl` | `485a85f522bbf304f8abf28d4955315d175475d5a68b3c8e8007f6571f1d40e9` | 1600 |
+| `data/dataset.jsonl` | `2d4397542e67d71cec1d447ceb8f9636f67af254e885bd7e0eafd309a81d2f0c` | 1915 |
+| `data/compound_questions_generated.jsonl` | `1bfb5add6a5f4028c3ceb52531987aaea595c409bfaca1c98bbf48c80901d3c6` | 315 |
 | `data/classifier_train.jsonl` | `eb89bf7b0ad6303d41f2b668549f85362988de1eaee7b4faf98b3d3f5edcd9ef` | 1427（無変更） |
 
 出典: JMMLU（`nlp-waseda/JMMLU`, commit `3637b25e444ccfdcde4d23a783cbe8e674faa01b`）．ライセンス CC BY-NC-ND 4.0．
+複合設問の LLM 生成部分（`compound-101` 以降）は本リポジトリの生成・独立検証パイプラインの出力であり，
+JMMLU 由来ではない．
 
 ## E6 教師あり分類器
 

@@ -12,6 +12,7 @@ import zipfile
 from pathlib import Path
 
 from build_dataset import (
+    _COMPOUND_QUESTIONS,
     _DOMAIN_TASK_MAP,
     _DOMAIN_TARGET_SIZE,
     _EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES,
@@ -19,6 +20,7 @@ from build_dataset import (
     _build_rows,
     _classifier_task_sample_weight,
     _ensure_parent_dir,
+    _load_generated_compound_questions,
     _sample_domain_questions,
     build_classifier_training_rows,
     write_dataset,
@@ -336,3 +338,140 @@ def test_education_proxy_task_train_target_sizes_static_integrity() -> None:
         f"Keys mismatch: {target_keys} vs {education_tasks}"
     )
     assert sum(_EDUCATION_PROXY_TASK_TRAIN_TARGET_SIZES.values()) == _DOMAIN_TARGET_SIZE * 2
+
+
+# --- Iter78 (compound_eval_set_expansion=llm_generated_separate_generator) ---
+# Regression tests for the 100 -> 415 compound-row expansion: the existing
+# 100 hand-authored rows must stay byte-identical, the new rows must be
+# well-formed compound rows, and no id may collide.
+#
+# These tests use _EDUCATION_TASK_FIXED_DOMAIN_TASK_MAP (education ->
+# "sociology") instead of module-level _FIXTURE_DOMAIN_TASK_MAP, because
+# the latter's "education": ["japanese_civics"] entry does not match any
+# file in tests/fixtures/jmmlu_sample.zip (that fixture predates the
+# education proxy task's japanese_civics switch) -- a pre-existing fixture/
+# domain-map mismatch unrelated to Iter78 that already fails 9 tests in
+# this file before this iteration's changes. Substituting a task that is
+# actually present in the fixture zip keeps these new regression tests
+# independent of that pre-existing breakage.
+_EDUCATION_TASK_FIXED_DOMAIN_TASK_MAP: dict[str, list[str]] = {
+    **_FIXTURE_DOMAIN_TASK_MAP,
+    "education": ["sociology"],
+}
+
+_SAMPLE_GENERATED_ROWS: list[dict] = [
+    {
+        "query": "アプリの利用規約に個人情報の取り扱いが不明瞭な条項があり、開発チームにどう改修を指示すればよいか悩んでいます。",
+        "expected_domains": ["computer_science", "legal"],
+        "pair": "computer_science+legal",
+        "generator_model": "qwen3.5:9b",
+        "generated_at": "2026-09-26T00:00:00+00:00",
+    },
+    {
+        "query": "地域の高齢者向け健康教室を企画していますが、参加者の持病に配慮した運動指導の内容がわからず困っています。",
+        "expected_domains": ["education", "medical"],
+        "pair": "education+medical",
+        "generator_model": "qwen3.5:9b",
+        "generated_at": "2026-09-26T00:00:00+00:00",
+    },
+]
+
+
+def _write_generated_compound_fixture(tmp_path, rows: list[dict] = _SAMPLE_GENERATED_ROWS) -> str:
+    """Write `rows` as JSONL and return the path, for _load_generated_compound_questions()/_build_rows() tests."""
+    path = tmp_path / "compound_questions_generated.jsonl"
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return str(path)
+
+
+def test_load_generated_compound_questions_returns_empty_list_when_path_is_none() -> None:
+    """No path argument (existing callers' default) means no expansion at all."""
+    assert _load_generated_compound_questions(None) == []
+
+
+def test_load_generated_compound_questions_returns_empty_list_when_file_missing(tmp_path) -> None:
+    """A configured-but-absent path (clean checkout without the committed generated file) is not an error."""
+    missing_path = str(tmp_path / "does_not_exist.jsonl")
+    assert _load_generated_compound_questions(missing_path) == []
+
+
+def test_load_generated_compound_questions_parses_query_and_expected_domains(tmp_path) -> None:
+    """Only {query, expected_domains} are read; pair/generator_model/generated_at are provenance-only."""
+    path = _write_generated_compound_fixture(tmp_path)
+
+    loaded = _load_generated_compound_questions(path)
+
+    assert loaded == [
+        (row["query"], row["expected_domains"]) for row in _SAMPLE_GENERATED_ROWS
+    ]
+
+
+def test_build_rows_without_generated_compound_questions_path_is_unaffected() -> None:
+    """Existing callers that omit generated_compound_questions_path keep producing exactly the
+    pre-Iter78 100 hand-authored compound rows (id/query/expected_domains untouched, ordering intact)."""
+    rows = _build_rows(
+        _FIXTURE_ZIP,
+        domain_target_size=1,
+        exclude_restricted_license_tasks=False,
+        domain_task_map=_EDUCATION_TASK_FIXED_DOMAIN_TASK_MAP,
+    )
+
+    compound_rows = [row for row in rows if row["is_compound"]]
+    assert len(compound_rows) == len(_COMPOUND_QUESTIONS)
+    for row, (query, expected_domains) in zip(compound_rows, _COMPOUND_QUESTIONS, strict=True):
+        assert row["query"] == query
+        assert row["expected_domains"] == expected_domains
+
+
+def test_build_rows_appends_generated_compound_questions_after_existing_100(tmp_path) -> None:
+    """Iter78 expansion: generated rows are appended as compound-101+, and the existing
+    100 hand-authored rows (id, query, expected_domains) stay byte-identical."""
+    generated_path = _write_generated_compound_fixture(tmp_path)
+
+    rows = _build_rows(
+        _FIXTURE_ZIP,
+        domain_target_size=1,
+        exclude_restricted_license_tasks=False,
+        domain_task_map=_EDUCATION_TASK_FIXED_DOMAIN_TASK_MAP,
+        generated_compound_questions_path=generated_path,
+    )
+    compound_rows = [row for row in rows if row["is_compound"]]
+
+    # Existing 100 rows: unchanged content, in their original order.
+    existing_compound_rows = compound_rows[: len(_COMPOUND_QUESTIONS)]
+    for row, (query, expected_domains) in zip(
+        existing_compound_rows, _COMPOUND_QUESTIONS, strict=True
+    ):
+        assert row["query"] == query
+        assert row["expected_domains"] == expected_domains
+
+    # New rows: appended after, ids starting at compound-101, each a genuine
+    # 2-domain compound row.
+    new_rows = compound_rows[len(_COMPOUND_QUESTIONS) :]
+    assert len(new_rows) == len(_SAMPLE_GENERATED_ROWS)
+    for offset, (row, generated) in enumerate(zip(new_rows, _SAMPLE_GENERATED_ROWS, strict=True), start=1):
+        assert row["id"] == f"compound-{len(_COMPOUND_QUESTIONS) + offset:03d}"
+        assert row["is_compound"] is True
+        assert len(row["expected_domains"]) == 2
+        assert row["query"] == generated["query"]
+        assert row["expected_domains"] == generated["expected_domains"]
+        assert "jmmlu_task" not in row
+
+
+def test_build_rows_with_generated_compound_questions_has_no_duplicate_ids(tmp_path) -> None:
+    """id uniqueness holds across single-domain rows, the 100 hand-authored rows, and the
+    newly appended generated rows."""
+    generated_path = _write_generated_compound_fixture(tmp_path)
+
+    rows = _build_rows(
+        _FIXTURE_ZIP,
+        domain_target_size=2,
+        exclude_restricted_license_tasks=False,
+        domain_task_map=_EDUCATION_TASK_FIXED_DOMAIN_TASK_MAP,
+        generated_compound_questions_path=generated_path,
+    )
+
+    ids = [row["id"] for row in rows]
+    assert len(ids) == len(set(ids))
