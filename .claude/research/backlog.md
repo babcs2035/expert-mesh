@@ -15,6 +15,96 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B125 [auto-decided 2026-09-26] Iter79 の判定（adopted）と次イテレーションのレバー選定（qwen3-embedding のスケールアップ）／train-eval 重複 72 行の発見
+
+- **状況**: Iter79（`embedding_model_replacement=qwen3_embedding_0.6b`）は事前登録した adopted 条件を
+  すべて満たした（top1 0.589556→0.753003，+16.34pt，McNemar p=4.30e-39，per-domain 20 指標の
+  BH 補正後有意退行 0 件，ECE も改善）．判定自体に裁量の余地は無く **adopted** で確定．
+  裁量が要ったのは (a) +16.3pt という過去最大の効果を交絡なしと言い切ってよいか，
+  (b) 次に何を振るか，(c) 分析中に見つけた train/eval 重複 72 行をどう扱うか，の 3 点である．
+- **自動選択**:
+  - (a) **交絡なしと判断した**．根拠は journal「分析（交絡の検討）」の 4 点（G1 が訓練手順固定の
+    対照になっている／G1・再訓練とも評価集合を参照していない／Iter78 の新規 315 行より旧来の
+    手作り 100 行の方が改善幅が大きく新規行有利の交絡は不成立／漏洩 72 行を除くと改善幅は
+    むしろ広がる）．
+  - (b) **次イテレーションのレバー**: `embedding_model_replacement` = **`qwen3_embedding_4b`**
+    （config.yml の `values` に既にある未試行の第 2 値．レバーの追記は不要）．
+    **次イテレーションの `iteration_name`**: 「埋め込みモデルのスケールアップ
+    （qwen3-embedding:0.6b → 4b）」．
+    Iter79 と同じ G1 事前スクリーニング（`classifier_train.jsonl` のみの 5-fold CV）を先に回し，
+    **今回発火しなかった `bge-m3` を比較対象として同時に評価する**（値の選定は本走前に
+    オフラインで確定する．選定規則は計画フェーズで結果を見る前に事前登録すること）．
+    本走前に **10 ノードの VRAM 実測**（`qwen3-embedding:4b` は 0.6b の約 4 倍，
+    `light_model` 2.4GB + `expert_model` + embedding を `OLLAMA_KEEP_ALIVE=-1` で常駐させる
+    構成に収まるか）を必ず確認すること．収まらない場合は G1 で最良だった小型候補へ切り替える．
+  - (c) **train/eval 重複 72 行は Iter79 では触らない**（単一レバー原則）．独立の保守タスクとして
+    起票する．
+- **根拠**:
+  - (b) B115(3) の恒久優先順位は「複合評価集合拡充 > 埋め込みモデル差し替え > 全ドメイン共通の
+    訓練データ拡充」であり，最上位は Iter78 で完了（複合 415 行・本走 discordant 160 行で
+    十分な検出力を確認済み）．第 2 位の `embedding_model_replacement` は今回 0.6b で
+    +16.34pt を実証し，レバー自体の期待値が全レバー中で突出した．未試行の第 2 値
+    `qwen3_embedding_4b`（MTEB multilingual 69.45，0.6b の 64.33 に対し +5.12pt）は，
+    同一レバー内で最も素直な続きであり，config.yml の `values` を消化する運用にも合致する．
+    B124 要レビュー (a) の `multilingual-e5-large` / `ruri-v3-310m` は JMTEB Classification で
+    より高いが，**prefix 付与という入力整形の追加を伴い 2 レバーになる**ため，
+    `embedding_input_instruction_prefix` として別立てにし，4b の結果を見てから着手する．
+    ドメイン固有補正でも棄権系でもなく，2026-09-23 の恒久運用ルールに抵触しない．
+  - (c) 72 行（education 54・history_culture 18）は旧走・新走の双方に等しく含まれ，
+    しかも新モデルではこの 72 行の正答率が 0.875→0.653 と**下がっている**ため，
+    Iter79 の判定を有利側へ歪めていない（除外すると改善幅は +16.34pt→+17.85pt へ広がる）．
+    したがって緊急性は無い．一方で `education_recall`・`history_culture_recall` の絶対値，
+    および過去の全反復の top1 絶対値がわずかに水増しされている点は測定系の課題である．
+- **要レビュー**:
+  - (a) **train/eval 重複 72 行の扱い**．`data/classifier_train.jsonl` と `data/dataset.jsonl` の
+    質問本文が 72 行重複している（d0002 §6-E の「重複 0 件」は Iter17 時点の記述で，
+    Iter35 の education 手作り問題追加または Iter36/37 の `japanese_civics` 再割当以降に混入
+    したと見られる）．評価集合側から抜く／訓練集合側から抜く／注記のうえ現状維持，の
+    いずれを採るか．**評価集合を変えると全反復の基準線が動く**ため，人間判断が望ましい．
+    再現コマンドは journal の Iter79 節に記載した突き合わせ手順のとおり．
+  - (b) **`dispatch_gap_threshold=0.29` の再調整を独立レバーとして立てるか**．Iter79 で確信度
+    分布が鋭くなり `compound_mean_dispatched_count` が 2.506→1.880 へ低下した．
+    `set_recall` は改善したため無害だったが，この閾値は nomic 時代の分布で調整した値であり，
+    もはや「調整済み」ではない．
+  - (c) Iter79 の adopted により `models/domain_classifier.joblib` は 1024 次元版へ置き換わった
+    （`models/` は .gitignore 対象のため git 履歴に残らない．sha256 は `data/MANIFEST.md`）．
+    旧 nomic 版は `models/domain_classifier_pre_iter79_nomic.joblib` に残してある．
+    ディスク逼迫時に削除してよいかの判断．
+
+## B124 [auto-decided 2026-09-26] Iter79 の値選定に事前スクリーニング（G1）を挟む／prefix 付与は別レバーへ送る
+
+- **状況**: Iter79 のレバーは `embedding_model_replacement` で，config.yml の `values` は
+  `[qwen3_embedding_0.6b, qwen3_embedding_4b]`，rc-evaluator の `iteration_name` も
+  qwen3-embedding:0.6b を前提にしている．しかし調査で，**Qwen3-Embedding-0.6B の日本語
+  ベンチマーク（JMTEB）Classification は 66.09 で，multilingual-e5-large 72.89・ruri-v3-310m
+  78.66 に明確に劣る**という実測（<https://secon.dev/entry/2025/06/11/100000-qwen3-embedding-jmteb>）
+  が見つかった．config の lever note が根拠にしていた「MTEB multilingual 64.33 で現行 +2.05pt」は
+  多言語平均であり，日本語分類タスクの代理指標ではない．一方で現行 `nomic-embed-text` は英語中心の
+  モデルで JMTEB 系に載っておらず，「Qwen3 が現行より弱い」とは言えない．**「Qwen3 > 現行」は
+  未検証の推測**という状態のまま 51 分の本走に賭けるかどうかの判断が要った．
+- **自動選択**: (a) レバー名・優先順位は変えず `embedding_model_replacement` のまま着手する．
+  (b) **本走の前に，`data/classifier_train.jsonl` のみを使う 5-fold CV の事前スクリーニング（G1）で
+  値を 1 つに確定する**．第 1 段は nomic vs qwen3-embedding:0.6b．qwen3 が勝てばそこで確定し，
+  負けた場合に限り第 2 段で `bge-m3`（Ollama 公式・1024 次元・prefix 不要）を追加評価して最良を採る．
+  選定規則は結果を見る前に journal へ事前登録済み．`bge-m3` を採った場合のみ config.yml の
+  `values` へ `bge_m3` を追記する．
+  (c) **`multilingual-e5-large` は今回の候補に含めない**．`query: ` prefix が必須で，
+  `node.py` と `scripts/train_domain_classifier.py` の両方に入力整形を足す必要があり，
+  「モデル差し替え」と「入力整形の追加」の 2 レバーになるため．
+  (d) 同じ理由で **Qwen3-Embedding の `Instruct: ...\nQuery: ...` prefix も今回は付けない**
+  （Ollama の `/api/embed` は chat template を適用しないことを wafl-ctrl5 で実機確認済み）．
+- **根拠**: G1 は評価集合（`data/dataset.jsonl`）を一切見ないため判定へのリークが無く，
+  config.yml の運用ルール「事前シミュレーションは本走 1 点を絞り込むための事前登録手段」に
+  そのまま合致する．コストは埋め込み 1,427 行 ×2〜3 モデルで数分程度に対し，
+  外した場合に失う本走は 51 分 + deploy 一式．Iter78 の学び 2（次レバーの artifact ペアで
+  π̂_d を本走前にオフライン実測せよ）とも整合する．
+- **要レビュー**: (a) 日本語性能を優先して `multilingual-e5-large` や `ruri-v3-310m` を
+  prefix 付きで使う独立レバー（`embedding_input_instruction_prefix` 等）を立てるべきか．
+  JMTEB Classification では現行候補より 6〜12pt 高く，見込みは最も大きい．
+  ただし ruri 系は Ollama 公式ライブラリに無く，コミュニティ配布の GGUF を 10 ノードへ配る
+  運用リスクがある．(b) G1 で 3 候補すべてが nomic を下回った場合でも絶対条件 A に従って
+  本走する方針でよいか（journal に「改善しない見込み」を事前記録した上で実施する計画）．
+
 ## B123 [auto-decided 2026-09-26] Iter78 の計画とのずれ 2 件（生成データを MANIFEST 方式に変更，config.yaml の `embed_node_host` 変更）
 
 - **状況**: 計画 (Iter78) は `data/compound_questions_generated.jsonl`（315 行）を「新規・コミット対象」

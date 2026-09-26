@@ -1,3 +1,186 @@
+## Iteration 79: 埋め込みモデルの差し替え（nomic-embed-text → qwen3-embedding:0.6b）
+
+### 調査 (Iter79)
+
+B115(3) の優先順位（複合評価集合拡充 > 埋め込みモデル差し替え > 全ドメイン共通の訓練データ拡充）に従い，Iter78 で最上位項目が完了（partial だが評価集合は常設採用）したため本反復は `embedding_model_replacement` に着手する．B116(3) により本レバーはユーザー事前承認済みで，着手前の追加確認は不要である．調査の問いは 3 つ．**(Q1) `qwen3-embedding:0.6b` は本タスク（日本語質問文の 10 ドメイン分類）で現行 `nomic-embed-text` を上回る根拠があるか．(Q2) Ollama 経由のドロップイン差し替えで，モデル固有の前処理（instruction prefix 等）を欠くことによる性能劣化は起きないか．(Q3) 実装上，差し替えが本走経路まで届く到達条件と，静かに壊れる箇所はどこか．**
+
+**Q1: 多言語 MTEB では上回るが，日本語ベンチマークでは自明ではない**
+
+- `Qwen3-Embedding-0.6B` の公称値は MTEB multilingual Mean(Task) **64.33**（Accenture AI Refinery SDK のモデルカード <https://sdk.airefinery.accenture.com/>，および Qwen3 Embedding 論文 Table <https://arxiv.org/abs/2506.05176> の 0.6B 行．論文表記は評価版差で 70.70 とする箇所もあり，公称値は出典で揺れる）．config.yml の lever note が採った 64.33 と現行 `nomic-embed-text` の 62.28 の差 **+2.05pt** は，この多言語平均での比較である．
+- 一方，**日本語ベンチマーク JMTEB での実測は振るわない**．hotchpotch「Qwen3 Embedding 文章ベクトルの日本語性能を JMTEB で測る」（2025-06-11，<https://secon.dev/entry/2025/06/11/100000-qwen3-embedding-jmteb>）によれば，Qwen3-Embedding-0.6B の **Classification 平均は 66.09**．同記事の同一条件の比較対象は `intfloat/multilingual-e5-large` 72.89，`cl-nagoya/ruri-v3-310m` 78.66 で，**日本語特化・多言語専用モデルに明確に劣る**．著者自身が「Qwen3-Embedding-0.6B の性能が低すぎる気もする」と留保を付けている点は割り引く必要があるが，**本研究のタスクは「日本語質問文の埋め込みを特徴量とする多クラス分類」であり，JMTEB Classification が最も近い代理指標である**ことは動かない．
+- ただし**現行 `nomic-embed-text` は英語中心のモデル**（Nomic AI，v1/v1.5．多言語版は別系統の `nomic-embed-text-v2-moe`）であり，JMTEB 系のリストにそもそも載っていない．したがって「Qwen3 は日本語が弱い」という所見は，**「現行より弱い」を意味しない**．現行がベースラインとして低い可能性が高く，差し替えによる改善余地自体は残っている．
+- **事実と推測の区別**: 「Qwen3-0.6B < multilingual-e5-large（日本語 Classification）」は実測（出典上記）．「Qwen3-0.6B > nomic-embed-text（日本語 Classification）」は**未検証の推測**である．本反復ではこれを推測のまま本走に賭けず，後述のオフライン事前スクリーニングで先に数値化する．
+
+**Q2: instruction prefix と，Ollama 実装の実態（実機で確認済み）**
+
+- Qwen3-Embedding は decoder 型で最終層 `[EOS]` トークンの hidden state を埋め込みとし，**Query 側には `Instruct: {task}\nQuery: {query}` 形式の指示文を付けて学習されている**（Doc 側は素のまま．上記 secon.dev の論文メモ，および Qwen3-Embedding モデルカード <https://huggingface.co/Qwen/Qwen3-Embedding-0.6B>）．prefix を付けないと検索系タスクで性能が落ちるという報告がある（r/LocalLLaMA の議論など．定量値は一次情報として確認できず）．
+- **実機確認（wafl-ctrl5，2026-09-26）**: `ollama pull qwen3-embedding:0.6b` は ollama 0.34.4 で成功．`ollama show` は architecture=qwen3，parameters=**595.78M**，context length=**32768**，embedding length=**1024**，quantization=**Q8_0**．`ollama show --template` が返すのは Qwen3 の **chat template** であり，`/api/embed` はこれを適用しない．実際に `/api/embed` へ日本語の医療相談文 1 件を投げて **1024 次元**のベクトルが返ることを確認した．つまり **Ollama 経由のドロップインでは instruction prefix は一切付かない**．
+- **本反復では prefix を付けない**．prefix を導入すると `node.py` のクエリ埋め込みと `scripts/train_domain_classifier.py` の訓練側埋め込みの両方にテキスト整形を足すことになり，「埋め込みモデルの差し替え」と「入力整形の追加」の 2 レバーになる．単一レバー原則に反するため，prefix 版は**次反復以降の独立レバー候補**として backlog へ回す．
+- 副作用として，`nomic-embed-text`（274MB）→ `qwen3-embedding:0.6b`（Q8_0，約 639MB）で各ノードの常駐 VRAM が約 +365MB 増える．10 ノードとも `light_model`(qwen3.5:4b-q4_K_M，約 2.4GB) + `expert_model` + embedding を常駐させる構成（`OLLAMA_KEEP_ALIVE=-1`）だが，この増分は許容範囲と見込む（要実測）．
+
+**Q3: 到達条件と「静かに壊れる箇所」**
+
+- 本走経路で埋め込みモデル名を読むのは **`config.yaml:4 embedding_model` の 1 箇所のみ**．そこから (a) `node.py:202` `await ollama_client.embed(config["embedding_model"], query)`（依頼者ノードでのクエリ埋め込み）と (b) `http_server.py:402-404`（各ノード起動時の `domain_embedding` 計算）へ届く．`grep` で確認した限り，次元を決め打ちしている箇所は `scripts/run_central_experiment.py`（768 次元のゼロベクトル fallback）と `scripts/fine_tune_embedding_*.py` のみで，**いずれも本走経路の外**（前者は Iter26 の中央集権ベースライン比較専用）．したがって本走は次元非依存で動く．
+- 全 10 ノードへのモデル配布は自動である．`tools/node_models.py:get_models()` が `[light_model, expert_model, config["embedding_model"]]` を返し，`mise.toml` の deploy ループ（L96-104）が各ノードで `ollama pull` する．`models/` は L70-74 で `sudo rm -rf` の後 rsync される．
+- **静かに壊れない（＝派手に壊れる）箇所**: 分類器 artifact を再訓練せずに埋め込みだけ替えると，1024 次元のベクトルを 768 次元前提の `LogisticRegression` に渡すことになり sklearn が `X has 1024 features, but ... is expecting 768 features` を投げる．`classifier.py:estimate_confidence_classifier` は例外を握りつぶさないので全ノードの `/probe` が 500 になる．**検知は容易だが，デプロイ順序を誤ると本走が丸ごと無駄になる**ため，config.yaml と `models/domain_classifier.joblib` は必ず同一 deploy で配る．
+- **本当に静かに壊れる箇所は評価集合の側にある**．`mise run setup` は `build_dataset.py --generated-compound-questions data/compound_questions_generated.jsonl`（既定値）を呼ぶが，このファイルは `.gitignore: data/*` によりローカルにしか存在しない（backlog B123）．**消失すると dataset.jsonl が黙って 1,600 行へ戻り，Iter78 基準線との比較が成立しなくなる．** 本日時点で存在を確認済み（315 行，sha256 `1bfb5add6a5f4028c3ceb52531987aaea595c409bfaca1c98bbf48c80901d3c6`，`data/dataset.jsonl` は 1,915 行）．実験前に再確認する．
+
+**Iter78 の学びの反映**
+
+Iter78 の学び 2「π̂_d はレバー依存の量であり，評価集合の属性ではない．**次レバーの artifact ペアで π̂_d を本走前にオフライン実測し，n_d < 30 ならそこで打ち手を考え直す**」をそのまま実行する．埋め込み空間ごと入れ替える本レバーは Iter77 の education 固有補正撤去（10 ドメイン中 1 つの決定境界しか動かない）とは比較にならない広さのはずで，n_d は数百規模になると見込む（未検証．オフラインで実測する）．
+
+### 計画 (Iter79)
+
+**単一レバー**
+
+`embedding_model_replacement` = **`qwen3_embedding_0.6b`**．`config.yaml:4` の `embedding_model` を `nomic-embed-text` → `qwen3-embedding:0.6b` へ変更し，同じ埋め込みで `models/domain_classifier.joblib` を再訓練する（再訓練は差し替えに構造的に付随する作業であり，別レバーではない）．
+
+**事前登録した値の選定規則（G1 ゲート．Q1 の推測を本走前に潰すため）**
+
+Q1 のとおり「Qwen3-0.6B > nomic（日本語）」は未検証である．そこで**本走の前に，評価集合を一切見ないオフライン事前スクリーニングで値を確定する**（config.yml の「事前シミュレーションは本走 1 点を絞り込むための事前登録手段」に該当）．
+
+1. `data/classifier_train.jsonl`（1,427 行，**訓練データのみ．`data/dataset.jsonl` は使わない**＝評価集合へのリークなし）に対し，候補ごとに埋め込みを計算し，同一の `LogisticRegression(max_iter=1000)` + `sample_weight`（`_extract_sample_weights` と同一）で **5-fold StratifiedKFold の accuracy / macro-F1** を測る．
+2. 候補は 2 段階．第 1 段: `nomic-embed-text`（現行基準）と `qwen3-embedding:0.6b`．**qwen3 の CV accuracy が nomic を上回れば，そこで `qwen3-embedding:0.6b` に確定する**（以降の候補は評価しない）．
+3. 第 1 段で qwen3 が nomic を**上回らなかった場合に限り**，第 2 段として `bge-m3`（Ollama 公式ライブラリ，1024 次元，567M，多言語，prefix 不要のドロップイン）を追加評価し，**CV accuracy 最大の候補を採る**（同点なら macro-F1，なお同点なら qwen3）．`multilingual-e5-large` は JMTEB Classification 72.89 と有力だが `query: ` prefix が必須で入力整形の追加＝2 レバー目になるため**本反復では候補に含めない**（backlog 送り）．
+4. 3 候補すべてが nomic を下回った場合でも，**最良の非 nomic 候補で本走は実施する**（config.yml 絶対条件 A．「施策を適用したら常に本走」）．その際は着地点予測として「改善しない見込み」を事前に journal へ記録してから走らせる．
+
+この規則は結果を見る前に固定してあり，選定に使うのは訓練データの CV のみである．本走の判定指標（評価集合 1,915 行の top1）は選定に一切使わない．
+
+**仮説（事前登録）**
+
+「英語中心の `nomic-embed-text` を多言語対応の `qwen3-embedding:0.6b` へ差し替えると，日本語質問文のドメイン分離度が上がり，1,915 行本走の `top1_accuracy` が Iter78 基準線 0.589556 から **+1.8pt 以上**改善する（McNemar p<0.05）．同時に，埋め込み空間が総入れ替えになるため argmax の discordant 行数 n_d は Iter77 ペアの 19 行から桁違いに増え，200 行以上になる．」
+
+**固定する構成（単一レバー原則）**
+
+`config.yaml` の `embedding_model` 以外の全項目（`routing_method=supervised_classifier`，`confidence_threshold=0.0`，`dispatch_top_k=2`，`dispatch_gap_threshold=0.29`／`dispatch_gap_max_k=4`，`aggregation_method=max_confidence`，`judge_model`，`classifier_model_path`，各ノードの `light_model`/`expert_model`，`probe_timeout_s`/`dispatch_timeout_s`），`data/dataset.jsonl`（1,915 行．Iter78 の成果物をビット単位でそのまま使う），`data/classifier_train.jsonl`（1,427 行，無変更），`scripts/train_domain_classifier.py` のハイパラ（`_CALIBRATION_METHOD="temperature"`，`_CALIBRATION_CV=5`，`_MAX_ITER=1000`，`ensemble=True`，`class_weight=None` + domain-balanced `sample_weight`），`classifier.py` / `http_server.py` / `node.py` / `aggregator.py` / `metrics.py` / `build_dataset.py`，`experiment.timeout_min=150`．**instruction prefix は導入しない．**
+
+**変更するファイルと箇所**
+
+1. `config.yaml:4`: `embedding_model: nomic-embed-text` → `embedding_model: qwen3-embedding:0.6b`（G1 の結果が別候補ならその名前）．**これが本レバーの本体であり，変更はこの 1 行のみ．**
+2. `models/domain_classifier.joblib`: 新埋め込みで再訓練して差し替える．**旧 artifact は `models/domain_classifier_pre_iter79_nomic.joblib` へ退避**してから上書きする（Iter77 の `domain_classifier_pre_iter77_edu_corrected.joblib` と同じ慣行．flip 計測に必要）．
+3. `scripts/screen_embedding_models.py`（**新規**）: G1 の事前スクリーニング専用．`data/classifier_train.jsonl` を候補モデルごとに埋め込み（`data/embcache_<model>.npy` へキャッシュし，採用モデル分は再訓練でも再利用する），5-fold StratifiedKFold の accuracy/macro-F1 を JSON で標準出力へ出す．**Ollama ホストは wafl-ctrl5 固定**（引数の既定値を `localhost:11499` とし，docstring に SSH トンネル手順を書く）．
+4. `data/MANIFEST.md`: 新 artifact の sha256・生成コマンド・使用した埋め込みモデル名を追記する（`data/`・`models/` は `.gitignore` 対象のため MANIFEST が唯一の再現性の担保．B123 で確認した既存規約）．
+5. `.claude/research/config.yml`: G1 が第 2 段へ進んで `bge-m3` を採った場合のみ，`embedding_model_replacement` の `values` へ `bge_m3` を追記する（採らなければ変更しない）．
+
+**変更しないが確認だけするファイル**: `tests/test_node.py:170` ほか計 4 つのテストが `"nomic-embed-text"` を文字列リテラルで持つが，いずれもテスト内で組み立てる config 辞書の値であって `config.yaml` を読まない．**テストの修正は不要**（修正するとレバーの外側を触ることになる）．
+
+**レバーを読むコード行と到達条件（d0004 §4 の再発防止．同型の失敗 6 回の教訓）**
+
+- 設定 → 全ノードのモデル配布: `tools/node_models.py:get_models()` が `config["embedding_model"]` を返し，`mise.toml` L96-104 の deploy ループが各ノードで `ollama pull` する．到達確認は **全 10 ノードで `docker compose exec -T ollama ollama list | grep qwen3-embedding` が 1 行返ること**．
+- 設定 → 各ノードの config: `mise.toml` L67 の `rsync ... config.yaml` が配布する．到達確認は **全 10 ノードで `grep '^embedding_model:' $REMOTE_DIR/config.yaml`**．
+- 設定 → 実行時のクエリ埋め込み: `node.py:202`．到達確認は本走ログでノード起動時の `domain_embedding` 計算（`http_server.py:402-404`）が例外なく通ること，および先頭 20 問の予備実行が 500 を返さないこと（**次元不一致なら必ずここで落ちる**）．
+- artifact → 全ノード: `mise.toml` L70-74 の `models/` rsync．到達確認は **全 10 ノードで `docker compose exec app python -c "import joblib;m=joblib.load('/app/models/domain_classifier.joblib');print(m.estimators_[0].estimator.n_features_in_)"` 相当が 1024 を返すこと**（実装が困難なら sha256 一致確認で代替してよい）．
+- 実験 → 指標: `metrics.py` は無変更．到達確認は `question_count == 1915` かつ `compound_domain_question_count == 415`．
+- **レバー発火の直接証拠**: 旧/新 artifact の argmax replay による flip 行数 n_d が **30 行以上**（後述 G2）．これが一桁なら「効果が無かった」ではなく **config が届いていない**ことを既定の解釈とする．
+
+**実験手順**
+
+1. **前提確認**: `wc -l data/dataset.jsonl` = 1915，`sha256sum data/compound_questions_generated.jsonl` = `1bfb5a...01d3c6` を確認（B123 のリスク．消えていたら本反復は中止して backlog へ差し戻す）．
+2. **G1 事前スクリーニング（wafl-ctrl5 のみ．絶対条件 B）**: `ssh -fNT -L 11499:localhost:11434 wafl-ctrl5` のトンネル経由で `scripts/screen_embedding_models.py` を実行．`qwen3-embedding:0.6b` は wafl-ctrl5 に pull 済み（調査 Q2 で実施）．第 2 段へ進む場合のみ `bge-m3` を追加 pull する．**wafl500〜509 は使わない．** 結果の CV accuracy / macro-F1 を journal に全候補分記録し，選定規則に従って 1 モデルを確定する．
+3. **分類器の再訓練（wafl-ctrl5 のみ）**: 旧 artifact を `models/domain_classifier_pre_iter79_nomic.joblib` へ `cp` で退避してから，
+   `uv run python -m scripts.train_domain_classifier --train-data data/classifier_train.jsonl --embedding-model <選定モデル> --ollama-host 127.0.0.1 --ollama-port 11499 --output models/domain_classifier.joblib`
+   を実行する（`--ollama-host` を wafl500 等へ向けないこと．絶対条件 B）．`n_features_in_` が 1024 であることを確認する．
+4. **G2 検出力の事前実測（wafl-ctrl5 のみ）**: `scripts/evaluate_classifier_calibration.py` を conformal オプション無し（素の `predict_proba` argmax）で 2 回走らせ，(旧 artifact × `nomic-embed-text`) と (新 artifact × 選定モデル) の `selected_domain` を 1,915 行全体で突き合わせて discordant 行数 n_d と必要偏り率 `1.96/sqrt(n_d)` を算出する．**Iter78 の学び 1 に従い，pt スケールの MDE ではなく n_d を主たる検出力指標として記録する．** 同時に新 artifact 単体のオフライン accuracy も記録する（着地点予測．本走の判定には使わない）．
+5. `config.yaml:4` を書き換え，`uv run ruff check` と `uv run pytest tests/`（pre-existing 9 件 FAIL は B122 の既知事項．新規失敗 0 件であることを確認）を通す．
+6. `mise run setup`（**直後に `uv sync --extra research` で research extra を復旧する．B118 の落とし穴 2**）→ `wc -l data/dataset.jsonl` = **1915** を再確認．
+7. `mise run deploy` → 上記「到達条件」4 点を全 10 ノードで確認．
+8. 先頭 20 問の予備実行でノード疎通を確認（**次元不一致はここで必ず出る**）．
+9. **wafl500〜509 で 1,915 問のフルスペック本走を 1 回（絶対条件 A）**．起動直後に `state.json` を `status=waiting_experiment`・`experiment_dir`・`experiment_deadline`（開始時刻 + 150×60 + 600 秒）へ更新する．`mise run analyze -- <timestamp>` まで実施（**引数なし実行は `results/iter45_preliminary/` を誤選択する．B118 の落とし穴 1**）．
+10. 指標を「全 1,915 行」「既存 1,600 行部分集合」「複合 415 行」の 3 通りで算出し，Iter78 基準線 `results/20260926_195929/` と id ペアリングで McNemar 検定・per-domain 20 指標の BH 補正を行う．
+
+**実験時間の見積りと `timeout_min`**
+
+Iter78 本走は 1,915 問で実測 51 分（`18 分 + n_compound/9.9 分` の経験式に概ね一致）．埋め込みモデルの差し替えは 1 問あたり埋め込み 1 回分のコストしか変えず，`mean_dispatch_gen_time_ms`=1997 が所要時間の大半を占めるため，所要時間はほぼ横ばい（±10 分）と見込む．ただし**ルーティング先の分布が変われば `dispatch_gap` 経由の平均 dispatch 数（Iter78 実測 `compound_mean_dispatched_count`=2.506）が動き，所要時間が変わる可能性がある**（増える向きにも減る向きにもあり得る）．`experiment.timeout_min: 150` は実測の約 3 倍の余裕があるため**変更しない**．130 分を超えた場合のみ次反復で 180 への引き上げを起票する．
+
+**成功条件（事前登録）**
+
+基準線は Iter78 本走 `results/20260926_195929/`（全 1,915 行: top1=0.589556，single_domain_top1=0.628667，compound_domain_top1=0.448193，compound_domain_set_recall=0.393976，kappa=0.587438，misrouting=0.410444，ECE=0.050552，Brier=0.206919，AUROC=0.731903，fallback=0.0，dispatch_failure=0.000522／既存 1,600 行部分集合: top1=0.615000）．
+
+| 区分 | 指標 | 現状 | 合格条件 |
+|---|---|---|---|
+| **事前ゲート G1（値の選定）** | 5-fold CV accuracy（`classifier_train.jsonl` のみ） | nomic の実測値を基準に取る | 選定規則どおり 1 モデルへ確定できること．全候補の値を journal に記録 |
+| **事前ゲート G2（検出力）** | 旧/新 artifact replay の discordant 行数 n_d（1,915 行） | 参考: Iter77 ペアで 19 | **n_d ≥ 30**．必要偏り率 `1.96/sqrt(n_d)` も併記．**n_d < 30 なら config 未到達を疑い，本走前に原因を潰す** |
+| **主基準（効果）** | 全 1,915 行の `top1_accuracy` | 0.589556 | **McNemar p < 0.05 の有意改善 かつ 点推定 +1.8pt 以上**（n_d=200 想定の MDE `1.96·sqrt(n_d)/1915` ≈ 1.45pt を上回る水準として設定） |
+| **非退行①** | per-domain recall/precision 計 20 指標 | Iter78 実測 | **BH 補正（q=0.05）後の有意退行 0 件** |
+| **非退行②** | `fallback_rate` / `dispatch_failure_rate` | 0.0 / 0.000522 | fallback = 0.0，dispatch_failure ≤ 0.005 |
+| **非退行③** | ECE | 0.050552 | **≤ 0.10**（+5pt 以内．埋め込み空間が変われば温度スケーリングの最適値も変わるため，ここは悪化余地を見込んで緩く置く） |
+| 報告のみ | 既存 1,600 行部分集合の top1 | 0.615000 | 判定に用いないが毎回併記する（B119 要レビュー (c) への回答） |
+| 報告のみ | `compound_domain_top1` / `single_domain_top1` / `compound_domain_set_recall` | 0.448193 / 0.628667 / 0.393976 | 複合設問への効果を初めて 415 行で測る参考値．Iter78 の学び 2 のとおり，ここが動くかどうかが評価集合拡充の投資回収の指標になる |
+| 報告のみ | `answer_quality_accuracy` / `end_to_end_accuracy` | 0.564 / 0.287728 | 埋め込み差し替えは生成器を変えないため横ばいを期待 |
+
+- **adopted**: 主基準（有意改善 かつ +1.8pt 以上）と非退行①②③をすべて満たす．
+- **partial**: 点推定は改善だが p ≥ 0.05 または +1.8pt 未満，かつ非退行に違反なし．この場合，`qwen3-embedding:4b`（config の第 2 値）または prefix 付与版を次反復の候補として backlog へ残す．
+- **rejected**: 点推定が低下，または非退行①で有意退行が 1 件以上．rejected の場合は `config.yaml` を `nomic-embed-text` へ戻し，`models/domain_classifier.joblib` を退避した旧 artifact から復元する（復元手順を journal に明記してから本走に入ること）．
+- **invalid（実験不成立）**: `question_count != 1915`，`compound_domain_question_count != 415`，G2 の n_d が一桁，またはノードの `ollama list` に選定モデルが無い．いずれも「効果なし」ではなく setup/deploy の漏れと解釈する（d0004 §4）．
+
+**期待効果**
+
+現行の `nomic-embed-text` は英語中心のモデルであり，日本語 1,915 問のルーティングを英語埋め込み空間の上で行っている．ここを多言語モデルへ替えることは，これまでの 78 反復で触れてこなかった**特徴量そのものの品質**への初めての介入である（Iter39〜43 の fine-tuning はベースモデルを保ったまま補正する試みで，argmax flip rate が過大となり単一レバー原則と両立せず rejected だった．本レバーは差し替えなので同じ制約を受けない）．同時に，Iter78 で拡充した複合 415 行に対して初めて意味のある検出力で効果を測る機会でもある．
+
+### Iteration 79 実行済み
+
+**判定: adopted（事前登録した全条件を満たす）**
+
+#### 変更したもの
+
+`config.yaml:4` の `embedding_model` を `nomic-embed-text` → `qwen3-embedding:0.6b` の 1 行のみ．これに構造的に付随する作業として `models/domain_classifier.joblib` を新埋め込み（1024 次元）で再訓練し（旧版は `models/domain_classifier_pre_iter79_nomic.joblib` へ退避），`scripts/screen_embedding_models.py`（G1 専用・新規）を追加，`data/MANIFEST.md` に新 artifact の sha256・生成コマンド・G1/G2 実測値を追記した．`data/dataset.jsonl`（1,915 行）・`data/classifier_train.jsonl`（1,427 行）・訓練ハイパラ・その他 config は計画どおりビット単位で固定した．instruction prefix は付けていない．
+
+#### 事前ゲートの結果
+
+- **G1（値の選定，`classifier_train.jsonl` のみの 5-fold StratifiedKFold CV．評価集合不参照）**: `nomic-embed-text` cv_accuracy 0.5711 / macro-F1 0.5710，`qwen3-embedding:0.6b` cv_accuracy 0.7561 / macro-F1 0.7562．第 1 段で qwen3 が nomic を **+18.50pt** 上回ったため事前登録の規則どおりここで確定し，第 2 段（`bge-m3`）は起動しなかった．`scripts/screen_embedding_models.py` が `data/dataset.jsonl` を一切参照しないことをソースで確認済み（docstring L10 に明記，`--train-data` 既定は `classifier_train.jsonl`）．
+- **G2（検出力）**: 旧/新 artifact の argmax replay で discordant n_d=787（閾値 30 を大幅超過）．本走実測でも `selected_domain` の discordant は **n_d=791**（必要偏り率 `1.96/sqrt(791)`=6.97%）で，replay と整合する．計画が予測した「n_d は 200 行以上」を上回り，レバーが実行時経路まで到達したことの直接証拠になっている．
+
+#### 本走の結果（`results/20260926_221822/`，基準線 Iter78 `results/20260926_195929/`）
+
+rc-executor の報告は，`metrics.py` の再実行と `results.jsonl` からの独立再計算で全項目を裏取りした．`expected_domains` と `query` は 1,915 行すべてで両走一致しており，評価集合は同一である（確認済み）．
+
+| 指標 | Iter78 | Iter79 | 差 |
+|---|---|---|---|
+| top1_accuracy（全 1,915 行） | 0.589556 | **0.753003**（Wilson CI [0.73319, 0.77180]） | **+16.34pt** |
+| cohens_kappa | 0.587438 | 0.721502 | +13.41pt |
+| misrouting_rate | 0.410444 | 0.246997 | -16.34pt |
+| ECE / Brier / AUROC | 0.050552 / 0.206919 / 0.731903 | 0.032745 / 0.152849 / 0.777614 | すべて改善 |
+| fallback_rate / dispatch_failure_rate | 0.0 / 0.000522 | 0.0 / 0.000522 | 同一（同じ 1 行） |
+| single_domain_top1（1,500 行） | 0.628667 | 0.749333 | +12.07pt |
+| compound_domain_top1（415 行） | 0.448193 | 0.766265 | +31.81pt |
+| compound_domain_set_recall | 0.393976 | 0.548193 | +15.42pt |
+| compound_mean_dispatched_count | 2.506 | 1.880 | **-0.63**（後述） |
+| answer_quality / end_to_end | 0.564 / 0.287728 | 0.569333 / 0.335770 | +0.53pt / +4.80pt |
+| mean_duration_ms | 約 2300 | 2301.4 | 横ばい |
+
+McNemar（連続性補正あり，自前再計算）: 全 1,915 行で a_only(旧のみ正解)=128，b_only(新のみ正解)=441，discordant=569，chi2=171.08，**p=4.30e-39**．部分集合も同様に全て有意改善（単一 1,500 行: 114/295，p=5.56e-19／複合 415 行: 14/146，p=3.91e-25／既存 1,600 行部分集合 top1 0.615000→0.751250，118/336，p=2.33e-24）．
+
+**非退行①（per-domain recall 10 + precision 10 の計 20 指標，BH 補正 q=0.05）**: 自前で再計算（recall は exact McNemar，precision は Fisher）した結果，**有意 10 件・方向はすべて改善・有意退行 0 件**．点推定で悪化したのは `social_science_recall`（0.4242→0.4156，p=0.888）と `history_culture_recall`（0.7792→0.7706，p=0.896）の 2 件のみで，いずれも有意でない．非退行②（fallback=0.0，dispatch_failure=0.000522 ≤ 0.005）・非退行③（ECE 0.032745 ≤ 0.10．むしろ改善）も充足．
+
+**到達確認**: `question_count`=1915，`compound_domain_question_count`=415，全 10 ノードで `ollama list` に `qwen3-embedding` と `config.yaml` の値を確認，新分類器の `n_features_in_`=1024，先頭 20 問の予備実行で 500 エラーなし．invalid 条件には一つも該当しない．
+
+**検証**: `uv run ruff check` 新規失敗 0 件（既存 23 件は pre-existing），`uv run pytest tests/` 306 passed / 9 failed（9 件すべて B122 の pre-existing，新規失敗 0 件）．
+
+#### 分析（交絡の検討 — +16.3pt は過去のどのレバーよりも大きいため，本物であることを個別に潰す）
+
+1. **分類器の再訓練そのものの寄与と，埋め込みの寄与を分離できているか**．G1 は**同一の訓練データ・同一の訓練手順・同一のハイパラ・同一の CV 分割（`random_state` 固定）で埋め込みだけを差し替えた比較**であり，cv_accuracy 0.5711→0.7561（+18.50pt）を得ている．訓練手順が同一である以上，この差は埋め込み特徴量の品質に帰属する．本走の +16.34pt は G1 の +18.50pt より小さく，オフラインの分離度改善が実機へほぼそのまま（やや目減りして）伝播した，という素直な解釈と整合する．「再訓練したから上がった」だけなら nomic で再訓練した対照でも上がるはずだが，G1 の nomic 側がまさにその対照であり 0.5711 に留まっている．
+2. **評価集合への情報漏洩**．G1 も再訓練も `data/classifier_train.jsonl` のみを使い，`data/dataset.jsonl` を参照していない（スクリプトの引数とソースで確認）．値の選定規則は結果を見る前に journal へ事前登録済みで，選定に評価集合の指標を一切使っていない．
+   - ただし**副次的に既存の漏洩を 1 件発見した**．`classifier_train.jsonl` の質問本文と `dataset.jsonl` の質問本文が **72 行重複している**（education 54 行，history_culture 18 行）．d0002 §6-E の「重複 0 件」という記述は現状に合致しない（Iter35 の education 手作り問題追加，または Iter36/37 の `japanese_civics` 再割当以降に混入したと見られる）．**この 72 行は旧走・新走の双方に等しく含まれるため今回の比較を歪めないうえ，向きも逆である**: 漏洩 72 行では新モデルの方が**悪く**（0.875→0.653），漏洩 72 行を除いた 1,843 行では改善幅がむしろ広がる（0.578405→0.756918，**+17.85pt**）．したがって漏洩は今回の判定を有利側へ押していない．絶対値の水増しという別問題は残るため backlog B125 に起票した．
+3. **Iter78 で拡充した新規 315 行が新モデルに有利に働いていないか**．複合設問を由来で分けると，**旧来の手作り 100 行が 0.410→0.780（+37.0pt，a=4/b=41，p=8.0e-8）**，Iter78 の LLM 生成 315 行が 0.460→0.762（+30.2pt，a=10/b=105，p=1.9e-18）で，**改善幅が大きいのは新規 315 行ではなく旧来の 100 行の側**である．新規行が新モデルに有利という交絡は支持されない．なお単独で最も改善が小さいのは単一ドメイン 1,500 行（+12.07pt）であり，複合設問ほど恩恵が大きいという構図になっている．
+4. **想定外の挙動**．言語崩れ・発散・OOM は観測されず，`mean_duration_ms` も横ばい（2301.4）．唯一の想定外は `compound_mean_dispatched_count` の 2.506→1.880 という低下である．これは `dispatch_gap_threshold=0.29` を固定したまま確信度の分布が鋭くなった（`mean_confidence_std` が上がった）結果，rank2 以降が gap 条件で落ちやすくなった二次効果であり，レバーの直接の帰結ではない．**それでも `compound_domain_set_recall` は 0.394→0.548 と改善しており，「送る数を減らしたのに当てる数が増えた」**（送出先の質が上がった）と読める．ただし複合設問で 2 ドメイン中 1 つしか送られない行が増えている可能性があるため，`dispatch_gap_threshold` の再調整は独立レバーとして起票する価値がある（B125）．
+
+#### 考察（採否判定）
+
+事前登録した adopted 条件は「主基準（McNemar p<0.05 かつ点推定 +1.8pt 以上）かつ非退行①②③をすべて満たす」である．主基準は p=4.30e-39・+16.34pt で桁違いに充足し，非退行①（BH 補正後の有意退行 0 件）・②・③もすべて充足した．**adopted で確定する**．`config.yaml` の `qwen3-embedding:0.6b` と再訓練済み `models/domain_classifier.joblib` はこのまま本番構成として維持する（rejected 時の復元手順は不要となった）．
+
+これは Iter15 以降の全反復で最大の単一レバー効果であり，Iter17 の `routing_method=supervised_classifier`（0.2059→0.5651）に次ぐ規模の前進である．top1_accuracy は初めて 0.75 を超えた．
+
+**単一レバー原則の観点で，分類器の再訓練を同一レバーに含めた判断が妥当だったか**: 妥当だったと判断する．埋め込みを 768→1024 次元へ替えると旧 artifact は次元不一致で例外を投げるため，「差し替えだけして再訓練しない」という構成はそもそも実行不能であり，再訓練は選択肢ではなく差し替えの構成要素である．そのうえで G1 が「訓練手順を固定して埋め込みだけを変えた対照」を提供しているため，再訓練の寄与と埋め込みの寄与は事後に分離できている．この形（**付随作業が避けられない場合は，付随作業を固定した対照をオフラインで別に取る**）は今後の単一レバー運用の型として再利用できる．
+
+#### 学び
+
+1. **78 反復のあいだ，日本語タスクを英語中心の埋め込み空間の上で解き続けていた**．`nomic-embed-text` は英語中心モデルで，JMTEB 系のリストにすら載っていない．Iter29〜77 の大半は，その低品質な特徴量を前提にした後段（較正・閾値・intercept・集約方式・conformal）の微調整であり，改善幅は概ね ±1〜3pt に収まっていた．**後段の作り込みを重ねる前に，特徴量そのものの妥当性（入力言語とモデルの学習言語の一致）を疑うべきだった**．G1 相当の CV スクリーニングは数分で終わる．教訓は「安価なオフライン検証で前提そのものを測れる場合は，レバーの優先順位に関わらず早期に測る」である．
+2. **公称ベンチマークの選び方が判定を左右する**．config.yml の lever note は MTEB multilingual 平均（nomic 62.28 vs qwen3 64.33，差 +2.05pt）を根拠にしていたが，実測は +18.50pt（CV）/ +16.34pt（本走）だった．一方，調査で見つけた JMTEB Classification は「qwen3-0.6b 66.09 は multilingual-e5-large 72.89 に劣る」と示しており，この数字だけを見ると着手を見送りかねなかった．**どちらの公称値も本タスクの効果量を予測できていない**．B124 で G1 を挟む判断をしたことが，この不確実性をコスト数分で解消した．公称ベンチは候補を絞る道具であって，採否の根拠にはならない．
+3. **効果が大きいレバーほど，二次効果が別のハイパラを陳腐化させる**．確信度分布が鋭くなったことで `dispatch_gap_threshold=0.29`（Iter7x 世代に nomic の分布で調整した値）の実効が変わり，複合設問の平均送出数が 2.506→1.880 へ落ちた．**過去に調整したハイパラは，特徴量を入れ替えた時点で「調整済み」ではなくなる**．今回は結果的に set_recall も改善したため無害だったが，次以降は再調整を独立レバーとして検討する．
+4. **train/eval の重複 0 件という前提は，データを触るたびに再検証が要る**．d0002 §6-E の確認は Iter17 時点のもので，Iter35/36/37 のデータ変更を経て現在 72 行が重複している．データセットを変更するレバーの計画フェーズに，重複チェックを定型作業として組み込むべきである．
+
+---
+
 ## Iteration 78: 複合設問評価集合の拡充（既存公開データセットの調査を起点に n=300〜400 へ）
 
 ### 調査 (Iter78)
@@ -415,236 +598,4 @@ Q2 で事前に予測したとおりの方向であり，B116(1) により**撤�
 
 **次の一手**: B116 の優先順位に従い，優先度 1 の**複合設問評価集合の拡充**（research_frontier 最上位）へ移る．config.yml の levers 末尾へ `compound_eval_set_expansion` を追加した（詳細と比較可能性の担保方針は backlog B118）．
 
-
-## Iteration 76: conformal予測集合サイズを棄権信号に使う選択的ルーティングの価値を測る
-
-### 調査 (Iter76)
-
-Iter75 の申し送り（backlog B112・停止条件 2）に従い，config の levers 使い切り後の代替アプローチを tavily-search で広めに調査した．B112 が挙げた 4 候補（多ラベル化，binary relevance，conformal risk control，選択的予測）のうち，**前 2 者は本リポジトリで既に試し切り済みである**ことをまず確認した（`dispatch_candidate_ranking=multilabel_binary_relevance_head` は Iter59 で rejected，`multilabel_training_signal` 以降 Iter60〜68 の 9 反復で合成多ラベル信号の量・質量比・構造・質をすべて探索し Iter68 で打ち止め確定）．したがって残る実行可能な候補は後 2 者である．
-
-**問い**
-
-- Q1: conformal risk control（CRC）で複合設問の 2 ドメイン同時被覆を直接制御できるか．本リポジトリの標本規模で意味のある実験になるか．
-- Q2: 予測集合を「棄権・人手エスカレーション」の信号として使う場合，先行研究はどう定式化・評価しているか．基準線は何か．
-- Q3: その評価を本リポジトリの既存データで実行したとき，どこへ着地するか（Iter71 以降の慣行に従い本実行前に数値で言語化する）．
-
-**Q1: conformal risk control — 定式化は可能だが本標本では実験にならない**
-
-CRC（Angelopoulos, Bates, Fisch, Lei, Schuster, "Conformal Risk Control", ICLR 2024, arXiv:2208.02814，<https://arxiv.org/abs/2208.02814>）は，単調かつ有界な損失の期待値を有限標本で制御する枠組で，参照実装 `aangelopoulos/conformal-risk` の README が多ラベル分類の例として偽陰性割合 `L_i(λ) = 1 - |Y_i ∩ C_λ(X_i)| / |Y_i|` を挙げている（<https://github.com/aangelopoulos/conformal-risk>）．MAPIE のドキュメントも同じ損失で実装を公開している（<https://mapie.readthedocs.io/>）．本リポジトリの `expected_domains` はそのまま `Y_i` として使えるため定式化上の障害はない．
-
-**しかし標本が足りない．** 損失を 1,600 行全体で取ると，複合行は 100 行（校正/評価半では各 ~50 行）しかなく，単一ドメイン行 1,500 行（`|Y_i|=1`，損失は通常の非被覆と一致）が λ の校正をほぼ完全に支配する．すなわち CRC は現行の周辺被覆 conformal とほぼ同じ λ に落ち，複合の同時被覆はほとんど動かない．損失を複合行に限定すれば校正標本は ~50 行となり，Iter60〜68 で繰り返し臨界に達した検出力の壁（R-H: n=100・discordant 15〜19 行では ±3〜4 行を検出できない）にそのまま突き当たる．**Iter68 と同じく「実施しても『効果なし』ではなく『検出力不足で判定不能』としか結論できない実験」であり，着手しない**と判断した（複合設問データセットの拡充は research_frontier 相当・人間判断）．
-
-**Q2: 選択的予測（棄権）— 定式化と評価指標，および基準線の強さ**
-
-- Tayebati et al., "Learning Conformal Abstention Policies for Adaptive Risk Management in Large Language and Vision-Language Models", arXiv:2502.06884（2025，<https://arxiv.org/abs/2502.06884>）が，conformal の予測集合サイズを棄権判定に使う定式化（集合サイズ >1 なら棄権する，LAC/APS を比較対象に AUARC 等で評価する）を扱っている．本イテレーションの着想はこれに直接対応する．
-- 評価枠組は選択的分類の標準である risk-coverage 曲線と AURC（Geifman & El-Yaniv, NeurIPS 2017）．さらに Traub, Bungert, Lüth, Baumgartner, Maier-Hein, Maier-Hein, Jäger, "Overcoming Common Flaws in the Evaluation of Selective Classification Systems", NeurIPS 2024, arXiv:2407.01032（<https://arxiv.org/abs/2407.01032>）が，AURC が低 coverage 側の少数標本に支配されるという欠点を指摘し，generalized risk（誤りかつ非棄権の同時確率）の曲線下面積 **AUGRC** を代替として提案している．本イテレーションはこの勧告に従い **AUGRC を主指標，AURC を副指標**とする．
-- **基準線の強さに関する注意**: 選択的予測の文献では，素の最大ソフトマックス確率（MSP / softmax response）が強い基準線であり，凝った不確実性指標が安定して上回れないことが繰り返し報告されている（Hendrycks & Gimpel 2017 以来．例えば選択的分類の post-hoc 手法をまとめた文献レビューでも MSP + 温度較正の組合せが上位に来る）．**本リポジトリの実行時 confidence は既に temperature 較正済み（Iter31 adopted）の MSP そのものであり，基準線は相当に強い**．
-
-**Q3: 事前シミュレーション（本実行前に実施．B109 制約 (2) の慣行）**
-
-Iter75 の出力 `results/20260923_161147/Iter75_variantA_edu005.jsonl`（1,600 行，`probabilities` / `expected_domains` / `set_size` / `split` を持つ）だけで計算が閉じる．評価は conformal の評価半 n=800（校正半は q_hat の当てはめに使われており in-sample のため副次扱い）．棄権スコアは大きいほど「任せてよい」向き．正誤は `argmax(probabilities) ∈ expected_domains`（eval 半で argmax は `selected_domain` と 800/800 一致，top1=0.605000）．
-
-| 棄権スコア | AURC | AUGRC | err@cov50% | err@cov70% | err@cov80% | err@cov90% |
-|---|---|---|---|---|---|---|
-| **max_probability（基準線）** | **0.218717** | **0.138450** | **0.2200** | **0.2804** | **0.3219** | **0.3611** |
-| margin（top1-top2） | 0.225014 | 0.142492 | 0.2275 | 0.2982 | 0.3328 | 0.3681 |
-| negative entropy | 0.224522 | 0.140497 | 0.2175 | 0.2857 | 0.3281 | 0.3569 |
-| **conformal set size（本レバー）** | **0.252187** | **0.153391** | **0.2700** | **0.3179** | **0.3391** | **0.3667** |
-| conformal set size（同点を max_prob で解く） | 0.234332 | 0.145975 | 0.2475 | 0.2964 | 0.3391 | 0.3583 |
-
-対応ありブートストラップ（B=10,000，seed 42，eval 半 n=800）: **ΔAUGRC = +0.014941，95%CI [0.007923, 0.022549]**（正は劣化方向．改善方向に出る確率 0.0001）．ΔAURC = +0.033470，95%CI [0.014948, 0.050655]．方向は校正半（n=800，AUGRC 0.162959 対 0.146444）でも全 1,600 行（0.158015 対 0.142462）でも同じで，分割に依存しない．
-
-集合サイズ閾値が到達する coverage と，そこへ max_probability を揃えた対比較（discordant 行の誤り数と二項検定）:
-
-| 閾値 | coverage | n | 誤り率（set size） | 誤り率（max prob） | only-size 側の誤り | only-maxp 側の誤り | 二項 p |
-|---|---|---|---|---|---|---|---|
-| size<=1 | 0.0300 | 24 | 0.0000 | 0.0000 | 0/3 | 0/3 | 1.0 |
-| size<=2 | 0.1200 | 96 | 0.1146 | 0.0938 | 5/30 | 3/30 | 0.727 |
-| size<=3 | 0.3000 | 240 | 0.1917 | 0.1625 | 21/70 | 14/70 | 0.311 |
-| **size<=4** | **0.5425** | **434** | **0.2834** | **0.2281** | **52/99** | **28/99** | **0.0097** |
-| size<=5 | 0.8013 | 641 | 0.3385 | 0.3214 | 46/72 | 35/72 | 0.266 |
-| size<=6 | 0.9450 | 756 | 0.3783 | 0.3783 | 19/26 | 19/26 | 1.0 |
-
-**この調査で分かったことの要約**
-
-1. B112 が挙げた 4 候補のうち，多ラベル化・binary relevance は既に試し切り済み（Iter59・Iter68 で打ち止め），conformal risk control は定式化できるが標本規模から判定不能が確定しているため着手しない．**残る実行可能な候補は選択的予測（棄権）ただ 1 つである**．
-2. 選択的予測は本リポジトリで一度も測っていないが，**実行時に既に存在する confidence（temperature 較正済み MSP）だけで，棄権 20% ならルーティング誤り 0.3950→0.3219，棄権 50% なら 0.2200 まで下がる**．これは B104 A2（配線の是非）を人間に諮るための運用点の表になる．
-3. 一方 **conformal の集合サイズは棄権信号として MSP より有意に劣る**（ΔAUGRC +0.0149，95%CI が 0 を跨がない）．機序は解像度の欠如にあると解釈できる：集合サイズは 1〜8 の 8 段階しかなく，size<=4 と size<=5 の間で coverage が 0.54 から 0.80 へ飛ぶため中間の運用点が存在しない．同点を max_probability で解くと AUGRC が 0.153391→0.145975 と MSP 側へ寄る（それでもなお MSP に届かない）ことがこの解釈を支持する．
-
-### 計画 (Iter76)
-
-**仮説（反証形で事前登録する．Iter74 と同型）**
-
-「conformal の予測集合サイズは，棄権・人手エスカレーションの判定信号として，実行時に既に存在する confidence（max_probability）より優れる」は**成り立たない**．eval 半 n=800 で AUGRC は 0.153391 対 0.138450（Δ=+0.014941，劣化方向，ブートストラップ 95%CI [0.007923, 0.022549]）となり主基準は不成立となる．
-
-この仮説を採る根拠は，(a) 上記シミュレーションが入力 jsonl から決定論的に閉じており実行時の再現は確実であること，(b) 選択的予測の文献で MSP が強い基準線であることが繰り返し報告されており，本リポジトリの confidence は temperature 較正済み（Iter31 adopted）でさらに強いこと，の 2 点である．**本実行は，この予測を実装で確認して conformal 系列を根拠をもって閉じ，同時に選択的ルーティングの運用点の表を成果物として残すための反証実験である．合格を探して信号を振り直すことはしない**（margin・negative entropy も掃引済みで，いずれも MSP を上回らない）．
-
-**単一レバー**
-
-`routing_abstention_signal`: ルーティングの棄権スコアを `max_probability`（基準線．実行時の confidence そのもの）→ **`conformal_set_size`**（Iter75 adopted 構成の予測集合サイズ）へ変更する．動かすのはこの 1 点のみ．
-
-**固定する構成**
-
-入力は `results/20260923_161147/Iter75_variantA_edu005.jsonl`（Iter75 adopted の出力．randomized_aps / `--randomization-seed 42` / `--calibration-source eval_holdout` / `--holdout-seed 42` / `--qhat-quantile-direction alpha_lower` / `--qhat-source true_class` / `--confidence-level 0.90` / `--education-threshold 0.05`）を**再生成せずそのまま使う**（埋め込み再計算なし＝差分が棄権スコアの選択のみになる）．評価対象は `split == "eval"` の 800 行．正誤の定義・分類器・埋め込み・`config.yaml`・`http_server.py`・`classifier.py`・`aggregator.py`・`mise.toml`・実機構成はすべて変更しない．**実行時経路への配線は行わない**（B104 A2 は人間判断事項のまま維持）．
-
-**変更箇所（新規 1 ファイル＋テスト．既存ファイルは変更しない）**
-
-1. 新規 `scripts/evaluate_selective_routing.py`（ファイル冒頭に責務を 1 行で記す）．
-   - CLI: `--predictions`（必須，jsonl），`--split`（既定 `eval`），`--abstention-signal`（`{max_probability, conformal_set_size, margin, negative_entropy}`，複数指定可），`--bootstrap`（既定 10000），`--bootstrap-seed`（既定 42），`--output`（json）．
-   - **レバーを読む行**: 棄権スコア関数テーブル（`_SIGNALS: dict[str, Callable[[np.ndarray, np.ndarray], np.ndarray]]`）を `--abstention-signal` で引く 1 箇所．未知の値は `ValueError`（無言で基準線へ落ちないこと．Iter69 の教訓）．
-   - risk-coverage 曲線はスコア降順の安定ソート（`kind="mergesort"`）で構成し，AURC = 選択的誤り率の全 coverage 平均，AUGRC = generalized risk（誤りかつ非棄権の割合）の全 coverage 平均とする．
-   - 対応ありブートストラップで Δ(AUGRC)・Δ(AURC) の点推定と 95%CI を出す（行インデックスを再標本化し，両信号を同一の再標本上で評価する）．
-   - `size<=k` 閾値の到達 coverage へ max_probability を揃えた対比較（discordant 行の誤り数と `scipy.stats.binomtest`）を出す．
-   - stderr へ発火証拠（`abstention_signal=` / `n=` / `split=` / `set_size` 分布）を出す．
-2. `tests/test_evaluate_selective_routing.py`: (a) 手組みの小標本で AURC・AUGRC が手計算値と一致すること，(b) 定数スコア（全行同値）のとき AURC が全体誤り率と一致すること，(c) 未知の `--abstention-signal` が `ValueError` になること，(d) 完全な信号（正解行が全て誤り行より高スコア）のとき AUGRC が理論下限に一致すること．
-
-**到達コードパス**
-
-`uv run python scripts/evaluate_selective_routing.py --predictions results/20260923_161147/Iter75_variantA_edu005.jsonl --split eval --abstention-signal max_probability --abstention-signal conformal_set_size --abstention-signal margin --abstention-signal negative_entropy --bootstrap 10000 --bootstrap-seed 42 --output results/<ts>/Iter76_selective_routing.json`
-→ jsonl 読み込み → `split == "eval"` で 800 行抽出 → `_SIGNALS[name]`（**レバーを読む行**）→ risk-coverage → AURC/AUGRC → 対応ありブートストラップ → json + stderr．既存コードの分岐に依存しないため到達は CLI 実行そのもので保証される．
-
-**成功条件（事前登録）**
-
-評価半 n=800．基準線は同一 800 行上の `max_probability`．
-
-| 指標 | 定義 | 基準線（予測） | 本レバー（予測） | 合格条件 |
-|---|---|---|---|---|
-| **AUGRC（主基準）** | generalized risk の coverage 平均 | 0.138450 | **0.153391** | **conformal_set_size < max_probability かつ ΔAUGRC のブートストラップ 95%CI が 0 を跨がないこと**（予測: FAIL） |
-| ΔAUGRC の 95%CI（発火・整合） | 対応あり B=10,000, seed 42 | — | **+0.014941 [0.007923, 0.022549]** | 点推定が予測の ±0.002 以内 |
-| AURC（副基準・報告） | 選択的誤り率の coverage 平均 | 0.218717 | 0.252187 | 報告のみ（±0.002） |
-| size<=4 での対比較（副基準） | coverage 0.5425 に揃えた discordant | 誤り 28/99 | 誤り 52/99 | 報告のみ（二項 p=0.0097） |
-| risk-coverage 表（成果物） | 棄権率 0/10/20/30/50% の誤り率 | 0.3950 / — / 0.3219 / — / 0.2200 | — | 4 信号すべてについて出力すること |
-
-- **adopted**: 主基準を満たす（AUGRC が有意に低い）こと．解釈は「conformal の集合サイズは実行時 confidence より良い棄権信号であり，B104 A2 の配線に棄権用途という積極的理由がある」．
-- **rejected（予測される帰結）**: 主基準が不成立．解釈は「**conformal を実行時経路へ配線する理由は棄権用途にも無い（実行時に既にある confidence で足りる）．conformal 系列 Iter69〜76 は被覆保証を厳密に得たが本線のルーティングには接続しないという結論で閉じる**」．
-- **実装不成立の判別（事前登録．数値が近接しているため事後に決めない）**:
-
-| 実測パターン | 判定 |
-|---|---|
-| AUGRC が 0.153391 / 0.138450（±0.002）で ΔAUGRC≈+0.0149 | **正しく発火**（主基準の判定へ進む） |
-| 4 信号の AUGRC が互いに完全一致 | **実装不成立**（`--abstention-signal` がスコア関数テーブルへ届いていない） |
-| max_probability の AUGRC が 0.138450 から外れる | **実装不成立**（正誤判定または split 抽出の定義違い．基準線は入力 jsonl だけで決まる量） |
-| 上記いずれにも当たらない | **実装不成立**を第一に疑う（既定の解釈） |
-
-- **非退行条件**:
-  1. **rank_1（argmax）不変**: 棄権は選択そのものを変えないため定義上不変．eval 半の top1 = **0.605000**，全 1,600 行 = **0.597500**，argmax と `selected_domain` の一致 800/800（eval）・1,600/1,600（全体）を出力に含めること．いずれかが動いたら実装バグ．
-  2. 入力 jsonl を一切書き換えないこと（実行前後で md5 不変を確認する）．
-  3. eval 半の set_size 分布が {1:24, 2:72, 3:144, 4:194, 5:207, 6:115, 7:43, 8:1} と一致すること（発火・入力同一性の証拠）．
-  4. coverage=1.0 での選択的誤り率が 4 信号すべてで 0.3950（eval 半）に一致すること（スコアに依らない恒等式．曲線構成の健全性チェック）．
-  5. 既存テスト（33 件）が PASS のまま，新規 4 件も PASS．`uv run ruff check` PASS．
-- **ノイズ幅**: ΔAUGRC の対応ありブートストラップ SE は約 0.0037（95%CI 幅 0.0146 から逆算）で，点推定 +0.0149 は約 4.0 SE．全体 top1 の二項 SE は n=800・p=0.605 で 0.0173．risk-coverage 表の各点は coverage×800 行の二項比率として SE を併記すること（例: coverage 0.5 の 0.2200 は n=400 で SE=0.0207）．
-
-**期待効果**
-
-(1) B104 A2（conformal を実行時経路へ配線するか，配線するなら棄権・人手エスカレーション用途としてか）に対し，「棄権用途としても conformal に積極的理由は無い」という数値的な答えを与え，人間判断の選択肢を 1 つ確定的に落とす．(2) 本研究で初めて選択的ルーティングの risk-coverage を数値化し，「何割を人手へ回せばルーティング誤りがどこまで下がるか」という運用上の表を成果物として残す．(3) 反証が成立した場合，conformal 系列（Iter69〜76，8 反復）を根拠をもって閉じ，次の論点（複合設問データセットの拡充＝research_frontier 相当・人間判断）へ進める．
-
-**コスト**: オフライン完結．埋め込み再計算なし・分類器再訓練なし・実機ノード不使用．スクリプト実装 30 分＋実行 1 分未満．`config.yaml` のスキーマ変更なしのため自律着手してよい．
-
-**留保（判定に用いない）**
-
-(i) Iter75 で観測された「オフラインの argmax と実機本走の `selected_domain` が 1,600 行中 3 行で食い違う」（B112 要レビュー (2)）は本イテレーションでも未解決であり，本評価はオフライン argmax を正とする．3/1,600=0.19% は上記の効果量より 1 桁小さいため結論を変えない．(ii) 校正半 800 行は q_hat の当てはめに使われているため in-sample であり，副次報告に留める（方向は eval 半と同じ）．(iii) 複合設問 100 行の扱いは「`argmax ∈ expected_domains` なら正」とする単一の定義に統一し，2 ドメイン同時被覆は本イテレーションでは扱わない（検出力不足．Q1 参照）．
-
-### 実装・実験 (Iter76)
-
-**実装**（計画どおり新規 1 ファイル．既存ファイルは無変更）
-
-- 新規 `scripts/evaluate_selective_routing.py`．棄権スコア関数テーブル `_SIGNALS: dict[str, Callable[[dict], float]]`（`max_probability` / `margin` / `negative_entropy` / `conformal_set_size` の 4 エントリ）を `_get_signal_scorer()` が `--abstention-signal` の値で引く 1 箇所だけがレバーを読むコード（計画どおり）．未知の値は `ValueError`（`_get_signal_scorer("not_a_real_signal")` で確認）．
-- risk-coverage 曲線はスコア降順の安定ソート（`np.argsort(-score, kind="mergesort")`）で構成し，AURC = 選択的誤り率（`cum_errors(k)/k`）の全 coverage 平均，AUGRC = generalized risk（`cum_errors(k)/n`）の全 coverage 平均（`compute_aurc_augrc`）．
-- 棄権率 {0,10,20,30,50}% の誤り率表（`compute_risk_coverage_table`）は，既存の `metrics.compute_wilson_confidence_interval` を再利用して各点の Wilson 95%CI を付与した（自前で二項区間の式を再導出していない）．
-- 対応ありブートストラップ（`bootstrap_delta_aurc_augrc`，percentile 法，同一再標本上で基準線・候補信号の両方を再評価）で ΔAUGRC・ΔAURC の点推定と 95%CI を出す．`scipy.stats.binomtest` を使った size<=k 閾値対比較（`compute_size_threshold_comparison`）も実装した．AURC/AUGRC・対応ありブートストラップ・discordant 二項検定は本リポジトリに既存実装が無いため新規実装とし，出典（Geifman & El-Yaniv 2017／Traub et al. 2024／percentile ブートストラップと二項検定は標準的な教科書的構成）をスクリプル冒頭の docstring に明記した．
-- 非退行診断（`compute_diagnostics`）で eval 半・全 1,600 行の top1・argmax 一致率・set_size 分布を出力に含めた．
-- stderr に発火証拠（`abstention_signal=` / `split=` / `n=` / `set_size_distribution=` と各信号の AURC/AUGRC）を出力．
-
-**テスト**（計画どおり新規 `tests/test_evaluate_selective_routing.py` に 4 件）
-
-1. 小標本（n=4）での AURC/AUGRC の手計算一致．
-2. 定数スコアのとき AURC が全体誤り率と一致すること（数学的に厳密な一致は「全行同一正誤ラベル」の退化ケースでのみ成り立つため，全行不正解の n=5 標本で検証．一般の混合正誤標本では tie-break の行順序に依存し厳密には成り立たないことをコメントに明記した．AUGRC は同じ退化ケースでも一致しない（`cum_errors(k)/n` の平均が誤り率そのものにならない）ため，本テストでは AURC のみ検証する）．
-3. 未知の `--abstention-signal`（`_get_signal_scorer`）が `ValueError` を送出すること．
-4. 完全な信号（正解行が全て誤り行より高スコア）で AUGRC が理論下限 `sum(1..n_incorrect)/n/n` に一致すること．
-
-実行結果: `uv run pytest tests/test_evaluate_selective_routing.py -q` → **4 件 PASS**．`uv run pytest -q`（全体）→ **299 件 PASS，12 件 FAIL**（`tests/test_build_dataset.py`・`tests/test_train_domain_classifier.py`．いずれも `CalibratedClassifierCV` に `classes_` 属性が無いという sklearn バージョン起因の既存失敗．本イテレーション開始前から発生していることを `git stash -u` で新規ファイルを退避して再実行し確認済み＝本変更と無関係）．`uv run ruff check scripts/evaluate_selective_routing.py tests/test_evaluate_selective_routing.py` → **PASS**．
-
-**実験（オフライン．実機ノード不使用，埋め込み再計算なし，分類器再訓練なし）**
-
-入力 `results/20260923_161147/Iter75_variantA_edu005.jsonl`（md5 `417c34141be6b602bfbccaf8a4c2d2a7`，実行前後で不変を確認）をそのまま再利用．コマンド（計画の「到達コードパス」どおり）:
-
-```
-uv run python -m scripts.evaluate_selective_routing \
-  --predictions results/20260923_161147/Iter75_variantA_edu005.jsonl \
-  --split eval \
-  --abstention-signal max_probability --abstention-signal conformal_set_size \
-  --abstention-signal margin --abstention-signal negative_entropy \
-  --bootstrap 10000 --bootstrap-seed 42 \
-  --output results/20260923_164424/Iter76_selective_routing.json
-```
-
-出力: `results/20260923_164424/Iter76_selective_routing.json`（実行時間 4.2 秒）．
-
-**発火証拠・非退行チェックの結果（すべて事前登録値と一致）**
-
-1. rank_1 不変: eval 半 top1=**0.605000**，全 1,600 行 top1=**0.597500**，argmax と `selected_domain` の一致率 **1.0**（800/800・1,600/1,600）．事前登録値と完全一致．
-2. 入力 jsonl の md5 は実行前後で **不変**（`417c34141be6b602bfbccaf8a4c2d2a7`）．
-3. eval 半の set_size 分布 = **{1: 24, 2: 72, 3: 144, 4: 194, 5: 207, 6: 115, 7: 43, 8: 1}**．事前登録値と完全一致．
-4. coverage=1.0（棄権率 0%）の誤り率は **4 信号すべて 0.3950**（316/800）で一致．
-5. テスト・lint は上記のとおり全 PASS．
-
-判別表と照合すると，4 信号の AUGRC は互いに異なり（下表），かつ max_probability の AUGRC が予測値 0.138450 と一致しているため，**「正しく発火」**（実装不成立ではない）と判定できる．
-
-**実測値（eval 半 n=800）**
-
-| 棄権スコア | AURC | AUGRC | err@cov50% | err@cov70% | err@cov80% | err@cov90% |
-|---|---|---|---|---|---|---|
-| max_probability（基準線） | 0.218717 | 0.138450 | 0.2200 | 0.2804 | 0.3219 | 0.3611 |
-| margin | 0.225014 | 0.142492 | 0.2275 | 0.2982 | 0.3328 | 0.3681 |
-| negative_entropy | 0.224522 | 0.140497 | 0.2175 | 0.2857 | 0.3281 | 0.3569 |
-| conformal_set_size（本レバー） | 0.252187 | 0.153391 | 0.2700 | 0.3179 | 0.3391 | 0.3667 |
-
-対応ありブートストラップ（B=10,000，seed 42，percentile 法，eval 半 n=800，vs max_probability）:
-
-| 信号 | ΔAURC | ΔAURC 95%CI | ΔAUGRC | ΔAUGRC 95%CI | 改善方向の割合 |
-|---|---|---|---|---|---|
-| conformal_set_size | +0.033470 | [0.014948, 0.050655] | **+0.014941** | **[0.007923, 0.022549]** | 0.0001 |
-| margin | +0.006297 | [0.000945, 0.011763] | +0.004042 | [0.000917, 0.007271] | 0.0042 |
-| negative_entropy | +0.005805 | [-0.001281, 0.012902] | +0.002047 | [-0.001520, 0.005544] | 0.1272 |
-
-conformal_set_size の ΔAUGRC 点推定・95%CI は事前登録値（+0.014941，[0.007923, 0.022549]）と最終桁まで一致した．
-
-size<=4 での対比較（副基準）: coverage 0.5425（n=434），誤り率 size=0.283410／max_probability=0.228111，only-size 側の誤り 52/99，only-maxp 側の誤り 28/99，`binomtest` 両側 p=0.009683．事前登録値（52/99・28/99・p=0.0097）と一致．他の size 閾値（1,2,3,5,6,7）も事前登録の表と全行一致した．
-
-risk-coverage 表（成果物，棄権率 0/10/20/30/50%）は上表の err@cov 列に対応し，4 信号すべてについて出力済み（各点の Wilson 95%CI も `Iter76_selective_routing.json` に含む）．
-
-判定（adopted/rejected）は次フェーズ（rc-evaluator）の担当のため，ここでは行わない．
-
-### Iteration 76 実行済み
-
-**単一レバー**: `routing_abstention_signal` = `max_probability`（基準線）→ **`conformal_set_size`**．
-
-**判定: rejected（仮説は正しく反証された．実装不成立ではない）**．
-
-**主基準**: 事前登録は「eval 半 n=800 の AUGRC で conformal_set_size < max_probability，かつ ΔAUGRC の対応ありブートストラップ 95%CI が 0 を跨がないこと」．実測は AUGRC 0.153391（conformal_set_size）対 0.138450（max_probability），**ΔAUGRC = +0.014941，95%CI [0.007923, 0.022549]**（B=10,000，seed 42）．CI は 0 を跨がないが**符号が合格条件と逆**であり，conformal_set_size は基準線より**有意に劣る**．したがって主基準は不成立で **rejected**．
-
-**ノイズか有意か**: ΔAUGRC の対応ありブートストラップ SE は約 0.0037（CI 幅 0.0146 から逆算）で，点推定 +0.014941 は約 **4.0 SE**．改善方向に出た再標本は 10,000 中 1 本（0.0001）．方向は eval 半・校正半（0.162959 対 0.146444）・全 1,600 行（0.158015 対 0.142462）で一致し，分割にも依存しない．**ノイズ幅を明確に超えた有意な劣化**である．副基準（coverage 0.5425 に揃えた size<=4 の対比較）も discordant 52/99 対 28/99，二項検定 両側 p=0.009683 で同じ方向を示した．
-
-**実装不成立ではないことの根拠（事前登録した判別表との照合）**: (1) 4 信号の AUGRC が互いに異なる（テーブルへ届いている），(2) 基準線 max_probability の AUGRC が事前登録値 0.138450 と一致（正誤判定・split 抽出の定義が一致），(3) ΔAUGRC の点推定・95%CI が事前登録値と最終桁まで一致，(4) eval 半 set_size 分布が {1:24,2:72,3:144,4:194,5:207,6:115,7:43,8:1} と一致，(5) 入力 jsonl の md5 が実行前後で不変．判別表の「正しく発火」の行に該当する．**Iter69〜71 で繰り返した「実装不成立」とは異なり，今回は仮説そのものが反証された**．
-
-**非退行**: eval 半 top1=0.605000・全 1,600 行 top1=0.597500・argmax と `selected_domain` の一致 800/800・1,600/1,600 で事前登録値と完全一致（棄権は選択を変えないという定義上の恒等式が成立）．coverage=1.0 の誤り率は 4 信号すべて 0.3950 で一致（曲線構成の健全性）．新規テスト 4 件 PASS，既存 33 件 PASS 維持，`ruff check` PASS．全体スイートの 12 件 FAIL は `CalibratedClassifierCV.classes_` 不在という sklearn バージョン起因の既存失敗で，`git stash -u` による退避後も再現するため本イテレーション由来ではない．
-
-**この反復で言えること（因果として言える範囲）**
-
-1. **conformal 予測集合のサイズは，選択的ルーティングの棄権信号として max_probability に劣る**（eval 半 n=800，ΔAUGRC +0.0149，4.0 SE）．一般化できるのは「本リポジトリの 10 ドメイン・temperature 較正済み分類器・Iter75 adopted の randomized APS 構成・名目 0.90」という条件下の主張までである．
-2. **機序の考察（解像度の欠如）**: 棄権の目的は「top1 が誤りである確率」で行を順序付けることだが，集合サイズは 1〜8 の 8 段階しか値を取らず，同値行を区別できない．実際 size<=4 と size<=5 の間で coverage が 0.5425 から 0.8013 へ飛び，その間に運用点が存在しない．同点を max_probability で解くと AUGRC が 0.153391→0.145975 と基準線側へ寄る（それでも届かない）ことがこの解釈を支持する．加えて，集合サイズは「複数クラスにまたがる不確実性の広がり」を表す量であって top1 の正しさの単調な指標ではなく，棄権という目的関数に対しては生の確信度スコアの方が直接的である．
-3. **同系列の手組み信号も基準線を上回らない**: margin は ΔAUGRC +0.004042 [0.000917, 0.007271]（有意に劣る），negative_entropy は +0.002047 [-0.001520, 0.005544]（差は判定不能）．**temperature 較正済み MSP という基準線が強いという選択的予測の文献（Hendrycks & Gimpel 2017 以来）の報告が，本リポジトリでもそのまま再現した**．
-4. **肯定的な成果（判定とは独立）**: 選択的ルーティングの risk-coverage を本研究で初めて数値化した．実行時に既に存在する confidence だけで，棄権 20% でルーティング誤り 0.3950→0.3219，棄権 50% で 0.2200 まで下がる．B104 A2 を人間へ諮る際の運用点の表として `results/20260923_164424/Iter76_selective_routing.json`（Wilson 95%CI 付き）に残した．
-
-**レバーの扱い**: `routing_abstention_signal` は `values: [conformal_set_size]` の単一値のため本反復でクローズ．これにより **conformal 系列（Iter69〜76，8 反復）は「被覆保証は厳密に得た（Iter72 adopted・Iter75 で実行時分布での外的妥当性も確認）が，集合サイズは dispatch の絞り込みにも棄権判定にも使えず，本線のルーティングには接続しない」という結論に到達した**（この結論の確定と B104 A2 への回答は不可逆のため人間判断を仰ぐ．backlog B114 要レビュー (1)）．
-
-**次の一手（停止条件 1 を適用）**: config の levers は再び使い切りだが，Iter76 は既に停止条件 2（調査フェーズからの再探索）の結果であるため，今回の学びから新レバーを 1 つ考案して config へ追記する．**`routing_abstention_scorer = learned_deferral_head`**（校正半 800 行だけで学習した post-hoc の棄権スコア器を eval 半 800 行で評価する）．根拠は本反復の機序考察で，劣った原因が「conformal であること」ではなく「8 段階という解像度の粗さ」であり，複数の既存特徴（max_probability・margin・negative_entropy・set_size・上位確率の形状）を連続値へ束ねれば基準線を上回る余地があるかを，同じ AUGRC・同じブートストラップ枠組で 1 回で判定できるためである．手組み信号の振り直し（margin・entropy）は掃引済みで再訪しない（本反復で明示的に否定した）．検出力は ΔAUGRC の SE≈0.0037 から，0.008 程度以上の効果なら検出できる．
-
-**次の自分向けの非自明な学び**
-
-1. **「CI が 0 を跨がない」だけでは合格条件ではない．符号まで事前登録しておくこと**．今回は CI が 0 を跨がなかったが符号が逆で，事前登録の文言（`conformal_set_size < max_probability` かつ CI が 0 を跨がない）が無ければ「有意差あり＝採用」と誤読し得た．
-2. **反証を事前登録して閉じる実験は，判定が事後の解釈に揺れない**．Iter74 に続き 2 例目で，事前シミュレーションの数値（AUGRC・CI・discordant の分割表）が最終桁まで再現した（Iter71 以降 6 反復連続）．オフラインで閉じる評価では，事前シミュレーションを「実行の代替」ではなく「合否条件の数値化」に使う運用が機能している．
-3. **離散段数の少ない量を連続スコアの代わりに使うと，risk-coverage の運用点が飛ぶ**．集合サイズのような整数値信号を選択的予測へ持ち込むときは，同点解消規則（今回は max_probability）を最初から設計に含めないと，指標以前に「欲しい coverage を作れない」という実務上の欠陥が出る．
-
----
 

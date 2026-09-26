@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 78,
-  "iteration_name": "複合設問評価集合の拡充（既存公開データセットの調査を起点に n=300〜400 へ）",
-  "phase": "evaluate",
+  "iteration": 79,
+  "iteration_name": "埋め込みモデルの差し替え（nomic-embed-text → qwen3-embedding:0.6b）",
+  "phase": "reflect",
   "status": "running",
-  "current_lever": "compound_eval_set_expansion=llm_generated_separate_generator",
-  "experiment_dir": "results/20260926_195929",
-  "experiment_deadline": 1790429956,
-  "updated_at": 1790425957,
-  "last_slack_ts": "1790425551.844769",
-  "iteration_thread_ts": "1790414413.235309",
+  "current_lever": "embedding_model_replacement=qwen3_embedding_0.6b",
+  "experiment_dir": "results/20260926_221822",
+  "experiment_deadline": 1790438323,
+  "updated_at": 1790433826,
+  "last_slack_ts": "1790433410.377459",
+  "iteration_thread_ts": "1790426770.038139",
   "notion_toggle_created": true,
-  "last_commit": "9027fc8"
+  "last_commit": "413312c"
 }

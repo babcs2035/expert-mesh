@@ -70,21 +70,38 @@ JMMLU 由来ではない．
 
 ## E6 教師あり分類器
 
-生成コマンド（実機の ollama ノードが必要．scripts/train_domain_classifier.py の docstring 参照）:
+生成コマンド（実機の ollama ノードが必要．scripts/train_domain_classifier.py の docstring 参照．
+2026-09-26 以降は `embedding_model_replacement=qwen3_embedding_0.6b`（Iteration 79）により
+埋め込みモデルが `qwen3-embedding:0.6b` へ変更されている．**wafl-ctrl5 限定**（config.yml 絶対条件 B））:
 
 ```
 uv run python -m scripts.train_domain_classifier \
     --train-data data/classifier_train.jsonl \
-    --embedding-model nomic-embed-text \
-    --ollama-host 192.168.15.100 \
+    --embedding-model qwen3-embedding:0.6b \
+    --ollama-host 127.0.0.1 --ollama-port 11499 \
     --output models/domain_classifier.joblib
 ```
 
 | ファイル | sha256 |
 |---|---|
-| `models/domain_classifier.joblib` | `3a5610aa88d70b9e94af4620d2747b313c52b834a9dbaa5e872ed45c3520dcb0` |
+| `models/domain_classifier.joblib`（現行，qwen3-embedding:0.6b，1024次元） | `21e16ec63db89f4c8435264e98e6a704382aec723548359f6a74f44753f6ca19` |
+| `models/domain_classifier_pre_iter79_nomic.joblib`（Iter79 直前の退避，nomic-embed-text，768次元） | `02caf2b8e7a85972ff47867f05c8145e7d985e2000a2eb55662c6285db408905` |
 
-オフライン性能（docs/d0002 §6-E）: 訓練 100.00%（1427/1427），評価 59.87%（898/1500）．過学習の傾向が残る．
+オフライン性能（旧・nomic-embed-text，docs/d0002 §6-E）: 訓練 100.00%（1427/1427），評価 59.87%（898/1500，
+1500 行版データセット当時の実測）．過学習の傾向が残る．
+
+オフライン性能（新・qwen3-embedding:0.6b，Iteration 79 実装フェーズ実測）: 訓練 84.09%（1200/1427），
+評価（argmax `selected_domain` が `expected_domains` に含まれる比率，dispatch/aggregation を経ない
+分類器単体の値，dataset.jsonl 全 1915 行）75.35%（1443/1915）．旧モデルより訓練精度が下がっている
+一方，評価精度は大きく上回っており，過学習が緩和された可能性がある（判定は分析・考察フェーズに委ねる）．
+
+G1（Iteration 79 事前スクリーニング，`data/classifier_train.jsonl` のみの 5-fold StratifiedKFold CV，
+`scripts/screen_embedding_models.py`）: `nomic-embed-text` cv_accuracy=0.5711（macro-F1 0.5710），
+`qwen3-embedding:0.6b` cv_accuracy=0.7561（macro-F1 0.7562）．qwen3 が第 1 段で nomic を上回ったため，
+第 2 段（bge-m3）は評価していない．
+
+G2（旧/新 artifact の argmax replay，dataset.jsonl 全 1915 行，conformal 無し）: discordant 行数
+n_d=787（必要偏り率 `1.96/sqrt(787)`=0.0699）．
 
 ## E10 ドメイン別 LoRA アダプタ
 

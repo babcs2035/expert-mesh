@@ -1,7 +1,7 @@
 # Unified configuration for all nodes: shared settings and per-node settings
 # (host/port/domain/model names). Hostnames, IPs, model names, and deploy
 # paths are documented ONLY in this file — never hardcode them in code.
-embedding_model: nomic-embed-text
+embedding_model: qwen3-embedding:0.6b
 confidence_threshold: 0.0
 # Threshold for rank 2+ candidates when dispatching to multiple nodes.
 # Defaults to the same value as confidence_threshold for backward

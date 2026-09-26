@@ -1,3 +1,235 @@
+## Iteration 76: conformal予測集合サイズを棄権信号に使う選択的ルーティングの価値を測る
+
+### 調査 (Iter76)
+
+Iter75 の申し送り（backlog B112・停止条件 2）に従い，config の levers 使い切り後の代替アプローチを tavily-search で広めに調査した．B112 が挙げた 4 候補（多ラベル化，binary relevance，conformal risk control，選択的予測）のうち，**前 2 者は本リポジトリで既に試し切り済みである**ことをまず確認した（`dispatch_candidate_ranking=multilabel_binary_relevance_head` は Iter59 で rejected，`multilabel_training_signal` 以降 Iter60〜68 の 9 反復で合成多ラベル信号の量・質量比・構造・質をすべて探索し Iter68 で打ち止め確定）．したがって残る実行可能な候補は後 2 者である．
+
+**問い**
+
+- Q1: conformal risk control（CRC）で複合設問の 2 ドメイン同時被覆を直接制御できるか．本リポジトリの標本規模で意味のある実験になるか．
+- Q2: 予測集合を「棄権・人手エスカレーション」の信号として使う場合，先行研究はどう定式化・評価しているか．基準線は何か．
+- Q3: その評価を本リポジトリの既存データで実行したとき，どこへ着地するか（Iter71 以降の慣行に従い本実行前に数値で言語化する）．
+
+**Q1: conformal risk control — 定式化は可能だが本標本では実験にならない**
+
+CRC（Angelopoulos, Bates, Fisch, Lei, Schuster, "Conformal Risk Control", ICLR 2024, arXiv:2208.02814，<https://arxiv.org/abs/2208.02814>）は，単調かつ有界な損失の期待値を有限標本で制御する枠組で，参照実装 `aangelopoulos/conformal-risk` の README が多ラベル分類の例として偽陰性割合 `L_i(λ) = 1 - |Y_i ∩ C_λ(X_i)| / |Y_i|` を挙げている（<https://github.com/aangelopoulos/conformal-risk>）．MAPIE のドキュメントも同じ損失で実装を公開している（<https://mapie.readthedocs.io/>）．本リポジトリの `expected_domains` はそのまま `Y_i` として使えるため定式化上の障害はない．
+
+**しかし標本が足りない．** 損失を 1,600 行全体で取ると，複合行は 100 行（校正/評価半では各 ~50 行）しかなく，単一ドメイン行 1,500 行（`|Y_i|=1`，損失は通常の非被覆と一致）が λ の校正をほぼ完全に支配する．すなわち CRC は現行の周辺被覆 conformal とほぼ同じ λ に落ち，複合の同時被覆はほとんど動かない．損失を複合行に限定すれば校正標本は ~50 行となり，Iter60〜68 で繰り返し臨界に達した検出力の壁（R-H: n=100・discordant 15〜19 行では ±3〜4 行を検出できない）にそのまま突き当たる．**Iter68 と同じく「実施しても『効果なし』ではなく『検出力不足で判定不能』としか結論できない実験」であり，着手しない**と判断した（複合設問データセットの拡充は research_frontier 相当・人間判断）．
+
+**Q2: 選択的予測（棄権）— 定式化と評価指標，および基準線の強さ**
+
+- Tayebati et al., "Learning Conformal Abstention Policies for Adaptive Risk Management in Large Language and Vision-Language Models", arXiv:2502.06884（2025，<https://arxiv.org/abs/2502.06884>）が，conformal の予測集合サイズを棄権判定に使う定式化（集合サイズ >1 なら棄権する，LAC/APS を比較対象に AUARC 等で評価する）を扱っている．本イテレーションの着想はこれに直接対応する．
+- 評価枠組は選択的分類の標準である risk-coverage 曲線と AURC（Geifman & El-Yaniv, NeurIPS 2017）．さらに Traub, Bungert, Lüth, Baumgartner, Maier-Hein, Maier-Hein, Jäger, "Overcoming Common Flaws in the Evaluation of Selective Classification Systems", NeurIPS 2024, arXiv:2407.01032（<https://arxiv.org/abs/2407.01032>）が，AURC が低 coverage 側の少数標本に支配されるという欠点を指摘し，generalized risk（誤りかつ非棄権の同時確率）の曲線下面積 **AUGRC** を代替として提案している．本イテレーションはこの勧告に従い **AUGRC を主指標，AURC を副指標**とする．
+- **基準線の強さに関する注意**: 選択的予測の文献では，素の最大ソフトマックス確率（MSP / softmax response）が強い基準線であり，凝った不確実性指標が安定して上回れないことが繰り返し報告されている（Hendrycks & Gimpel 2017 以来．例えば選択的分類の post-hoc 手法をまとめた文献レビューでも MSP + 温度較正の組合せが上位に来る）．**本リポジトリの実行時 confidence は既に temperature 較正済み（Iter31 adopted）の MSP そのものであり，基準線は相当に強い**．
+
+**Q3: 事前シミュレーション（本実行前に実施．B109 制約 (2) の慣行）**
+
+Iter75 の出力 `results/20260923_161147/Iter75_variantA_edu005.jsonl`（1,600 行，`probabilities` / `expected_domains` / `set_size` / `split` を持つ）だけで計算が閉じる．評価は conformal の評価半 n=800（校正半は q_hat の当てはめに使われており in-sample のため副次扱い）．棄権スコアは大きいほど「任せてよい」向き．正誤は `argmax(probabilities) ∈ expected_domains`（eval 半で argmax は `selected_domain` と 800/800 一致，top1=0.605000）．
+
+| 棄権スコア | AURC | AUGRC | err@cov50% | err@cov70% | err@cov80% | err@cov90% |
+|---|---|---|---|---|---|---|
+| **max_probability（基準線）** | **0.218717** | **0.138450** | **0.2200** | **0.2804** | **0.3219** | **0.3611** |
+| margin（top1-top2） | 0.225014 | 0.142492 | 0.2275 | 0.2982 | 0.3328 | 0.3681 |
+| negative entropy | 0.224522 | 0.140497 | 0.2175 | 0.2857 | 0.3281 | 0.3569 |
+| **conformal set size（本レバー）** | **0.252187** | **0.153391** | **0.2700** | **0.3179** | **0.3391** | **0.3667** |
+| conformal set size（同点を max_prob で解く） | 0.234332 | 0.145975 | 0.2475 | 0.2964 | 0.3391 | 0.3583 |
+
+対応ありブートストラップ（B=10,000，seed 42，eval 半 n=800）: **ΔAUGRC = +0.014941，95%CI [0.007923, 0.022549]**（正は劣化方向．改善方向に出る確率 0.0001）．ΔAURC = +0.033470，95%CI [0.014948, 0.050655]．方向は校正半（n=800，AUGRC 0.162959 対 0.146444）でも全 1,600 行（0.158015 対 0.142462）でも同じで，分割に依存しない．
+
+集合サイズ閾値が到達する coverage と，そこへ max_probability を揃えた対比較（discordant 行の誤り数と二項検定）:
+
+| 閾値 | coverage | n | 誤り率（set size） | 誤り率（max prob） | only-size 側の誤り | only-maxp 側の誤り | 二項 p |
+|---|---|---|---|---|---|---|---|
+| size<=1 | 0.0300 | 24 | 0.0000 | 0.0000 | 0/3 | 0/3 | 1.0 |
+| size<=2 | 0.1200 | 96 | 0.1146 | 0.0938 | 5/30 | 3/30 | 0.727 |
+| size<=3 | 0.3000 | 240 | 0.1917 | 0.1625 | 21/70 | 14/70 | 0.311 |
+| **size<=4** | **0.5425** | **434** | **0.2834** | **0.2281** | **52/99** | **28/99** | **0.0097** |
+| size<=5 | 0.8013 | 641 | 0.3385 | 0.3214 | 46/72 | 35/72 | 0.266 |
+| size<=6 | 0.9450 | 756 | 0.3783 | 0.3783 | 19/26 | 19/26 | 1.0 |
+
+**この調査で分かったことの要約**
+
+1. B112 が挙げた 4 候補のうち，多ラベル化・binary relevance は既に試し切り済み（Iter59・Iter68 で打ち止め），conformal risk control は定式化できるが標本規模から判定不能が確定しているため着手しない．**残る実行可能な候補は選択的予測（棄権）ただ 1 つである**．
+2. 選択的予測は本リポジトリで一度も測っていないが，**実行時に既に存在する confidence（temperature 較正済み MSP）だけで，棄権 20% ならルーティング誤り 0.3950→0.3219，棄権 50% なら 0.2200 まで下がる**．これは B104 A2（配線の是非）を人間に諮るための運用点の表になる．
+3. 一方 **conformal の集合サイズは棄権信号として MSP より有意に劣る**（ΔAUGRC +0.0149，95%CI が 0 を跨がない）．機序は解像度の欠如にあると解釈できる：集合サイズは 1〜8 の 8 段階しかなく，size<=4 と size<=5 の間で coverage が 0.54 から 0.80 へ飛ぶため中間の運用点が存在しない．同点を max_probability で解くと AUGRC が 0.153391→0.145975 と MSP 側へ寄る（それでもなお MSP に届かない）ことがこの解釈を支持する．
+
+### 計画 (Iter76)
+
+**仮説（反証形で事前登録する．Iter74 と同型）**
+
+「conformal の予測集合サイズは，棄権・人手エスカレーションの判定信号として，実行時に既に存在する confidence（max_probability）より優れる」は**成り立たない**．eval 半 n=800 で AUGRC は 0.153391 対 0.138450（Δ=+0.014941，劣化方向，ブートストラップ 95%CI [0.007923, 0.022549]）となり主基準は不成立となる．
+
+この仮説を採る根拠は，(a) 上記シミュレーションが入力 jsonl から決定論的に閉じており実行時の再現は確実であること，(b) 選択的予測の文献で MSP が強い基準線であることが繰り返し報告されており，本リポジトリの confidence は temperature 較正済み（Iter31 adopted）でさらに強いこと，の 2 点である．**本実行は，この予測を実装で確認して conformal 系列を根拠をもって閉じ，同時に選択的ルーティングの運用点の表を成果物として残すための反証実験である．合格を探して信号を振り直すことはしない**（margin・negative entropy も掃引済みで，いずれも MSP を上回らない）．
+
+**単一レバー**
+
+`routing_abstention_signal`: ルーティングの棄権スコアを `max_probability`（基準線．実行時の confidence そのもの）→ **`conformal_set_size`**（Iter75 adopted 構成の予測集合サイズ）へ変更する．動かすのはこの 1 点のみ．
+
+**固定する構成**
+
+入力は `results/20260923_161147/Iter75_variantA_edu005.jsonl`（Iter75 adopted の出力．randomized_aps / `--randomization-seed 42` / `--calibration-source eval_holdout` / `--holdout-seed 42` / `--qhat-quantile-direction alpha_lower` / `--qhat-source true_class` / `--confidence-level 0.90` / `--education-threshold 0.05`）を**再生成せずそのまま使う**（埋め込み再計算なし＝差分が棄権スコアの選択のみになる）．評価対象は `split == "eval"` の 800 行．正誤の定義・分類器・埋め込み・`config.yaml`・`http_server.py`・`classifier.py`・`aggregator.py`・`mise.toml`・実機構成はすべて変更しない．**実行時経路への配線は行わない**（B104 A2 は人間判断事項のまま維持）．
+
+**変更箇所（新規 1 ファイル＋テスト．既存ファイルは変更しない）**
+
+1. 新規 `scripts/evaluate_selective_routing.py`（ファイル冒頭に責務を 1 行で記す）．
+   - CLI: `--predictions`（必須，jsonl），`--split`（既定 `eval`），`--abstention-signal`（`{max_probability, conformal_set_size, margin, negative_entropy}`，複数指定可），`--bootstrap`（既定 10000），`--bootstrap-seed`（既定 42），`--output`（json）．
+   - **レバーを読む行**: 棄権スコア関数テーブル（`_SIGNALS: dict[str, Callable[[np.ndarray, np.ndarray], np.ndarray]]`）を `--abstention-signal` で引く 1 箇所．未知の値は `ValueError`（無言で基準線へ落ちないこと．Iter69 の教訓）．
+   - risk-coverage 曲線はスコア降順の安定ソート（`kind="mergesort"`）で構成し，AURC = 選択的誤り率の全 coverage 平均，AUGRC = generalized risk（誤りかつ非棄権の割合）の全 coverage 平均とする．
+   - 対応ありブートストラップで Δ(AUGRC)・Δ(AURC) の点推定と 95%CI を出す（行インデックスを再標本化し，両信号を同一の再標本上で評価する）．
+   - `size<=k` 閾値の到達 coverage へ max_probability を揃えた対比較（discordant 行の誤り数と `scipy.stats.binomtest`）を出す．
+   - stderr へ発火証拠（`abstention_signal=` / `n=` / `split=` / `set_size` 分布）を出す．
+2. `tests/test_evaluate_selective_routing.py`: (a) 手組みの小標本で AURC・AUGRC が手計算値と一致すること，(b) 定数スコア（全行同値）のとき AURC が全体誤り率と一致すること，(c) 未知の `--abstention-signal` が `ValueError` になること，(d) 完全な信号（正解行が全て誤り行より高スコア）のとき AUGRC が理論下限に一致すること．
+
+**到達コードパス**
+
+`uv run python scripts/evaluate_selective_routing.py --predictions results/20260923_161147/Iter75_variantA_edu005.jsonl --split eval --abstention-signal max_probability --abstention-signal conformal_set_size --abstention-signal margin --abstention-signal negative_entropy --bootstrap 10000 --bootstrap-seed 42 --output results/<ts>/Iter76_selective_routing.json`
+→ jsonl 読み込み → `split == "eval"` で 800 行抽出 → `_SIGNALS[name]`（**レバーを読む行**）→ risk-coverage → AURC/AUGRC → 対応ありブートストラップ → json + stderr．既存コードの分岐に依存しないため到達は CLI 実行そのもので保証される．
+
+**成功条件（事前登録）**
+
+評価半 n=800．基準線は同一 800 行上の `max_probability`．
+
+| 指標 | 定義 | 基準線（予測） | 本レバー（予測） | 合格条件 |
+|---|---|---|---|---|
+| **AUGRC（主基準）** | generalized risk の coverage 平均 | 0.138450 | **0.153391** | **conformal_set_size < max_probability かつ ΔAUGRC のブートストラップ 95%CI が 0 を跨がないこと**（予測: FAIL） |
+| ΔAUGRC の 95%CI（発火・整合） | 対応あり B=10,000, seed 42 | — | **+0.014941 [0.007923, 0.022549]** | 点推定が予測の ±0.002 以内 |
+| AURC（副基準・報告） | 選択的誤り率の coverage 平均 | 0.218717 | 0.252187 | 報告のみ（±0.002） |
+| size<=4 での対比較（副基準） | coverage 0.5425 に揃えた discordant | 誤り 28/99 | 誤り 52/99 | 報告のみ（二項 p=0.0097） |
+| risk-coverage 表（成果物） | 棄権率 0/10/20/30/50% の誤り率 | 0.3950 / — / 0.3219 / — / 0.2200 | — | 4 信号すべてについて出力すること |
+
+- **adopted**: 主基準を満たす（AUGRC が有意に低い）こと．解釈は「conformal の集合サイズは実行時 confidence より良い棄権信号であり，B104 A2 の配線に棄権用途という積極的理由がある」．
+- **rejected（予測される帰結）**: 主基準が不成立．解釈は「**conformal を実行時経路へ配線する理由は棄権用途にも無い（実行時に既にある confidence で足りる）．conformal 系列 Iter69〜76 は被覆保証を厳密に得たが本線のルーティングには接続しないという結論で閉じる**」．
+- **実装不成立の判別（事前登録．数値が近接しているため事後に決めない）**:
+
+| 実測パターン | 判定 |
+|---|---|
+| AUGRC が 0.153391 / 0.138450（±0.002）で ΔAUGRC≈+0.0149 | **正しく発火**（主基準の判定へ進む） |
+| 4 信号の AUGRC が互いに完全一致 | **実装不成立**（`--abstention-signal` がスコア関数テーブルへ届いていない） |
+| max_probability の AUGRC が 0.138450 から外れる | **実装不成立**（正誤判定または split 抽出の定義違い．基準線は入力 jsonl だけで決まる量） |
+| 上記いずれにも当たらない | **実装不成立**を第一に疑う（既定の解釈） |
+
+- **非退行条件**:
+  1. **rank_1（argmax）不変**: 棄権は選択そのものを変えないため定義上不変．eval 半の top1 = **0.605000**，全 1,600 行 = **0.597500**，argmax と `selected_domain` の一致 800/800（eval）・1,600/1,600（全体）を出力に含めること．いずれかが動いたら実装バグ．
+  2. 入力 jsonl を一切書き換えないこと（実行前後で md5 不変を確認する）．
+  3. eval 半の set_size 分布が {1:24, 2:72, 3:144, 4:194, 5:207, 6:115, 7:43, 8:1} と一致すること（発火・入力同一性の証拠）．
+  4. coverage=1.0 での選択的誤り率が 4 信号すべてで 0.3950（eval 半）に一致すること（スコアに依らない恒等式．曲線構成の健全性チェック）．
+  5. 既存テスト（33 件）が PASS のまま，新規 4 件も PASS．`uv run ruff check` PASS．
+- **ノイズ幅**: ΔAUGRC の対応ありブートストラップ SE は約 0.0037（95%CI 幅 0.0146 から逆算）で，点推定 +0.0149 は約 4.0 SE．全体 top1 の二項 SE は n=800・p=0.605 で 0.0173．risk-coverage 表の各点は coverage×800 行の二項比率として SE を併記すること（例: coverage 0.5 の 0.2200 は n=400 で SE=0.0207）．
+
+**期待効果**
+
+(1) B104 A2（conformal を実行時経路へ配線するか，配線するなら棄権・人手エスカレーション用途としてか）に対し，「棄権用途としても conformal に積極的理由は無い」という数値的な答えを与え，人間判断の選択肢を 1 つ確定的に落とす．(2) 本研究で初めて選択的ルーティングの risk-coverage を数値化し，「何割を人手へ回せばルーティング誤りがどこまで下がるか」という運用上の表を成果物として残す．(3) 反証が成立した場合，conformal 系列（Iter69〜76，8 反復）を根拠をもって閉じ，次の論点（複合設問データセットの拡充＝research_frontier 相当・人間判断）へ進める．
+
+**コスト**: オフライン完結．埋め込み再計算なし・分類器再訓練なし・実機ノード不使用．スクリプト実装 30 分＋実行 1 分未満．`config.yaml` のスキーマ変更なしのため自律着手してよい．
+
+**留保（判定に用いない）**
+
+(i) Iter75 で観測された「オフラインの argmax と実機本走の `selected_domain` が 1,600 行中 3 行で食い違う」（B112 要レビュー (2)）は本イテレーションでも未解決であり，本評価はオフライン argmax を正とする．3/1,600=0.19% は上記の効果量より 1 桁小さいため結論を変えない．(ii) 校正半 800 行は q_hat の当てはめに使われているため in-sample であり，副次報告に留める（方向は eval 半と同じ）．(iii) 複合設問 100 行の扱いは「`argmax ∈ expected_domains` なら正」とする単一の定義に統一し，2 ドメイン同時被覆は本イテレーションでは扱わない（検出力不足．Q1 参照）．
+
+### 実装・実験 (Iter76)
+
+**実装**（計画どおり新規 1 ファイル．既存ファイルは無変更）
+
+- 新規 `scripts/evaluate_selective_routing.py`．棄権スコア関数テーブル `_SIGNALS: dict[str, Callable[[dict], float]]`（`max_probability` / `margin` / `negative_entropy` / `conformal_set_size` の 4 エントリ）を `_get_signal_scorer()` が `--abstention-signal` の値で引く 1 箇所だけがレバーを読むコード（計画どおり）．未知の値は `ValueError`（`_get_signal_scorer("not_a_real_signal")` で確認）．
+- risk-coverage 曲線はスコア降順の安定ソート（`np.argsort(-score, kind="mergesort")`）で構成し，AURC = 選択的誤り率（`cum_errors(k)/k`）の全 coverage 平均，AUGRC = generalized risk（`cum_errors(k)/n`）の全 coverage 平均（`compute_aurc_augrc`）．
+- 棄権率 {0,10,20,30,50}% の誤り率表（`compute_risk_coverage_table`）は，既存の `metrics.compute_wilson_confidence_interval` を再利用して各点の Wilson 95%CI を付与した（自前で二項区間の式を再導出していない）．
+- 対応ありブートストラップ（`bootstrap_delta_aurc_augrc`，percentile 法，同一再標本上で基準線・候補信号の両方を再評価）で ΔAUGRC・ΔAURC の点推定と 95%CI を出す．`scipy.stats.binomtest` を使った size<=k 閾値対比較（`compute_size_threshold_comparison`）も実装した．AURC/AUGRC・対応ありブートストラップ・discordant 二項検定は本リポジトリに既存実装が無いため新規実装とし，出典（Geifman & El-Yaniv 2017／Traub et al. 2024／percentile ブートストラップと二項検定は標準的な教科書的構成）をスクリプル冒頭の docstring に明記した．
+- 非退行診断（`compute_diagnostics`）で eval 半・全 1,600 行の top1・argmax 一致率・set_size 分布を出力に含めた．
+- stderr に発火証拠（`abstention_signal=` / `split=` / `n=` / `set_size_distribution=` と各信号の AURC/AUGRC）を出力．
+
+**テスト**（計画どおり新規 `tests/test_evaluate_selective_routing.py` に 4 件）
+
+1. 小標本（n=4）での AURC/AUGRC の手計算一致．
+2. 定数スコアのとき AURC が全体誤り率と一致すること（数学的に厳密な一致は「全行同一正誤ラベル」の退化ケースでのみ成り立つため，全行不正解の n=5 標本で検証．一般の混合正誤標本では tie-break の行順序に依存し厳密には成り立たないことをコメントに明記した．AUGRC は同じ退化ケースでも一致しない（`cum_errors(k)/n` の平均が誤り率そのものにならない）ため，本テストでは AURC のみ検証する）．
+3. 未知の `--abstention-signal`（`_get_signal_scorer`）が `ValueError` を送出すること．
+4. 完全な信号（正解行が全て誤り行より高スコア）で AUGRC が理論下限 `sum(1..n_incorrect)/n/n` に一致すること．
+
+実行結果: `uv run pytest tests/test_evaluate_selective_routing.py -q` → **4 件 PASS**．`uv run pytest -q`（全体）→ **299 件 PASS，12 件 FAIL**（`tests/test_build_dataset.py`・`tests/test_train_domain_classifier.py`．いずれも `CalibratedClassifierCV` に `classes_` 属性が無いという sklearn バージョン起因の既存失敗．本イテレーション開始前から発生していることを `git stash -u` で新規ファイルを退避して再実行し確認済み＝本変更と無関係）．`uv run ruff check scripts/evaluate_selective_routing.py tests/test_evaluate_selective_routing.py` → **PASS**．
+
+**実験（オフライン．実機ノード不使用，埋め込み再計算なし，分類器再訓練なし）**
+
+入力 `results/20260923_161147/Iter75_variantA_edu005.jsonl`（md5 `417c34141be6b602bfbccaf8a4c2d2a7`，実行前後で不変を確認）をそのまま再利用．コマンド（計画の「到達コードパス」どおり）:
+
+```
+uv run python -m scripts.evaluate_selective_routing \
+  --predictions results/20260923_161147/Iter75_variantA_edu005.jsonl \
+  --split eval \
+  --abstention-signal max_probability --abstention-signal conformal_set_size \
+  --abstention-signal margin --abstention-signal negative_entropy \
+  --bootstrap 10000 --bootstrap-seed 42 \
+  --output results/20260923_164424/Iter76_selective_routing.json
+```
+
+出力: `results/20260923_164424/Iter76_selective_routing.json`（実行時間 4.2 秒）．
+
+**発火証拠・非退行チェックの結果（すべて事前登録値と一致）**
+
+1. rank_1 不変: eval 半 top1=**0.605000**，全 1,600 行 top1=**0.597500**，argmax と `selected_domain` の一致率 **1.0**（800/800・1,600/1,600）．事前登録値と完全一致．
+2. 入力 jsonl の md5 は実行前後で **不変**（`417c34141be6b602bfbccaf8a4c2d2a7`）．
+3. eval 半の set_size 分布 = **{1: 24, 2: 72, 3: 144, 4: 194, 5: 207, 6: 115, 7: 43, 8: 1}**．事前登録値と完全一致．
+4. coverage=1.0（棄権率 0%）の誤り率は **4 信号すべて 0.3950**（316/800）で一致．
+5. テスト・lint は上記のとおり全 PASS．
+
+判別表と照合すると，4 信号の AUGRC は互いに異なり（下表），かつ max_probability の AUGRC が予測値 0.138450 と一致しているため，**「正しく発火」**（実装不成立ではない）と判定できる．
+
+**実測値（eval 半 n=800）**
+
+| 棄権スコア | AURC | AUGRC | err@cov50% | err@cov70% | err@cov80% | err@cov90% |
+|---|---|---|---|---|---|---|
+| max_probability（基準線） | 0.218717 | 0.138450 | 0.2200 | 0.2804 | 0.3219 | 0.3611 |
+| margin | 0.225014 | 0.142492 | 0.2275 | 0.2982 | 0.3328 | 0.3681 |
+| negative_entropy | 0.224522 | 0.140497 | 0.2175 | 0.2857 | 0.3281 | 0.3569 |
+| conformal_set_size（本レバー） | 0.252187 | 0.153391 | 0.2700 | 0.3179 | 0.3391 | 0.3667 |
+
+対応ありブートストラップ（B=10,000，seed 42，percentile 法，eval 半 n=800，vs max_probability）:
+
+| 信号 | ΔAURC | ΔAURC 95%CI | ΔAUGRC | ΔAUGRC 95%CI | 改善方向の割合 |
+|---|---|---|---|---|---|
+| conformal_set_size | +0.033470 | [0.014948, 0.050655] | **+0.014941** | **[0.007923, 0.022549]** | 0.0001 |
+| margin | +0.006297 | [0.000945, 0.011763] | +0.004042 | [0.000917, 0.007271] | 0.0042 |
+| negative_entropy | +0.005805 | [-0.001281, 0.012902] | +0.002047 | [-0.001520, 0.005544] | 0.1272 |
+
+conformal_set_size の ΔAUGRC 点推定・95%CI は事前登録値（+0.014941，[0.007923, 0.022549]）と最終桁まで一致した．
+
+size<=4 での対比較（副基準）: coverage 0.5425（n=434），誤り率 size=0.283410／max_probability=0.228111，only-size 側の誤り 52/99，only-maxp 側の誤り 28/99，`binomtest` 両側 p=0.009683．事前登録値（52/99・28/99・p=0.0097）と一致．他の size 閾値（1,2,3,5,6,7）も事前登録の表と全行一致した．
+
+risk-coverage 表（成果物，棄権率 0/10/20/30/50%）は上表の err@cov 列に対応し，4 信号すべてについて出力済み（各点の Wilson 95%CI も `Iter76_selective_routing.json` に含む）．
+
+判定（adopted/rejected）は次フェーズ（rc-evaluator）の担当のため，ここでは行わない．
+
+### Iteration 76 実行済み
+
+**単一レバー**: `routing_abstention_signal` = `max_probability`（基準線）→ **`conformal_set_size`**．
+
+**判定: rejected（仮説は正しく反証された．実装不成立ではない）**．
+
+**主基準**: 事前登録は「eval 半 n=800 の AUGRC で conformal_set_size < max_probability，かつ ΔAUGRC の対応ありブートストラップ 95%CI が 0 を跨がないこと」．実測は AUGRC 0.153391（conformal_set_size）対 0.138450（max_probability），**ΔAUGRC = +0.014941，95%CI [0.007923, 0.022549]**（B=10,000，seed 42）．CI は 0 を跨がないが**符号が合格条件と逆**であり，conformal_set_size は基準線より**有意に劣る**．したがって主基準は不成立で **rejected**．
+
+**ノイズか有意か**: ΔAUGRC の対応ありブートストラップ SE は約 0.0037（CI 幅 0.0146 から逆算）で，点推定 +0.014941 は約 **4.0 SE**．改善方向に出た再標本は 10,000 中 1 本（0.0001）．方向は eval 半・校正半（0.162959 対 0.146444）・全 1,600 行（0.158015 対 0.142462）で一致し，分割にも依存しない．**ノイズ幅を明確に超えた有意な劣化**である．副基準（coverage 0.5425 に揃えた size<=4 の対比較）も discordant 52/99 対 28/99，二項検定 両側 p=0.009683 で同じ方向を示した．
+
+**実装不成立ではないことの根拠（事前登録した判別表との照合）**: (1) 4 信号の AUGRC が互いに異なる（テーブルへ届いている），(2) 基準線 max_probability の AUGRC が事前登録値 0.138450 と一致（正誤判定・split 抽出の定義が一致），(3) ΔAUGRC の点推定・95%CI が事前登録値と最終桁まで一致，(4) eval 半 set_size 分布が {1:24,2:72,3:144,4:194,5:207,6:115,7:43,8:1} と一致，(5) 入力 jsonl の md5 が実行前後で不変．判別表の「正しく発火」の行に該当する．**Iter69〜71 で繰り返した「実装不成立」とは異なり，今回は仮説そのものが反証された**．
+
+**非退行**: eval 半 top1=0.605000・全 1,600 行 top1=0.597500・argmax と `selected_domain` の一致 800/800・1,600/1,600 で事前登録値と完全一致（棄権は選択を変えないという定義上の恒等式が成立）．coverage=1.0 の誤り率は 4 信号すべて 0.3950 で一致（曲線構成の健全性）．新規テスト 4 件 PASS，既存 33 件 PASS 維持，`ruff check` PASS．全体スイートの 12 件 FAIL は `CalibratedClassifierCV.classes_` 不在という sklearn バージョン起因の既存失敗で，`git stash -u` による退避後も再現するため本イテレーション由来ではない．
+
+**この反復で言えること（因果として言える範囲）**
+
+1. **conformal 予測集合のサイズは，選択的ルーティングの棄権信号として max_probability に劣る**（eval 半 n=800，ΔAUGRC +0.0149，4.0 SE）．一般化できるのは「本リポジトリの 10 ドメイン・temperature 較正済み分類器・Iter75 adopted の randomized APS 構成・名目 0.90」という条件下の主張までである．
+2. **機序の考察（解像度の欠如）**: 棄権の目的は「top1 が誤りである確率」で行を順序付けることだが，集合サイズは 1〜8 の 8 段階しか値を取らず，同値行を区別できない．実際 size<=4 と size<=5 の間で coverage が 0.5425 から 0.8013 へ飛び，その間に運用点が存在しない．同点を max_probability で解くと AUGRC が 0.153391→0.145975 と基準線側へ寄る（それでも届かない）ことがこの解釈を支持する．加えて，集合サイズは「複数クラスにまたがる不確実性の広がり」を表す量であって top1 の正しさの単調な指標ではなく，棄権という目的関数に対しては生の確信度スコアの方が直接的である．
+3. **同系列の手組み信号も基準線を上回らない**: margin は ΔAUGRC +0.004042 [0.000917, 0.007271]（有意に劣る），negative_entropy は +0.002047 [-0.001520, 0.005544]（差は判定不能）．**temperature 較正済み MSP という基準線が強いという選択的予測の文献（Hendrycks & Gimpel 2017 以来）の報告が，本リポジトリでもそのまま再現した**．
+4. **肯定的な成果（判定とは独立）**: 選択的ルーティングの risk-coverage を本研究で初めて数値化した．実行時に既に存在する confidence だけで，棄権 20% でルーティング誤り 0.3950→0.3219，棄権 50% で 0.2200 まで下がる．B104 A2 を人間へ諮る際の運用点の表として `results/20260923_164424/Iter76_selective_routing.json`（Wilson 95%CI 付き）に残した．
+
+**レバーの扱い**: `routing_abstention_signal` は `values: [conformal_set_size]` の単一値のため本反復でクローズ．これにより **conformal 系列（Iter69〜76，8 反復）は「被覆保証は厳密に得た（Iter72 adopted・Iter75 で実行時分布での外的妥当性も確認）が，集合サイズは dispatch の絞り込みにも棄権判定にも使えず，本線のルーティングには接続しない」という結論に到達した**（この結論の確定と B104 A2 への回答は不可逆のため人間判断を仰ぐ．backlog B114 要レビュー (1)）．
+
+**次の一手（停止条件 1 を適用）**: config の levers は再び使い切りだが，Iter76 は既に停止条件 2（調査フェーズからの再探索）の結果であるため，今回の学びから新レバーを 1 つ考案して config へ追記する．**`routing_abstention_scorer = learned_deferral_head`**（校正半 800 行だけで学習した post-hoc の棄権スコア器を eval 半 800 行で評価する）．根拠は本反復の機序考察で，劣った原因が「conformal であること」ではなく「8 段階という解像度の粗さ」であり，複数の既存特徴（max_probability・margin・negative_entropy・set_size・上位確率の形状）を連続値へ束ねれば基準線を上回る余地があるかを，同じ AUGRC・同じブートストラップ枠組で 1 回で判定できるためである．手組み信号の振り直し（margin・entropy）は掃引済みで再訪しない（本反復で明示的に否定した）．検出力は ΔAUGRC の SE≈0.0037 から，0.008 程度以上の効果なら検出できる．
+
+**次の自分向けの非自明な学び**
+
+1. **「CI が 0 を跨がない」だけでは合格条件ではない．符号まで事前登録しておくこと**．今回は CI が 0 を跨がなかったが符号が逆で，事前登録の文言（`conformal_set_size < max_probability` かつ CI が 0 を跨がない）が無ければ「有意差あり＝採用」と誤読し得た．
+2. **反証を事前登録して閉じる実験は，判定が事後の解釈に揺れない**．Iter74 に続き 2 例目で，事前シミュレーションの数値（AUGRC・CI・discordant の分割表）が最終桁まで再現した（Iter71 以降 6 反復連続）．オフラインで閉じる評価では，事前シミュレーションを「実行の代替」ではなく「合否条件の数値化」に使う運用が機能している．
+3. **離散段数の少ない量を連続スコアの代わりに使うと，risk-coverage の運用点が飛ぶ**．集合サイズのような整数値信号を選択的予測へ持ち込むときは，同点解消規則（今回は max_probability）を最初から設計に含めないと，指標以前に「欲しい coverage を作れない」という実務上の欠陥が出る．
+
+---
+
 ## Iteration 75: conformal評価の入力分布を実行時と同一のeducation+0.05へ揃えて被覆保証の外的妥当性を検証する
 
 ### 調査 (Iter75)

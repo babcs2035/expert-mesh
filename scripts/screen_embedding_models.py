@@ -1,0 +1,205 @@
+"""Iter79 G1 (embedding_model_replacement): offline 5-fold CV screening of
+embedding-model candidates on data/classifier_train.jsonl ONLY.
+
+Selection rule (registered in journal.md Iter79 plan, fixed before results
+are seen): stage 1 compares nomic-embed-text (baseline) vs
+qwen3-embedding:0.6b; if qwen3 wins on CV accuracy, it is selected and stage
+2 is skipped. Otherwise stage 2 adds bge-m3 and the best of all three is
+selected (ties broken by macro-F1, then by preferring qwen3-embedding:0.6b).
+
+Deliberately never reads data/dataset.jsonl (the 1,915-row evaluation set):
+doing so here would leak the evaluation set into model selection, the same
+information-leakage concern train_domain_classifier.py's docstring raises
+for probe/dispatch-derived features (Iter10).
+
+Reuses scripts/train_domain_classifier.py's _load_training_rows,
+_extract_sample_weights, and train_classifier so the CV here exercises the
+exact same LogisticRegression + sample_weight configuration as production
+training, differing only in the embedding model and in using bare
+StratifiedKFold instead of CalibratedClassifierCV's internal one (the
+calibration wrapper is irrelevant to a model-selection signal that only
+needs argmax accuracy / macro-F1, and skipping it avoids paying temperature-
+scaling cost 5x per candidate).
+
+Per-candidate embeddings are cached to data/embcache_<model>.npy so a
+subsequent scripts/train_domain_classifier.py run for the selected model
+does not need to re-embed data/classifier_train.jsonl from scratch (the
+cache uses the exact row order of --train-data, so it can be reused as long
+as that file is unchanged).
+
+Usage (module mode; run against wafl-ctrl5 via the SSH tunnel per the
+2026-09-19 operational rule -- this script must NOT be pointed at
+wafl500-509):
+    ssh -fNT -L 11499:localhost:11434 wafl-ctrl5
+    uv run python -m scripts.screen_embedding_models \\
+        --train-data data/classifier_train.jsonl \\
+        --ollama-host 127.0.0.1 --ollama-port 11499 \\
+        --stage 1
+"""
+
+import argparse
+import asyncio
+import json
+import sys
+
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.model_selection import StratifiedKFold
+
+from expert_backend import OllamaClient
+from scripts.train_domain_classifier import (
+    _extract_sample_weights,
+    _load_training_rows,
+    build_training_features,
+)
+
+# Fixed, pre-registered candidate list (journal.md Iter79 plan). Stage 1 is
+# the first two entries; stage 2 appends "bge-m3" only if qwen3 does not
+# beat nomic on stage 1's CV accuracy.
+_STAGE_1_CANDIDATES = ["nomic-embed-text", "qwen3-embedding:0.6b"]
+_STAGE_2_EXTRA_CANDIDATE = "bge-m3"
+
+_CV_SPLITS = 5
+_CV_RANDOM_STATE = 42
+
+
+def _cache_path(train_data_path: str, embedding_model: str) -> str:
+    """Derive data/embcache_<model>.npy from --train-data's directory.
+
+    Sanitizes ':' and '/' (present in model names like "qwen3-embedding:0.6b")
+    into '_' so the path is a single valid filename component.
+    """
+    import os
+
+    safe_model = embedding_model.replace(":", "_").replace("/", "_")
+    data_dir = os.path.dirname(train_data_path) or "."
+    return os.path.join(data_dir, f"embcache_{safe_model}.npy")
+
+
+async def _embed_candidate(
+    ollama_client: OllamaClient, embedding_model: str, rows: list[dict], cache_path: str
+) -> np.ndarray:
+    """Return (n_rows, dim) embeddings for embedding_model, using/populating a cache file."""
+    import os
+
+    if os.path.exists(cache_path):
+        cached = np.load(cache_path)
+        if cached.shape[0] == len(rows):
+            print(f"[screen_embedding_models] using cached embeddings: {cache_path}", file=sys.stderr)
+            return cached
+        print(
+            f"[screen_embedding_models] cache row count mismatch ({cached.shape[0]} != {len(rows)}), "
+            f"recomputing: {cache_path}",
+            file=sys.stderr,
+        )
+
+    embeddings, _labels = await build_training_features(ollama_client, embedding_model, rows)
+    arr = np.array(embeddings, dtype=np.float64)
+    np.save(cache_path, arr)
+    print(f"[screen_embedding_models] wrote {cache_path} shape={arr.shape}", file=sys.stderr)
+    return arr
+
+
+def _cross_validate(embeddings: np.ndarray, labels: list[str], sample_weight: list[float]) -> dict[str, float]:
+    """5-fold StratifiedKFold CV accuracy / macro-F1 for a single embedding-model candidate.
+
+    Mirrors train_domain_classifier.train_classifier's base estimator
+    (LogisticRegression(max_iter=1000, class_weight=None) + sample_weight)
+    but without CalibratedClassifierCV, since model selection only needs
+    argmax predictions, not calibrated probabilities.
+    """
+    labels_arr = np.array(labels)
+    weights_arr = np.array(sample_weight)
+    skf = StratifiedKFold(n_splits=_CV_SPLITS, shuffle=True, random_state=_CV_RANDOM_STATE)
+
+    fold_accuracies = []
+    fold_macro_f1s = []
+    for train_idx, test_idx in skf.split(embeddings, labels_arr):
+        clf = LogisticRegression(max_iter=1000, class_weight=None)
+        clf.fit(embeddings[train_idx], labels_arr[train_idx], sample_weight=weights_arr[train_idx])
+        preds = clf.predict(embeddings[test_idx])
+        fold_accuracies.append(accuracy_score(labels_arr[test_idx], preds))
+        fold_macro_f1s.append(f1_score(labels_arr[test_idx], preds, average="macro"))
+
+    return {
+        "cv_accuracy_mean": float(np.mean(fold_accuracies)),
+        "cv_accuracy_folds": [float(a) for a in fold_accuracies],
+        "cv_macro_f1_mean": float(np.mean(fold_macro_f1s)),
+        "cv_macro_f1_folds": [float(f) for f in fold_macro_f1s],
+    }
+
+
+async def _run(train_data_path: str, ollama_host: str, ollama_port: int, stage: int) -> dict:
+    """Run the pre-registered stage-1 (and, if needed, stage-2) screening and return all results."""
+    rows = _load_training_rows(train_data_path)
+    labels = [row["domain"] for row in rows]
+    sample_weight = _extract_sample_weights(rows)
+    ollama_client = OllamaClient(host=f"http://{ollama_host}:{ollama_port}")
+
+    candidates = list(_STAGE_1_CANDIDATES)
+    results: dict[str, dict] = {}
+
+    for model_name in candidates:
+        cache_path = _cache_path(train_data_path, model_name)
+        embeddings = await _embed_candidate(ollama_client, model_name, rows, cache_path)
+        results[model_name] = _cross_validate(embeddings, labels, sample_weight)
+
+    nomic_acc = results["nomic-embed-text"]["cv_accuracy_mean"]
+    qwen3_acc = results["qwen3-embedding:0.6b"]["cv_accuracy_mean"]
+    stage1_qwen3_wins = qwen3_acc > nomic_acc
+
+    selected_model = None
+    if stage1_qwen3_wins:
+        selected_model = "qwen3-embedding:0.6b"
+    elif stage >= 2:
+        model_name = _STAGE_2_EXTRA_CANDIDATE
+        cache_path = _cache_path(train_data_path, model_name)
+        embeddings = await _embed_candidate(ollama_client, model_name, rows, cache_path)
+        results[model_name] = _cross_validate(embeddings, labels, sample_weight)
+
+        # Selection rule (journal.md Iter79 plan): max CV accuracy; ties
+        # broken by macro-F1, then by preferring qwen3-embedding:0.6b.
+        def _sort_key(name: str) -> tuple[float, float, int]:
+            r = results[name]
+            prefer_qwen3 = 1 if name == "qwen3-embedding:0.6b" else 0
+            return (r["cv_accuracy_mean"], r["cv_macro_f1_mean"], prefer_qwen3)
+
+        selected_model = max(results.keys(), key=_sort_key)
+
+    return {
+        "stage1_qwen3_wins": stage1_qwen3_wins,
+        "selected_model": selected_model,
+        "candidates": results,
+    }
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Iter79 G1: offline CV screening of embedding-model candidates "
+        "on data/classifier_train.jsonl only (no dataset.jsonl access)."
+    )
+    parser.add_argument("--train-data", default="data/classifier_train.jsonl")
+    parser.add_argument(
+        "--ollama-host",
+        default="127.0.0.1",
+        help="wafl-ctrl5 tunnel endpoint (2026-09-19 operational rule: never wafl500-509)",
+    )
+    parser.add_argument("--ollama-port", type=int, default=11499)
+    parser.add_argument(
+        "--stage",
+        type=int,
+        choices=[1, 2],
+        default=1,
+        help="1: nomic vs qwen3-embedding:0.6b only. 2: also evaluate bge-m3 if qwen3 does not "
+        "win stage 1 (no-op if qwen3 already wins).",
+    )
+    args = parser.parse_args()
+
+    result = asyncio.run(_run(args.train_data, args.ollama_host, args.ollama_port, args.stage))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
