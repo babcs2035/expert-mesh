@@ -71,23 +71,42 @@ JMMLU 由来ではない．
 ## E6 教師あり分類器
 
 生成コマンド（実機の ollama ノードが必要．scripts/train_domain_classifier.py の docstring 参照．
-2026-09-27 以降は Iteration 80 の G0 ゲート不合格（後述）により，`embedding_model_replacement` の
-値は計画時点の `qwen3_embedding_4b` ではなく `bge_m3` へ自動切替され（backlog B126），
-埋め込みモデルが `bge-m3` へ変更されている．**wafl-ctrl5 限定**（config.yml 絶対条件 B））:
+**wafl-ctrl5 限定**（config.yml 絶対条件 B））:
 
 ```
 uv run python -m scripts.train_domain_classifier \
     --train-data data/classifier_train.jsonl \
-    --embedding-model bge-m3 \
+    --embedding-model qwen3-embedding:0.6b \
     --ollama-host 127.0.0.1 --ollama-port 11499 \
     --output models/domain_classifier.joblib
 ```
 
+**2026-09-27 訂正（Iteration 81 分析フェーズ）**: 直前の版はこの生成コマンドを
+`--embedding-model bge-m3` と記載していたが，これは誤りである．Iteration 80（`bge_m3`）は
+**rejected** で判定され，基準線（`qwen3-embedding:0.6b`，artifact `21e16ec6...`）への復元まで
+実施済みである（journal.md「Iteration 80 実行済み」節・backlog B127）．MANIFEST 側が
+Iteration 80 の実装フェーズ時点の記述のまま更新されていなかった．Iteration 81 も rejected で
+復元済みのため，**現行の生成コマンドは上記（prefix なし・qwen3-embedding:0.6b）である**．
+
 | ファイル | sha256 |
 |---|---|
-| `models/domain_classifier.joblib`（現行，bge-m3，1024次元） | `37d71b6339ba3a16d6ce6ff0183fd92b9349776a154dfbb8431b5d6026f29b12` |
+| `models/domain_classifier.joblib`（現行，qwen3-embedding:0.6b，prefixなし，1024次元．Iter81 rejected により復元） | `21e16ec63db89f4c8435264e98e6a704382aec723548359f6a74f44753f6ca19` |
+| `models/domain_classifier_pre_iter81_noprefix.joblib`（Iter81 直前の退避，qwen3-embedding:0.6b，prefixなし，1024次元） | `21e16ec63db89f4c8435264e98e6a704382aec723548359f6a74f44753f6ca19` |
 | `models/domain_classifier_pre_iter80_qwen3_0.6b.joblib`（Iter80 直前の退避，qwen3-embedding:0.6b，1024次元） | `21e16ec63db89f4c8435264e98e6a704382aec723548359f6a74f44753f6ca19` |
 | `models/domain_classifier_pre_iter79_nomic.joblib`（Iter79 直前の退避，nomic-embed-text，768次元） | `02caf2b8e7a85972ff47867f05c8145e7d985e2000a2eb55662c6285db408905` |
+
+**Iteration 81 の申し送り 1 への回答（2026-09-27 分析フェーズで確認・訂正済み）**:
+`bge-m3` は Iteration 80 で **adopted ではなく rejected** であり，実機は基準線
+（`qwen3-embedding:0.6b`，artifact `21e16ec6...`）へ復元済みだった．したがって Iteration 81 開始時点の
+実機構成（`21e16ec6...`）が正しく，**誤っていたのは MANIFEST の記述の方**である（backlog B127 の
+記録は正しい）．上記の生成コマンドとテーブルはこの訂正を反映済み．以下は訂正前の記述の経緯:
+
+（旧記述）Iteration 80 で採用されたはずの `bge-m3`（sha256
+`37d71b63...`）は，Iteration 81 開始時点の実機構成が `embedding_model=qwen3-embedding:0.6b`
+（`models/domain_classifier_pre_iter81_noprefix.joblib` と sha256 一致）に戻っていた
+（journal.md Iteration 81 開始前提の確認事項）．本反復はこの前提を検証対象とせず，与えられた
+単一レバー `embedding_input_instruction_prefix` の実施のみを担当したため，`bge-m3` への
+切替とその後の巻き戻しの経緯は分析・考察フェーズで確認すること．
 
 オフライン性能（旧・nomic-embed-text，docs/d0002 §6-E）: 訓練 100.00%（1427/1427），評価 59.87%（898/1500，
 1500 行版データセット当時の実測）．過学習の傾向が残る．
@@ -122,6 +141,89 @@ conformal 無し，`scripts.evaluate_classifier_calibration`）: discordant 行�
 G1: `nomic-embed-text` cv_accuracy=0.5711（macro-F1 0.5710），`qwen3-embedding:0.6b`
 cv_accuracy=0.7561（macro-F1 0.7562）．G2: discordant 行数 n_d=787（必要偏り率
 `1.96/sqrt(787)`=0.0699）。
+
+### Iteration 81（embedding_input_instruction_prefix=qwen3_instruct_classification_prefix）
+
+埋め込みモデルは `qwen3-embedding:0.6b` のまま変えず，`/api/embeddings` へ渡す文字列に
+Qwen3-Embedding の instruct 形式 prefix を付与する（`expert_backend.py:OllamaClient.embed()`
+の `instruction` 引数，`config.yaml` の新キー `embedding_instruction`）．
+
+選定文言（`config.yaml:embedding_instruction`，10 ドメイン共通の英語 1 文）:
+`Given a user question, identify the single academic or professional domain it belongs to`
+（node.py・train_domain_classifier.py 双方で `f"Instruct: {embedding_instruction}\nQuery: {text}"`
+として付与．journal.md Iteration 81 計画の P1 に一致）．
+
+F1（prefix有無の埋め込みコサイン類似度，wafl-ctrl5，同一日本語質問文 1 件）: cosine=0.7674
+（< 0.999 の合格ラインを満たす．Ollama が prefix を実際に反映していることの直接証拠）．
+
+F2（配布，deploy 後 wafl500〜509 全 10 ノード）: `config.yaml` の `embedding_instruction` 行と
+`models/domain_classifier.joblib` の sha256 が全ノードで選定文言・新 artifact（`56d5a882...`）と
+一致．
+
+F3（実行時経路，先頭 20 問の予備実行 vs オフライン replay）: `selected_domain` が 20/20 一致
+（dispatch 失敗 0 件，分母 20）．
+
+G1（`data/classifier_train.jsonl` 1427 行のみの 5-fold StratifiedKFold CV，
+`scripts/screen_embedding_models.py`，P0〜P3 の 4 候補同時評価，wafl-ctrl5）:
+P0（prefixなし，基準線）cv_accuracy=0.7561231750705435（macro-F1 0.7562199648757597），
+**P1（`Instruct: ...\nQuery: {text}`）cv_accuracy=0.7715225125751441（macro-F1
+0.7690555039871017，4候補中最良）**，P2（`Instruct: ...\nInput: {text}`）
+cv_accuracy=0.7666102318733898（macro-F1 0.7649437025621662），P3（モデル同梱既定 query
+prompt）cv_accuracy=0.7547196662986138（macro-F1 0.7537554700089361）．選定規則（CV accuracy
+最大）により P1 を採用．
+
+G2（旧 qwen3-embedding:0.6b・prefixなし artifact `21e16ec6...`／新 qwen3-embedding:0.6b・
+prefixあり(P1) artifact `56d5a882...` の argmax replay，dataset.jsonl 全 1915 行，自前
+replay スクリプト．`predict_proba` argmax は sklearn 標準の `.predict()` を使用）:
+discordant 行数 n_d=276（必要偏り率 `1.96/sqrt(276)`=0.1180）．合格ライン n_d≥30 を満たす．
+オフライン accuracy（`expected_domains[0]` に対する argmax の一致率，着地点予測，判定には
+不使用）: 旧 0.6840731070496083 → 新 0.7232375979112271．
+
+再訓練コマンド（wafl-ctrl5 限定）:
+
+```
+uv run python -m scripts.train_domain_classifier \
+    --train-data data/classifier_train.jsonl \
+    --embedding-model qwen3-embedding:0.6b \
+    --embedding-instruction "Given a user question, identify the single academic or professional domain it belongs to" \
+    --ollama-host 127.0.0.1 --ollama-port 11499 \
+    --output models/domain_classifier.joblib
+```
+
+キャッシュファイル（`scripts/screen_embedding_models.py` の G1 用，prefix 識別子つき）:
+`data/embcache_qwen3-embedding_0.6b.npy`（P0，Iter79 のキャッシュを再利用），
+`data/embcache_qwen3-embedding_0.6b__p1.npy`／`__p2.npy`／`__p3.npy`（P1〜P3，本反復で新規生成）．
+
+本走実測（`results/20260927_024644/`，1,915 問フルスペック．基準線 `results/20260926_221822/`）:
+top1_accuracy 全1915行 0.753003→0.789556（+3.655pt，McNemar continuity-corrected
+chi2=25.5968，p=4.207e-7，discordant_a_only(基準線正解→新誤り)=58／discordant_b_only(基準線誤り→新正解)=128）．
+既存1,600行部分集合（single 1500 + compound-001〜100）top1: 0.751250→0.781250．
+複合415行（compound-001〜415）top1: 0.766265→0.843373．single_domain_top1:
+0.749333→0.774667．非退行指標: fallback_rate 0.0→0.0，dispatch_failure_rate
+0.000522→0.000522，ECE 0.032745→0.030951，mean_duration_ms 2301.4→2200.7．報告のみ:
+answer_quality_accuracy 0.569333→0.58，end_to_end_accuracy 0.335770→0.350392，
+compound_domain_set_recall 0.548193→0.526506，compound_mean_dispatched_count
+1.880→1.494．
+
+per-domain recall/precision 計20指標（BH補正 q=0.05，`metrics.py`の
+`compute_domain_recall_mcnemar_test`／`compute_domain_precision_fisher_test`／
+`apply_benjamini_hochberg` を使用．算出根拠・出典は各関数のdocstring参照）:
+有意差3件—computer_science_recall（0.7273→0.8528，p≈4.93e-7，改善方向），
+**medical_recall（0.7842→0.7178，p=0.003264，悪化方向）**，natural_science_recall
+（0.5931→0.6623，p=0.004586，改善方向）．他17指標はBH補正後有意差なし．
+medical_recallの有意退行は計画時点の非退行条件①（20指標BH補正後有意退行0件）に抵触する
+実測結果であり，判定は分析・考察フェーズに委ねる．
+
+**判定（2026-09-27 分析・考察フェーズ）: `rejected`**．事前登録の判定規則
+「非退行①で有意退行1件以上なら rejected」に medical_recall が該当したため，主基準
+（+3.655pt・McNemar p=4.207e-7）を満たしていても規則どおり rejected とした．
+**復元実施済み**: `config.yaml` から `embedding_instruction` 行を削除，
+`cp models/domain_classifier_pre_iter81_noprefix.joblib models/domain_classifier.joblib`
+（`21e16ec6...`），`mise run deploy` 再実行．全ノードで `embedding_instruction` 不在・
+artifact `21e16ec6...` を確認（smoke_check hashes/probe pass）．
+**注意**: prefix 版 artifact（`56d5a882...`）はこの復元で上書きされ現存しない．必要なら
+上記「再訓練コマンド」で決定論的に再生成できる（P1 文言・キャッシュ
+`data/embcache_qwen3-embedding_0.6b__p1.npy` も保存済み）．
 
 ## E10 ドメイン別 LoRA アダプタ
 

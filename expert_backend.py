@@ -138,18 +138,29 @@ class OllamaClient:
             return response.json().get("models", [])
 
     async def embed(
-        self, model: str, text: str, timeout_s: float = DEFAULT_TIMEOUT_S
+        self,
+        model: str,
+        text: str,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        instruction: str | None = None,
     ) -> list[float]:
         """Return the embedding vector for a text string.
 
         Retries up to DEFAULT_RETRIES times on transient connection errors.
+
+        If `instruction` is given, the prompt is prefixed in the Qwen3-Embedding
+        instruct format (`Instruct: {instruction}\\nQuery: {text}`) before being
+        sent to Ollama, which does not add such prefixes on its own (see
+        journal.md Iteration 81 Q3). Defaults to None so existing callers that
+        do not pass this argument keep the current unprefixed behavior.
         """
+        prompt = f"Instruct: {instruction}\nQuery: {text}" if instruction else text
         for attempt in range(DEFAULT_RETRIES):
             try:
                 async with httpx.AsyncClient(timeout=timeout_s) as client:
                     response = await client.post(
                         f"{self._host}/api/embeddings",
-                        json={"model": model, "prompt": text},
+                        json={"model": model, "prompt": prompt},
                     )
                     response.raise_for_status()
                     return response.json()["embedding"]

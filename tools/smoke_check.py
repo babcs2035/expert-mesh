@@ -167,7 +167,9 @@ async def run_probe_smoke_test(config: dict) -> bool:
     signal_method = config.get("confidence_signal_method", "self_report")
 
     ollama_client = OllamaClient()
-    query_embedding = await ollama_client.embed(embedding_model, SMOKE_QUERY)
+    query_embedding = await ollama_client.embed(
+        embedding_model, SMOKE_QUERY, instruction=config.get("embedding_instruction")
+    )
 
     request_body = {
         "request_id": f"smoke-{uuid.uuid4().hex[:8]}",

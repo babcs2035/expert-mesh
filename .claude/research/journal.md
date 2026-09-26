@@ -1,3 +1,209 @@
+## Iteration 81: 埋め込み入力への instruction prefix 付与（qwen3-embedding:0.6b）
+
+### 調査 (Iter81)
+
+本反復のレバーは B127（Iter80 分析フェーズ）で `embedding_input_instruction_prefix` = `qwen3_instruct_classification_prefix` に確定済みで，レバー選定の裁量は無い．調査の問いは 3 つ．**(Q1) Qwen3-Embedding の instruction 形式は具体的にどう書くのが正しく，どの程度の効果が報告されているか．(Q2) prefix は「クエリ側だけ」か「訓練側・推論側の両方」か（symmetric / asymmetric タスクでの扱いの違い）．(Q3) Ollama の `/api/embeddings` は prefix を自動付与するのか．**
+
+**Q1: 形式は `Instruct: {task_description}\nQuery: {text}`．効果は「多くの下流タスクで 1〜5%」**
+
+- Qwen 公式（<https://github.com/QwenLM/Qwen3-Embedding>，HF Model Card <https://huggingface.co/Qwen/Qwen3-Embedding-0.6B> / <https://huggingface.co/Qwen/Qwen3-Embedding-8B>，いずれも 2026-09-27 確認）の `get_detailed_instruct()` は `f'Instruct: {task_description}\nQuery:{query}'` を返す．**モデル同梱の `config_sentence_transformers.json` も `query` prompt = `"Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "`，`document` prompt = `""`（空）**である（ollama/ollama issue #16076 <https://github.com/ollama/ollama/issues/16076> に原文が引用されている）．
+- 効果の公称値: 「**評価の結果，多くの下流タスクで instruct を使うと使わない場合に比べ通常 1〜5% の改善が得られる**．したがってタスク・シナリオに合わせた instruction を作ることを推奨する．**多言語の文脈では，訓練時の instruction の大半が英語で書かれていたため，instruction は英語で書くことを推奨する**」（Qwen3-Embedding GitHub README，同文が HF Model Card・Docker Hub の `ai/qwen3-embedding` にも掲載）．**本研究の質問文は日本語だが，instruction は英語で書くのが公式推奨である**点は設計に直接効く（事実）．
+- ただし「1〜5%」の但し書きは「**retrieval シナリオで query 側に instruct を付けない場合に約 1〜5% 低下する**」という retrieval 中心の文言でもある（同 README の Tip）．**分類タスクでの効果量を保証する一次情報は見つからなかった**（推測と事実の区別: 分類での効果は未確認）．
+- 日本語での傍証: hotchpotch 氏の JMTEB 計測（<https://secon.dev/entry/2025/06/11/100000-qwen3-embedding-jmteb>，<https://hotchpotch.dev/articles/qwen3-embedding-jmteb>）は Qwen3-Embedding-0.6B の Classification 66.09 を報告しているが，本文に「**Retrieval, Reranking タスクでは Query の prefix に `Instruct: ...\nQuery:` を追加している**」と明記されており，**Classification は prefix なしで測られている**．つまり「日本語分類で prefix を付けた値」は公開情報として存在しない（事実）．Iter79/80 の学び（公称ベンチは採否の根拠にならない）どおり，G1 CV で自前に数値化するほかない．
+
+**Q2: 分類のような single-side（symmetric）タスクでは，全テキストに同じ instruction を付ける．訓練側と推論側で一致していなければならない**
+
+- 公式コード例は **retrieval 前提の asymmetric な使い方**であり，`# No need to add instruction for retrieval documents` と明記して documents 側には何も付けない（上記 GitHub / Model Card）．
+- 一方，**分類・クラスタリング・STS のように「クエリ／文書」の区別が無いタスクでは，全入力テキストに instruction を付けるのが標準的な運用**である．arXiv:2606.01074（"When Is 0.1% Enough?"，<https://arxiv.org/html/2606.01074v1> Appendix A，Qwen3-Embedding-8B を含む instruction 系 4 モデルで MTEB 4 タスク族を評価）は「instruction 系モデルでは全タスクで task-specific instruction を付けて符号化する．**classification / clustering / STS では `Instruct: {instruction}\nInput: {text}` を使い，retrieval ではクエリのみ `Instruct: {instruction}\nQuery: {text}` とし，corpus 文書は instruction なしで符号化する（標準的な asymmetric retrieval 設定に従う）**」と手続きを明記している．**`Query:` ではなく `Input:` を使う流儀がある**点は本反復の文言候補に反映する．
+- mteb ライブラリでも各タスクの `prompt`（未指定時は抽象クラスの既定文，例: Clustering は `"Identify categories in user passages."`）が入力テキストへ前置される（<https://github.com/embeddings-benchmark/mteb/discussions/3239>，メンテナ回答）．
+- **本研究への帰結**: 分類器の訓練特徴量（`data/classifier_train.jsonl` の質問文）と実行時のクエリ文は**同じ種類のテキスト（1 本の日本語質問）**であり，片側だけに prefix を付けると**訓練時と推論時で入力分布がずれる**．Iter36 の失敗（train/eval のタスク不一致で education_recall 0.4588 → 0.0529）と同型の事故になるため，**`scripts/train_domain_classifier.py`（訓練）と `node.py`（実行時クエリ）の双方に同一 prefix を適用することが必須条件**である．一方，`http_server.py:402-405` が計算する `domain_embedding`（ドメイン名そのものの埋め込み）は「文書側」に相当し，かつ `routing_method=supervised_classifier` の現構成では `estimate_embedding_confidence` 経路に到達しない．**ここには prefix を付けない**（asymmetric 慣行に従い，かつ無変更部分を増やさない）．
+- **リスク（推測）**: 全入力に同一の prefix を付ける運用は「全ベクトルに共通の変形」を加えるため，線形分類器の性能に与える影響が小さい（discordant が伸びない）可能性がある．一方で Qwen3 は last-token pooling かつ attention 経由なので単なる平行移動ではなく，効果が出るとすれば表現の再配置による．**効果ゼロの可能性を織り込み，G2 の n_d が小さい場合の解釈規則を事前登録する**（後述）．
+
+**Q3: Ollama は prefix を自動付与しない．クライアント側で付ける必要がある**
+
+- ollama/ollama issue #16076（2025〜2026）は「`/api/embed` が `task: "query" | "document"` を受け取り，対応する prefix を Ollama 側で自動前置すべきだ．**今日はこれをクライアント側でやるしかなく壊れやすい**」と現状を述べている（＝現行の Ollama は自動付与しない）．
+- 第三者ベンチ（<https://localaimaster.com/blog/best-ollama-embedding-models>）も「**Ollama の `/api/embed` は prefix を一切付けないので自分のコードで前置する必要がある**」と明記．同記事は embeddinggemma では prefix の有無が hit@1 で 33.3% → 87.5% と決定的だった一方，**`qwen3-embedding` では prefix の有無で結果がほぼ同一（1 クエリ差以内）だった**とも報告している（小規模な独自 retrieval 評価，n が小さく一次情報としては弱い）．**本反復の期待値を過大に見積もらない根拠として扱う**．
+- 本リポジトリの実装は `expert_backend.py:140-165` の `OllamaClient.embed()` が **旧 `/api/embeddings`（`prompt` フィールド）**を叩いており，`node.py:202` / `scripts/train_domain_classifier.py:140` / `http_server.py:403-405` のいずれも**生の質問文をそのまま渡している**（prefix なし）．学習時分布とのずれは実在する（コードで確認済み）．
+
+**変更対象コードの特定（Read で確認済み．行番号付き）**
+
+| # | ファイル:行 | 現状 | 本反復での扱い |
+|---|---|---|---|
+| 1 | `config.yaml:4` | `embedding_model: qwen3-embedding:0.6b`（次行から `confidence_threshold`） | 直後に新キー `embedding_instruction:`（英語 1 文．未設定／null で現行動作）を追加 |
+| 2 | `expert_backend.py:140-165` | `async def embed(self, model, text, timeout_s)` が `POST /api/embeddings {"model":..,"prompt": text}`（L150-153） | 省略可能引数 `instruction: str | None = None` を追加し，非 None のとき `prompt` を `f"Instruct: {instruction}\nQuery: {text}"` に置換．**既定 None で全既存呼び出しの動作は不変** |
+| 3 | `node.py:202` | `await ollama_client.embed(config["embedding_model"], query)` | `instruction=config.get("embedding_instruction")` を渡す（**実行時クエリ側．本レバーの本体**） |
+| 4 | `scripts/train_domain_classifier.py:99-142`（実 embed は L140） | `build_training_features()` が `row["query"]` を素で embed | 引数 `instruction: str | None` を追加し L140 へ渡す．CLI に `--embedding-instruction`（`argparse` 定義は L229 付近，`main()` の受け渡しは L197-206・L244-245）を追加（**訓練側．Q2 より必須**） |
+| 5 | `scripts/screen_embedding_models.py:64-66, 73-82, 86-104` | `_CANDIDATES`／`_cache_path()`／`_embed_candidate()` がモデル名のみでキャッシュ名を決める | G1 用に「モデル固定・prefix 文言を変える」比較へ書き換える．**`_cache_path()` に prefix 識別子を必ず含める**（`embcache_qwen3-embedding_0.6b.npy` は prefix なしの Iter79 キャッシュであり，識別子を足さないと prefix 版が無言で旧キャッシュを読み，本リポジトリで 6 回起きた「レバー未到達」事故を再現する） |
+| 6 | `tools/smoke_check.py:165-170` | `config["embedding_model"]` で `SMOKE_QUERY` を素で embed し分類器へ通す | 同じ `embedding_instruction` を使うよう修正（しないと deploy 後の smoke_check が訓練時と違う分布で確率を見ることになる） |
+| 7 | `http_server.py:402-405` | `state.domain_embedding = await ollama_client.embed(state.embedding_model, state.domain)` | **変更しない**（文書側相当・現構成では未到達．Q2 の結論） |
+| 8 | `scripts/evaluate_classifier_calibration.py:395,471,612` / `scripts/evaluate_dispatch_candidate_ranking.py:169` / `scripts/fit_embedding_whitening.py:62` / `scripts/run_central_experiment.py:238` | 素の質問文を embed | **本反復では変更しない**（現行の実験経路に含まれない）．ただし今後これらを prefix 前提の artifact に対して使うと無言で分布がずれるため，`data/MANIFEST.md` に注意を明記する |
+| 9 | `models/domain_classifier.joblib` | Iter79 版（sha256 `21e16ec6...`，`n_features_in_`=1024） | prefix 付き埋め込みで再訓練して差し替え．旧版を `models/domain_classifier_pre_iter81_noprefix.joblib` へ `cp` 退避 |
+
+**次元は 1024 のまま変わらない点に注意**．Iter80 は次元不一致で 500 エラーが出るため「prefix/モデルの取り違え」が必ず表面化したが，**本反復は訓練側と推論側で prefix が食い違っても例外は起きず，静かに精度だけ落ちる**．この非対称性が本反復最大の実験運用上のリスクであり，後述の F1〜F3 で明示的に潰す．
+
+### 計画 (Iter81)
+
+**単一レバー**
+
+`embedding_input_instruction_prefix` = **`qwen3_instruct_classification_prefix`**．`/api/embed`（実体は `/api/embeddings`）へ渡す文字列に instruction prefix を付けること**だけ**を変える．埋め込みモデルは `qwen3-embedding:0.6b` のまま，分類器のハイパラ・訓練データ・評価集合・ルーティング設定は一切変えない（prefix 変更に構造的に付随する分類器の再訓練は，Iter79/80 で確立したとおり別レバーとは数えない）．
+
+**固定する構成（直近の最良構成 = Iter79 基準線）**
+
+`config.yaml` の `embedding_model=qwen3-embedding:0.6b`・`routing_method=supervised_classifier`・`confidence_threshold=0.0`・`dispatch_candidate_threshold=0.0`・`dispatch_top_k=2`・`dispatch_gap_threshold=0.29`・`dispatch_gap_max_k=4`・`aggregation_method`・`judge_model`・`classifier_model_path`・各ノードの `light_model=qwen3.5:4b-q4_K_M`／`expert_model=expert-mesh-*-lora`・`probe_timeout_s`／`dispatch_timeout_s`，`data/dataset.jsonl`（1,915 行，ビット単位で不変），`data/classifier_train.jsonl`（1,427 行，不変．train/eval 重複 72 行は B125(c) のとおり本反復でも触らない），`scripts/train_domain_classifier.py` のモデル定義部（`LogisticRegression(max_iter=1000, class_weight=None)` + `CalibratedClassifierCV(method='temperature')` + `_extract_sample_weights()`），`classifier.py`・`aggregator.py`・`metrics.py`・`build_dataset.py`，`docker-compose.yml`．**ドメイン固有の文言を含む prefix は 2026-09-23 恒久運用ルールに抵触するため不可．task_description は 10 ドメイン共通の英語 1 文に限る**（B127 要レビュー (1)）．
+
+**事前ゲート G1（文言の確定．評価集合を一切見ない）**
+
+`data/classifier_train.jsonl`（1,427 行）**のみ**で 5-fold StratifiedKFold（`random_state=42`，`LogisticRegression(max_iter=1000, class_weight=None)` + `sample_weight`）の accuracy / macro-F1 を測る．`data/dataset.jsonl` は参照しない．全て wafl-ctrl5（`ssh -fNT -L 11499:localhost:11434 wafl-ctrl5`）で行い，wafl500〜509 は使わない（絶対条件 B）．**比較する文言は結果を見る前に次の 4 条件へ固定する**（B127 要レビュー (1) の「2〜3 文言を G1 でオフライン比較し 1 つへ確定，本走は 1 回」に従う）．
+
+| id | `/api/embeddings` へ渡す文字列 | 由来 |
+|---|---|---|
+| **P0** | `{text}`（prefix なし＝現行基準線） | Iter79 構成．`data/embcache_qwen3-embedding_0.6b.npy` を再利用（再計算不要） |
+| **P1** | `Instruct: Given a user question, identify the single academic or professional domain it belongs to\nQuery: {text}` | Qwen 公式 `get_detailed_instruct()` の形式 ＋ 本タスク向けの英語 1 文（公式は「タスクに合わせて英語で書く」ことを推奨） |
+| **P2** | `Instruct: Given a user question, identify the single academic or professional domain it belongs to\nInput: {text}` | arXiv:2606.01074 Appendix A が classification/clustering/STS に用いる `Input:` 形式．P1 との差は末尾ラベルのみ |
+| **P3** | `Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: {text}` | モデル同梱 `config_sentence_transformers.json` の既定 query prompt（文言を自作しない対照） |
+
+- **選定規則（事前登録）**: P1/P2/P3 のうち **CV accuracy が最大のもの**を採用する．同点なら macro-F1，なお同点なら P1 > P2 > P3 の順．**P0（Iter79 実測 cv_accuracy 0.7561 / macro-F1 0.7562．同一手順で再計算して一致を確認する）を 3 つとも下回る場合でも，最良の非 P0 候補で本走は実施する**（config.yml 絶対条件 A．Iter79/80 と同じ規則）．その場合は「改善しない見込み」という着地点予測を本走前に journal へ記録する．
+- **CV の位置づけ**: G1 CV は**値の選定にのみ用い，本走 top1 の予測値としては扱わない**（Iter79/80 で順位の予測には 2 回連続で成功しているが，方針は据え置く）．
+- **キャッシュ命名**: `data/embcache_qwen3-embedding_0.6b__{p1|p2|p3}.npy` のように prefix 識別子を必ず含める（上表 #5）．
+
+**事前ゲート F（レバー発火の直接証拠．本反復では G2 の n_d と分離する）**
+
+本反復は次元が変わらないため，prefix の付け忘れ・食い違いが例外にならない．そこで**発火の証拠を n_d とは独立に 3 つ取る**．
+
+- **F1（埋め込みレベル）**: wafl-ctrl5 で同一の 1 文を prefix 有り／無しで embed し，**コサイン類似度 < 0.999** を確認する（Ollama が prefix を無視していないことの証明．Q3 の裏取り）．満たさなければ以降に進まない．
+- **F2（配布レベル）**: deploy 後，全 10 ノードで `grep '^embedding_instruction:' $REMOTE_DIR/config.yaml` が選定文言と一致し，artifact sha256 が新版と一致すること．
+- **F3（実行時経路レベル）**: 先頭 20 問の予備実行の `selected_domain` を，**同じ 20 問をオフライン replay（新 artifact × prefix 付き埋め込み）した argmax と 20/20 一致**することを確認する（埋め込みは決定論的なので完全一致を要求する．dispatch 失敗行は除外して分母を明示）．**不一致があれば実行時側の prefix 未適用を疑い，本走に進まない．**
+
+**事前ゲート G2（検出力）**
+
+旧 artifact（prefix なし）と新 artifact（選定 prefix）の `predict_proba` argmax を `data/dataset.jsonl` 1,915 行で replay し，discordant 行数 n_d と必要偏り率 `1.96/sqrt(n_d)` を算出する．**n_d ≥ 30 を合格条件**とする．**解釈規則（事前登録）**: Iter79/80 では n_d 一桁を「config 未到達」の既定解釈としたが，**本反復に限り F1〜F2 が合格しているなら「未到達」ではなく「prefix の効果が検出限界未満」と解釈する**（同一 prefix を全入力へ一律付与する運用では変化が小さくなりうる，という Q2 のリスクに対応）．その場合も絶対条件 A に従い本走は実施し，判定は後述の「no_effect」に落とす．
+
+**変更するファイルと箇所**: 上表 #1〜#6・#9（#7 は変更しない，#8 は MANIFEST への注記のみ）．加えて `data/MANIFEST.md` に新 artifact の sha256・生成コマンド・選定 prefix 文言・G1/G2/F の実測値を追記する（`data/`・`models/` は gitignore 対象で MANIFEST が唯一の再現性の担保．B123）．`.claude/research/config.yml` の `levers` は既に本レバーを含むため追記不要．
+
+**レバーを読むコード行と到達条件**
+
+- 設定 → 各ノードの config: `mise.toml` L67 の `rsync config.yaml`．到達確認は **F2**．
+- 設定 → 実行時のクエリ埋め込み: `node.py:202` → `expert_backend.py:140-153`．到達確認は **F3**（次元不一致では落ちないため，予備 20 問の一致で代替する）．
+- 設定 → 訓練特徴量: `scripts/train_domain_classifier.py:140`．到達確認は artifact の sha256 が旧版と異なり，かつ G2 の n_d ≥ 30．
+- 埋め込みモデルの pull・`models/` rsync は Iter79/80 と同一（`mise.toml` L70-74・L96-104）．**新規に pull するモデルは無い．**
+- 実験 → 指標: `metrics.py` 無変更．到達確認は `question_count == 1915` かつ `compound_domain_question_count == 415`．
+
+**実験手順**
+
+1. **前提確認**: `wc -l data/dataset.jsonl` = 1915，`wc -l data/classifier_train.jsonl` = 1427，`models/domain_classifier.joblib` の sha256 が `21e16ec6...`・`n_features_in_`=1024．
+2. **F1**（wafl-ctrl5 のみ）．
+3. **G1**（wafl-ctrl5 のみ）: P0〜P3 の CV を 1 回の実行で全て記録し，選定規則で 1 文言へ確定する．
+4. **再訓練**（wafl-ctrl5 のみ）: 旧 artifact を `models/domain_classifier_pre_iter81_noprefix.joblib` へ退避したうえで `scripts.train_domain_classifier --train-data data/classifier_train.jsonl --embedding-model qwen3-embedding:0.6b --embedding-instruction '<選定文言>' --ollama-host 127.0.0.1 --ollama-port 11499 --output models/domain_classifier.joblib`．`n_features_in_`=1024 と sha256 を記録．
+5. **G2**（wafl-ctrl5 のみ）: 1,915 行の argmax replay で n_d と `1.96/sqrt(n_d)`，新 artifact 単体のオフライン accuracy（着地点予測．判定には使わない）を記録．
+6. `config.yaml` に `embedding_instruction` を追記し，`uv run ruff check`（既存 23 件は pre-existing）と `uv run pytest tests/`（pre-existing 9 件 FAIL は B122．**新規失敗 0 件**）を確認．
+7. `mise run setup`（**直後に `uv sync --extra research` で research extra を復旧．B118 の落とし穴 2**）→ `wc -l data/dataset.jsonl` = 1915 を再確認．
+8. `mise run deploy` → **F2** と smoke_check の pass を確認．
+9. **先頭 20 問の予備実行 → F3**．不一致なら本走に進まず原因を潰す．
+10. **wafl500〜509 で 1,915 問のフルスペック本走を 1 回**（絶対条件 A）．起動直後に `state.json` を `status=waiting_experiment`・`experiment_dir`・`experiment_deadline`（開始時刻 + 150×60 + 600 秒）へ更新．`mise run analyze -- <timestamp>` まで実施（**引数なし実行は `results/iter45_preliminary/` を誤選択する．B118 の落とし穴 1**）．
+11. 指標を「全 1,915 行」「既存 1,600 行部分集合」「複合 415 行」の 3 通りで算出し，Iter79 基準線 `results/20260926_221822/` と id ペアリングで McNemar 検定・per-domain 20 指標の BH 補正を行う．
+
+**仮説（事前登録）**
+
+「Qwen3-Embedding は instruction-aware に訓練されており，現行実装は prefix を一切付けずに学習時分布とずれた入力を与えている．訓練側と推論側の双方へ同一の英語 1 文 instruction を付けると，10 ドメインの線形分離度が上がり，1,915 行本走の `top1_accuracy` が Iter79 基準線 0.753003 から **+1.0pt 以上**改善する（McNemar p<0.05）．ただし公称の 1〜5% は retrieval 中心の値であり，分類での効果量は一次情報が無い．さらに**全入力へ一律に同じ prefix を付ける運用は変化が小さくなりうる**ため，**着地点は 0〜+2pt の範囲，discordant n_d は 50〜300 行**と予測する．」
+
+**成功条件（事前登録．結果を見る前に固定する）**
+
+基準線は Iter79 本走 `results/20260926_221822/`（全 1,915 行: top1=0.753003，single_domain_top1=0.749333，compound_domain_top1=0.766265，compound_domain_set_recall=0.548193，kappa=0.721502，misrouting=0.246997，ECE=0.032745，Brier=0.152849，AUROC=0.777614，fallback=0.0，dispatch_failure=0.000522，mean_duration_ms=2301.4，compound_mean_dispatched_count=1.880，answer_quality=0.569333，end_to_end=0.335770／既存 1,600 行部分集合: top1=0.751250）．
+
+| 区分 | 指標 | 現状 | 合格条件 |
+|---|---|---|---|
+| **F1** | prefix 有／無の埋め込みのコサイン類似度 | — | **< 0.999**（Ollama が prefix を反映していること） |
+| **F2** | 全 10 ノードの `embedding_instruction` と artifact sha256 | — | 全ノードで選定文言・新 sha256 に一致 |
+| **F3** | 予備 20 問の `selected_domain` とオフライン replay の一致 | — | **20/20 一致**（dispatch 失敗行は除外し分母を明記） |
+| **G1** | 5-fold CV accuracy（`classifier_train.jsonl` のみ） | P0 = 0.7561 | P0〜P3 の 4 値を全て記録し，選定規則どおり 1 文言へ確定できること |
+| **G2** | 旧／新 replay の discordant n_d | 参考: Iter80 は 469 | **n_d ≥ 30**．未満でも F1・F2 合格なら「検出限界未満」と解釈し本走は実施 |
+| **主基準（効果）** | 全 1,915 行の `top1_accuracy` | 0.753003 | **McNemar p < 0.05 かつ 点推定 +1.0pt 以上**（n_d=100 想定の MDE `1.96·sqrt(n_d)/1915` ≈ 1.02pt を上回る水準） |
+| **非退行①** | per-domain recall/precision 計 20 指標 | Iter79 実測 | **BH 補正（q=0.05）後の有意退行 0 件** |
+| **非退行②** | `fallback_rate` / `dispatch_failure_rate` | 0.0 / 0.000522 | fallback = 0.0，dispatch_failure ≤ 0.005 |
+| **非退行③** | ECE | 0.032745 | **≤ 0.08** |
+| **非退行④** | `mean_duration_ms` | 2301.4 | **≤ 2761（+20% 以内）**．prefix は入力トークンを 15〜20 トークン増やすだけなので，Iter80 の「2 倍」枠は不要 |
+| 報告のみ | 既存 1,600 行部分集合の top1 | 0.751250 | 判定には用いないが毎回併記 |
+| 報告のみ | `compound_domain_top1` / `single_domain_top1` / `compound_domain_set_recall` / `compound_mean_dispatched_count` | 0.766265 / 0.749333 / 0.548193 / 1.880 | 複合 415 行は埋め込み品質の変化に対する感度が単一行より高い（Iter80 の学び 4） |
+| 報告のみ | `answer_quality_accuracy` / `end_to_end_accuracy` | 0.569333 / 0.335770 | 生成器は不変のため横ばいを期待（3SD=2.6pt のノイズ床を適用） |
+
+**判定規則（事前登録）**
+
+- **adopted**: 主基準（McNemar p<0.05 かつ +1.0pt 以上）と非退行①②③④をすべて満たす．
+- **partial**: 点推定は改善だが p ≥ 0.05 または +1.0pt 未満で，非退行に違反なし．この場合 prefix は**採用せず基準線へ復元**し，レバーは「収束」扱いとする（文言をさらに探すチューニングは B127 要レビュー (1) により行わない）．
+- **no_effect**: G2 の n_d < 30（ただし F1・F2 合格）かつ本走の top1 差が ±0.5pt 以内．**「実験不成立」ではなく「prefix は本構成で効かない」という結論**として記録し，基準線へ復元する．
+- **rejected**: 点推定が低下，または非退行①で有意退行 1 件以上，または非退行②③④のいずれかに違反．
+- **invalid（実験不成立）**: F1・F2・F3 のいずれか不合格，`question_count != 1915`，`compound_domain_question_count != 415`．setup/deploy・実装漏れと解釈する（d0004 §4）．
+- **復元手順（partial / no_effect / rejected 共通）**: `config.yaml` の `embedding_instruction` 行を削除し，`cp models/domain_classifier_pre_iter81_noprefix.joblib models/domain_classifier.joblib`（sha256 `21e16ec6...`，`n_features_in_`=1024）で復元，`mise run deploy` を再実行して全 10 ノードで sha256 と config を確認する．
+
+**期待効果とリスク**
+
+期待効果は「モデルを替えずに，学習時分布へ入力形式を合わせるだけで分離度を取り戻す」ことに尽きる．VRAM を増やさないため Iter80 の G0 制約に抵触しない．リスクは 2 つで，(1) **効果がゼロに近い可能性**（公称 1〜5% は retrieval 側の値であり，第三者ベンチでも qwen3-embedding は prefix 有無でほぼ同一だったと報告されている），(2) **訓練側と推論側で prefix が食い違っても例外が出ず静かに劣化する**こと．(1) は G1・G2 で本走前に数値化し，(2) は F1〜F3 で潰す．
+
+### 実験 (Iter81)
+
+事前登録した計画どおりに実装・実験を実施した．判定は行っていない（分析・考察フェーズの担当）．
+
+**変更したファイル**: `expert_backend.py`（`OllamaClient.embed()` に `instruction: str | None = None` を追加し，非 None のとき `prompt = f"Instruct: {instruction}\nQuery: {text}"`．既定 None で既存呼び出しは不変），`node.py:202`（`instruction=config.get("embedding_instruction")` を渡す），`scripts/train_domain_classifier.py`（`build_training_features()` / `_train_and_save()` に `instruction` 引数，CLI `--embedding-instruction`），`scripts/screen_embedding_models.py`（prefix 文言比較へ全面書き換え．`_cache_path()` に `__p1`/`__p2`/`__p3` の識別子を含める），`tools/smoke_check.py:169-171`，`config.yaml`（新キー `embedding_instruction`），`data/MANIFEST.md`（Iter81 節）．`http_server.py:402-405` は計画どおり変更していない．`models/domain_classifier.joblib` は prefix 付きで再訓練（sha256 `56d5a882ec8e...`），旧版を `models/domain_classifier_pre_iter81_noprefix.joblib`（sha256 `21e16ec6...`）へ退避した．
+
+**lint / テスト**: `uv run ruff check` 23 件（実装前と同数．pre-existing），`uv run pytest tests/` 9 failed / 306 passed（`test_build_dataset.py` の 9 件は B122 の既知失敗で実装前後同一）．**新規失敗 0 件**．
+
+**ゲート実測（すべて PASS）**
+
+| ゲート | 実測 | 判定 |
+|---|---|---|
+| F1（prefix 有無のコサイン） | 0.7674 < 0.999 | PASS |
+| G1（`classifier_train.jsonl` 1,427 行のみ 5-fold CV） | P0=0.756123 / **P1=0.771523（最良，採用）** / P2=0.766610 / P3=0.754720 | PASS |
+| G2（1,915 行 argmax replay の discordant） | n_d=276 ≥ 30 | PASS |
+| F2（deploy 後 全 10 ノード） | `embedding_instruction` 文言・artifact sha256 `56d5a882ec8e...` 全ノード一致 | PASS |
+| F3（先頭 20 問 予備実行 vs replay） | `selected_domain` 20/20 一致，dispatch 失敗 0 件 | PASS |
+
+採用した instruction 文言（P1）は `Given a user question, identify the single academic or professional domain it belongs to`．
+
+**本走**: `results/20260927_024644/`．wafl500〜509 で 1,915 問フルスペックを 1 回．`mise run analyze -- 20260927_024644` 実施済み．基準線は `results/20260926_221822/`（Iter79）．
+
+| 指標 | 基準線 | Iter81 | 差 |
+|---|---|---|---|
+| **全 1,915 行 top1_accuracy** | 0.753003 | **0.789556** | **+3.655pt**（McNemar chi2=25.5968, p=4.207e-7, discordant 58/128） |
+| 既存 1,600 行部分集合 top1 | 0.751250 | 0.781250 | +3.000pt |
+| 複合 415 行 top1 | 0.766265 | 0.843373 | +7.711pt |
+| single_domain_top1 | 0.749333 | 0.774667 | +2.533pt |
+| compound_domain_set_recall | 0.548193 | 0.526506 | -2.169pt |
+| compound_mean_dispatched_count | 1.880 | 1.494 | -0.386 |
+| fallback_rate | 0.0 | 0.0 | 0 |
+| dispatch_failure_rate | 0.000522 | 0.000522 | 0 |
+| ECE | 0.032745 | 0.030951 | -0.001794 |
+| mean_duration_ms | 2301.4 | 2200.7 | -100.7 |
+| answer_quality_accuracy | 0.569333 | 0.580000 | +1.067pt |
+| end_to_end_accuracy | 0.335770 | 0.350392 | +1.462pt |
+
+**per-domain recall/precision 計 20 指標（BH 補正 q=0.05）**: 有意差 3 件．computer_science_recall 0.7273→0.8528（p≈4.93e-7，改善），natural_science_recall 0.5931→0.6623（p=0.004586，改善），**medical_recall 0.7842→0.7178（p=0.003264，悪化）**．他 17 指標は有意差なし．
+
+**申し送り 1（要検証）**: 本反復開始時の実機構成は `embedding_model=qwen3-embedding:0.6b`・artifact sha256 `21e16ec6...` であり，rc-executor は「これが MANIFEST 上 Iter80 で adopted と記録されていた bge-m3 版（sha256 `37d71b63...`）と一致しない」と報告した．**ただし backlog B127 では Iter80 の判定は `rejected` で，基準線（`21e16ec6...`）への復元を実施したと記録されている**ため，MANIFEST 側の記述が judgment と食い違っている可能性が高い．どちらが誤りかは本反復のスコープ外として MANIFEST に注記のみ残してある．分析フェーズで確認すること．
+
+**申し送り 2（分析フェーズで確認済み）**: wafl500 上に F3 検証用の空ディレクトリ `~/workspace/ktakahashi/expert-mesh/results/iter81_preflight`（root 所有）が残存している．空で無害だが削除に sudo が必要なため放置した．
+
+### Iteration 81 実行済み
+
+**変更**: 単一レバー `embedding_input_instruction_prefix` = `qwen3_instruct_classification_prefix`．埋め込みモデル（`qwen3-embedding:0.6b`）・分類器のハイパラ・訓練データ・評価集合・ルーティング設定を固定したまま，`/api/embeddings` へ渡す文字列を `Instruct: Given a user question, identify the single academic or professional domain it belongs to\nQuery: {text}`（G1 で 4 候補から選定した P1）へ変え，訓練側（`scripts/train_domain_classifier.py`）と実行時クエリ側（`node.py:202`）の双方に同一 prefix を適用した．
+
+**結果（ノイズか信号か）**: 全 1,915 行 top1 **0.753003 → 0.789556（+3.655pt）**．ルーティング系は決定論的でノイズ床を適用しない系だが（config.yml success_criteria (5)），それでも McNemar chi2=25.5968・**p=4.207e-7**（discordant 186 行の内訳 58 悪化 / 128 改善）であり，事前登録の MDE（n_d=100 想定で約 1.02pt）を 3.6 倍上回る．**ノイズではなく明確な信号**である．複合 415 行 top1 +7.71pt，single_domain_top1 +2.53pt，ECE -0.0018，`mean_duration_ms` -100.7（prefix によるトークン増は速度に響かなかった），fallback/dispatch_failure 不変．answer_quality +1.07pt・end_to_end +1.46pt は 3SD=2.6pt のノイズ床内で判定しない．ゲート F1/F2/F3・G1・G2 は全 PASS で，実験は成立している（invalid ではない）．
+
+**判定: rejected（事前登録の判定規則どおり）**．規則は「点推定が低下，**または非退行①（per-domain 20 指標の BH 補正後の有意退行 0 件）に 1 件以上抵触**，または非退行②③④に違反」を rejected と定めている．per-domain 20 指標の BH 補正後の有意差は 3 件で，うち **medical_recall 0.7842 → 0.7178（p=0.003264）が悪化方向**であるため，主基準（+1.0pt 以上かつ p<0.05）を大幅に満たしていても規則上 rejected 以外の判定は取れない（partial・no_effect はいずれも「非退行に違反なし」または「n_d<30 かつ ±0.5pt 以内」を要件とし，本結果はどちらにも該当しない）．**結果を見てから規則を読み替えないという事前登録の趣旨に従い，復元を実施した**: `config.yaml` の `embedding_instruction` 行を削除，`cp models/domain_classifier_pre_iter81_noprefix.joblib models/domain_classifier.joblib`（sha256 `21e16ec6...`），`mise run deploy`．全 10 ノードで `config.yaml` のハッシュ一致（smoke_check）・`embedding_instruction` 不在・artifact `21e16ec6...` を確認し，probe も pass．
+
+**学び 1（送出数が減った構造．事前の仮説は支持された）**: `compound_domain_set_recall` が 0.548193 → 0.526506 と下がり `compound_mean_dispatched_count` が 1.880 → 1.494 に減った原因は，**prefix により確信度分布が鋭くなり，`dispatch_gap_threshold=0.29` による 2 件目以降の送出が起きにくくなったこと**である．`results/20260927_024644/` の `probe_candidates` を基準線と id ペアで比較すると，複合 415 行の rank1−rank2 gap は平均 0.4769 → 0.5764（中央値 0.4449 → 0.6075），**gap < 0.29 の行の割合は 33.49% → 20.48%**，rank1 confidence 平均は 0.6510 → 0.7239 だった．送出内訳も「1 件送出で 1 ドメイン的中」が 236 → 296 行へ増え，「4 件送出で 2 ドメイン的中」が 66 → 46 行へ減っている．**送出予算を揃えると逆転する**: 同じ `probe_candidates` に gap 閾値を掃引して再現すると，新構成は gt=0.40 で mean_k=1.933・set_recall **0.5928** となり，基準線の gt=0.29（mean_k=1.880・0.5482）を **+4.46pt 上回る**．つまり set_recall の低下は埋め込み品質の劣化ではなく，**固定閾値 0.29 が新しい確信度スケールに対して相対的にきつくなったことの帰結**である（gap 閾値は確信度分布のスケールに依存するハイパラであり，埋め込みを変えたら再較正が要る，という一般則）．
+
+**学び 2（medical 退行の正体は「rank 1 → rank 2 の入れ替わり」）**: `metrics.py` の per-domain recall は `selected_domain`（= 固定 top-1）で測る定義であり，実測でも新構成の固定 top-1 medical recall は 0.7178 で journal 記載値と一致する．medical を含む 241 行のうち **23 行が medical を取りこぼし，6 行が新たに取れた**．取りこぼした 23 行で新 artifact の medical の順位を見ると **rank 2 が 19 行，rank 3 が 3 行，rank 4 が 1 行**で，**固定 top-2 で測れば medical recall は 0.9046 → 0.8963 とほぼ不変**（top-3 では 0.9461 → 0.9544 と改善）．吸われた先は education 8 行・business_economics 6 行・computer_science 5 行・history_culture 2 行・natural_science 1 行・social_science 1 行で，特定 1 ドメインへの系統的な混同ではない．**medical の信号が失われたのではなく，prefix が「学術/専門ドメインの同定」という instruction に沿って空間を再配置した結果，medical と隣接ドメインの相対順位が僅差で入れ替わった**と解釈するのが妥当である．なお 2026-09-23 恒久運用ルールにより，medical 固有の閾値・intercept・訓練データ調整による是正は**提案しない**（次レバーは 10 ドメイン共通の特徴量設計で対処する）．
+
+**学び 3（記録の一貫性．申し送り 1 への回答）**: **誤っていたのは `data/MANIFEST.md` の方**である．Iteration 80（`bge_m3`）の判定は journal「Iteration 80 実行済み」節・backlog B127 のいずれも **rejected**（top1 -3.03pt，BH 補正後の有意退行 2 件）で，基準線 `21e16ec6...` への復元まで実施済みと記録されている．MANIFEST だけが Iteration 80 の**実装フェーズ時点の記述**（生成コマンドの `--embedding-model bge-m3`，「Iteration 80 で採用されたはずの bge-m3」）のまま更新されず，あたかも adopted であったかのように読めていた．本フェーズで MANIFEST を訂正した（生成コマンドを `qwen3-embedding:0.6b` へ戻し，訂正の経緯を明記）．**教訓: MANIFEST は実装フェーズで先に書かれるため，rejected で復元した反復では分析フェーズが必ず MANIFEST を巻き戻す責任を負う**（journal/backlog は判定を書くが MANIFEST は書かない，という非対称が今回の食い違いを生んだ）．
+
+**学び 4（実験設計への反省．次レバーへ直結）**: 本反復は「per-domain の非退行を本走後にしか確認していない」ために，1 回の 1,915 問本走（約 100 分 + 10 ノード）を rejected で失った．**per-domain 20 指標の BH 補正は分類器 artifact の argmax replay（決定論的・オフライン）で本走前に完全に予測できる**（`metrics.py` の `compute_domain_recall_mcnemar_test` 等をそのまま流用可能）．Iter79/80/81 で G1（CV）→ G2（discordant n_d）までは型化できていたが，**G2 に per-domain 非退行の事前予測を足す（G2'）**のが次反復以降の標準手順である．
+
+**学び 5（要人間判断）**: 「全体 +3.655pt（p=4.2e-7）を，1 ドメインの recall 退行 1 件で棄却する」という非退行条件①の設計自体に，研究方針として再考の余地がある．ただし判定規則の改定は結果を見てからの事後変更であり，かつ研究の結論に関わる不可逆な方針変更のため，**本フェーズでは規則を変えず rejected を確定させ，規則設計の是非は人間判断に委ねる**（backlog B128 要レビュー）．
+
+**次の一手**: 新レバー **`embedding_view_concatenation` = `prefix_and_noprefix_concat`**（`.claude/research/config.yml` の `levers` 末尾へ追記済み）．学び 2 の「prefix 有り／無しは相補的で，medical は prefix 版でも rank 2 に残っている」という実測を根拠に，2 つのビューを連結した 2048 次元を分類器の特徴量とし，学び 4 の G2'（本走前の per-domain 非退行予測）を事前ゲートに組み込む．
+
+---
+
 ## Iteration 80: 埋め込みモデルのスケールアップ（qwen3-embedding:0.6b → 4b）
 
 ### 調査 (Iter80)
@@ -414,236 +620,6 @@ McNemar（連続性補正あり，自前再計算）: 全 1,915 行で a_only(�
 2. **公称ベンチマークの選び方が判定を左右する**．config.yml の lever note は MTEB multilingual 平均（nomic 62.28 vs qwen3 64.33，差 +2.05pt）を根拠にしていたが，実測は +18.50pt（CV）/ +16.34pt（本走）だった．一方，調査で見つけた JMTEB Classification は「qwen3-0.6b 66.09 は multilingual-e5-large 72.89 に劣る」と示しており，この数字だけを見ると着手を見送りかねなかった．**どちらの公称値も本タスクの効果量を予測できていない**．B124 で G1 を挟む判断をしたことが，この不確実性をコスト数分で解消した．公称ベンチは候補を絞る道具であって，採否の根拠にはならない．
 3. **効果が大きいレバーほど，二次効果が別のハイパラを陳腐化させる**．確信度分布が鋭くなったことで `dispatch_gap_threshold=0.29`（Iter7x 世代に nomic の分布で調整した値）の実効が変わり，複合設問の平均送出数が 2.506→1.880 へ落ちた．**過去に調整したハイパラは，特徴量を入れ替えた時点で「調整済み」ではなくなる**．今回は結果的に set_recall も改善したため無害だったが，次以降は再調整を独立レバーとして検討する．
 4. **train/eval の重複 0 件という前提は，データを触るたびに再検証が要る**．d0002 §6-E の確認は Iter17 時点のもので，Iter35/36/37 のデータ変更を経て現在 72 行が重複している．データセットを変更するレバーの計画フェーズに，重複チェックを定型作業として組み込むべきである．
-
----
-
-## Iteration 78: 複合設問評価集合の拡充（既存公開データセットの調査を起点に n=300〜400 へ）
-
-### 調査 (Iter78)
-
-B116(2)・config.yml の `compound_eval_set_expansion` note が定める調達順位 (i) 既存公開データセット → (ii) LLM 生成（生成器を rank_2 の合成訓練データ生成器と分離）→ (iii) 人手作成，に従って調査した．問いは 3 つ．**(Q1) 「1 問で 2 ドメインを同時に要する日本語の相談文」に相当する公開データセットは存在するか（出典・発行元・ライセンス・本研究の 10 ドメイン定義との適合性）．(Q2) 存在しない場合，LLM 生成で循環的妥当性を避ける構成は何か．(Q3) 拡充後に必要な件数はいくつか（検出力の実測に基づく見積り）．**
-
-**Q1: 既存公開データセットの調査 — 該当なし（(i) は不成立と判断する）**
-
-tavily-search（`tvly search`，depth=advanced）で日本語・英語の両方から 7 クエリを投げ，加えて Hugging Face Hub を `hf datasets list --search` で 5 クエリ検索した．確認できた候補と，本研究の要件（**1 行が 2 つのドメインラベルを同時に持つ，日本語の自然文相談**）に対する適合性は次のとおり．
-
-| 候補 | 発行元・出典 | ライセンス/入手性 | 10 ドメイン定義との適合性 |
-|---|---|---|---|
-| LegalRikai: Open Benchmark | LegalOn Technologies（2026 公開．<https://legalontech.jp/10193>，HF Hub にデータソース公開） | 公開（詳細条件は要確認） | **不適合**．企業法務タスク（契約書修正等）の単一ドメイン．相談文ではなく指示タスク |
-| lawqa_jp（日本の法令に関する多肢選択式 QA） | デジタル庁 <https://github.com/digital-go-jp/lawqa_jp> | GitHub 公開（星 276） | **不適合**．legal 単独・4 択形式．JMMLU と同型で複合性なし |
-| JMED-LLM（日本語医療 LLM 評価データセット） | 医療 NLP コミュニティ <https://speakerdeck.com/fta98/jmed-llm-...> | 公開 | **不適合**．medical 単独．「医療安全性を医療・法律・倫理の観点で評価」とあるのは**評価観点**であって設問のドメインラベルではない |
-| Yahoo!知恵袋データセット | NII ×ヤフー（2007〜．<https://data.mdsc.hokudai.ac.jp/ne/dataset/mdsc19>） | **申込み・研究利用契約が必要**（オープンライセンスではない） | 自然文相談という点だけは合致するが，**ドメインラベルが付与されていない**．ラベル付けを自前で行うなら結局 (ii)/(iii) と同じ作業量．入手に契約手続きの待ちが入り単一イテレーションで完結しない |
-| 国民生活センター 相談事例 / PIO-NET | 国民生活センター <https://www.kokusen.go.jp/category/jirei.html> | オープンデータは**窓口一覧 CSV 等に限られ**，相談事例本体は解説記事（HTML）．PIO-NET 生データは外部提供に制約あり | **不適合**．消費生活相談に偏り，10 ドメインへの写像が business_economics/legal へ集中する |
-| RouterArena | Lu et al., arXiv:2510.00202（ICLR 2026）<https://arxiv.org/abs/2510.00202>，HF `RouteWorks/RouterArena` | 公開（CC BY 4.0 の論文，データセットは HF 公開） | **不適合**．8,400 クエリ・9 トップレベルドメイン・44 カテゴリだが **英語**，かつ **1 クエリ 1 ドメインの単一ラベル**（既存 23 データセットからのサンプリングで構成）．ルータ評価という目的は近いが複合設問ではない |
-| RouterBench / RouterEval / LLMRouterBench | Hu et al. ICML 2024（<https://openreview.net/forum?id=IVXmV8Uxwh>），MilkThink-Lab/RouterEval 等 | 公開 | **不適合**．いずれも「どのモデルへ送るか」のモデル選択ベンチマークで，英語・単一ラベル・ドメイン横断設問ではない |
-
-**結論**: 「日本語」「自然文の実務相談」「1 問に 2 つの専門ドメインラベル」の 3 条件を同時に満たす公開データセットは見つからなかった．司法試験過去問・医事法制の判例解説の類も，商用予備校サイトの有償教材か，判例データベース（出版社との契約が前提．JED2022 山田「日本語判決書を用いたデータセットの構築」<https://jedworkshop.github.io/jed2022/materials/jed2022_c-4_%E5%B1%B1%E7%94%B0.pdf> が「判例データベースはデータベースの著作物として保護され，使用には出版社との交渉・契約が前提」と明記）であり，本研究でそのまま再配布できるライセンスのものは確認できなかった．**したがって (i) `existing_public_dataset` は不成立とし，(ii) へ落とす．**（断定は避けるべき点として，調査は tavily と HF Hub 検索の範囲に限られる．「存在しない」ことの証明ではなく「この探索範囲では見つからなかった」ことの記録である．）
-
-**Q2: LLM 生成における循環的妥当性の回避（(ii) の構成）**
-
-本リポジトリには既に 2 ドメイン同時の日本語相談文を LLM 生成する実績がある（`scripts/generate_multidomain_training_examples.py`，Iter60〜65，rank_2 の多ラベル訓練信号用）．ただしこれは **`config.yaml` の `judge_model`（`schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m`）を生成器に使っている**（同スクリプト docstring L10，`--model` の既定運用）．評価集合をこの生成器で作ると，(a) 訓練側の合成データと評価側が同一分布になる，(b) 軸②の LLM-as-judge（`scripts/evaluate_response_quality.py`，同じ judge_model）が自分の生成物を採点する，という二重の循環が生じる．config.yml の note が要求する「生成モデル・プロンプトの分離」はこの 2 点を断つためのものである．
-
-多ラベルデータ拡張における生成方式の先行知見として，Iter60 の計画が引いた arXiv:2312.11276 は「2 つの単一ラベル文を連結する Concat 方式は意味的にも統語的にも一貫しないため LLM 生成に一貫して劣る」と報告している（同スクリプト docstring に記載）．本反復でも連結方式は採らず，1 文で 2 ドメインの知識を要する相談文を生成させる方式を踏襲する．
-
-wafl-ctrl5 の Ollama に現在存在するモデルは `nomic-embed-text:latest` と `schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` の 2 つだけであることを実機確認した（`docker exec ... ollama list`）．したがって**別系統の生成モデルを 1 つ pull する必要がある**．
-
-**Q3: 必要件数 — 現行 100 行の検出力を実測してから決める**
-
-config.yml は「discordant 15〜19 行」を前提に n=300〜400 を目安としているが，**Iter75 本走と Iter77 本走（education 固有補正撤去という，全体 top1 を +2.0pt 動かした比較的大きなレバー）の複合 100 行を直接突き合わせたところ，`selected_domain` が変わった行はわずか 8 行だった**（全 1,600 行では 100 行）．つまり複合行の discordant 率は π_d ≈ 0.08 で，note の想定（0.15〜0.19）より低い．正誤の discordant はこれ以下になる．
-
-McNemar の検出力（α=0.05 両側）を π_d と n の関数として計算すると次のとおり（`δ_MDE = (z_{0.975}+z_{0.80})·sqrt(π_d/n)`，有意判定に必要な純増減行数 `≈1.96·sqrt(n·π_d)`）．
-
-| 複合行数 n | π_d=0.08 の期待 discordant | 有意に必要な純差（行 / pt） | π_d=0.17 の期待 discordant | 同（行 / pt） |
-|---|---|---|---|---|
-| 100（現状） | 8 | 5.5 行 / **5.5pt**（実際には 8 行中 8-0 でも p=0.008 と綱渡り） | 17 | 8.1 行 / **8.1pt** |
-| 300 | 24 | 9.6 行 / 3.2pt | 51 | 14.0 行 / 4.7pt |
-| **415（本計画）** | 33 | 11.3 行 / **2.7pt** | 71 | 16.5 行 / **4.0pt** |
-
-80% 検出力ベースの MDE も n=100 の 11.6pt（π_d=0.17）/ 7.9pt（π_d=0.08）から，n=415 では 5.7pt / 3.9pt へ縮む．**Iter63〜68 が「判定不能」で潰れた ±3〜4 行（3〜4pt）の変化は，n=415・π_d=0.08 なら 11 行前後の純差が必要なので依然として厳しいが，n=100 では原理的に不可能だった領域（discordant 8 行では ±3 行は絶対に有意にならない）が，少なくとも「一方向に偏れば検出できる」領域に入る．** 過大な期待は置かず，到達点は「複合設問の 4pt 級の差を初めて統計的に語れるようになる」ことと定める．
-
-### 計画 (Iter78)
-
-**単一レバー**
-
-`compound_eval_set_expansion` = **`llm_generated_separate_generator`**（Q1 により (i) は不成立．(iii) 人手作成は 315 件規模では現実的でなく，かつ B116(2) が最終手段と定めている）．評価集合の複合行を **100 行 → 415 行**（45 ドメインペア × 7 件 = 315 行を純追加）へ拡充する．データセット全体は 1,600 行 → **1,915 行**．変更するのは評価データのみで，分類器・埋め込み・`config.yaml`・ルーティングのコードは一切触らない．
-
-**仮説（事前登録）**
-
-「複合行を 415 行へ増やすと，複合サブセットの discordant 行数が現状 8 行（Iter75↔Iter77 の実測）から 30 行以上へ増え，複合設問に関する McNemar 検定の最小有意検出幅が 5.5pt から 3.0pt 前後へ縮む．一方，既存 1,600 行部分集合の指標は Iter77 本走と（dispatch 失敗行を除いて）一致する．」
-
-**固定する構成（単一レバー原則）**
-
-`config.yaml` 全項目（`embedding_model=nomic-embed-text`，`routing_method=supervised_classifier`，`confidence_threshold=0.0`，`dispatch_top_k=2`，`dispatch_gap_threshold=0.29`／`dispatch_gap_max_k=4`，`aggregation_method=max_confidence`，`judge_model`），`models/domain_classifier.joblib`（Iter77 で再生成した artifact をそのまま使う．再訓練しない），`data/classifier_train.jsonl`（1,427 件，無変更），`build_dataset.py` の JMMLU 単一ドメイン行 1,500 件（`_DOMAIN_TASK_MAP`・サンプリング seed とも無変更），既存 `_COMPOUND_QUESTIONS` 100 件（本文・順序・id をビット単位で保持），`classifier.py` / `http_server.py` / `aggregator.py` / `node.py` / `metrics.py`．
-
-**変更するファイルと箇所**
-
-1. `scripts/generate_compound_eval_questions.py`（**新規**）: 45 ペア（10 ドメインから 2 つ選ぶ全組合せ）ごとに日本語相談文を生成する．`scripts/generate_multidomain_training_examples.py` を **import しない・プロンプト文言を流用しない**（独立に書き下ろす）．生成中に `build_dataset._COMPOUND_QUESTIONS` を読まない（近重複監査のモードでのみ局所 import する．Iter60 の leak guard と同じ設計）．
-2. `data/compound_questions_generated.jsonl`（**新規・コミット対象**）: 生成・フィルタ後に採択した 315 件（`{query, expected_domains, pair, generator_model, generated_at}`）．本走のたびに再生成しない（`mise run setup` が `build_dataset.py` を毎回呼ぶため，生成結果はファイルとして固定しないと評価集合が非決定になる）．
-3. `build_dataset.py`: `_load_generated_compound_questions(path)` を追加し，`_build_rows()` の `_COMPOUND_QUESTIONS` ループ（L1147-1155）の**後**に追加行を append する．id は `compound-101` 以降の連番（既存 `compound-001`〜`compound-100` の id と本文は不変）．ファイルが無い場合は従来どおり 1,600 行を返す（テスト互換）．
-4. `tests/test_build_dataset.py`: 「拡充後も既存 100 行の id・本文・`expected_domains` が完全一致する」「追加行がすべて `is_compound=True` かつ `len(expected_domains)==2`」「id の重複が無い」を固定する回帰テストを追加．
-
-**レバーを読むコード行と到達条件（d0004 §4 の再発防止．同型の失敗 6 回の教訓）**
-
-- 生成 → データ化: `data/compound_questions_generated.jsonl` を `build_dataset.py:_build_rows()` の新規ブロックが読む．到達条件は `mise.toml` L31 `uv run python build_dataset.py --output data/dataset.jsonl`（`mise run setup` 内）が実行されること．**`mise run setup` を省略すると dataset.jsonl が 1,600 行のまま本走してしまうため，setup を必ず実行し，`wc -l data/dataset.jsonl` = 1915 を確認する．**
-- データ → 実験: `mise.toml` L161・L206 が `--dataset data/dataset.jsonl` を `run_experiment.py` へ渡す．dataset.jsonl は Docker イメージに同梱されるため **`mise run deploy` によるイメージ再配布が必須**（Iter22 のデプロイ漏れと同型の失敗を防ぐ．各ノードで `wc -l` を確認する）．
-- 実験 → 指標: `metrics.py` L647-649 の `by_compound[len(r["expected_domains"]) > 1]` が複合行を分離し，`compound_domain_question_count` / `compound_domain_top1_accuracy` を出す．`compute_compound_coverage_metrics()`（L127-194）の `compound_rows` も同じ条件で拾う．**到達確認は `compound_domain_question_count == 415`．**
-- 到達条件はすべて現行構成で満たされる（新しい config キーもスキーマ変更も導入しないため，「設定は変えたがコードに届かない」型の失敗は構造的に起こり得ない）．
-
-**実験手順**
-
-1. **生成（wafl-ctrl5 のみ．絶対条件 B）**: wafl-ctrl5 の Ollama へ judge_model と別系統のモデルを 1 つ pull する（第一候補 `qwen3.5:9b`．pull できない場合は `qwen3.5:14b-q4_K_M` → `gemma3:12b-it-q4_K_M` の順に代替．**必須条件は `schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m` 以外であること**．RTX 3060 12GB に収まる q4 量子化を選ぶ）．`ssh -fNT -L 11499:localhost:11434 wafl-ctrl5` のトンネル経由で 45 ペア × 12 件 = 540 件を生成する．**wafl500〜509 は使わない．**
-2. **フィルタ（決定的・自動）**: (a) 20〜200 字，(b) 4 択マーカー（`A.` `B.` 等）を含まない，(c) 生成文同士・既存 100 行・`data/classifier_train.jsonl`・`data/classifier_train_multidomain*.jsonl` に対する近重複除去（文字 3-gram Jaccard ≥ 0.6 を除外），(d) ドメイン名そのもの（「法律」「医療」等のラベル語の列挙）を含む機械的な文を除外．
-3. **2 ドメイン性の独立検証**: 生成器とは別のモデル（`judge_model` = Swallow 8B）へ「この相談に回答するために必要な専門分野を 10 個の選択肢から 2 つ挙げよ」と問い，**意図した 2 ドメインを順不同で両方挙げた行だけを採択**する．生成器と検証器が別モデルであることが要件（循環回避）．採択率を journal に記録する．ペアごとに 7 件へ切り詰める（不足ペアは追加生成して補う．最終的に 45 ペア × 7 = 315 件）．
-4. **人手スポットレビュー**: ランダム 30 件を実装フェーズが読み，「2 ドメインの知識が本当に両方要るか」を判定．不適合が 6 件（20%）を超えたらプロンプトを見直して再生成する（この閾値は事前登録）．
-5. `build_dataset.py` を改修し，`uv run pytest tests/test_build_dataset.py` と `uv run ruff check` を通す．`mise run setup`（**直後に `uv sync --extra research` で research extra を復旧する．B118 の落とし穴 2**）→ `wc -l data/dataset.jsonl` = 1915 を確認．
-6. **オフラインの検出力検証（wafl-ctrl5）**: 拡充後の 415 複合行について，Iter77 で退避した旧 artifact `models/domain_classifier_pre_iter77_edu_corrected.joblib` と現行 artifact の argmax を比較し，flip 行数を数える．現行 100 行での実測 8 行に対し，415 行での期待値は 33 行．**これが本レバーの主基準の実測値である．**
-7. `mise run deploy` → 先頭 20 問の予備実行（`data/dataset_20.jsonl` 相当）でノード疎通を確認．
-8. **wafl500〜509 で 1,915 問のフルスペック本走を 1 回（絶対条件 A）**．`mise run analyze -- <timestamp>` まで実施（引数なし実行は `results/iter45_preliminary/` を誤選択する．B118 の落とし穴 1）．
-9. 指標を「全 1,915 行」「既存 1,600 行部分集合」「複合 415 行」「新規 315 行」の 4 通りで算出する（`metrics.py --results` に id フィルタを掛けたサブセットを渡す小スクリプトで足りる）．
-
-**実験時間の見積りと `timeout_min`**
-
-Iter77 本走は 1,600 問で約 24 分．問題数比 1.197 倍で約 29 分．過去の最遅実測（Iter27 の 96〜101 分）を基準にしても 115〜121 分で，現行の `experiment.timeout_min: 150` に約 19% の余裕が残る．**したがって config.yml の `timeout_min` は 150 のまま変更しない**（変更すると単一レバー原則の外側で config を触ることにもなる）．ただし本走のポーリングで 130 分を超えた場合は，次イテレーションで 180 への引き上げを backlog へ起票すること．
-
-**成功条件（事前登録）— 主基準は検出力であり top1_accuracy ではない**
-
-基準線は Iter77 本走 `results/20260926_171953/`（top1=0.615625，single_domain_top1=0.629333，compound_domain_top1=0.41，kappa=0.588209，ECE=0.076640，misrouting=0.384375，fallback=0.0，dispatch_failure=0.00125）．
-
-| 区分 | 指標 | 現状 | 合格条件 |
-|---|---|---|---|
-| **主基準①（規模）** | 複合行数 / 全行数 | 100 / 1,600 | **415 / 1,915**．`metrics.py` の `compound_domain_question_count == 415` |
-| **主基準②（検出力）** | 旧/新 artifact replay による複合行の argmax flip 行数 | 8 | **≥ 30 行**（415 行への比例期待値 33 の 9 割）．同時に実測 π̂_d を報告し，McNemar の最小有意検出幅 `1.96·sqrt(n·π̂_d)/n` が **≤ 3.5pt**（現状 5.5pt）になること |
-| **主基準③（純追加）** | 既存 100 行の同一性 | — | id `compound-001`〜`compound-100` の `query`・`expected_domains` が拡充前 dataset.jsonl と**完全一致**（diff 0 バイト）．単一ドメイン 1,500 行も同様に完全一致 |
-| **主基準④（非循環）** | 生成器と judge/rank_2 生成器の分離 | — | 生成モデル ≠ `schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m`．生成スクリプトが `generate_multidomain_training_examples` を import しない．近重複監査で既存 100 行・訓練データとの 3-gram Jaccard ≥ 0.6 の行が **0 件** |
-| **主基準⑤（データ品質）** | 独立検証器の一致率／人手スポットレビュー | — | 採択行は検証器一致 100%（フィルタ条件）．人手 30 件のうち不適合 **≤ 6 件（20%）** |
-| **非退行①** | 1,600 行サブセットの top1_accuracy | 0.615625 | **0.615625 と一致**（ルーティングは決定論的．許容差は dispatch 失敗行に起因する ±0.2pt 以内．ズレたら「拡充の効果」ではなく実行環境の異常を疑う） |
-| **非退行②** | 1,600 行サブセットの single_domain_top1 / 旧 compound_top1 | 0.629333 / 0.41 | 同上（±0.2pt 以内） |
-| **非退行③** | ドメインごとの選択分布 | — | 新規 315 行を除いた per-domain recall/precision 20 指標が Iter77 と一致 |
-| 報告のみ | 全 1,915 行の top1_accuracy・複合 415 行の compound_top1・compound_domain_set_recall | 0.615625 / 0.41 / — | **判定に用いない**（複合行の比率が 6.25%→21.7% へ上がるため全体 top1 は機械的に下がる見込み．混同しないこと） |
-| 報告のみ | 新規 315 行と既存 100 行の compound_top1 の差 | — | 生成由来の系統差の有無を見る参考値．差が 15pt を超える場合は生成分布の偏りとして backlog へ起票 |
-
-- **adopted の定義（本レバー固有）**: 本レバーは精度改善ではなく測定系の整備であるため，**主基準①〜⑤と非退行①〜③をすべて満たせば adopted** とする．top1_accuracy の増減は判定に用いない．
-- **invalid（実験不成立）の判別**: 本走の results.jsonl が 1,600 行のまま，または `compound_domain_question_count` が 100 のままなら，「効果なし」ではなく **`mise run setup`/`deploy` の漏れ**を既定の解釈とする（d0004 §4）．
-- **partial の扱い**: 主基準②（flip ≥ 30 行）だけが未達の場合は，「拡充は完了したが検出力は想定より低い」として `partial` とし，実測 π̂_d から必要 n を再計算して backlog へ残す（さらなる拡充か，複合設問の評価指標自体の見直しかを次反復で判断する）．
-
-**期待効果**
-
-Iter63〜68 の 6 反復と Iter76 の conformal risk control 見送りは，いずれも「複合 100 行では判定できない」ことが理由だった．複合行を 415 行にすることで，以降の複合ドメイン系レバー（`embedding_model_replacement`，`cross_domain_training_data_augmentation`，`dispatch_policy` 系の再訪）が初めて 3〜4pt 級の効果を統計的に語れる土俵に乗る．副次的に，複合行が全体の 21.7% を占めることで，全体 top1 が単一ドメイン行にほぼ支配されていた現状（93.75%）も緩和される．
-
-### 実装・実験 (Iter78)
-
-**実装（差分の要点）**
-
-1. `scripts/generate_compound_eval_questions.py`（新規）: 45 ドメインペア分の日本語相談文を生成する独立スクリプト．`generate_multidomain_training_examples` は import せず，プロンプト文言・ドメイン説明文（`_DOMAIN_PROMPT_HINTS_JA`）を独立に書き下ろした．生成器 `--generator-model` と検証器 `--verifier-model` が同一なら `SystemExit`（循環回避のハード guard）．フィルタは (a) 20〜200 字，(b) 4 択マーカー無し，(c) ドメインラベル語（`_DOMAIN_LABEL_WORDS_JA`）の直接使用無し，(d) 既存 100 行・`classifier_train*.jsonl`・`classifier_train_multidomain*.jsonl` に対する文字 3-gram Jaccard ≥ 0.6 の近重複除外．独立検証は Swallow 8B（`judge_model`）へ「10 分野から 2 つ選べ」と問い，意図した 2 ドメインが順不同で完全一致した行だけを採択する．`build_dataset._COMPOUND_QUESTIONS` の読み込みは `_load_existing_compound_texts()`（近重複監査専用，local import）のみで，生成そのものには一切影響しない（Iter60 の leak guard と同型）．
-2. `data/compound_questions_generated.jsonl`（新規・コミット対象，315 行）: 生成・独立検証・近重複フィルタ後に採択した行．45 ペア × 7 件で固定．
-3. `build_dataset.py`: `_load_generated_compound_questions(path)` を追加し，`_build_rows()` に `generated_compound_questions_path: str | None = None` 引数を新設．`_COMPOUND_QUESTIONS` ループの**後**に，`compound-{101,...,415}` として追加行を append する．デフォルト `None`（未指定なら追加無し，既存呼び出し元・既存テストは無変更）．CLI (`main()`) にのみ `--generated-compound-questions`（既定値 `data/compound_questions_generated.jsonl`）を新設し，`_build_rows()` へ明示的に渡す．これにより `mise run setup` が呼ぶ実プロダクションパスだけが拡張分を読み，`tests/test_build_dataset.py` の既存呼び出し（`_build_rows()` / `write_dataset()` を直接叩く 9 件のフィクスチャテスト）は不変のまま保たれる（単一レバー原則．実行時の到達条件はこの `main()` の 1 引数のみ）．
-4. `tests/test_build_dataset.py`: 5 件追加（`_load_generated_compound_questions` の None/欠損/正常系，`_build_rows` が `generated_compound_questions_path` 未指定なら既存 100 行のみを返すこと，指定時に既存 100 行がバイト一致のまま `compound-101` 以降が追記されること，id 重複が無いこと）．**申し送り**: `tests/fixtures/jmmlu_sample.zip` は Iter36/37 の `education → japanese_civics` 切替に追随しておらず（fixture に `japanese_civics.csv` が無い），本反復と無関係に 9 件が既存失敗している（`git stash -u` で退避しても同数再現，Iter78 変更前から存在）．新規 5 件は `_FIXTURE_DOMAIN_TASK_MAP` の `education` をこの fixture に実在する `sociology` へ差し替えたローカル変数 `_EDUCATION_TASK_FIXED_DOMAIN_TASK_MAP` を使うことでこの pre-existing 破損から独立させた．
-
-検証: 変更 3 ファイルの `uv run ruff check` は PASS．`uv run pytest tests/test_build_dataset.py` は新規 5 件を含む 13 件 PASS，pre-existing 9 件 FAIL（上記と同一原因，本反復による新規失敗 0 件）．
-
-**絶対条件 B（wafl-ctrl5 限定）の遵守**: wafl-ctrl5（192.168.15.10）の Ollama へ `qwen3.5:9b`（6.6GB, q4量子化，RTX 3060 12GB 制約内）を生成器として新規 pull（`judge_model` の Swallow 8B とは別系統）．`ssh -fNT -L 11499:localhost:11434 wafl-ctrl5` のトンネル経由で生成・検証を実行．wafl500〜509 は生成に一切使用していない．
-
-**生成の実行記録**: 第一パスは 45 ペア × 12 件生成 → 検証 → 各ペア 7 件へ切り詰めで 270/315 行（16 ペアが目標未達，生成試行 433 件）．不足 45 行を対象ペアだけに絞った追い上げパス（同じ `generate_all_rows()` を `domains=[d1,d2]` の 2 要素リストで呼ぶだけで対応，コード変更無し，近重複参照に第一パスの採択済みクエリを追加）で全 16 ペアとも過不足なく充足し，315/315 行を確定．生成モデルが `qwen3.5:9b`（thinking モデルで 1 呼出し約 10〜15 秒）かつ Ollama の keep_alive=-1 でも生成器と検証器の 2 モデル（6.6GB+4.9GB＝約11.5GB／12GB）がほぼ VRAM を使い切るため呼出しごとに再ロードが発生し，生成全体（2 パス合計）で実時間**約 78 分**を要した．
-
-**品質確認**:
-- 近重複監査（既存 100 行 + `classifier_train.jsonl` + `classifier_train_multidomain*.jsonl`，計 3,030 件参照）: 315 行すべてで 3-gram Jaccard の最大値 = **0.2288**（≥0.6 の該当 0 件）．生成 315 行どうしの pairwise 近重複も 0 件．
-- 人手スポットレビュー（乱数シード 78 で 30 件抽出，実装フェーズが判定）: 「2 ドメインの知識が本当に両方必要か」という基準で弱い/不適合と判定したのは **5/30（16.7%）**，事前登録の閾値 ≤6/30（20%）以内．弱かった行はいずれも `general` ドメインを含むペア（`business_economics+general` の医療危機混入，`general+mathematics` の「数学ノートを捨てるか」など計算不要な設問，`general+history_culture` の無関係な 2 話混在）で，`general` が抽象的すぎるために生成が単一ドメインへ寄るか無関係な 2 話を継ぎ足す傾向がある，という所見を得た（backlog 起票要，本文末尾参照）．
-
-**setup/deploy 手順**: `mise run setup`（イメージビルド・push 含む）実行後に `wc -l data/dataset.jsonl` = **1915** を確認．直後に `uv sync --extra research` で research extra を復旧（B118 落とし穴 2 の再発防止）．独立検証: git HEAD 版 `build_dataset.py`（`git show HEAD:` で復元）の `_build_rows()` を `generated_compound_questions_path` 無しで実行した 1,600 行と，新版 dataset.jsonl の対応 id（`{domain}-NNN`，`compound-001`〜`100`）を突き合わせ，**query・expected_domains ともに mismatch 0 件**（完全一致）を確認．`mise run deploy` でイメージ再配布（10 ノード）→ 全ノード healthy，smoke_check（git-status/hashes/probe）すべて PASS．各ノードで `docker compose exec app wc -l /app/data/dataset.jsonl` = **1915**（10/10 ノード一致）を確認．
-
-**レバー発火の証拠**: (1) `data/dataset.jsonl` の `compound_domain_question_count` 相当の実カウント = 415（1500 単一 + 415 複合）．(2) 先頭 20 問相当の予備実行（`data/dataset_preview_iter78.jsonl` = 単一 15 問 + `compound-101`〜`105` の新規複合 5 問，イメージを当該ファイル込みで再ビルド・push 後に実行）で `compound-101`〜`105` が実際に評価対象としてルーティングされることを直接確認（`compound-101 -> medical`，`compound-102`〜`105 -> business_economics`）．(3) 本走のログでも `compound-101`〜`415` が問題なく処理され，`completed 1915 questions` で正常終了．
-
-**本走（絶対条件 A，wafl500〜509，1 回）**: `results/20260926_195929/`．`mise run start -- --dataset data/dataset.jsonl --output results.jsonl` を検出後即座に `state.json` を `status=waiting_experiment`，`experiment_dir=results/20260926_195929`，`experiment_deadline=1790429956`（開始時刻 1790420356 + timeout_min 150×60 + マージン 600 秒）に設定して起動．所要時間は実測**約 51 分**（19:59:29 起動 → 20:50 ごろ完了，ログの `completed 1915 questions` 時刻から逆算）．**単一ドメイン区間（739 問）は約 9 分（≈82 問/分）に対し，複合区間（415 問）は約 42 分（≈9.9 問/分，8 倍以上遅い）**．これは今回固定した `dispatch_top_k=2`／`dispatch_gap_threshold=0.29`／`dispatch_gap_max_k=4`（複合行は上位候補の confidence 差が小さくなりやすく，gap policy が 3〜4 ノードへの追加ディスパッチをより頻繁に発火させるため）が原因と推測される（`compound_mean_dispatched_count`＝2.506，metrics.py 出力参照）．推測の域を出ないが，複合行の存在そのものが実行時の分岐に測定可能な影響を与えている点は，主基準①（規模）とは独立の追加的な傍証として記録する．`mise run analyze -- 20260926_195929`（timestamp 明示指定，B118 落とし穴 1 の再発防止）まで実施．ログ全 10 ノードを grep した範囲で言語崩れ・OOM は無し．`dispatch_model_not_ready`（HTTP 500，一時的なノード過負荷）が 3 ノードで散発したが，いずれもリトライで解決し，最終的な `dispatch_failure_rate` は 1/1915（`medical-109`，probe 自体は正常でも実際の dispatch 呼出し 1 件が失敗）のみ．fallback は 0 件．
-
-**取得した機械可読メトリクス（4 通り，`metrics.py` の既存実装をそのまま使用）**
-
-| 区分 | n | top1_accuracy | single_domain_top1 | compound_domain_top1 | compound_domain_set_recall |
-|---|---|---|---|---|---|
-| 全 1,915 行 | 1915 | 0.589556 (Wilson 95%CI [0.567366, 0.611387]) | 0.628667 | 0.448193 | 0.393976 |
-| 既存 1,600 行部分集合 | 1600 | 0.615000 | 0.628667 | 0.410000 | 0.420000 |
-| 複合 415 行 | 415 | 0.448193 | — | 0.448193 | 0.393976 |
-| 新規 315 行のみ | 315 | 0.460317 | — | 0.460317 | 0.385714 |
-
-全 1,915 行の付随指標: kappa=0.587438，misrouting_rate=0.410444，fallback_rate=0.0，dispatch_failure_rate=0.000522，ECE=0.050552（n=1914），Brier=0.206919，AUROC=0.731903，answer_quality_accuracy=0.564（graded n=1500），end_to_end_accuracy=0.287728，mean_duration_ms=2424.68（`mean_dispatch_gen_time_ms`=1997.22 が大半を占める）．
-
-**非退行の統計検証（`metrics.py` 既存関数 `compute_mcnemar_test` / `compute_domain_recall_mcnemar_test` / `compute_domain_precision_fisher_test` / `apply_benjamini_hochberg` をそのまま使用，Iter77 基準線 `results/20260926_171953/` と id ペアリング，id 集合完全一致を確認済み）**:
-
-- 全体 top1（既存 1,600 行部分集合 vs Iter77 基準線）: discordant 2 対 1（計 3 件），chi2=0.0，**p=1.0**．基準線 0.615625 → 本走 0.615000（-0.0625pt，noise 内）．
-- per-domain recall/precision 計 20 指標（10 ドメイン × 2）: 生の discordant はいずれも 0〜2 件，p 値は 0.4795（`natural_science_recall`）を除き全て 1.0．**BH 補正（q=0.05）後の有意退行 0/20**．
-
-**主基準②（検出力）の実測 — 旧/新 artifact の argmax replay（wafl-ctrl5，`scripts/evaluate_classifier_calibration.py` の既存実装をそのまま使用，`--set-construction` 等の conformal オプションは未指定＝素の `predict_proba` argmax）**: `models/domain_classifier_pre_iter77_edu_corrected.joblib`（旧）と `models/domain_classifier.joblib`（現行）をそれぞれ拡充後の 1,915 行データセット全体で再埋め込み・再推論し（embedding は wafl-ctrl5 の `nomic-embed-text` 経由，絶対条件 B 準拠），`selected_domain` の argmax を比較した．
-
-| 区分 | n | flip 行数 | π̂_d（flip率） |
-|---|---|---|---|
-| 複合 415 行全体 | 415 | **19** | 0.045783 |
-| 既存 100 行部分集合 | 100 | 6 | 0.06 |
-| 新規 315 行部分集合 | 315 | 13 | 0.041270 |
-
-McNemar 最小有意検出幅（事前登録式 `1.96·sqrt(n·π̂_d)/n`，n=415, π̂_d=0.045783 を代入）= **2.0587pt**．
-
-**申し送り（本反復スコープ外の所見，backlog 起票用メモ）**:
-1. 既存 100 行部分集合の argmax replay flip 数は本手法（`evaluate_classifier_calibration.py` の素の `predict_proba` argmax，dispatch_top_k・aggregation を経由しない）で 6 行だったのに対し，調査 (Iter78) 節で引用した「Iter75↔Iter77 実測 8 行」は本番 `results.jsonl` の `selected_domain`（Iter77 時点の `dispatch_top_k=1` を経由した実際のルーティング結果）同士の比較であり，測定対象（分類器の argmax 単体 vs パイプライン全体の選択結果）が異なる．今回の 19/415・6/100・13/315 はすべて前者（分類器 argmax 単体）の定義に統一して計測した．
-2. `tests/fixtures/jmmlu_sample.zip` と `_FIXTURE_DOMAIN_TASK_MAP["education"]`（`japanese_civics`）の不一致による 9 件の既存テスト失敗は，Iter36/37 の本番切替（`build_dataset.py` の `education` proxy task 変更）にテストフィクスチャが追随していない，本反復と無関係の pre-existing バグ．修正は本反復のスコープ外（単一レバー原則）だが，次回のテスト保守タスクとして残す．
-3. 人手レビューで判明した「`general` ドメインを含む複合ペアは弱い/無関係な組合せになりやすい」という所見（5/30 の不適合のうち該当 3 件が `general` 絡み）は，`general` の定義が「特定分野に限定されない一般的な話題」で最も抽象的なことに起因すると考えられる．次回複合設問を追加拡充する際は `general` ペアのプロンプトに具体例を追加する等の改善余地がある．
-4. 本走の所要時間は約 51 分（複合行区間が単一行区間の 8 倍以上遅い）であり，`experiment.timeout_min: 150` に対しては十分な余裕（実測は上限の約 34%）があるため，130 分超過時の 180 分への引き上げ提案（config.yml 既存の申し送り）は今回発動しなかった．
-
-### Iteration 78 実行済み
-
-**単一レバー**: `compound_eval_set_expansion` = `llm_generated_separate_generator`．複合評価行を 100 → 415 行（45 ドメインペア × 7 件 = 315 行の純追加），評価集合全体を 1,600 → 1,915 行へ拡充した．分類器・埋め込み・ルーティング実装は一切変更していない（測定系のみの変更）．
-
-**判定: partial**（事前登録の partial 規定「主基準②（flip ≥ 30 行）だけが未達の場合は partial」にそのまま該当する）．**adopted ではない**が，拡充した評価集合そのものは Iter79 以降の標準基準線として常設採用する．
-
-| 事前登録基準 | 結果 | 可否 |
-|---|---|---|
-| ①規模 415/1,915 | 415 / 1,915 | ✅ |
-| ②検出力 flip ≥30 行 | **19 行**（π̂_d=0.045783） | ❌ |
-| ②検出力 最小有意検出幅 ≤3.5pt | **2.0587pt** | ✅ |
-| ③純追加（既存 1,600 行の完全一致） | query・expected_domains とも mismatch 0 件 | ✅ |
-| ④非循環（生成器 ≠ judge_model，近重複 0 件） | 生成器 `qwen3.5:9b`／検証器 Swallow 8B，3-gram Jaccard 最大 0.2288 | ✅ |
-| ⑤品質（人手不適合 ≤6/30） | 5/30（16.7%） | ✅ |
-| 非退行①②③ | 1,600 行サブセット top1=0.615000（基準線 0.615625，-0.0625pt）．McNemar discordant 2:1・p=1.0．per-domain 20 指標の BH 補正後有意退行 0/20 | ✅ |
-
-非退行①の -0.0625pt は「ちょうど 1 行分」であり，本走で唯一の dispatch 失敗行 `medical-109`（`dispatch_failure_rate`=1/1915）で過不足なく説明がつく．ルーティングが決定論的であるという前提は崩れていない．
-
-#### 主基準②の 2 条件が食い違った件 — 事前登録の設計上の誤りを認める
-
-flip 行数（19 < 30，未達）と最小有意検出幅（2.0587pt ≤ 3.5pt，達成）は，**同じ「検出力」を測る 2 つの代理指標のつもりで登録したが，実際には互いに逆方向へ動く量だった**．検出幅は `MDE = 1.96·sqrt(π̂_d/n)` であり，n を固定すると π̂_d が小さいほど機械的に小さくなる．つまり「discordant が少ないほど検出幅が良く見える」という自己矛盾を，事前登録の時点で見落としていた．**pt スケールの検出幅は検出力の妥当な代理指標ではない．** 理由は，π̂_d が小さいとき，検出可能な効果の上限（discordant が全て一方向に倒れた場合の差＝π̂_d そのもの）も同時に縮むためである．今回の実測では検出可能な窓は `[2.06pt, 4.58pt]` しかなく，事前想定（π_d=0.08）の `[2.72pt, 8.0pt]` より明確に狭い．検出幅が「改善」して見えたのは，窓の下端だけを見て上端の縮小を見なかったからである．
-
-検出力を素直に表す量は，**discordant 行数 n_d と，有意判定に必要な一方向偏り率 `1.96/sqrt(n_d)`** である．
-
-| 条件 | n_d | 必要な偏り率 | 80% 検出力に必要な偏り |
-|---|---|---|---|
-| 拡充前（既存 100 行，argmax 定義） | 6 | 0.800 | 6-0 の全会一致でようやく p=0.031．実質検出不能 |
-| **拡充後（415 行，実測）** | **19** | **0.450** | 約 80/20 の分割 |
-| 事前登録の目標（415 行，π_d=0.08 想定） | 33 | 0.341 | 約 74/26 の分割 |
-
-したがって正しい読み方は「flip 行数の条件こそが妥当な代理指標であり，それが未達である」．n_d は 6 → 19 と 3.17 倍に増え，必要偏り率は 0.80 → 0.45 へ下がったので**測定系は実質的に前進した**が，事前登録が目標とした水準には届いていない．**事後に検出幅の側だけを採って adopted とするのは，登録した基準を結果に合わせて選び直す行為なので採らない．** 加えて，仮に目標の 33 行に達していても 80% 検出力には 74/26 の偏りが要る．「n=415 なら 3〜4pt 級を統計的に語れる」という計画フェーズの見通し自体が，pt スケールの検出幅に引きずられた楽観だったと訂正する．
-
-#### π̂_d が想定 0.08 に対し 0.045783 と低かった理由
-
-- **新規 315 行が易しいから，ではない**．新規 315 行の flip 率 0.041270（13/315）と既存 100 行の 0.06（6/100）の差は有意でない（2 標本比率検定 z=0.78, p=0.44）．education を含む複合行の比率も既存 20/100・新規 63/315 と**ともに 20%** で，構成比の偏りも説明にならない．したがって「生成設問はルーティングが安定していて易しい」とは，このデータからは言えない．
-- **真因は π̂_d の定義にある**．π̂_d は評価集合の固有の性質ではなく，**比較する artifact ペアに依存する量**である．今回 π̂_d を測るのに使った Iter77 の artifact ペア（education 固有補正の撤去）は 10 ドメイン中 1 ドメインの決定境界しか動かさない狭いレバーであり，これで測った 0.0458 は**下限側の推定値**である．事前想定 0.08 も，同じ狭いレバー（Iter75↔Iter77）のパイプライン出力から採った値であり，母数が 100 行と小さく（8/100，Wilson 95%CI 約 [0.041, 0.150]）今回の 0.0458 はその CI にほぼ収まっている．つまり 0.08 → 0.0458 の低下自体が，そもそもノイズ幅の範囲内である．
-- 実務的な含意: `embedding_model_replacement` のようにベクトル空間ごと入れ替えるレバーでは flip 率が桁違いに大きくなることが期待できる（Iter39〜43 では fine-tuning の argmax flip rate が「過大」で単一レバー原則と両立しなかったと記録がある）．**「検出力が足りないから評価集合をさらに拡げる」ではなく，「次レバーの artifact ペアで π̂_d を本走前にオフライン実測し，n_d < 30 ならそこで打ち手を考え直す」** が正しい順序である（Iter79 の計画へ申し送り）．
-- 力任せの拡充は割に合わない．π̂_d=0.0458 のまま n_d=30 を得るには複合行 655 行，n_d=100 には 2,184 行が要る．後者は下記の実行時間見積りで約 240 分となり `timeout_min: 150` を超える．
-
-#### 複合行 top1 = 0.448193 の解釈
-
-事前登録どおり全 1,915 行の top1（0.589556）は判定に用いない（複合行比率が 6.25% → 21.7% に上がれば機械的に下がる）．参考値として，新規 315 行の compound_top1=0.460317 は既存 100 行の 0.410000 を 5.03pt 上回るが有意ではなく（z=0.89, p=0.37），事前登録の「差が 15pt を超えたら生成分布の偏りとして起票」にも該当しない．生成設問が既存の手作り設問と系統的に異なる難易度である証拠は得られなかった．なお既存 100 行の compound_top1 が基準線と小数点まで一致（0.41）したことは，純追加が既存行を汚していないことの追加的な裏付けである．
-
-#### 想定外事象: 複合行区間が単一行区間より約 8 倍遅い
-
-単一 739 問区間 ≈82 問/分に対し複合 415 問区間 ≈9.9 問/分．`compound_mean_dispatched_count`=2.506 であり，複合行は上位候補の confidence 差が小さく `dispatch_gap_threshold=0.29`／`dispatch_gap_max_k=4` の gap policy が 3〜4 ノードへの追加 dispatch を頻繁に発火させることが原因と推測される（推測の域は出ない）．**今後の実行時間は概ね `18 分 + n_compound/9.9 分` で見積もれる**：n_compound=415 で 60 分（実測 51 分），655 で約 84 分，1,000 で約 119 分（`timeout_min: 150` の 8 割），2,184 で約 240 分（超過）．**複合行の拡充は 1,000 行あたりが現行タイムアウトでの実用上限**であり，それ以上は `timeout_min` の引き上げか dispatch 並列度の見直しとセットでしか成立しない．言語崩れ・OOM・fallback は 0 件．
-
-#### 学び
-
-1. **検出力の事前登録は，pt スケールの MDE ではなく discordant 行数 n_d と必要偏り率 `1.96/sqrt(n_d)` で書くこと．** pt スケールの MDE は π̂_d が下がると自動的に良く見えるうえ，検出可能な効果の上限が同時に縮むことを隠す．今回はこの隠れた自己矛盾を，2 条件を並べて登録したおかげで検出できた（結果的に，複数の代理指標を併記する登録法には意味があった）．
-2. **π̂_d はレバー依存の量であり，評価集合の属性ではない．** 狭いレバー（1 ドメインのみを動かす）で測った π̂_d を，広いレバーの検出力設計に流用してはいけない．評価集合サイズ n の設計は「どのレバーを検出したいか」とセットでのみ意味を持つ．
-3. 測定系の整備を目的とする反復では，非退行条件（既存部分集合のバイト一致・指標一致）が最重要の防衛線になる．今回それが 1 行のずれまで dispatch 失敗で説明しきれたことで，「拡充の効果」と「実行環境の異常」を混同せずに済んだ．
-4. 実行時間は問題数に比例しない．複合行は gap policy 経由で単一行の 8 倍の実時間を食うため，評価集合の設計時には行数ではなく「行の種別ごとの単価」で見積もる必要がある．
-
-#### 次の一手
-
-複合評価集合の拡充（research_frontier 最上位）は規模・純追加・非循環・品質の 4 条件を満たして完了とし，B115(3) の優先順位に従い次レバーは **`embedding_model_replacement` = `qwen3_embedding_0.6b`**（B116(3) によりユーザー確認不要で自律着手可）．次イテレーション名は「埋め込みモデルの差し替え（nomic-embed-text → qwen3-embedding:0.6b）」．基準線は本走 `results/20260926_195929/`（1,600 行サブセット top1=0.615000／全 1,915 行 top1=0.589556）とし，両方を毎回併記する（B119 要レビュー (c) への回答）．詳細と申し送りは backlog B120〜B123．
 
 ---
 

@@ -15,6 +15,62 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B128 [auto-decided 2026-09-27] Iter81 の判定（rejected）と復元，MANIFEST の訂正，次レバー `embedding_view_concatenation` の起票
+
+- **状況**: Iter81（`embedding_input_instruction_prefix=qwen3_instruct_classification_prefix`）は
+  主基準を大幅に満たした（全 1,915 行 top1 **0.753003 → 0.789556，+3.655pt，McNemar
+  chi2=25.5968 / p=4.207e-7，discordant 58 悪化 /128 改善**．複合 415 行 +7.71pt，ECE -0.0018，
+  `mean_duration_ms` -100.7）．**しかし事前登録の非退行条件①（per-domain 20 指標の BH 補正後の
+  有意退行 0 件）に medical_recall 0.7842 → 0.7178（p=0.003264）が抵触した**．ゲート
+  F1（cos=0.7674）/F2/F3（20 件一致）/G1（P1=0.771523 最良）/G2（n_d=276）は全 PASS で実験は成立．
+  判定に裁量は無く，裁量が要ったのは (a) 復元の実施，(b) 次レバーの選定，(c) MANIFEST と
+  B127 の食い違いの是正方向，の 3 点である．
+- **自動選択**:
+  - (a) **判定 `rejected`，復元を実施した**．事前登録の判定規則は「非退行①で有意退行 1 件以上」を
+    rejected と定めており，partial（非退行に違反なしが要件）・no_effect（n_d<30 かつ ±0.5pt 以内が
+    要件）のいずれにも該当しない．**結果を見てから規則を読み替えないという事前登録の趣旨に従った**．
+    `config.yaml` から `embedding_instruction` 行を削除，
+    `cp models/domain_classifier_pre_iter81_noprefix.joblib models/domain_classifier.joblib`
+    （sha256 `21e16ec6...`），`mise run deploy` 再実行．全 10 ノードで `config.yaml` ハッシュ一致・
+    `embedding_instruction` 不在・artifact `21e16ec6...`・smoke_check（hashes/probe）pass を確認．
+    **prefix 版 artifact（`56d5a882...`）はこの復元で上書きされ現存しない**が，P1 文言と
+    キャッシュ `data/embcache_qwen3-embedding_0.6b__p1.npy` が残っており MANIFEST の再訓練コマンドで
+    決定論的に再生成できる．`expert_backend.py` / `node.py` / `train_domain_classifier.py` の
+    `instruction` 対応コード自体は残置した（既定 None で動作不変．次レバーで再利用する）．
+  - (b) **次イテレーションのレバー**: 新設した **`embedding_view_concatenation`** =
+    **`prefix_and_noprefix_concat`**（`.claude/research/config.yml` の `levers` 末尾へ追記済み）．
+    **次イテレーションの `iteration_name`**:
+    **「prefix 有無の埋め込み連結（2048 次元）による medical 退行の回避」**．
+  - (c) **`data/MANIFEST.md` 側を訂正した**（journal 申し送り 1 への回答）．Iter80 の判定は
+    journal・backlog B127 とも `rejected`＋復元済みで一致しており，**MANIFEST だけが Iter80 の
+    実装フェーズ時点の記述（生成コマンドが `--embedding-model bge-m3`，「Iter80 で採用されたはずの
+    bge-m3」）のまま残っていた**．生成コマンドを `qwen3-embedding:0.6b`（prefix なし）へ戻し，
+    現行 artifact 行を `21e16ec6...` に更新し，訂正の経緯と Iter81 の判定・復元も追記した．
+- **根拠**:
+  - (b) の選定根拠は Iter81 の生データ分析（journal 学び 2）．medical を取りこぼした 23 行のうち
+    **19 行で medical は新 artifact の rank 2 に留まり，固定 top-2 なら medical recall は
+    0.9046 → 0.8963 とほぼ不変**だった．prefix は medical の信号を消したのではなく順位を僅差で
+    入れ替えただけであり，prefix 有り／無しの 2 ビューは相補的と考えられる．連結は 10 ドメイン
+    共通の特徴量設計であり，2026-09-23 恒久ルール（ドメイン固有の後付け補正の禁止）にも抵触しない．
+  - 併せて **G2'（本走前に argmax replay で per-domain 20 指標の BH 補正を予測する）** を次反復の
+    事前ゲートへ追加する．Iter81 は per-domain 非退行を本走後にしか見ておらず，そのために
+    1,915 問本走 1 回を失った．replay は決定論的で `metrics.py` の検定関数を流用できる．
+  - 対案として検討し見送ったもの: (i) prefix 文言の再探索（P2/P3）は B127 要レビュー (1) が
+    明示的に禁じている．(ii) `dispatch_gap_threshold` の再較正は，学び 1 のとおり基準線へ復元した
+    今は確信度スケールも元に戻るため単独では効かず，かつ top1（主要指標）は gap 閾値に依存しない．
+    連結レバーの採否が決まってから改めて検討する．
+- **要レビュー（人間判断を求める）**: **非退行条件①の設計の是非**．「全体 top1 +3.655pt
+  （p=4.2e-7）という研究上最大級の改善を，per-domain 20 指標中 1 件の退行（medical -6.64pt，
+  実体は rank 1→2 の入れ替わり 19 行）を理由に棄却する」のが妥当かどうかは，研究の評価方針に
+  関わる不可逆な判断のため自動では変更しなかった．選択肢: **(A1)** 現行どおり厳格な AND 条件を
+  維持する（判定の一貫性を守れるが，全体最良の構成を捨て続けるおそれがある）．
+  **(A2) (Recommended)** 非退行①を「BH 補正後の有意退行が 1 件以内，かつその退行幅が全体改善幅を
+  下回る」等へ緩和し，**Iter81 の prefix 構成を再評価する**（実機での再現は MANIFEST の再訓練
+  コマンドと `mise run deploy` で 30 分程度．ただし規則の事後変更に当たるため，改定は次反復以降へ
+  前向きに適用するのが筋）．**(A3)** 規則は維持しつつ，per-domain 退行を許容するかどうかを
+  「下流の answer_quality/end_to_end が退行しないこと」で判断する条件へ置き換える．
+  確認箇所: journal.md「Iteration 81 実行済み」学び 2・学び 5．
+
 ## B127 [auto-decided 2026-09-27] Iter80 の判定（rejected）と復元，`embedding_model_replacement` 使い切りに伴う新レバーの起票
 
 - **状況**: Iter80（G0 不合格により `qwen3_embedding_4b` → `bge_m3` へ切り替えて本走）の結果は

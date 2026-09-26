@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 80,
-  "iteration_name": "埋め込みモデルのスケールアップ（qwen3-embedding:0.6b → 4b）",
+  "iteration": 81,
+  "iteration_name": null,
   "phase": "reflect",
   "status": "running",
-  "current_lever": "embedding_model_replacement=bge_m3",
-  "experiment_dir": "results/20260927_004001",
-  "experiment_deadline": 1790446791,
-  "updated_at": 1790442434,
-  "last_slack_ts": "1790441636.131829",
-  "iteration_thread_ts": "1790434485.620849",
+  "current_lever": null,
+  "experiment_dir": null,
+  "experiment_deadline": 1790454398,
+  "updated_at": 1790450280,
+  "last_slack_ts": "1790442540.190269",
+  "iteration_thread_ts": "1790443159.733959",
   "notion_toggle_created": true,
-  "last_commit": "4791e47"
+  "last_commit": "6b7b056"
 }

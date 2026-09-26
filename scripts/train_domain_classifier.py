@@ -99,6 +99,7 @@ def _extract_sample_weights(rows: list[dict]) -> list[float]:
 async def build_training_features(
     ollama_client: OllamaClient, embedding_model: str, rows: list[dict],
     fine_tuned_embed_model: str | None = None,
+    instruction: str | None = None,
 ) -> tuple[list[list[float]], list[str]]:
     """Embed every row's query text; return (embeddings, domain labels) in matching order.
 
@@ -106,6 +107,13 @@ async def build_training_features(
     instead of the Ollama client for embedding generation.
     Sequential (not concurrent) to mirror run_experiment.py's and
     fit_embedding_whitening.py's sequential embedding calls.
+
+    `instruction`, if given, is forwarded to OllamaClient.embed() so training
+    features are computed from the same Qwen3-Embedding instruct-prefixed
+    input as node.py's runtime query embedding (Iter81,
+    embedding_input_instruction_prefix). Only used on the Ollama path;
+    fine_tuned_embed_model callers ignore it (out of scope for this lever,
+    see journal.md Iteration 81 change table #4).
     """
     from sentence_transformers import SentenceTransformer
 
@@ -137,7 +145,9 @@ async def build_training_features(
         embeddings = []
         labels = []
         for row in rows:
-            embeddings.append(await ollama_client.embed(embedding_model, row["query"]))
+            embeddings.append(
+                await ollama_client.embed(embedding_model, row["query"], instruction=instruction)
+            )
             labels.append(row["domain"])
         return embeddings, labels
 
@@ -196,12 +206,14 @@ def train_classifier(
 async def _train_and_save(
     train_data_path: str, embedding_model: str, ollama_host: str, ollama_port: int,
     output_path: str, fine_tuned_embed_model: str | None = None,
+    instruction: str | None = None,
 ) -> None:
     rows = _load_training_rows(train_data_path)
     sample_weight = _extract_sample_weights(rows)
     ollama_client = OllamaClient(host=f"http://{ollama_host}:{ollama_port}")
     embeddings, labels = await build_training_features(
-        ollama_client, embedding_model, rows, fine_tuned_embed_model=fine_tuned_embed_model
+        ollama_client, embedding_model, rows, fine_tuned_embed_model=fine_tuned_embed_model,
+        instruction=instruction,
     )
     model = train_classifier(embeddings, labels, sample_weight=sample_weight)
     output_dir = os.path.dirname(output_path)
@@ -237,12 +249,21 @@ def main() -> None:
              "If provided, uses this local model for embeddings instead of Ollama.",
     )
     parser.add_argument("--output", default="models/domain_classifier.joblib")
+    parser.add_argument(
+        "--embedding-instruction",
+        default=None,
+        help="Qwen3-Embedding instruct-prefix task description (e.g. 'Instruct: ...\\n"
+             "Query: {text}' template's task_description part). Must match config.yaml's "
+             "embedding_instruction so runtime query embeddings (node.py) and training "
+             "features are computed from the same input distribution (Iter81).",
+    )
     args = parser.parse_args()
 
     asyncio.run(
         _train_and_save(
             args.train_data, args.embedding_model, args.ollama_host, args.ollama_port,
             args.output, fine_tuned_embed_model=args.fine_tuned_embed_model,
+            instruction=args.embedding_instruction,
         )
     )
 

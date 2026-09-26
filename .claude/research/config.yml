@@ -2049,7 +2049,52 @@ levers:
             2026-09-23 恒久運用ルールに抵触するため不可．task_description は 10 ドメイン共通の
             1 文に限る．
             **成功条件**: 次回の計画フェーズで事前登録する．G1（CV）→ G2（argmax replay の
-            discordant n_d ≥ 30）→ 本走 1,915 問という Iter79/80 で確立した型をそのまま踏襲する．"}
+            discordant n_d ≥ 30）→ 本走 1,915 問という Iter79/80 で確立した型をそのまま踏襲する．
+            **[2026-09-27 Iter81 分析フェーズ追記] 唯一の値 `qwen3_instruct_classification_prefix`
+            は判定 `rejected`（レバー消化済み）**．全 1,915 行 top1 は 0.753003 → 0.789556
+            （+3.655pt，McNemar p=4.207e-7）と主基準を大きく満たしたが，事前登録の非退行条件①
+            （per-domain 20 指標の BH 補正後の有意退行 0 件）に medical_recall
+            （0.7842→0.7178，p=0.003264）が抵触し，規則どおり rejected・基準線へ復元した．
+            **文言のさらなる探索（P2/P3 等）は B127 要レビュー (1) により行わない**．
+            学びは journal.md「Iteration 81 実行済み」節を参照．"}
+
+  - {name: embedding_view_concatenation,
+     values: [prefix_and_noprefix_concat],
+     note: "[2026-09-27 backlog B128（Iter81 分析フェーズ）で追加]
+            **起点となる実測**: Iter81 で prefix 付き埋め込みは全体 top1 を +3.655pt
+            （p=4.207e-7）押し上げ，computer_science_recall +12.55pt・natural_science_recall
+            +6.92pt を得た一方，medical_recall を -6.64pt（p=0.003264）失って rejected になった．
+            失われた 23 行を調べると，**19 行で medical は新 artifact の rank 2 に留まっており
+            （rank 3 が 3 行，rank 4 が 1 行）**，固定 top-2 で測れば medical recall は
+            0.9046 → 0.8963 とほぼ不変である．つまり prefix 埋め込みは medical の信号を
+            失っているのではなく，**他ドメイン（education / business_economics /
+            computer_science）を rank 1 に押し上げる方向へ空間を再配置している**．
+            prefix 有り／無しの 2 つのビューは相補的である可能性が高い．
+            **内容（単一レバー）**: 同一質問に対する prefix 無し埋め込み（1024 次元）と
+            prefix 付き埋め込み（1024 次元，Iter81 で選定した P1 文言）を連結した 2048 次元を
+            分類器の特徴量とする．変えるのは特徴量の構成のみで，埋め込みモデル・分類器のハイパラ
+            （`LogisticRegression(max_iter=1000, class_weight=None)` + `sample_weight` +
+            `CalibratedClassifierCV(method='temperature')`）・訓練データ・評価集合・
+            ルーティング設定（`dispatch_gap_threshold=0.29` 等）は一切変えない．
+            **実装の見通し**: `expert_backend.py:OllamaClient.embed()` は Iter81 で
+            `instruction` 引数を得ており（既定 None で prefix なし），`config.yaml` の
+            `embedding_instruction` キーと CLI `--embedding-instruction` も実装済みで残っている
+            （Iter81 の復元では `config.yaml` の値だけを外した）．したがって追加実装は
+            「2 回 embed して `np.concatenate` する」経路を `node.py:202` と
+            `scripts/train_domain_classifier.py:140` の双方へ入れることに集約される．
+            **事前ゲート（計画フェーズで具体値を事前登録すること）**: (a) G1: 既存キャッシュ
+            `data/embcache_qwen3-embedding_0.6b.npy` と `..._0.6b__p1.npy` を連結した 5-fold CV
+            を P0（0.7561）・P1（0.7715）と比較する（実機不要・数分）．(b) **G2'（新設・本レバー
+            の肝）: 1,915 行の argmax replay で per-domain 20 指標の BH 補正を本走前にオフライン
+            実施し，medical_recall の退行が消えているかを確認する**．Iter81 は per-domain の
+            退行を本走後にしか見ておらず，そのために 1 本走を失った．replay は決定論的で
+            `metrics.py` の検定関数をそのまま使えるため，**本走前に非退行条件①を予測できる**．
+            (c) 非退行④（`mean_duration_ms` ≤ +20%）: embed 呼び出しが 1 回増えるが，probe は
+            LLM を呼ばず実測 4ms のため影響は小さいと見込む（要実測）．
+            **リスク**: 2048 次元 × 訓練 1,427 行は p≫n がさらに進み，Iter80 の bge-m3 で見られた
+            訓練 100% 適合（過学習）を招きうる．G1 CV が P1 を下回る場合は素直にその旨を記録する．
+            **禁止事項**: ドメイン固有の重み付け・閾値による medical の救済は
+            2026-09-23 恒久運用ルールにより不可．連結は 10 ドメイン共通の特徴量設計である．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

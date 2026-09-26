@@ -199,7 +199,9 @@ async def run_ask_flow(
 
     request_id = str(uuid.uuid4())
     query_summary = query[:QUERY_SUMMARY_MAX_LENGTH]
-    query_embedding = await ollama_client.embed(config["embedding_model"], query)
+    query_embedding = await ollama_client.embed(
+        config["embedding_model"], query, instruction=config.get("embedding_instruction")
+    )
 
     probe_request = ProbeRequest(
         request_id=request_id,
