@@ -1953,7 +1953,7 @@ levers:
             (a)(b) 両方をまとめて撤去し，1 回の実機比較で完了させる（個別に撤去すると
             『どちらの撤去が top1 に効いたか』を切り分ける意味がなく，むしろ実機コストが
             倍になるため）．"}
-  - {name: embedding_model_replacement, values: [qwen3_embedding_0.6b, qwen3_embedding_4b],
+  - {name: embedding_model_replacement, values: [qwen3_embedding_0.6b, qwen3_embedding_4b, bge_m3],
      note: "[2026-09-23 backlog B115 / docs/d0008] 現行 `nomic-embed-text`（768次元，MTEB
             multilingual 62.28）を，Ollama で配布されている既製の多言語埋め込みモデルへ
             丸ごと差し替える．fine-tuning ではなくモデル差し替えのため，Iter39〜43
@@ -2023,6 +2023,33 @@ levers:
             あるため，主基準は top1_accuracy の改善ではなく『拡充後の複合行で discordant が
             検出力目安を満たすこと』『1,600 問サブセットの指標が Iter77 本走
             （top1=0.615625，results/20260926_171953/）と整合すること』に置く．"}
+
+  - {name: embedding_input_instruction_prefix,
+     values: [qwen3_instruct_classification_prefix],
+     note: "[2026-09-27 backlog B127（Iter80 分析フェーズ）で追加．B124 要レビュー (a)・B125(b) が
+            予告していた項目をレバーとして正式に起票した]
+            `embedding_model_replacement` の 3 値（`qwen3_embedding_0.6b` / `qwen3_embedding_4b` /
+            `bge_m3`）を Iter79・Iter80 で試し切り，**モデルそのものの交換は `qwen3-embedding:0.6b`
+            が最良で打ち止め**になった（4b は G0 VRAM ゲート不合格，bge-m3 は本走 -3.03pt で
+            rejected）．残る未試行の方向は，**同じモデルに与える入力の整形**である．
+            **内容**: `classifier.py` / `node.py` / `http_server.py` が `/api/embed` へ渡す文字列に，
+            Qwen3-Embedding が学習時に用いた instruction 形式
+            （`Instruct: {task_description}\\nQuery: {text}`）の prefix を付与する．
+            訓練側（`scripts/train_domain_classifier.py` の埋め込み計算）と推論側の双方に
+            同一 prefix を適用し，**prefix 文字列以外は一切変えない**（単一レバー）．
+            **有望と判断した根拠**: (1) Qwen3-Embedding は instruction-aware に学習されており，
+            公式 Model Card が instruction の有無で 1〜5% の差が出ると明記している．現行実装は
+            prefix を一切付けておらず，学習時分布と推論時分布がずれたまま使っている．
+            (2) VRAM を増やさない（4b が排除された制約に抵触しない）．
+            (3) Iter80 で G1 オフライン CV（`classifier_train.jsonl` のみの 5-fold）が本走 top1 の
+            順位を正しく予測したことが実証されたため，本走前に低コストで着地点を絞れる．
+            (4) B124 要レビュー (a) の `multilingual-e5-large` / `ruri-v3-310m` は prefix 必須で
+            あり，本レバーを先に確立しておけば将来それらを 2 レバー化せずに評価できる．
+            **禁止事項**: ドメイン固有の prefix（特定ドメインだけ文言を変える等）は
+            2026-09-23 恒久運用ルールに抵触するため不可．task_description は 10 ドメイン共通の
+            1 文に限る．
+            **成功条件**: 次回の計画フェーズで事前登録する．G1（CV）→ G2（argmax replay の
+            discordant n_d ≥ 30）→ 本走 1,915 問という Iter79/80 で確立した型をそのまま踏襲する．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

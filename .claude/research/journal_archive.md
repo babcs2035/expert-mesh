@@ -1,3 +1,191 @@
+## Iteration 77: education 固有補正の撤去と 10 ドメイン均一化
+
+### 調査 (Iter77)
+
+backlog B116（2026-09-23，user-decided）が定めた優先順位に従い，本反復は `education_specific_correction_removal` を実施する．調査では「撤去の是非」ではなく（B116 により再考の余地なしと確定済み），**(Q1) 撤去対象が実際にコードのどこに何個あるか，(Q2) 単一クラスだけの decision boundary 補正を外すことが理論的に何を意味するか，(Q3) 撤去後の着地点はどこか**の 3 点を明らかにした．
+
+**Q1: 撤去対象の棚卸し（config.yml の記述は古く，実態と食い違っていた）**
+
+config.yml の `education_specific_correction_removal` note は backlog B88 を引いて「`education_threshold=0.05` は実行時経路 `classifier.py:estimate_confidence_classifier()` に未反映であり，実行時への影響は現状ゼロ」と書いているが，**これは Iter57（`production_deployment_gap` の実施）以前の記述であり，現 HEAD では誤りである**．実機コードを直接確認した結果，education 固有補正は次の 4 箇所に存在する．
+
+1. `scripts/train_domain_classifier.py:194-204` — `intercept_delta = 0.7` を `calibrated_model.calibrated_classifiers_` の各 fold の `estimator.intercept_[edu_idx]` へ加算（Iter44/45 adopted，訓練時）．
+2. `classifier.py:56,77-78` — `EDUCATION_THRESHOLD = 0.05`．`estimate_confidence_classifier()` が education ノードのときだけ生確率に加算して返す（Iter57 で実行時経路へ配線済み．**実行時に効いている**）．
+3. `scripts/evaluate_classifier_calibration.py:280,484-489,611-618,660-667` — `--education-threshold`（既定 0.0）．conformal 系列 Iter75 が `0.05` を明示指定して実行時分布を再現していた．
+4. 同 `--education-logit-bias`（既定 0.0，Iter49/50 で rejected 済みの死にパラメータ）．
+
+2 が実行時に効いている証拠は基準線の実測に残っている: `results/20260923_150540/results.jsonl`（Iter75 本走）の education ノードの confidence は 1,600 行すべてで 0.05 以上（**最小 0.050006**，最大 0.996516）であり，`p + 0.05` の下限がそのまま観測されている．
+
+**Q2: 単一クラスだけの intercept シフトの位置づけ（先行研究）**
+
+クラス事前分布に応じて logit を平行移動する手法の標準は Menon, Jayasumana, Rawat, Jain, Veit, Kumar, "Long-tail learning via logit adjustment", ICLR 2021（arXiv:2007.07314，<https://research.google/pubs/long-tail-learning-via-logit-adjustment/>）である．同論文の post-hoc logit adjustment は **全クラスに対し** `logit_y - τ·log π_y` を適用するもので，balanced error に対して Bayes 一貫性を持つ．本リポジトリの `intercept_delta=+0.7`（education のみ）はその単一クラス版に相当するが，(a) 補正量が事前分布から導かれておらず経験的に掃引された値であること，(b) 他 9 クラスに対応する項が無いため balanced error にも plain accuracy にも一貫性を持たないこと，の 2 点で理論的裏付けを欠く．そもそも本リポジトリの訓練データは `_extract_sample_weights()` により 10 ドメインの実効重みが完全に等しく揃えられている（`train_domain_classifier.py` docstring）ため，原理的な logit adjustment 量は全クラスでほぼ 0 である．**すなわち撤去は「補正を外して裸に戻す」というより「事前分布が均一な設定における Bayes 最適な決定則へ戻す」操作と解釈できる**．
+
+一般論として，単一クラスの閾値・intercept を下げることはそのクラスの recall を上げ precision を下げる（accuracy と balanced accuracy で最適閾値が異なる，という多クラス評価指標の教科書的事実．例: MDPI "Selecting and Interpreting Multiclass Loss and Accuracy Assessment Metrics for Classifications with Class Imbalance", <https://www.mdpi.com/2072-4292/13/13/2591>）．実測もこれと整合しており，基準線の education は **recall 0.5353 に対し precision 0.3745** と 10 ドメイン中もっとも precision が低い．撤去でこの偏りが解消される方向へ動くと予想する．
+
+**Q3: 事前シミュレーション（`+0.05` の部分は基準線ファイルだけで閉じる）**
+
+`results/20260923_150540/results.jsonl` の `probe_candidates` は 10 ドメイン全ノードの confidence を保持しているため，**`EDUCATION_THRESHOLD` 撤去の効果は再計算なしで厳密に求まる**（education の値から 0.05 を引いて argmax を取り直すだけ）．
+
+| 量 | 現行（+0.05 あり） | +0.05 撤去後 | 差 |
+|---|---|---|---|
+| top1（`probe_candidates` の argmax で再計算．`metrics.json` の 0.595625 とは dispatch 失敗行等で 3 行ぶんずれる） | 0.597500 | **0.603125** | +0.5625pt |
+| argmax が変わる行数 | — | **38 / 1,600** | 2.375% |
+| education が選ばれる行数 | 243 | **205** | -38 |
+| education の単一ドメイン recall（n=150） | 0.580000 (87/150) | **0.553333** (83/150) | -2.67pt |
+| education confidence の最小値 | 0.050006 | **0.000006** | 下限が外れる |
+
+一方 `intercept_delta=+0.7` の撤去は temperature 較正の内側（fold ごとの logit）に効くため確率から逆算できず，**修正後の joblib で `evaluate_classifier_calibration.py` を回す必要がある**．Iter44 の採用時実績（education_recall +0.0647，argmax flip rate 8.62%）を逆向きに当てると，education_recall -6〜-7pt・flip 約 8〜9%（130〜140 行）が見込み値となる．両方を合わせた着地点の予想は下表（成功条件節）に事前登録する．
+
+**撤去後の artifact 生成に関する技術的所見（実装フェーズへの申し送り）**
+
+`intercept_delta` は `CalibratedClassifierCV.fit()` の**後**に加算されている（`train_domain_classifier.py:192` → `:203-204`）．したがって撤去後のモデルは，現行 artifact `models/domain_classifier.joblib` の各 fold の `estimator.intercept_[edu_idx]` から 0.7 を引いたものと**数学的に厳密に一致する**．これは「他 9 ドメインの係数・intercept がビット単位で不変」という非退行条件を構成的に保証する手段として使える（Iter32 の `class_weight` 結合バグのような相互依存は，加算が fit 後であるためここには生じない）．本番 artifact は改修後の訓練スクリプトで作り直す（B116(B) により埋め込み計算は **wafl-ctrl5** で行う）が，その結果が上記の減算版と一致することを検証に用いること．
+
+### 計画 (Iter77)
+
+**単一レバー**
+
+`education_specific_correction_removal` = `revert_intercept_delta_and_threshold`．education ドメインだけを狙い撃ちにした後付け補正を **(a) 訓練時 `intercept_delta=+0.7`** と **(b) 実行時 `EDUCATION_THRESHOLD=+0.05`** の 2 つ同時に撤去し，10 ドメイン均一な決定則へ戻す．config.yml の note が定める通り，(a)(b) は分類器の再訓練を共有するため 1 反復でまとめて外す（個別に外すと実機コストが倍になるだけで切り分けの意味がない）．
+
+**仮説（事前登録）**
+
+「education 固有補正の撤去により，education の recall は低下するが precision は上昇し，全体 top1_accuracy は基準線 0.595625 から実質的に変化しない（±1.5pt = 二項 SE 0.0123 の約 1.2 倍以内）」．根拠は，(i) `+0.05` の撤去だけを取れば top1 は **+0.56pt 上昇**する（上表，決定論的に算出済み），(ii) `+0.7` の採用時（Iter44）も top1 は有意変化しなかった，(iii) `+0.05` の採用時（Iter52）も McNemar p=0.2636 だった，の 3 点である．**なお B116 により，top1 が悪化した場合でも撤去は維持する．top1 は判定基準ではなく報告対象である．**
+
+**固定する構成**
+
+`config.yaml`（`embedding_model=nomic-embed-text`，`routing_method=supervised_classifier`，`confidence_threshold=0.0`，`dispatch_top_k=1`，`expert_model=expert-mesh-{domain}-lora`，`judge_model`），較正手法（`temperature`，Iter31 adopted），訓練データ `data/classifier_train.jsonl`（1,427 件，内容不変），`_extract_sample_weights()`，`http_server.py` / `aggregator.py` / `node.py` / `mise.toml`，実機 10 ノード構成をすべて変更しない．conformal 系列（Iter69〜76）の実行時配線は行わない（B115(2) によりクローズ済み）．
+
+**変更するファイルと箇所（4 ファイル＋テスト）**
+
+1. `scripts/train_domain_classifier.py`: L194-204 の `intercept_delta` ブロックを削除．`train_classifier()` の docstring から education 固有補正の記述を削る．
+2. `classifier.py`: `EDUCATION_THRESHOLD` 定数（L52-56）と `estimate_confidence_classifier()` の `if domain == "education":` 分岐（L77-78）を削除し，全ドメイン一律に生確率を返す．モジュール docstring L31-34 を削除．
+3. `scripts/evaluate_classifier_calibration.py`: `--education-threshold` / `--education-logit-bias` の両 CLI 引数と，`predict_calibrated_rows()` 内の加算箇所（L484-489 / L611-618 / L660-667 と logit bias 相当箇所），stderr 診断の該当文字列を削除．
+4. テスト: `tests/test_classifier.py` の education 加算テスト（L65-72 周辺）を「**全 10 ドメインで生確率がそのまま返る**」ことを検証する回帰テストへ置き換える（削除ではなく，撤去仕様を固定するテストへ差し替える）．`tests/test_evaluate_classifier_calibration.py:713-828` の `education_threshold` 4 件は対象機能ごと消えるため削除し，代わりに「`predict_calibrated_rows()` の出力が `predict_proba` の生値と一致する（どのクラスにも加算がない）」テストを 1 件追加する．
+5. 本番 artifact `models/domain_classifier.joblib` の再生成（`models/` は gitignore 対象のため履歴に残らない．旧版を `models/domain_classifier_pre_iter77_edu_corrected.joblib` として退避し，sha256 を journal に記録すること）．
+
+**レバーを読むコード行と到達条件（d0004 §4 の再発防止）**
+
+本レバーは「設定値の切り替え」ではなく**コードの削除**であるため，到達しない no-op になり得るのは削除漏れの場合だけである．発火の確認は次の 2 点で行う．
+
+- 訓練側: 再生成した joblib の `calibrated_classifiers_[i].estimator.intercept_[edu_idx]` が，退避した旧 artifact の同値から **ちょうど 0.7 低い**こと（全 5 fold）．他 9 クラスの `intercept_` と全クラスの `coef_` は旧 artifact とビット一致すること．
+- 実行時: 実機本走の `results/<ts>/results.jsonl` の `probe_candidates` 中 education ノードの confidence 最小値が **0.05 未満**になること（基準線では 0.050006 が下限で，これは `+0.05` が効いている限り破れない不等式である）．
+
+**実験手順**
+
+1. 上記 4 ファイルを改修し，`uv run pytest` と `uv run ruff check` を通す．
+2. **wafl-ctrl5（192.168.15.10，B116(B) の絶対条件）**の Ollama に対して `uv run python scripts/train_domain_classifier.py --train-data data/classifier_train.jsonl --embedding-model nomic-embed-text --ollama-host <wafl-ctrl5 の Ollama ホスト> --output models/domain_classifier.joblib` を実行し，artifact を再生成する．上記「訓練側」の差分検証を行う．
+3. オフライン事前確認（同じく wafl-ctrl5）: `scripts/evaluate_classifier_calibration.py --dataset data/dataset.jsonl --classifier models/domain_classifier.joblib --education-threshold なし` で 1,600 行の argmax・per-domain recall/precision を取得し，下表の予測と突き合わせる．**これは本実験の代替ではない（B116(A)）．**
+4. `mise run setup` → `mise run deploy`（wafl500〜509 へ新 artifact とコードを配布）．**デプロイ検証として各ノードで `grep -c EDUCATION_THRESHOLD classifier.py` が 0 を返すことを確認する**（Iter22 のデプロイ漏れと同型の失敗を防ぐため）．
+5. 先頭 20 問の予備実行で education confidence < 0.05 の行が出ることを確認．
+6. **wafl500〜509 で 1,600 問のフルスペック本走を 1 回**（B116(A) の絶対条件）．`mise run analyze` まで実施．
+
+**成功条件（事前登録）**
+
+基準線は Iter75 本走 `results/20260923_150540/`（top1=0.595625，kappa=0.564477，misrouting=0.404375，education recall=0.535294 / precision=0.374486，single_domain_top1=0.608，compound_top1=0.41，ECE=0.055085，fallback_rate=0.0）．
+
+| 区分 | 指標 | 基準線 | 予測 | 合格条件 |
+|---|---|---|---|---|
+| **主基準（完遂）** | education 固有補正の残存 | 4 箇所 | **0 箇所** | `grep -rn "intercept_delta\|EDUCATION_THRESHOLD\|education_threshold\|education_logit_bias" --include="*.py"` が（履歴コメントを除き）0 件．実機ノード側も 0 件 |
+| **主基準（発火）** | education confidence 最小値 | 0.050006 | **< 0.01** | 0.05 未満であること |
+| **主基準（発火）** | education intercept 差分 | — | **-0.7（全 5 fold）** | 旧 artifact との差が education のみ -0.7．他 9 クラスの coef/intercept はビット一致 |
+| 非退行 | 他 9 ドメインの recall/precision（18 指標） | 各値 | ほぼ不変 | BH 補正後に有意退行 **0 件** |
+| 報告のみ | top1_accuracy | 0.595625 | **0.58〜0.61** | 判定に用いない（B116．悪化しても撤去維持）．McNemar と Wilson 95%CI を必ず併記 |
+| 報告のみ | education recall | 0.535294 | **0.44〜0.50** | 低下が予想され，それ自体は棄却理由にならない |
+| 報告のみ | education precision | 0.374486 | **0.42〜0.52** | 上昇が予想される（Q2 のトレードオフ） |
+| 報告のみ | ECE / kappa / answer_quality | 0.055085 / 0.564477 / — | — | 軸②③の変化は 3SD=2.6pt を超えない限り有意としない（success_criteria (5)） |
+
+- **adopted の定義（本レバー固有）**: 本レバーはユーザー指示による方針変更の実装であり，「精度が上がったら採用」という通常のレバーとは判定構造が異なる．**主基準 3 つ（完遂・発火 2 種）と非退行条件を満たせば adopted** とし，top1 の増減は結果として報告する．
+- **invalid（実験不成立）の判別**: 実機本走の top1 が 0.595625 と小数点以下まで一致，または education confidence 最小値が 0.05 以上のままなら，**「効果なし」ではなく「デプロイ漏れ」を既定の解釈とする**（d0004 §4，Iter22 と同型）．
+- **ノイズ幅**: top1 の二項 SE は n=1600・p=0.596 で 0.0123（±2.5pt が 2SE）．education recall は n=150 で SE=0.041（±8.1pt が 2SE）と広く，**education 単体の増減を有意に語れる標本ではない**点を分析フェーズで明示すること．
+
+**期待効果**
+
+10 ドメイン均一な決定則へ戻すことで，以降のレバー（優先度 2 の `embedding_model_replacement`，優先度 3 の `cross_domain_training_data_augmentation`）を「education だけ下駄を履いた状態」ではない基準線の上で評価できるようになる．副次的に，`evaluate_classifier_calibration.py` から education 固有パラメータが消えることで，conformal 系列が抱えていた「評価分布と実行時分布の不一致」（Iter75 で判明した論点）も構造的に解消する．
+
+---
+
+### 実装・実験 (Iter77)
+
+計画どおり 4 箇所の education 固有補正を撤去した．`classifier.py` の `EDUCATION_THRESHOLD` 定数と実行時分岐，`scripts/train_domain_classifier.py` の fit 後 `intercept_delta = 0.7` 加算，`scripts/evaluate_classifier_calibration.py` の `--education-threshold` と死にパラメータ `--education-logit-bias` を削除し，テスト 2 ファイルを「加算がないこと」を検証する回帰テストへ差し替えた．`config.yaml`・`http_server.py`・`aggregator.py`・`node.py`・`mise.toml`・訓練データ本体は無変更（単一レバー原則）．
+
+検証: 対象 3 テストファイル 43 件 PASS，`ruff check` PASS．全体スイートの 9 件 FAIL と 23 件の ruff エラーは `git stash -u` で退避しても同数再現する既存の失敗であり，本変更とは無関係であることを確認した．
+
+artifact 再生成は B116(B) に従い wafl-ctrl5 で実施（`models/domain_classifier_pre_iter77_edu_corrected.joblib` へ旧版を退避，sha256 `835a10d6...9242c9` → 新版 `02caf2b8...db408905`）．本走は B116(A) に従い wafl500〜509 で 1,600 問フルスペックを 1 回実施（`results/20260926_171953/`，約 24 分）．
+
+**主基準の発火確認（3 つとも成立）**
+
+- ①完遂: 全 10 ノードで `grep -c EDUCATION_THRESHOLD classifier.py` が 0．リポジトリ全体の 4 パラメータ grep も履歴コメントを除き 0 件．
+- ②発火・実行時: 本走の education confidence 最小値 4.4628668777636105e-06（< 0.05）．wafl-ctrl5 でのオフライン事前確認と同一値で再現．
+- ③発火・訓練: 新旧 5 fold すべてで `estimator.intercept_[education]` の差分がちょうど -0.7，他 9 クラスの `intercept_` と全クラスの `coef_` はビット単位で完全一致（`np.max(np.abs(diff)) == 0.0`）．
+
+**取得したメトリクス**（本走 1,600 問．基準線は Iter75 本走 `results/20260923_150540/`）
+
+| 指標 | 基準線 | Iter77 |
+|---|---|---|
+| top1_accuracy | 0.595625 | **0.615625**（Wilson 95%CI [0.591540, 0.639157]） |
+| cohens_kappa | 0.564477 | 0.588209 |
+| education recall | 0.535294 | 0.470588 |
+| education precision | 0.374486 | 0.547945 |
+| ECE | 0.055085 | 0.076640 |
+
+misrouting_rate=0.384375，fallback_rate=0.0，dispatch_failure_rate=0.00125，brier=0.206158，auroc=0.735098，single_domain_top1=0.629333，compound_domain_top1=0.41．axis2/3 は answer_quality_accuracy=0.56，end_to_end_accuracy=0.345．
+
+統計（`metrics.py` の既存関数をそのまま使用）: 全体 top1 の McNemar は discordant 11（基準線のみ正解）対 43（新のみ正解），chi2=17.796，p=2.4586e-05．**非退行条件（他 9 ドメイン×recall/precision=18 指標）は BH 補正（q=0.05）後の有意退行 0 件**．education は recall が McNemar p=0.002569 で低下，precision が Fisher exact p=0.001054 で上昇（選択行数 243→146）．
+
+**申し送り**: `mise run analyze` を引数なしで実行すると `ls -1d results/*/ | sort` のアルファベット順により `results/iter45_preliminary/` を誤選択する．今回は `-- 20260926_171953` の明示指定で回避した（本イテレーションのスコープ外のため未修正）．また `mise run setup` の素の `uv sync` が research extra を落とすため，以降は `uv sync --extra research` で復旧する必要がある．
+
+---
+
+### Iteration 77 実行済み
+
+**変更（単一レバー）**: `education_specific_correction_removal=revert_intercept_delta_and_threshold`．education 固有の後付け補正 4 箇所（訓練時 `intercept_delta=+0.7`，実行時 `EDUCATION_THRESHOLD=+0.05`，評価スクリプトの `--education-threshold`・`--education-logit-bias`）を削除し，10 ドメイン均一な決定則へ戻した．テスト 2 ファイルを「どのクラスにも加算がない」ことを固定する回帰テストへ差し替え，artifact を wafl-ctrl5 で再生成のうえ wafl500〜509 で 1,600 問本走 1 回（`results/20260926_171953/`）．
+
+**判定: adopted**（事前登録した本レバー固有の定義「主基準 3 つ＋非退行を満たせば adopted」を充足）．
+
+- 主基準①完遂: 4 パラメータの grep が履歴コメントを除きリポジトリ・実機 10 ノードとも 0 件．
+- 主基準②発火（実行時）: education confidence 最小値 4.46e-06 < 0.05（基準線の下限 0.050006 が破れた）．
+- 主基準③発火（訓練）: 新旧 artifact の差分が education intercept のみ厳密に -0.7（全 5 fold），他 9 クラスの `intercept_`・全クラスの `coef_` は `np.max(np.abs(diff)) == 0.0`．
+- 非退行: 他 9 ドメイン×recall/precision=18 指標に BH 補正（q=0.05）後の有意退行 0 件．
+
+**結果と有意性の判定**
+
+| 指標 | 基準線 Iter75 | Iter77 | 判定 |
+|---|---|---|---|
+| top1_accuracy | 0.595625 | **0.615625**（Wilson 95%CI [0.591540, 0.639157]） | **有意な改善**（McNemar 11 vs 43，chi2=17.796，p=2.46e-05） |
+| cohens_kappa | 0.564477 | 0.588209 | top1 と同方向 |
+| education recall | 0.535294 | 0.470588 | 有意に低下（McNemar p=0.002569）．事前予測 0.44〜0.50 の範囲内 |
+| education precision | 0.374486 | 0.547945 | 有意に上昇（Fisher p=0.001054）．事前予測 0.42〜0.52 を上抜け |
+| ECE | 0.055085 | 0.076640 | 判定材料外の所見（後述） |
+
+top1 の +2.0pt は**ノイズではない**．軸①（ルーティング系）は決定論的で反復間ノイズ床を持たない（config success_criteria (5)）ことに加え，対応のある McNemar が p=2.46e-05，discordant の内訳が 11 対 43 と一方向に偏っている．二項 SE=0.0123（2SE=±2.5pt）は独立標本を仮定した保守的な幅であり，同一問題集合の対比較ではこちらが主基準である（success_criteria (1)）．
+
+**論点 1: 事前予測レンジ 0.58〜0.61 の上抜け（+2.0pt）の内訳**
+
+事前シミュレーションは `+0.05` 撤去分のみを決定論的に算出して +0.56pt（0.597500→0.603125，flip 38 行）としていた．実測の差分はその約 3.6 倍で，残り約 +1.4pt は `+0.7` 撤去分である．これは temperature 較正の内側（fold ごとの logit）に効くため基準線の `probe_candidates` からは逆算できず，事前レンジの上限側の不確実性として残っていた部分がそのまま顕在化した形である．機序は per-domain の内訳に明瞭に出ている: education の選択行数が 243→146（-97）へ減り，その大半が他 9 ドメインへ戻って **8/9 ドメインの recall が上昇**（social_science +5.4pt，legal +4.4pt，general +4.3pt，medical +3.9pt，mathematics と natural_science は ±0，precision の低下はいずれも -2.6pt 以内）した．education の真の支持数は約 170 行であるのに 243 行を選んでいた＝**過剰選択が全体 top1 を押し下げていた**という解釈で，Q2 の理論（事前分布が均一な設定では単一クラスの intercept シフトは Bayes 最適から離れる方向）と整合する．過剰な一般化は避けるべきで，本反復が示したのは「本データ・本分類器において，事前分布が均一化済みの訓練設定に単一クラスの経験的 intercept を重ねると全体 accuracy を損なう」までである．
+
+**論点 2: ECE 悪化（0.055085→0.076640）の解釈 — 判定材料ではなく所見**
+
+事前登録の成功条件に ECE は「報告のみ」として置かれており，判定に用いないのが妥当である．その上で中身を確認したところ，**これは較正の質的な劣化ではなく，accuracy だけが上がって confidence 分布が動かなかったことの算術的な帰結**である．
+
+- 平均 confidence は 0.5466→0.5398 とほぼ不変，accuracy は 0.5960→0.6164．平均ギャップ（conf - acc）は -0.0493→-0.0766 で，**符号は一貫して負（過小確信）**．10 ビンすべてで acc > conf（新）となっており，ECE ≈ |平均ギャップ| が成立する単調な過小確信である．過大確信側への崩れ（危険な方向）は起きていない．
+- 内訳を分けると，single ドメイン行（n=1498）が conf 0.5419 / acc 0.6302（ギャップ -0.088），compound 行（n=100）が conf 0.5080 / acc 0.4100（ギャップ +0.098）で，compound 側は基準線から一切動いていない（0.41 で同値）．つまり ECE の悪化はすべて single 行の accuracy 上昇に由来する．
+- 構造的な原因として，較正（temperature）は単一ラベルの訓練データで当てているのに，評価の正解判定は `selected_domain in expected_domains` という複数正解許容であるため，single 行でも過小確信が出やすい．加えて，基準線の ECE が見かけ上良かったのは **education への +0.7/+0.05 が過大確信を人為的に注入して過小確信を部分的に打ち消していたため**であり，補正を外したことでもともとの過小確信が露出したと読める．「ECE が良い基準線」は補正のアーティファクトだったという点は，今後 ECE を横比較する際の注意点として残す．
+- 今後のレバーへの影響: 絶対的な confidence 値に閾値を置く施策（conformal 系列，`confidence_threshold`，`dispatch_policy` の gap 閾値など）は，分類器を触るレバーの後に**必ず temperature を当て直してから**評価する必要がある．単調な過小確信なので順位（AUROC 0.7460→0.7351，Brier 0.20242→0.20616 といずれも僅差で悪化）はほぼ保たれており，再較正 1 段で回復可能な種類の劣化である．なお conformal 系列の実行時配線は B115(2) でクローズ済みのため，本件が直ちに新規作業を要求するわけではない．
+
+**論点 3: education の recall -6.5pt / precision +17.3pt のトレードオフ**
+
+Q2 で事前に予測したとおりの方向であり，B116(1) により**撤去は維持する**．education だけを特別扱いする方向へは戻さない．education 単体は n=170 前後（単一ドメイン評価では n=150，SE=0.041）で ±8pt が 2SE に相当し，そもそも単体の増減を強く語れる標本ではない．一方で precision の上昇は選択行数 243→146 という大きな変化を伴っており Fisher p=0.001054 と有意である．全体としては「education の過剰選択を止めたぶん，全ドメインの割り当てが正常化した」と要約される．
+
+**想定外の挙動**: なし（言語崩れ・発散・OOM なし．fallback_rate=0.0，dispatch_failure_rate=0.00125 は基準線と同水準）．軸②③は answer_quality_accuracy=0.56 / end_to_end_accuracy=0.345 で，success_criteria (5) の 3SD=2.6pt を超える変化とは判定しない．
+
+**学び**
+
+1. **単一クラスだけの経験的 intercept 補正は，その補正で改善した指標（education recall）以上のコストを他 9 ドメインから徴収していた**．Iter44/52 の採用時は education recall を主基準にしていたため全体 top1 への負の寄与が見えず，2 反復ぶん誤った方向へ投資していた．ドメイン固有補正を禁じる B115 の方針は，本反復で定量的にも裏づけられた（+2.0pt の回収）．
+2. **fit 後に加算した補正は，旧 artifact からの減算で厳密に再現できる**という性質（調査 Q3）が非退行の証明手段としてそのまま使えた．「他 9 クラスがビット一致」を統計的にではなく構成的に示せたのは，`class_weight` 結合（Iter32）のような相互依存が無いことの直接的な証拠になっている．今後も fit 後 post-hoc 補正を入れる際は，この検証可能性を保つ設計にする価値がある．
+3. **較正指標は accuracy の変化に引きずられる**．confidence 分布を動かさずに accuracy だけを上げるレバーは，それ自体が良い変更であっても ECE を悪化させる．ECE 単独を成功条件に据えると，accuracy を上げるレバーを誤って棄却しうる．今後は ECE を見るときに必ず「平均 conf と平均 acc の符号付きギャップ」を併記する．
+4. 運用上の落とし穴 2 件（`mise run analyze` の引数なし実行が `results/iter45_preliminary/` を誤選択する，`mise run setup` の素の `uv sync` が research extra を落とす）は backlog B118 に記録した．
+
+**次の一手**: B116 の優先順位に従い，優先度 1 の**複合設問評価集合の拡充**（research_frontier 最上位）へ移る．config.yml の levers 末尾へ `compound_eval_set_expansion` を追加した（詳細と比較可能性の担保方針は backlog B118）．
+
+
 ## Iteration 76: conformal予測集合サイズを棄権信号に使う選択的ルーティングの価値を測る
 
 ### 調査 (Iter76)

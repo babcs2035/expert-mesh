@@ -15,6 +15,95 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B127 [auto-decided 2026-09-27] Iter80 の判定（rejected）と復元，`embedding_model_replacement` 使い切りに伴う新レバーの起票
+
+- **状況**: Iter80（G0 不合格により `qwen3_embedding_4b` → `bge_m3` へ切り替えて本走）の結果は
+  全 1,915 行 top1 **0.753003 → 0.722715（-3.03pt，McNemar p=1.50e-03）**，per-domain 20 指標の
+  BH 補正（q=0.05）後の**有意退行 2 件**（recall: legal -20.87pt / p=1.82e-09，
+  recall: computer_science -12.40pt / p=3.88e-04）．事前登録した rejected 条件
+  （「点推定が低下，または非退行①で有意退行が 1 件以上，または非退行④違反」）を**独立に 2 つ**
+  満たしており，**判定 `rejected` に裁量の余地は無い**．裁量が要ったのは (a) 復元の実施，
+  (b) `embedding_model_replacement` の 3 値を使い切った後に何を振るか，の 2 点である．
+- **自動選択**:
+  - (a) **復元を実施した**．計画節の事前登録手順どおり，`config.yaml:4` を
+    `qwen3-embedding:0.6b` へ戻し，`cp models/domain_classifier_pre_iter80_qwen3_0.6b.joblib
+    models/domain_classifier.joblib`（sha256 `21e16ec6...`，`n_features_in_`=1024）で復元し，
+    `mise run deploy` を再実行して全 10 ノードで `embedding_model` と artifact sha256 を確認した．
+    smoke_check（hashes / probe）も pass．**`bge-m3` のイメージ削除は行っていない**
+    （破壊的操作を避ける方針．常駐しない限り VRAM を占有しない）．
+  - (b) **次イテレーションのレバー**: 新設した **`embedding_input_instruction_prefix`**
+    = **`qwen3_instruct_classification_prefix`**（`.claude/research/config.yml` の `levers` 末尾へ
+    追記済み）．**次イテレーションの `iteration_name`**:
+    **「埋め込み入力への instruction prefix 付与（qwen3-embedding:0.6b）」**．
+    現行の `qwen3-embedding:0.6b` を維持したまま，訓練側（`scripts/train_domain_classifier.py`）と
+    推論側（`classifier.py` / `node.py` / `http_server.py`）の双方が `/api/embed` へ渡す文字列へ
+    Qwen3-Embedding 学習時の instruction 形式
+    （`Instruct: {task_description}\nQuery: {text}`）を付与する．prefix 文字列以外は変えない．
+    Iter79/80 で確立した G1（`classifier_train.jsonl` のみの 5-fold CV）→ G2（argmax replay の
+    discordant n_d ≥ 30）→ 本走 1,915 問という型をそのまま踏襲する．
+- **根拠**:
+  - `embedding_model_replacement` の 3 値は全て消化済み（`qwen3_embedding_0.6b`=adopted，
+    `qwen3_embedding_4b`=G0 VRAM 不合格で実機未検証，`bge_m3`=rejected）であり，
+    **レバー使い切り**に当たる．skill 手順 7-1 に従い，journal/backlog の学びから新レバーを
+    考案できたため `status="converged"` とはせず継続する．
+  - 検討した 4 候補のうち本案を採った理由: (i) 4b の VRAM 予算確保は `light_model` の縮小等を
+    伴い**単一レバー原則に反する**（2 レバー目）ため不可．(ii) `multilingual-e5-large` /
+    `ruri-v3-310m` は prefix 付与が必須なので，**先に prefix レバーを確立しないと必ず 2 レバーに
+    なる**．順序として本案が先行するのが正しい．(iii) `dispatch_gap_threshold` の再調整は
+    Iter80 で見えた「送出数 1.880 → 2.104 と増えたのに set_recall は低下」という現象への反応だが，
+    **その現象は bge-m3 固有であり，基準線へ復元した今は再現しない**．基準線構成での再調整は
+    別途 replay で安価に掃引できるので優先度を下げた．
+  - 本案が有望と考える積極的な理由: Qwen3-Embedding は instruction-aware に学習されており，
+    公式 Model Card が instruction の有無で 1〜5% の差を報告している．**現行実装は prefix を
+    一切付けておらず，学習時分布と推論時分布がずれたまま使っている**（`classifier.py` /
+    `node.py:202` / `http_server.py:402-404` のいずれも生文字列を渡している）．VRAM を増やさず，
+    G1 で本走前に安価に着地点を絞れる．
+- **要レビュー**: (1) task_description の文言は 10 ドメイン共通の 1 文に限る（ドメイン固有 prefix は
+  2026-09-23 恒久運用ルールに抵触するため不可）．文言そのものを複数試すのは値の追加ではなく
+  同一値内のチューニングに当たるため，**G1 CV でオフラインに 2〜3 文言を比較して 1 つへ確定し，
+  本走は 1 回**とすること．(2) `qwen3-embedding:4b` は G1 CV 0.7722（3 候補中最良）で
+  **精度ではなく VRAM 1.3GB 超過のみで排除された**．将来ノード追加によるロール分離や
+  `light_model` 小型化で予算に余裕ができた場合，再評価する価値が残っている（B126 要レビュー (1)
+  を引き継ぐ）．(3) `bge-m3` の検証結果は「検索向け対照学習モデルは本分類タスクの線形分離に
+  向かない」という一般則の 1 事例に過ぎず，他の retrieval 系モデルへ無条件に外挿しないこと．
+
+## B126 [auto-decided 2026-09-27] Iter80: G0（VRAM ゲート）で `qwen3-embedding:4b` が不合格，`bge-m3` へ自動切替
+
+- **状況**: Iter80 計画（journal.md 該当節）は，`embedding_model_replacement` の値を
+  `qwen3_embedding_4b` にする前に G0（VRAM 実測ゲート）を通すことを事前登録していた．
+  wafl-ctrl5 で実測した結果，`qwen3-embedding:4b` の常駐サイズ（`ollama ps` の SIZE，
+  `/api/embed` を1回叩いてロードさせた後）は **4.4GB**（PROCESSOR は `100% GPU` で計算配置自体は
+  合格）．依頼者ノード wafl500 のピーク予算は `light_model 3.1GB + expert_model 5.3GB` を
+  12288 MiB から引いた **約 3.4GB（合格条件は X ≤ 3.1GB 相当，`X + 8.4GB ≤ 11.5GB`）**であり，
+  4.4GB はこれを **1.3GB 超過**する．計画の事前登録どおり G0 不合格と判定した．
+- **自動選択**: 計画の事前登録手順（journal.md Iter80 計画節「G0 失敗時の代替」）に厳密に従い，
+  `qwen3-embedding:4b` を断念し，G1（`data/classifier_train.jsonl` のみの 5-fold CV，
+  `scripts/screen_embedding_models.py`）で VRAM 実行可能と確認できた候補のうち CV accuracy
+  最大の **`bge-m3`** へレバーの値を切り替えた．G1 実測: `qwen3-embedding:0.6b`（基準線）
+  cv_accuracy=0.7561／`qwen3-embedding:4b`=0.7722（CV では最良だが G0 不合格のため選定対象外）／
+  `bge-m3`=0.7120（VRAM 実測: 常駐 0.664GB，`X + 8.4GB` = 9.06GB ≤ 11.5GB で合格）．
+  非現行候補で G0 を通過するのは `bge-m3` のみのため，選定規則により自動的に確定した．
+  **`bge-m3` の CV accuracy（0.7120）は現行基準線（0.7561）を下回る**が，計画の事前登録
+  （config.yml 絶対条件 A．「改善しない見込みでも最良の非現行候補で本走は実施する」）に従い，
+  この点は本走を止める理由にはしていない．`config.yml` の `values` へ `bge_m3` を追記した．
+  `state.json` の `iteration_name`（「埋め込みモデルのスケールアップ（0.6b → 4b）」）は
+  追跡性のため変更していない．
+- **根拠**: 計画フェーズで結果を見る前に固定した規則（journal.md Iter80 計画節）をそのまま
+  適用しただけであり，本反復の裁量はゲート判定と選定規則の機械的な適用に限られる．
+  G2（旧/新 artifact の argmax replay，`data/dataset.jsonl` 全 1,915 行）でも discordant
+  n_d=469（≥30 の合格ライン）を確認しており，レバーの値変更が実行時経路に到達する見込みは
+  確認済み．一方，新 artifact 単体のオフライン argmax accuracy は 0.7248（旧 0.7535 を下回る）
+  であり，本走で `top1_accuracy` が悪化する可能性が高い着地点予測であることを本走前に記録する
+  （判定には用いない．journal.md 本体の実行記録・分析は分析・考察フェーズが担当）．
+- **要レビュー**: (1) `qwen3-embedding:4b` は CV accuracy では 3 候補中最良（0.7722）だったが
+  VRAM 制約のみで排除された．将来 wafl-ctrl5／依頼者ノードの VRAM 予算に余裕ができた場合
+  （例: `light_model` のさらなる小型化，ノード追加によるロール分離），4b を再評価する価値が
+  残っている．(2) `bge-m3` は CV・G2 のオフライン着地点予測の両方で基準線を下回っており，
+  本走が `partial`／`rejected` になる可能性が高い．その場合，config.yml の
+  `embedding_model_replacement` の 3 値（0.6b・4b・bge-m3）はすべて試行済みとなり，
+  レバーは使い切り扱いとなる（次点は B125(b) に記録済みの
+  `embedding_input_instruction_prefix` または `dispatch_gap_threshold` 再調整）．
+
 ## B125 [auto-decided 2026-09-26] Iter79 の判定（adopted）と次イテレーションのレバー選定（qwen3-embedding のスケールアップ）／train-eval 重複 72 行の発見
 
 - **状況**: Iter79（`embedding_model_replacement=qwen3_embedding_0.6b`）は事前登録した adopted 条件を

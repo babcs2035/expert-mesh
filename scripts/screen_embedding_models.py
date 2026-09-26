@@ -1,11 +1,18 @@
-"""Iter79 G1 (embedding_model_replacement): offline 5-fold CV screening of
+"""Iter80 G1 (embedding_model_replacement): offline 5-fold CV screening of
 embedding-model candidates on data/classifier_train.jsonl ONLY.
 
-Selection rule (registered in journal.md Iter79 plan, fixed before results
-are seen): stage 1 compares nomic-embed-text (baseline) vs
-qwen3-embedding:0.6b; if qwen3 wins on CV accuracy, it is selected and stage
-2 is skipped. Otherwise stage 2 adds bge-m3 and the best of all three is
-selected (ties broken by macro-F1, then by preferring qwen3-embedding:0.6b).
+Selection rule (registered in journal.md Iter80 plan, fixed before results
+are seen): all three candidates -- qwen3-embedding:0.6b (current baseline,
+reuses the Iter79 embcache), qwen3-embedding:4b, and bge-m3 -- are scored
+simultaneously with the same 5-fold CV. The value adopted for
+embedding_model_replacement is the candidate with the highest CV accuracy
+among those that ALSO pass the G0 VRAM gate (measured separately, offline,
+via `ollama ps` / `nvidia-smi` on wafl-ctrl5 -- this script does not measure
+VRAM). Ties are broken by macro-F1, then by preferring qwen3-embedding:4b.
+If every non-baseline candidate that passes G0 scores below the 0.6b
+baseline, the best surviving non-baseline candidate is still selected (the
+run proceeds; a regression is not grounds for silently keeping the current
+value -- see config.yml Iter80 lever note, condition A).
 
 Deliberately never reads data/dataset.jsonl (the 1,915-row evaluation set):
 doing so here would leak the evaluation set into model selection, the same
@@ -33,8 +40,7 @@ wafl500-509):
     ssh -fNT -L 11499:localhost:11434 wafl-ctrl5
     uv run python -m scripts.screen_embedding_models \\
         --train-data data/classifier_train.jsonl \\
-        --ollama-host 127.0.0.1 --ollama-port 11499 \\
-        --stage 1
+        --ollama-host 127.0.0.1 --ollama-port 11499
 """
 
 import argparse
@@ -54,11 +60,11 @@ from scripts.train_domain_classifier import (
     build_training_features,
 )
 
-# Fixed, pre-registered candidate list (journal.md Iter79 plan). Stage 1 is
-# the first two entries; stage 2 appends "bge-m3" only if qwen3 does not
-# beat nomic on stage 1's CV accuracy.
-_STAGE_1_CANDIDATES = ["nomic-embed-text", "qwen3-embedding:0.6b"]
-_STAGE_2_EXTRA_CANDIDATE = "bge-m3"
+# Fixed, pre-registered candidate list (journal.md Iter80 plan). All three
+# are scored in the same run; "qwen3-embedding:0.6b" is the current baseline
+# and its embeddings are read from the Iter79 cache (no re-embedding cost).
+_CANDIDATES = ["qwen3-embedding:0.6b", "qwen3-embedding:4b", "bge-m3"]
+_BASELINE_CANDIDATE = "qwen3-embedding:0.6b"
 
 _CV_SPLITS = 5
 _CV_RANDOM_STATE = 42
@@ -130,45 +136,42 @@ def _cross_validate(embeddings: np.ndarray, labels: list[str], sample_weight: li
     }
 
 
-async def _run(train_data_path: str, ollama_host: str, ollama_port: int, stage: int) -> dict:
-    """Run the pre-registered stage-1 (and, if needed, stage-2) screening and return all results."""
+async def _run(train_data_path: str, ollama_host: str, ollama_port: int, exclude: list[str]) -> dict:
+    """Score all _CANDIDATES with 5-fold CV and apply the Iter80 selection rule.
+
+    `exclude` lists candidates that failed the separate, offline G0 VRAM gate
+    (measured via `ollama ps` / `nvidia-smi` on wafl-ctrl5, not by this
+    script) and are therefore ineligible for selection even if their CV
+    accuracy is highest. All candidates are still scored so their CV numbers
+    are visible in the output regardless of G0 outcome.
+    """
     rows = _load_training_rows(train_data_path)
     labels = [row["domain"] for row in rows]
     sample_weight = _extract_sample_weights(rows)
     ollama_client = OllamaClient(host=f"http://{ollama_host}:{ollama_port}")
 
-    candidates = list(_STAGE_1_CANDIDATES)
     results: dict[str, dict] = {}
-
-    for model_name in candidates:
+    for model_name in _CANDIDATES:
         cache_path = _cache_path(train_data_path, model_name)
         embeddings = await _embed_candidate(ollama_client, model_name, rows, cache_path)
         results[model_name] = _cross_validate(embeddings, labels, sample_weight)
 
-    nomic_acc = results["nomic-embed-text"]["cv_accuracy_mean"]
-    qwen3_acc = results["qwen3-embedding:0.6b"]["cv_accuracy_mean"]
-    stage1_qwen3_wins = qwen3_acc > nomic_acc
+    # Selection rule (journal.md Iter80 plan): among non-baseline candidates
+    # that passed G0, pick max CV accuracy; ties broken by macro-F1, then by
+    # preferring qwen3-embedding:4b. The baseline is never itself "selected"
+    # here (selecting it would mean no change, i.e. the lever is exhausted).
+    eligible = [name for name in _CANDIDATES if name != _BASELINE_CANDIDATE and name not in exclude]
 
-    selected_model = None
-    if stage1_qwen3_wins:
-        selected_model = "qwen3-embedding:0.6b"
-    elif stage >= 2:
-        model_name = _STAGE_2_EXTRA_CANDIDATE
-        cache_path = _cache_path(train_data_path, model_name)
-        embeddings = await _embed_candidate(ollama_client, model_name, rows, cache_path)
-        results[model_name] = _cross_validate(embeddings, labels, sample_weight)
+    def _sort_key(name: str) -> tuple[float, float, int]:
+        r = results[name]
+        prefer_4b = 1 if name == "qwen3-embedding:4b" else 0
+        return (r["cv_accuracy_mean"], r["cv_macro_f1_mean"], prefer_4b)
 
-        # Selection rule (journal.md Iter79 plan): max CV accuracy; ties
-        # broken by macro-F1, then by preferring qwen3-embedding:0.6b.
-        def _sort_key(name: str) -> tuple[float, float, int]:
-            r = results[name]
-            prefer_qwen3 = 1 if name == "qwen3-embedding:0.6b" else 0
-            return (r["cv_accuracy_mean"], r["cv_macro_f1_mean"], prefer_qwen3)
-
-        selected_model = max(results.keys(), key=_sort_key)
+    selected_model = max(eligible, key=_sort_key) if eligible else None
 
     return {
-        "stage1_qwen3_wins": stage1_qwen3_wins,
+        "baseline_cv_accuracy": results[_BASELINE_CANDIDATE]["cv_accuracy_mean"],
+        "excluded_by_g0": exclude,
         "selected_model": selected_model,
         "candidates": results,
     }
@@ -177,7 +180,7 @@ async def _run(train_data_path: str, ollama_host: str, ollama_port: int, stage: 
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Iter79 G1: offline CV screening of embedding-model candidates "
+        description="Iter80 G1: offline CV screening of embedding-model candidates "
         "on data/classifier_train.jsonl only (no dataset.jsonl access)."
     )
     parser.add_argument("--train-data", default="data/classifier_train.jsonl")
@@ -188,16 +191,15 @@ def main() -> None:
     )
     parser.add_argument("--ollama-port", type=int, default=11499)
     parser.add_argument(
-        "--stage",
-        type=int,
-        choices=[1, 2],
-        default=1,
-        help="1: nomic vs qwen3-embedding:0.6b only. 2: also evaluate bge-m3 if qwen3 does not "
-        "win stage 1 (no-op if qwen3 already wins).",
+        "--exclude",
+        nargs="*",
+        default=[],
+        help="Candidate names that failed the offline G0 VRAM gate and must not be selected "
+        "even if their CV accuracy is highest (e.g. --exclude qwen3-embedding:4b).",
     )
     args = parser.parse_args()
 
-    result = asyncio.run(_run(args.train_data, args.ollama_host, args.ollama_port, args.stage))
+    result = asyncio.run(_run(args.train_data, args.ollama_host, args.ollama_port, args.exclude))
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

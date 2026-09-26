@@ -1,3 +1,239 @@
+## Iteration 80: 埋め込みモデルのスケールアップ（qwen3-embedding:0.6b → 4b）
+
+### 調査 (Iter80)
+
+B125(b) により本反復のレバーは `embedding_model_replacement` = `qwen3_embedding_4b`（config.yml の `values` にある未試行の第 2 値）で確定しており，レバー選定の裁量は無い．調査の問いは 3 つ．**(Q1) `qwen3-embedding:4b` は 0.6b に対して本タスク（日本語 10 ドメイン分類）で上積みが見込めるか．(Q2) 10 ノード（RTX 3060 12GB）の VRAM に収まるか．収まらない場合の代替は何か．(Q3) 次元数の増加（1024 → 2560）が 1,427 行の LogisticRegression 訓練に与える影響は何か．**
+
+**Q1: 公称値は一貫して 4b > 0.6b．ただし日本語分類の直接値は無い**
+
+- Ollama 公式ライブラリの `qwen3-embedding:4b` は **2.5GB（Q4_K_M），native 2560 次元，40K context**（<https://ollama.com/library/qwen3-embedding/tags>，2026-09-26 確認）．0.6b は 639MB・1024 次元・32K context．MTEB multilingual は **0.6b 64.33 / 4b 69.45 / 8b 70.58**（morphllm のベンチ一覧 <https://www.morphllm.com/ollama-embedding-models>，および config.yml lever note と同値）．
+- Qwen 公式の Model Card（<https://huggingface.co/Qwen/Qwen3-Embedding-4B>，GitHub <https://github.com/QwenLM/Qwen3-Embedding>）では MMTEB 系の平均が **0.6B 70.70 → 4B 74.60 → 8B 75.22**，CMTEB 系の行でも 4B が 0.6B を一貫して上回る．**サイズ方向の単調性は複数のベンチで一致している**（事実）．
+- ただし**日本語（JMTEB）の Classification は 4B の公開値が見つからなかった**．hotchpotch の JMTEB 計測（<https://secon.dev/entry/2025/06/11/100000-qwen3-embedding-jmteb>）は 0.6B のみ（Classification 66.09）で，4B 行は無い．**「4b が日本語分類で 0.6b を上回る」は公称値からの外挿であり，未検証の推測である**．Iter79 の学び 2（公称ベンチは候補を絞る道具であって採否の根拠にならない．MTEB 差 +2.05pt に対し実測 +16.34pt だった）をそのまま適用し，本反復も **G1 オフライン CV で本走前に数値化する**．
+- 同時比較する `bge-m3` は Ollama 公式・**1024 次元・約 1.2GB・prefix 不要**（同ベンチ一覧）．JMTEB の Classification 値は上記記事に無いが，多言語モデルであり VRAM の退避先として位置づけられる．
+
+**Q2: VRAM は本反復の最大のリスク．実測では余裕が 3.4GB 程度しかない**
+
+wafl500・wafl503・wafl509 で `nvidia-smi` と `ollama ps` を実測した（2026-09-26，read-only）．
+
+| 項目 | 実測 |
+|---|---|
+| GPU | RTX 3060 **12288 MiB**（全ノード共通） |
+| wafl500 現況 | used 7621 MiB / free 4290 MiB．resident は `qwen3-embedding:0.6b` **2.4GB** ＋ `expert-mesh-general-lora` **5.3GB**（light_model は idle で未ロード） |
+| wafl503/509 現況 | `expert-mesh-*-lora` 5.3GB ＋ `qwen3.5:4b-q4_K_M` **3.1GB** ＋ `nomic-embed-text` 0.32GB |
+| wafl-ctrl5 | used 8131 / free 3779 MiB．judge 用 swallow-8B 5.3GB ＋ 0.6b 2.4GB ＋ nomic 0.32GB が常駐 |
+
+- **重要な実測事実**: `qwen3-embedding:0.6b` の**常駐サイズは重み 639MB ではなく 2.4GB**である（`ollama ps`，context 4096）．差分の約 1.8GB は KV/活性メモリで，Ollama の SIZE はこれを含む．したがって「4b は 0.6b の約 4 倍」という B125 の見立て（重み比）は常駐サイズの比としては過小で，**4b の常駐サイズは重み 2.5GB ＋ より大きい KV（層数・隠れ次元とも増加）で 4.5〜6GB 規模になる可能性が高い**（推測．実測で確定させる）．
+- 本走時の wafl500 のピークは `light_model 3.1GB + expert_model 5.3GB + embedding X` である．**12288 MiB から 8.4GB を引くと X の予算は約 3.4GB** しかない．0.6b（2.4GB）はこの予算に収まっているが，**4b は収まらない可能性が高い**．
+- 収まらない場合に何が起きるかも実測から分かる．wafl503/509 では `qwen3-embedding:0.6b` が resident に居らず古い `nomic-embed-text` が残っている．**`OLLAMA_KEEP_ALIVE=-1`（docker-compose.yml:23）でも，Ollama は新しいモデルを載せるために既存モデルを退避する**．非依頼者ノードは埋め込みを起動時の `domain_embedding` 計算（`http_server.py:402-404`）にしか使わないため退避されても実害は無いが，**依頼者 wafl500 は 1 問ごとに埋め込みを呼ぶ（`node.py:202`）ため，退避と再ロードが往復すると所要時間が跳ね上がる**．精度ではなく所要時間（`experiment.timeout_min: 150`）のリスクとして扱う．
+- wafl-ctrl5 も free 3779 MiB であり，G1 で 4b を載せる前に `ollama stop` で `qwen3-embedding:0.6b`（2.4GB）と `nomic-embed-text` を一時退避して枠を空ける必要がある．**0.6b と nomic の訓練データ埋め込みは `data/embcache_qwen3-embedding_0.6b.npy` / `data/embcache_nomic-embed-text.npy` にキャッシュ済み**（`scripts/screen_embedding_models.py` の仕様）なので，退避しても G1 の基準線は再計算不要である．
+
+**Q3: 2560 次元 × 1,427 行は p ≫ n だが，1024 次元でも既にそうである**
+
+訓練行数 1,427 に対し特徴次元は 1024 → 2560 へ増える．`LogisticRegression(max_iter=1000)`（L2 正則化，既定 C=1.0）は p ≫ n でも解けるが，**訓練データ内 CV と本走の乖離が広がる方向の変化である**．Iter79 は G1 CV 0.7561 に対し本走 0.7530 とほぼ一致したが，次元が 2.5 倍になると「CV は上がったが本走は上がらない」という乖離が起こり得る．**この点は事前登録の解釈規則として明記しておく**（後述）．
+
+### 計画 (Iter80)
+
+**単一レバー**
+
+`embedding_model_replacement` = **`qwen3_embedding_4b`**．`config.yaml:4` の `embedding_model` を `qwen3-embedding:0.6b` → `qwen3-embedding:4b` へ変更し，同じ埋め込みで `models/domain_classifier.joblib` を再訓練する（再訓練は次元変更に構造的に付随する作業であり別レバーではない．Iter79 で確立した型）．**変更する設定キーは `config.yaml:4` の 1 行のみ．**
+
+**固定する構成（単一レバー原則）**
+
+`config.yaml` の `embedding_model` 以外の全項目（`routing_method=supervised_classifier`，`confidence_threshold=0.0`，`dispatch_top_k=2`，`dispatch_gap_threshold=0.29`／`dispatch_gap_max_k=4`，`aggregation_method`，`judge_model`，`classifier_model_path`，各ノードの `light_model=qwen3.5:4b-q4_K_M`／`expert_model=expert-mesh-*-lora`，`probe_timeout_s`／`dispatch_timeout_s`，`experiment.timeout_min=150`），`data/dataset.jsonl`（1,915 行．ビット単位で Iter79 と同一），`data/classifier_train.jsonl`（1,427 行，無変更．**train/eval 重複 72 行は B125(c) のとおり本反復では触らない**），`scripts/train_domain_classifier.py` のハイパラ一式，`classifier.py`／`http_server.py`／`node.py`／`aggregator.py`／`metrics.py`／`build_dataset.py`，`docker-compose.yml`（`OLLAMA_KEEP_ALIVE=-1` を含む）．**instruction prefix は導入しない**（B125(5)．`multilingual-e5-large`／`ruri-v3-310m` は prefix 付与＝2 レバー目になるため本反復の候補外）．
+
+**事前ゲート G0（VRAM 実測．B125(3)．結果を見る前に判定規則を固定する）**
+
+すべて wafl-ctrl5 と read-only の `ollama ps`／`nvidia-smi` で行い，**本走前に wafl500〜509 で生成処理は走らせない**（config.yml 絶対条件 B）．
+
+1. **G0-a（wafl-ctrl5 での常駐サイズ実測）**: `docker exec ollama-ctrl ollama stop qwen3-embedding:0.6b nomic-embed-text` で枠を空け，`ollama pull qwen3-embedding:4b` → 1 文の `/api/embed` を叩いてロードさせ，`ollama ps` の SIZE と PROCESSOR，`nvidia-smi` の used 差分を記録する．**PROCESSOR が `100% GPU` でなければ（CPU 混在なら）その時点で G0 失敗**．
+2. **G0-b（wafl500 の予算判定）**: G0-a で得た常駐サイズを X とし，**X + 3.1GB（light_model）+ 5.3GB（expert_model）≤ 11.5GB** を合格条件とする（12288 MiB から表示等の余白 0.8GB を引いた実効上限）．
+3. **G0-c（deploy 後の実機確認）**: deploy 後・本走前に，先頭 20 問の予備実行を回したうえで全 10 ノードの `ollama ps` を取り，(i) 3 モデルすべてが `100% GPU`，(ii) 予備 20 問の 1 問あたり平均所要が **Iter79 実測 2301.4ms の 2 倍（4603ms）以下**，を確認する．満たさない場合は所要時間を外挿し，**1,915 問の予測所要が 120 分を超えるなら G0 失敗**とする．
+4. **G0 失敗時の代替（事前登録）**: `qwen3-embedding:4b` を断念し，**G1 で VRAM 実行可能と確認できた候補のうち CV accuracy が最大のもの**（現実的には `bge-m3`，重み約 1.2GB）へレバーの値を切り替える．その場合のみ config.yml の `embedding_model_replacement` の `values` へ `bge_m3` を追記し，backlog へ `[auto-decided]` で記録する．**`iteration_name` は経緯の追跡性のため変更しない**（見出しと実際の値がずれる場合は journal の実行記録に明記する）．
+
+**事前ゲート G1（値の選定．評価集合を一切見ない．B125(1)(2)）**
+
+`scripts/screen_embedding_models.py` を拡張し（`_STAGE_1_CANDIDATES` を本反復用に差し替える），`data/classifier_train.jsonl`（1,427 行）**のみ**で 5-fold StratifiedKFold の accuracy / macro-F1 を測る．`data/dataset.jsonl` は参照しない（現行スクリプトが既にその設計であることは docstring と `--train-data` 既定値で担保されている）．
+
+- 候補は 3 つを**同時に**測る: **`qwen3-embedding:0.6b`（現行＝基準線．キャッシュ再利用）**，**`qwen3-embedding:4b`**，**`bge-m3`**（B125(2) の申し送り）．
+- **選定規則（結果を見る前に固定）**: G0 を通過した非現行候補のうち **CV accuracy 最大のものをレバーの値とする**．同点なら macro-F1，なお同点なら `qwen3-embedding:4b` を優先する．**現行 0.6b（Iter79 実測 cv_accuracy 0.7561 / macro-F1 0.7562）を下回る候補しか残らない場合でも，最良の非現行候補で本走は実施する**（config.yml 絶対条件 A．Iter79 の規則 4 と同一）．その際は「改善しない見込み」という着地点予測を本走前に journal へ記録する．
+- **CV と本走の乖離に関する解釈規則（Q3 への対処）**: 次元が 2.5 倍になるため，G1 の CV は本走 top1 の上振れした推定になり得る．**G1 CV が本走の予測値であるとは扱わず，値の選定にのみ用いる**．
+
+**事前ゲート G2（検出力）**
+
+旧 artifact（0.6b・1024 次元）と新 artifact（選定モデル）の `predict_proba` argmax を 1,915 行で replay し，discordant 行数 n_d と必要偏り率 `1.96/sqrt(n_d)` を算出する．**n_d ≥ 30 を合格条件**とし，一桁なら「効果なし」ではなく **config 未到達**を既定の解釈とする（d0004 §4）．
+
+**変更するファイルと箇所**
+
+1. `config.yaml:4`: `embedding_model: qwen3-embedding:0.6b` → `embedding_model: qwen3-embedding:4b`（G0/G1 の結果が `bge-m3` ならその名前）．**これが本レバーの本体であり，変更はこの 1 行のみ．**
+2. `models/domain_classifier.joblib`: 新埋め込みで再訓練して差し替える．**旧版は `models/domain_classifier_pre_iter80_qwen3_0.6b.joblib` へ `cp` で退避**してから上書きする（Iter77/79 と同じ慣行．flip 計測と rejected 時の復元に必要）．
+3. `scripts/screen_embedding_models.py`: 候補リストを本反復用（`qwen3-embedding:0.6b` / `qwen3-embedding:4b` / `bge-m3` の 3 候補同時評価）へ更新し，docstring の選定規則を Iter80 のものへ書き換える．**`data/dataset.jsonl` を参照しない性質は維持する．**
+4. `data/MANIFEST.md`: 新 artifact の sha256・生成コマンド・埋め込みモデル名・G0/G1/G2 の実測値を追記する（`data/`・`models/` は `.gitignore` 対象のため MANIFEST が唯一の再現性の担保．B123）．
+5. `.claude/research/config.yml`: **G0 失敗で `bge-m3` を採った場合のみ** `values` へ `bge_m3` を追記する．
+
+**変更しないが確認だけするファイル**: `tests/test_node.py:170` ほか計 4 つのテストが埋め込みモデル名を文字列リテラルで持つが，いずれもテスト内で組み立てる config 辞書の値であって `config.yaml` を読まない．**テストの修正は不要．**
+
+**レバーを読むコード行と到達条件**
+
+- 設定 → 全ノードへのモデル配布: `tools/node_models.py:get_models()` が `config["embedding_model"]` を返し，`mise.toml` L96-104 の deploy ループが `ollama pull` する．到達確認は**全 10 ノードで `ollama list | grep qwen3-embedding` に `4b` 行があること**．
+- 設定 → 各ノードの config: `mise.toml` L67 の `rsync config.yaml`．到達確認は**全 10 ノードで `grep '^embedding_model:' $REMOTE_DIR/config.yaml`**．
+- 設定 → 実行時のクエリ埋め込み: `node.py:202`（依頼者）／`http_server.py:402-404`（各ノードの `domain_embedding`）．到達確認は先頭 20 問の予備実行が 500 を返さないこと（**次元不一致なら必ずここで落ちる**）．
+- artifact → 全ノード: `mise.toml` L70-74 の `models/` rsync．到達確認は**全 10 ノードで `n_features_in_` が 2560（`bge-m3` なら 1024）**，または sha256 一致．
+- 実験 → 指標: `metrics.py` 無変更．到達確認は `question_count == 1915` かつ `compound_domain_question_count == 415`．
+- **レバー発火の直接証拠**: G2 の n_d ≥ 30，かつ本走 `selected_domain` の discordant が同程度であること．
+
+**実験手順**
+
+1. **前提確認**: `wc -l data/dataset.jsonl` = 1915，`wc -l data/classifier_train.jsonl` = 1427，`models/domain_classifier.joblib` の sha256 が `data/MANIFEST.md` の記載（`21e16ec6...`）と一致すること．
+2. **G0-a（wafl-ctrl5 のみ）**: 上記のとおり 4b と bge-m3 を pull し，常駐サイズ・PROCESSOR・embed レイテンシを実測．**wafl500〜509 は使わない．**
+3. **G1（wafl-ctrl5 のみ）**: `ssh -fNT -L 11499:localhost:11434 wafl-ctrl5` のトンネル経由で `uv run python -m scripts.screen_embedding_models --train-data data/classifier_train.jsonl --ollama-host 127.0.0.1 --ollama-port 11499` を実行．3 候補の CV accuracy / macro-F1 を全て journal へ記録し，選定規則に従って 1 モデルへ確定する．
+4. **G0-b 判定** → 合格なら 4b，不合格なら代替候補で以降へ進む．
+5. **再訓練（wafl-ctrl5 のみ）**: 旧 artifact を退避したうえで `uv run python -m scripts.train_domain_classifier --train-data data/classifier_train.jsonl --embedding-model <選定モデル> --ollama-host 127.0.0.1 --ollama-port 11499 --output models/domain_classifier.joblib`．`n_features_in_` を確認．
+6. **G2（wafl-ctrl5 のみ）**: 旧/新 artifact の argmax replay で n_d と `1.96/sqrt(n_d)` を算出し，新 artifact 単体のオフライン accuracy も着地点予測として記録する（判定には使わない）．
+7. `config.yaml:4` を書き換え，`uv run ruff check`（既存 23 件は pre-existing）と `uv run pytest tests/`（pre-existing 9 件 FAIL は B122．**新規失敗 0 件**）を確認．
+8. `mise run setup`（**直後に `uv sync --extra research` で research extra を復旧する．B118 の落とし穴 2**）→ `wc -l data/dataset.jsonl` = 1915 を再確認．
+9. `mise run deploy` → 上記「到達条件」を全 10 ノードで確認．
+10. **先頭 20 問の予備実行 → G0-c 判定**．失敗なら代替候補へ切り替えて 5〜9 をやり直す．
+11. **wafl500〜509 で 1,915 問のフルスペック本走を 1 回**（絶対条件 A）．起動直後に `state.json` を `status=waiting_experiment`・`experiment_dir`・`experiment_deadline`（開始時刻 + 150×60 + 600 秒）へ更新．`mise run analyze -- <timestamp>` まで実施（**引数なし実行は `results/iter45_preliminary/` を誤選択する．B118 の落とし穴 1**）．
+12. 指標を「全 1,915 行」「既存 1,600 行部分集合」「複合 415 行」の 3 通りで算出し，Iter79 基準線 `results/20260926_221822/` と id ペアリングで McNemar 検定・per-domain 20 指標の BH 補正を行う．
+
+**仮説（事前登録）**
+
+「`qwen3-embedding:0.6b` を `qwen3-embedding:4b`（2560 次元）へ替えると，日本語質問文のドメイン分離度がさらに上がり，1,915 行本走の `top1_accuracy` が Iter79 基準線 0.753003 から **+1.5pt 以上**改善する（McNemar p<0.05）．ただし Iter79 のような 2 桁 pt の伸びは期待しない．**0.753 の時点で残る誤りの多くは埋め込み品質ではなくラベル境界の曖昧さ（social_science と history_culture の相互混同など）に由来する可能性があり，効果は 0〜+3pt のどこかに着地する**と見込む．同一モデル族内のスケールアップであるため discordant n_d は Iter79 の 791 より大幅に小さく，**100〜400 行**と予測する．」
+
+**成功条件（事前登録）**
+
+基準線は Iter79 本走 `results/20260926_221822/`（全 1,915 行: top1=0.753003，single_domain_top1=0.749333，compound_domain_top1=0.766265，compound_domain_set_recall=0.548193，kappa=0.721502，misrouting=0.246997，ECE=0.032745，Brier=0.152849，AUROC=0.777614，fallback=0.0，dispatch_failure=0.000522，mean_duration_ms=2301.4，compound_mean_dispatched_count=1.880，answer_quality=0.569333，end_to_end=0.335770／既存 1,600 行部分集合: top1=0.751250）．
+
+| 区分 | 指標 | 現状 | 合格条件 |
+|---|---|---|---|
+| **G0（VRAM）** | wafl-ctrl5 での常駐サイズ X と PROCESSOR | 0.6b は 2.4GB / 100% GPU | `100% GPU` かつ **X + 8.4GB ≤ 11.5GB**．deploy 後は予備 20 問の平均所要 ≤ 4603ms，または 1,915 問外挿 ≤ 120 分 |
+| **G1（値の選定）** | 5-fold CV accuracy（`classifier_train.jsonl` のみ） | 0.6b = 0.7561 | 3 候補の値を全て記録し，選定規則どおり 1 モデルへ確定できること |
+| **G2（検出力）** | 旧/新 replay の discordant n_d | 参考: Iter79 は 791 | **n_d ≥ 30**．未満なら config 未到達を疑い本走前に原因を潰す |
+| **主基準（効果）** | 全 1,915 行の `top1_accuracy` | 0.753003 | **McNemar p < 0.05 かつ 点推定 +1.5pt 以上**（n_d=200 想定の MDE `1.96·sqrt(n_d)/1915` ≈ 1.45pt を上回る水準） |
+| **非退行①** | per-domain recall/precision 計 20 指標 | Iter79 実測 | **BH 補正（q=0.05）後の有意退行 0 件** |
+| **非退行②** | `fallback_rate` / `dispatch_failure_rate` | 0.0 / 0.000522 | fallback = 0.0，dispatch_failure ≤ 0.005 |
+| **非退行③** | ECE | 0.032745 | **≤ 0.08**（Iter79 の水準から +5pt 以内．再訓練で温度が変わる余地を見込む） |
+| **非退行④（新設）** | `mean_duration_ms` | 2301.4 | **≤ 4603（2 倍以内）**．埋め込みモデルの大型化による退避・再ロードの検出用．超過は「実験不成立」ではなく退行として扱う |
+| 報告のみ | 既存 1,600 行部分集合の top1 | 0.751250 | 判定には用いないが毎回併記する |
+| 報告のみ | `compound_domain_top1` / `single_domain_top1` / `compound_domain_set_recall` / `compound_mean_dispatched_count` | 0.766265 / 0.749333 / 0.548193 / 1.880 | 送出数は `dispatch_gap_threshold=0.29` 固定の二次効果で動きうる（B125 要レビュー (b)） |
+| 報告のみ | `answer_quality_accuracy` / `end_to_end_accuracy` | 0.569333 / 0.335770 | 生成器は不変のため横ばいを期待 |
+
+- **adopted**: 主基準（有意改善 かつ +1.5pt 以上）と非退行①②③④をすべて満たす．
+- **partial**: 点推定は改善だが p ≥ 0.05 または +1.5pt 未満，かつ非退行に違反なし．この場合は `embedding_model_replacement` の `values` を使い切ったものとして**収束**扱いにし，次レバーは prefix 付与（`embedding_input_instruction_prefix`，B124 要レビュー (a)）または `dispatch_gap_threshold` 再調整（B125 要レビュー (b)）を backlog で比較する．
+- **rejected**: 点推定が低下，または非退行①で有意退行が 1 件以上，または非退行④違反．**復元手順**: `config.yaml:4` を `qwen3-embedding:0.6b` へ戻し，`cp models/domain_classifier_pre_iter80_qwen3_0.6b.joblib models/domain_classifier.joblib` で復元し，`mise run deploy` を再実行して全 10 ノードの `n_features_in_`=1024 を確認する．
+- **invalid（実験不成立）**: `question_count != 1915`，`compound_domain_question_count != 415`，G2 の n_d が一桁，またはノードの `ollama list` に選定モデルが無い．いずれも setup/deploy の漏れと解釈する（d0004 §4）．
+
+**期待効果とリスク**
+
+期待効果は「同一モデル族のスケールアップで特徴量の分離度をもう一段上げる」ことに尽きる．一方で本反復は Iter79 と異なり，**改善が得られない側に賭けるべき理由（0.753 到達後の残差がラベル境界起因である可能性，JMTEB 4B 値の不在）と，実行自体が危うくなる側のリスク（VRAM 予算 3.4GB に対し 4b の常駐サイズが未知）の双方を抱えている**．前者は G1 で，後者は G0 で本走前に潰す．どちらのゲートでも失敗した場合の分岐（代替候補 `bge-m3` への切り替え，または「改善しない見込み」を記録したうえでの本走実施）を上記のとおり結果を見る前に固定してある．
+
+### Iteration 80 実行済み
+
+**判定: rejected（事前登録の rejected 条件を 2 つとも満たした）**
+
+#### レバーの値が本走前に切り替わった経緯（見出しと実際の値の齟齬）
+
+見出しの `iteration_name`（「0.6b → 4b」）と実際に本走したレバーの値（`bge-m3`）は一致していない．計画節「G0 失敗時の代替（事前登録）」の分岐がそのまま発火したためである（詳細は backlog B126）．
+
+- **G0-a（wafl-ctrl5 実測）**: `qwen3-embedding:4b` の常駐サイズは **4.4GB**（PROCESSOR は `100% GPU`）．
+- **G0-b（wafl500 予算判定）**: 合格条件 `X + 8.4GB ≤ 11.5GB` に対し 12.8GB で **1.3GB 超過 → G0 不合格**．
+- 事前登録どおり `qwen3-embedding:4b` を断念し，G0 を通過した非現行候補のうち CV 最大の **`bge-m3`**（常駐 **0.664GB**）へ切り替えた．`iteration_name` は追跡性のため据え置いた（計画節 G0-4 の指示どおり）．
+
+**G1（`data/classifier_train.jsonl` 1,427 行のみの 5-fold CV．評価集合を一切見ていない）**
+
+| 候補 | CV accuracy | macro-F1 | 常駐サイズ | G0 |
+|---|---|---|---|---|
+| `qwen3-embedding:0.6b`（現行＝基準線） | 0.7561 | 0.7562 | 2.4GB | 合格（現行） |
+| `qwen3-embedding:4b` | **0.7722** | 0.7718 | 4.4GB | **不合格**（選定対象外） |
+| `bge-m3` | 0.7120 | 0.7140 | 0.664GB | 合格 → **選定** |
+
+**CV で最良だった 4b が VRAM だけで排除され，選定規則が残した唯一の候補が基準線を 4.4pt 下回る `bge-m3` だった**．config.yml 絶対条件 A（「改善しない見込みでも最良の非現行候補で本走は実施する」）に従い，着地点が基準線割れになる見込みを本走前に記録したうえで本走した．
+
+**G2（検出力）**: 旧/新 artifact の argmax replay（1,915 行）で discordant **n_d=469 ≥ 30 で合格**．新 artifact 単体のオフライン argmax accuracy は **0.7248**（旧 0.7535）．
+
+#### 変更したもの
+
+1. `config.yaml:4` `embedding_model`: `qwen3-embedding:0.6b` → `bge-m3`（1 行．本レバーの本体）
+2. `models/domain_classifier.joblib`: bge-m3 で再訓練（sha256 `37d71b63...`，`n_features_in_`=1024）．旧版は `models/domain_classifier_pre_iter80_qwen3_0.6b.joblib`（sha256 `21e16ec6...`）へ退避
+3. `scripts/screen_embedding_models.py`: 3 候補同時評価へ拡張
+4. `data/MANIFEST.md`: 新 artifact の sha256・G0/G1/G2 実測値を追記
+5. `.claude/research/config.yml`: `embedding_model_replacement` の `values` へ `bge_m3` を追記
+
+到達確認は全て通過（全 10 ノードで `bge-m3:latest` の存在・`embedding_model: bge-m3`・artifact sha256 一致，先頭 20 問の予備実行で 500 エラー 0・平均 2288.9ms ≤ 4603ms）．lint 新規 0 件，test は pre-existing 9 件 FAIL（B122）のみで 306 件 PASS．**実験は成立している**（`question_count=1915`，`compound_domain_question_count=415`）．
+
+#### 結果（本走 `results/20260927_004001/`，1,915 問 1 回．基準線は Iter79 `results/20260926_221822/`）
+
+| 指標 | Iter79 基準線 | Iter80（bge-m3） | 差 | 判定 |
+|---|---|---|---|---|
+| **top1_accuracy（全 1,915）** | 0.753003 | **0.722715**（95%CI [0.7022, 0.7423]） | **-3.03pt** | **有意な退行** |
+| single_domain_top1（1,500） | 0.749333 | 0.744000 | -0.53pt | ノイズ範囲 |
+| compound_domain_top1（415） | 0.766265 | 0.645783 | **-12.05pt** | **有意な退行** |
+| 既存 1,600 行部分集合 top1 | 0.751250 | 0.735625 | -1.56pt | 有意でない |
+| compound_domain_set_recall | 0.548193 | 0.512048 | -3.61pt | 退行 |
+| compound_mean_dispatched_count | 1.880 | 2.104 | +0.224 | 増加 |
+| cohens_kappa | 0.721502 | 0.715619 | -0.0059 | — |
+| misrouting_rate | 0.246997 | 0.277285 | +3.03pt | 退行 |
+| fallback_rate | 0.0 | 0.0 | 0 | 非退行②合格 |
+| dispatch_failure_rate | 0.000522 | 0.001567 | +0.001 | 非退行②合格（≤0.005） |
+| ECE | 0.032745 | 0.033660 | +0.0009 | 非退行③合格（≤0.08） |
+| mean_duration_ms | 2301.4 | 2241.04 | -60 | 非退行④合格（≤4603） |
+| Brier | 0.152849 | 0.164695 | +0.0118 | 報告のみ |
+| AUROC | 0.777614 | 0.767964 | -0.0097 | 報告のみ |
+| answer_quality_accuracy | 0.569333 | 0.574667 | +0.53pt | 報告のみ（生成器不変） |
+| end_to_end_accuracy | 0.335770 | 0.335248 | -0.05pt | 報告のみ（横ばい） |
+
+**McNemar 検定（id ペアリング，1,915 行完全対応．`scipy.stats.binomtest` の正確二項検定）**
+
+| 区分 | n | 旧のみ正解 b | 新のみ正解 c | n_d | p 値 | 解釈 |
+|---|---|---|---|---|---|---|
+| 全 1,915 行 | 1915 | 191 | 133 | 324 | **1.50e-03** | **有意な退行** |
+| 単一 1,500 行 | 1500 | 127 | 119 | 246 | 0.656 | **差なし（ノイズ範囲）** |
+| **複合 415 行** | 415 | 64 | 14 | 78 | **8.58e-09** | **強く有意な退行** |
+| 既存 1,600 行部分集合 | 1600 | 150 | 125 | 275 | 0.148 | 有意でない |
+
+**per-domain 20 指標の BH 補正（q=0.05）: 有意退行 2 件（非退行①違反）**
+
+| 指標 | 旧 | 新 | 差 | p |
+|---|---|---|---|---|
+| **recall: legal** | 0.7621 | 0.5534 | **-20.87pt** | 1.82e-09 |
+| **recall: computer_science** | 0.8155 | 0.6915 | **-12.40pt** | 3.88e-04 |
+
+BH 補正で有意にならなかったものの退行側に振れた指標として precision: general（-13.39pt，p=9.4e-03），precision: history_culture（-9.00pt，p=2.6e-02）があり，**20 指標のうち 12 指標が退行側**（改善側 8）に偏っている．
+
+#### 判定と根拠
+
+事前登録の **rejected 条件は「点推定が低下，または非退行①で有意退行が 1 件以上，または非退行④違反」**であり，**前 2 者を独立に満たしている**（-3.03pt の低下，BH 後の有意退行 2 件）．非退行②③④は全て合格だが，rejected 条件は OR であるため判定は **rejected** で確定する．adopted/partial の余地は無い．
+
+#### 分析（ノイズか有意か，および原因）
+
+1. **これはノイズではない．3 つの独立な測定が一致している**．G1 CV -4.41pt（0.7561→0.7120），G2 オフライン argmax -2.87pt（0.7535→0.7248），本走 top1 -3.03pt（0.7530→0.7227）．**オフライン 2 指標が本走の符号と桁をともに正しく予測した**．Iter77〜79 の本走間ばらつき（同一 config の再現差は 1pt 未満）と比べても -3.03pt は明確に外側であり，McNemar p=1.50e-03 がこれを裏づける．
+2. **次元数は原因ではない**．`bge-m3` も `qwen3-embedding:0.6b` も **ともに 1024 次元**であり，訓練行数 1,427・LogisticRegression のハイパラ・訓練スクリプトは完全に同一である．計画時に Q3 として構えた「2560 次元による CV と本走の乖離」は，4b が排除された時点で本反復には該当しなくなった．**残る差は埋め込みベクトルの表現そのものだけ**であり，因果の切り分けとしては珍しく綺麗である．
+3. **劣化は単一ドメインではほぼ起きず，複合設問に集中している**（単一 -0.53pt / p=0.656 に対し複合 -12.05pt / p=8.58e-09）．しかも複合では `mean_dispatched_count` が 1.880 → 2.104 と**増えているのに** `set_recall` は 0.548 → 0.512 へ**下がった**．`dispatch_gap_threshold=0.29` は固定なので，送出数が増えたのは **bge-m3 の事後確率分布が平坦化し，rank1 と rank2 以降の gap が縮んだ**ことを意味する．つまり **bge-m3 はクラス間マージンが狭く，より多くの候補へ広く送ってなお当てられていない**．AUROC -0.0097・Brier +0.0118 もこの「順位付けの質そのものの低下」と整合する（ECE がほぼ不変なのは，確率の較正は保たれたまま順位の情報量だけが落ちたことを示す）．
+4. **モデル特性としての解釈（推測を含む）**: `bge-m3` は multi-vector／検索（retrieval）用途を主眼に対照学習されたモデルで，公開ベンチでも Retrieval 系が高く Classification 系は相対的に低い．本タスクは「クエリ 1 本を 10 クラスへ線形分離する」分類タスクであり，検索向けの埋め込み空間が必ずしも線形分離に有利ではない．**MTEB/JMTEB の総合スコアやモデルサイズは，本タスクの線形分離性を予測しない**（Iter79 の学び 2 の再確認）．
+5. **legal（-20.87pt）と computer_science（-12.40pt）の崩れ方**: この 2 ドメインは語彙が特徴的（法令名・条文・API 名・言語名）で，Iter79 の 0.6b 移行で最も伸びた側でもある．検索向けモデルは語の表層一致に引きずられやすく，「法律用語を含むが実質は business_economics の問い」のような行で誤って legal を引き寄せる／逆に一般語で書かれた法律問題を取りこぼす，という双方向の崩れが起きたと見られる（precision: legal は +4.48pt と上がっており，**legal へ入る数が減って残った分は当たっている＝再現率だけが落ちた**形になっている．これは「引き寄せ」ではなく「取りこぼし」が主因であることを示す）．
+6. **過剰一般化しない範囲**: 本反復が示したのは「`bge-m3` は本構成では `qwen3-embedding:0.6b` に劣る」ことだけである．`qwen3-embedding:4b` が優れているか否かは**実機で検証していない**（G1 CV 0.7722 は訓練データ内 CV であって本走の予測ではないと計画時に明記してある）．
+
+#### 復元（事前登録した手順を実行済み）
+
+rejected 判定に伴い，計画節の復元手順をそのまま実行した．
+
+1. `config.yaml:4` を `qwen3-embedding:0.6b` へ戻した（`git diff config.yaml` が空＝Iter79 commit の状態に一致）．
+2. `cp models/domain_classifier_pre_iter80_qwen3_0.6b.joblib models/domain_classifier.joblib` で復元．sha256 が `21e16ec6...`，`n_features_in_`=1024 であることを確認．
+3. `mise run deploy` を再実行．smoke_check（hashes / probe）は全て pass．
+4. 全 10 ノードで `embedding_model: qwen3-embedding:0.6b` と artifact sha256 `21e16ec6...` を確認し，コンテナ内 `ollama list` に `qwen3-embedding:0.6b` が存在することを確認した．
+
+**`bge-m3` のイメージは各ノードに残しているが削除していない**（破壊的操作は行わない方針．常駐しない限り VRAM を占有しないため実害は無く，再評価時の再 pull を省ける）．
+
+#### 学び
+
+1. **VRAM 予算はレバーの値空間を実質的に決める**．本反復で最も精度が高かった候補（4b，CV 0.7722）は，精度ではなく **1.3GB の VRAM 超過**だけで排除され，結果として基準線を下回ることが事前に分かっている候補で本走する羽目になった．`ollama ps` の SIZE は重みファイルサイズではなく **KV/活性を含む常駐サイズ**であり，0.6b では 639MB の重みに対し常駐 2.4GB（約 3.8 倍）だった．**「重みサイズ比で VRAM を見積もる」のは誤りで，必ず `ollama ps` で実測すること**．一方 bge-m3 は重み 1.2GB に対し常駐 0.664GB と**重みより小さく**，比率は一定ですらない．
+2. **事前登録した分岐は，都合の悪い結果を招くときこそ効いている**．G0 失敗時の代替候補を「結果を見る前に」固定してあったため，「4b が駄目なら基準線を下回ると分かっている bge-m3 を回すのは無駄では」という後付けの判断が入り込む余地が無かった．結果として「検索向けモデルは本分類タスクに向かない」という否定的だが再利用可能な知見が n=1915 の実測で得られた．**事前登録は adopted を守るためではなく rejected を捨てないための装置である**．
+3. **G1 オフライン CV は本走 top1 の「順位」を正しく予測した**（bge-m3 < 0.6b）．Iter79 でも CV 0.7561 に対し本走 0.7530 とほぼ一致しており，2 反復連続で整合した．**`embedding_model_replacement` 系のレバーについては，G1 CV で基準線を明確に下回る候補は本走でも下回る**と扱ってよい見込みが立った（ただし計画節で明記したとおり，次元数が大きく変わる候補では乖離が広がる可能性が残るため，CV は選定にのみ用い予測値としては扱わない方針は維持する）．
+4. **埋め込みの質の低下は「単一 → 複合」の順に増幅して現れる**．単一 -0.53pt（有意でない）に対し複合 -12.05pt（p=8.6e-09）．複合設問は rank2 以降の候補順位に依存するため，**確率分布のマージンが縮むと真っ先に壊れる**．逆に言えば，**複合 415 行は埋め込み品質の変化に対する感度が単一行より 20 倍以上高い検出器として機能している**（Iter78 の評価集合拡充の投資が，改善だけでなく退行の検出でも回収された）．
+5. **`embedding_model_replacement` レバーは使い切った**（`qwen3_embedding_0.6b`=adopted / `qwen3_embedding_4b`=G0 不合格で実機未検証 / `bge_m3`=rejected）．次は**モデルの交換ではなく入力の整形**へ移る（下記 B127）．
+
+---
+
 ## Iteration 79: 埋め込みモデルの差し替え（nomic-embed-text → qwen3-embedding:0.6b）
 
 ### 調査 (Iter79)
@@ -410,192 +646,4 @@ flip 行数（19 < 30，未達）と最小有意検出幅（2.0587pt ≤ 3.5pt�
 複合評価集合の拡充（research_frontier 最上位）は規模・純追加・非循環・品質の 4 条件を満たして完了とし，B115(3) の優先順位に従い次レバーは **`embedding_model_replacement` = `qwen3_embedding_0.6b`**（B116(3) によりユーザー確認不要で自律着手可）．次イテレーション名は「埋め込みモデルの差し替え（nomic-embed-text → qwen3-embedding:0.6b）」．基準線は本走 `results/20260926_195929/`（1,600 行サブセット top1=0.615000／全 1,915 行 top1=0.589556）とし，両方を毎回併記する（B119 要レビュー (c) への回答）．詳細と申し送りは backlog B120〜B123．
 
 ---
-
-## Iteration 77: education 固有補正の撤去と 10 ドメイン均一化
-
-### 調査 (Iter77)
-
-backlog B116（2026-09-23，user-decided）が定めた優先順位に従い，本反復は `education_specific_correction_removal` を実施する．調査では「撤去の是非」ではなく（B116 により再考の余地なしと確定済み），**(Q1) 撤去対象が実際にコードのどこに何個あるか，(Q2) 単一クラスだけの decision boundary 補正を外すことが理論的に何を意味するか，(Q3) 撤去後の着地点はどこか**の 3 点を明らかにした．
-
-**Q1: 撤去対象の棚卸し（config.yml の記述は古く，実態と食い違っていた）**
-
-config.yml の `education_specific_correction_removal` note は backlog B88 を引いて「`education_threshold=0.05` は実行時経路 `classifier.py:estimate_confidence_classifier()` に未反映であり，実行時への影響は現状ゼロ」と書いているが，**これは Iter57（`production_deployment_gap` の実施）以前の記述であり，現 HEAD では誤りである**．実機コードを直接確認した結果，education 固有補正は次の 4 箇所に存在する．
-
-1. `scripts/train_domain_classifier.py:194-204` — `intercept_delta = 0.7` を `calibrated_model.calibrated_classifiers_` の各 fold の `estimator.intercept_[edu_idx]` へ加算（Iter44/45 adopted，訓練時）．
-2. `classifier.py:56,77-78` — `EDUCATION_THRESHOLD = 0.05`．`estimate_confidence_classifier()` が education ノードのときだけ生確率に加算して返す（Iter57 で実行時経路へ配線済み．**実行時に効いている**）．
-3. `scripts/evaluate_classifier_calibration.py:280,484-489,611-618,660-667` — `--education-threshold`（既定 0.0）．conformal 系列 Iter75 が `0.05` を明示指定して実行時分布を再現していた．
-4. 同 `--education-logit-bias`（既定 0.0，Iter49/50 で rejected 済みの死にパラメータ）．
-
-2 が実行時に効いている証拠は基準線の実測に残っている: `results/20260923_150540/results.jsonl`（Iter75 本走）の education ノードの confidence は 1,600 行すべてで 0.05 以上（**最小 0.050006**，最大 0.996516）であり，`p + 0.05` の下限がそのまま観測されている．
-
-**Q2: 単一クラスだけの intercept シフトの位置づけ（先行研究）**
-
-クラス事前分布に応じて logit を平行移動する手法の標準は Menon, Jayasumana, Rawat, Jain, Veit, Kumar, "Long-tail learning via logit adjustment", ICLR 2021（arXiv:2007.07314，<https://research.google/pubs/long-tail-learning-via-logit-adjustment/>）である．同論文の post-hoc logit adjustment は **全クラスに対し** `logit_y - τ·log π_y` を適用するもので，balanced error に対して Bayes 一貫性を持つ．本リポジトリの `intercept_delta=+0.7`（education のみ）はその単一クラス版に相当するが，(a) 補正量が事前分布から導かれておらず経験的に掃引された値であること，(b) 他 9 クラスに対応する項が無いため balanced error にも plain accuracy にも一貫性を持たないこと，の 2 点で理論的裏付けを欠く．そもそも本リポジトリの訓練データは `_extract_sample_weights()` により 10 ドメインの実効重みが完全に等しく揃えられている（`train_domain_classifier.py` docstring）ため，原理的な logit adjustment 量は全クラスでほぼ 0 である．**すなわち撤去は「補正を外して裸に戻す」というより「事前分布が均一な設定における Bayes 最適な決定則へ戻す」操作と解釈できる**．
-
-一般論として，単一クラスの閾値・intercept を下げることはそのクラスの recall を上げ precision を下げる（accuracy と balanced accuracy で最適閾値が異なる，という多クラス評価指標の教科書的事実．例: MDPI "Selecting and Interpreting Multiclass Loss and Accuracy Assessment Metrics for Classifications with Class Imbalance", <https://www.mdpi.com/2072-4292/13/13/2591>）．実測もこれと整合しており，基準線の education は **recall 0.5353 に対し precision 0.3745** と 10 ドメイン中もっとも precision が低い．撤去でこの偏りが解消される方向へ動くと予想する．
-
-**Q3: 事前シミュレーション（`+0.05` の部分は基準線ファイルだけで閉じる）**
-
-`results/20260923_150540/results.jsonl` の `probe_candidates` は 10 ドメイン全ノードの confidence を保持しているため，**`EDUCATION_THRESHOLD` 撤去の効果は再計算なしで厳密に求まる**（education の値から 0.05 を引いて argmax を取り直すだけ）．
-
-| 量 | 現行（+0.05 あり） | +0.05 撤去後 | 差 |
-|---|---|---|---|
-| top1（`probe_candidates` の argmax で再計算．`metrics.json` の 0.595625 とは dispatch 失敗行等で 3 行ぶんずれる） | 0.597500 | **0.603125** | +0.5625pt |
-| argmax が変わる行数 | — | **38 / 1,600** | 2.375% |
-| education が選ばれる行数 | 243 | **205** | -38 |
-| education の単一ドメイン recall（n=150） | 0.580000 (87/150) | **0.553333** (83/150) | -2.67pt |
-| education confidence の最小値 | 0.050006 | **0.000006** | 下限が外れる |
-
-一方 `intercept_delta=+0.7` の撤去は temperature 較正の内側（fold ごとの logit）に効くため確率から逆算できず，**修正後の joblib で `evaluate_classifier_calibration.py` を回す必要がある**．Iter44 の採用時実績（education_recall +0.0647，argmax flip rate 8.62%）を逆向きに当てると，education_recall -6〜-7pt・flip 約 8〜9%（130〜140 行）が見込み値となる．両方を合わせた着地点の予想は下表（成功条件節）に事前登録する．
-
-**撤去後の artifact 生成に関する技術的所見（実装フェーズへの申し送り）**
-
-`intercept_delta` は `CalibratedClassifierCV.fit()` の**後**に加算されている（`train_domain_classifier.py:192` → `:203-204`）．したがって撤去後のモデルは，現行 artifact `models/domain_classifier.joblib` の各 fold の `estimator.intercept_[edu_idx]` から 0.7 を引いたものと**数学的に厳密に一致する**．これは「他 9 ドメインの係数・intercept がビット単位で不変」という非退行条件を構成的に保証する手段として使える（Iter32 の `class_weight` 結合バグのような相互依存は，加算が fit 後であるためここには生じない）．本番 artifact は改修後の訓練スクリプトで作り直す（B116(B) により埋め込み計算は **wafl-ctrl5** で行う）が，その結果が上記の減算版と一致することを検証に用いること．
-
-### 計画 (Iter77)
-
-**単一レバー**
-
-`education_specific_correction_removal` = `revert_intercept_delta_and_threshold`．education ドメインだけを狙い撃ちにした後付け補正を **(a) 訓練時 `intercept_delta=+0.7`** と **(b) 実行時 `EDUCATION_THRESHOLD=+0.05`** の 2 つ同時に撤去し，10 ドメイン均一な決定則へ戻す．config.yml の note が定める通り，(a)(b) は分類器の再訓練を共有するため 1 反復でまとめて外す（個別に外すと実機コストが倍になるだけで切り分けの意味がない）．
-
-**仮説（事前登録）**
-
-「education 固有補正の撤去により，education の recall は低下するが precision は上昇し，全体 top1_accuracy は基準線 0.595625 から実質的に変化しない（±1.5pt = 二項 SE 0.0123 の約 1.2 倍以内）」．根拠は，(i) `+0.05` の撤去だけを取れば top1 は **+0.56pt 上昇**する（上表，決定論的に算出済み），(ii) `+0.7` の採用時（Iter44）も top1 は有意変化しなかった，(iii) `+0.05` の採用時（Iter52）も McNemar p=0.2636 だった，の 3 点である．**なお B116 により，top1 が悪化した場合でも撤去は維持する．top1 は判定基準ではなく報告対象である．**
-
-**固定する構成**
-
-`config.yaml`（`embedding_model=nomic-embed-text`，`routing_method=supervised_classifier`，`confidence_threshold=0.0`，`dispatch_top_k=1`，`expert_model=expert-mesh-{domain}-lora`，`judge_model`），較正手法（`temperature`，Iter31 adopted），訓練データ `data/classifier_train.jsonl`（1,427 件，内容不変），`_extract_sample_weights()`，`http_server.py` / `aggregator.py` / `node.py` / `mise.toml`，実機 10 ノード構成をすべて変更しない．conformal 系列（Iter69〜76）の実行時配線は行わない（B115(2) によりクローズ済み）．
-
-**変更するファイルと箇所（4 ファイル＋テスト）**
-
-1. `scripts/train_domain_classifier.py`: L194-204 の `intercept_delta` ブロックを削除．`train_classifier()` の docstring から education 固有補正の記述を削る．
-2. `classifier.py`: `EDUCATION_THRESHOLD` 定数（L52-56）と `estimate_confidence_classifier()` の `if domain == "education":` 分岐（L77-78）を削除し，全ドメイン一律に生確率を返す．モジュール docstring L31-34 を削除．
-3. `scripts/evaluate_classifier_calibration.py`: `--education-threshold` / `--education-logit-bias` の両 CLI 引数と，`predict_calibrated_rows()` 内の加算箇所（L484-489 / L611-618 / L660-667 と logit bias 相当箇所），stderr 診断の該当文字列を削除．
-4. テスト: `tests/test_classifier.py` の education 加算テスト（L65-72 周辺）を「**全 10 ドメインで生確率がそのまま返る**」ことを検証する回帰テストへ置き換える（削除ではなく，撤去仕様を固定するテストへ差し替える）．`tests/test_evaluate_classifier_calibration.py:713-828` の `education_threshold` 4 件は対象機能ごと消えるため削除し，代わりに「`predict_calibrated_rows()` の出力が `predict_proba` の生値と一致する（どのクラスにも加算がない）」テストを 1 件追加する．
-5. 本番 artifact `models/domain_classifier.joblib` の再生成（`models/` は gitignore 対象のため履歴に残らない．旧版を `models/domain_classifier_pre_iter77_edu_corrected.joblib` として退避し，sha256 を journal に記録すること）．
-
-**レバーを読むコード行と到達条件（d0004 §4 の再発防止）**
-
-本レバーは「設定値の切り替え」ではなく**コードの削除**であるため，到達しない no-op になり得るのは削除漏れの場合だけである．発火の確認は次の 2 点で行う．
-
-- 訓練側: 再生成した joblib の `calibrated_classifiers_[i].estimator.intercept_[edu_idx]` が，退避した旧 artifact の同値から **ちょうど 0.7 低い**こと（全 5 fold）．他 9 クラスの `intercept_` と全クラスの `coef_` は旧 artifact とビット一致すること．
-- 実行時: 実機本走の `results/<ts>/results.jsonl` の `probe_candidates` 中 education ノードの confidence 最小値が **0.05 未満**になること（基準線では 0.050006 が下限で，これは `+0.05` が効いている限り破れない不等式である）．
-
-**実験手順**
-
-1. 上記 4 ファイルを改修し，`uv run pytest` と `uv run ruff check` を通す．
-2. **wafl-ctrl5（192.168.15.10，B116(B) の絶対条件）**の Ollama に対して `uv run python scripts/train_domain_classifier.py --train-data data/classifier_train.jsonl --embedding-model nomic-embed-text --ollama-host <wafl-ctrl5 の Ollama ホスト> --output models/domain_classifier.joblib` を実行し，artifact を再生成する．上記「訓練側」の差分検証を行う．
-3. オフライン事前確認（同じく wafl-ctrl5）: `scripts/evaluate_classifier_calibration.py --dataset data/dataset.jsonl --classifier models/domain_classifier.joblib --education-threshold なし` で 1,600 行の argmax・per-domain recall/precision を取得し，下表の予測と突き合わせる．**これは本実験の代替ではない（B116(A)）．**
-4. `mise run setup` → `mise run deploy`（wafl500〜509 へ新 artifact とコードを配布）．**デプロイ検証として各ノードで `grep -c EDUCATION_THRESHOLD classifier.py` が 0 を返すことを確認する**（Iter22 のデプロイ漏れと同型の失敗を防ぐため）．
-5. 先頭 20 問の予備実行で education confidence < 0.05 の行が出ることを確認．
-6. **wafl500〜509 で 1,600 問のフルスペック本走を 1 回**（B116(A) の絶対条件）．`mise run analyze` まで実施．
-
-**成功条件（事前登録）**
-
-基準線は Iter75 本走 `results/20260923_150540/`（top1=0.595625，kappa=0.564477，misrouting=0.404375，education recall=0.535294 / precision=0.374486，single_domain_top1=0.608，compound_top1=0.41，ECE=0.055085，fallback_rate=0.0）．
-
-| 区分 | 指標 | 基準線 | 予測 | 合格条件 |
-|---|---|---|---|---|
-| **主基準（完遂）** | education 固有補正の残存 | 4 箇所 | **0 箇所** | `grep -rn "intercept_delta\|EDUCATION_THRESHOLD\|education_threshold\|education_logit_bias" --include="*.py"` が（履歴コメントを除き）0 件．実機ノード側も 0 件 |
-| **主基準（発火）** | education confidence 最小値 | 0.050006 | **< 0.01** | 0.05 未満であること |
-| **主基準（発火）** | education intercept 差分 | — | **-0.7（全 5 fold）** | 旧 artifact との差が education のみ -0.7．他 9 クラスの coef/intercept はビット一致 |
-| 非退行 | 他 9 ドメインの recall/precision（18 指標） | 各値 | ほぼ不変 | BH 補正後に有意退行 **0 件** |
-| 報告のみ | top1_accuracy | 0.595625 | **0.58〜0.61** | 判定に用いない（B116．悪化しても撤去維持）．McNemar と Wilson 95%CI を必ず併記 |
-| 報告のみ | education recall | 0.535294 | **0.44〜0.50** | 低下が予想され，それ自体は棄却理由にならない |
-| 報告のみ | education precision | 0.374486 | **0.42〜0.52** | 上昇が予想される（Q2 のトレードオフ） |
-| 報告のみ | ECE / kappa / answer_quality | 0.055085 / 0.564477 / — | — | 軸②③の変化は 3SD=2.6pt を超えない限り有意としない（success_criteria (5)） |
-
-- **adopted の定義（本レバー固有）**: 本レバーはユーザー指示による方針変更の実装であり，「精度が上がったら採用」という通常のレバーとは判定構造が異なる．**主基準 3 つ（完遂・発火 2 種）と非退行条件を満たせば adopted** とし，top1 の増減は結果として報告する．
-- **invalid（実験不成立）の判別**: 実機本走の top1 が 0.595625 と小数点以下まで一致，または education confidence 最小値が 0.05 以上のままなら，**「効果なし」ではなく「デプロイ漏れ」を既定の解釈とする**（d0004 §4，Iter22 と同型）．
-- **ノイズ幅**: top1 の二項 SE は n=1600・p=0.596 で 0.0123（±2.5pt が 2SE）．education recall は n=150 で SE=0.041（±8.1pt が 2SE）と広く，**education 単体の増減を有意に語れる標本ではない**点を分析フェーズで明示すること．
-
-**期待効果**
-
-10 ドメイン均一な決定則へ戻すことで，以降のレバー（優先度 2 の `embedding_model_replacement`，優先度 3 の `cross_domain_training_data_augmentation`）を「education だけ下駄を履いた状態」ではない基準線の上で評価できるようになる．副次的に，`evaluate_classifier_calibration.py` から education 固有パラメータが消えることで，conformal 系列が抱えていた「評価分布と実行時分布の不一致」（Iter75 で判明した論点）も構造的に解消する．
-
----
-
-### 実装・実験 (Iter77)
-
-計画どおり 4 箇所の education 固有補正を撤去した．`classifier.py` の `EDUCATION_THRESHOLD` 定数と実行時分岐，`scripts/train_domain_classifier.py` の fit 後 `intercept_delta = 0.7` 加算，`scripts/evaluate_classifier_calibration.py` の `--education-threshold` と死にパラメータ `--education-logit-bias` を削除し，テスト 2 ファイルを「加算がないこと」を検証する回帰テストへ差し替えた．`config.yaml`・`http_server.py`・`aggregator.py`・`node.py`・`mise.toml`・訓練データ本体は無変更（単一レバー原則）．
-
-検証: 対象 3 テストファイル 43 件 PASS，`ruff check` PASS．全体スイートの 9 件 FAIL と 23 件の ruff エラーは `git stash -u` で退避しても同数再現する既存の失敗であり，本変更とは無関係であることを確認した．
-
-artifact 再生成は B116(B) に従い wafl-ctrl5 で実施（`models/domain_classifier_pre_iter77_edu_corrected.joblib` へ旧版を退避，sha256 `835a10d6...9242c9` → 新版 `02caf2b8...db408905`）．本走は B116(A) に従い wafl500〜509 で 1,600 問フルスペックを 1 回実施（`results/20260926_171953/`，約 24 分）．
-
-**主基準の発火確認（3 つとも成立）**
-
-- ①完遂: 全 10 ノードで `grep -c EDUCATION_THRESHOLD classifier.py` が 0．リポジトリ全体の 4 パラメータ grep も履歴コメントを除き 0 件．
-- ②発火・実行時: 本走の education confidence 最小値 4.4628668777636105e-06（< 0.05）．wafl-ctrl5 でのオフライン事前確認と同一値で再現．
-- ③発火・訓練: 新旧 5 fold すべてで `estimator.intercept_[education]` の差分がちょうど -0.7，他 9 クラスの `intercept_` と全クラスの `coef_` はビット単位で完全一致（`np.max(np.abs(diff)) == 0.0`）．
-
-**取得したメトリクス**（本走 1,600 問．基準線は Iter75 本走 `results/20260923_150540/`）
-
-| 指標 | 基準線 | Iter77 |
-|---|---|---|
-| top1_accuracy | 0.595625 | **0.615625**（Wilson 95%CI [0.591540, 0.639157]） |
-| cohens_kappa | 0.564477 | 0.588209 |
-| education recall | 0.535294 | 0.470588 |
-| education precision | 0.374486 | 0.547945 |
-| ECE | 0.055085 | 0.076640 |
-
-misrouting_rate=0.384375，fallback_rate=0.0，dispatch_failure_rate=0.00125，brier=0.206158，auroc=0.735098，single_domain_top1=0.629333，compound_domain_top1=0.41．axis2/3 は answer_quality_accuracy=0.56，end_to_end_accuracy=0.345．
-
-統計（`metrics.py` の既存関数をそのまま使用）: 全体 top1 の McNemar は discordant 11（基準線のみ正解）対 43（新のみ正解），chi2=17.796，p=2.4586e-05．**非退行条件（他 9 ドメイン×recall/precision=18 指標）は BH 補正（q=0.05）後の有意退行 0 件**．education は recall が McNemar p=0.002569 で低下，precision が Fisher exact p=0.001054 で上昇（選択行数 243→146）．
-
-**申し送り**: `mise run analyze` を引数なしで実行すると `ls -1d results/*/ | sort` のアルファベット順により `results/iter45_preliminary/` を誤選択する．今回は `-- 20260926_171953` の明示指定で回避した（本イテレーションのスコープ外のため未修正）．また `mise run setup` の素の `uv sync` が research extra を落とすため，以降は `uv sync --extra research` で復旧する必要がある．
-
----
-
-### Iteration 77 実行済み
-
-**変更（単一レバー）**: `education_specific_correction_removal=revert_intercept_delta_and_threshold`．education 固有の後付け補正 4 箇所（訓練時 `intercept_delta=+0.7`，実行時 `EDUCATION_THRESHOLD=+0.05`，評価スクリプトの `--education-threshold`・`--education-logit-bias`）を削除し，10 ドメイン均一な決定則へ戻した．テスト 2 ファイルを「どのクラスにも加算がない」ことを固定する回帰テストへ差し替え，artifact を wafl-ctrl5 で再生成のうえ wafl500〜509 で 1,600 問本走 1 回（`results/20260926_171953/`）．
-
-**判定: adopted**（事前登録した本レバー固有の定義「主基準 3 つ＋非退行を満たせば adopted」を充足）．
-
-- 主基準①完遂: 4 パラメータの grep が履歴コメントを除きリポジトリ・実機 10 ノードとも 0 件．
-- 主基準②発火（実行時）: education confidence 最小値 4.46e-06 < 0.05（基準線の下限 0.050006 が破れた）．
-- 主基準③発火（訓練）: 新旧 artifact の差分が education intercept のみ厳密に -0.7（全 5 fold），他 9 クラスの `intercept_`・全クラスの `coef_` は `np.max(np.abs(diff)) == 0.0`．
-- 非退行: 他 9 ドメイン×recall/precision=18 指標に BH 補正（q=0.05）後の有意退行 0 件．
-
-**結果と有意性の判定**
-
-| 指標 | 基準線 Iter75 | Iter77 | 判定 |
-|---|---|---|---|
-| top1_accuracy | 0.595625 | **0.615625**（Wilson 95%CI [0.591540, 0.639157]） | **有意な改善**（McNemar 11 vs 43，chi2=17.796，p=2.46e-05） |
-| cohens_kappa | 0.564477 | 0.588209 | top1 と同方向 |
-| education recall | 0.535294 | 0.470588 | 有意に低下（McNemar p=0.002569）．事前予測 0.44〜0.50 の範囲内 |
-| education precision | 0.374486 | 0.547945 | 有意に上昇（Fisher p=0.001054）．事前予測 0.42〜0.52 を上抜け |
-| ECE | 0.055085 | 0.076640 | 判定材料外の所見（後述） |
-
-top1 の +2.0pt は**ノイズではない**．軸①（ルーティング系）は決定論的で反復間ノイズ床を持たない（config success_criteria (5)）ことに加え，対応のある McNemar が p=2.46e-05，discordant の内訳が 11 対 43 と一方向に偏っている．二項 SE=0.0123（2SE=±2.5pt）は独立標本を仮定した保守的な幅であり，同一問題集合の対比較ではこちらが主基準である（success_criteria (1)）．
-
-**論点 1: 事前予測レンジ 0.58〜0.61 の上抜け（+2.0pt）の内訳**
-
-事前シミュレーションは `+0.05` 撤去分のみを決定論的に算出して +0.56pt（0.597500→0.603125，flip 38 行）としていた．実測の差分はその約 3.6 倍で，残り約 +1.4pt は `+0.7` 撤去分である．これは temperature 較正の内側（fold ごとの logit）に効くため基準線の `probe_candidates` からは逆算できず，事前レンジの上限側の不確実性として残っていた部分がそのまま顕在化した形である．機序は per-domain の内訳に明瞭に出ている: education の選択行数が 243→146（-97）へ減り，その大半が他 9 ドメインへ戻って **8/9 ドメインの recall が上昇**（social_science +5.4pt，legal +4.4pt，general +4.3pt，medical +3.9pt，mathematics と natural_science は ±0，precision の低下はいずれも -2.6pt 以内）した．education の真の支持数は約 170 行であるのに 243 行を選んでいた＝**過剰選択が全体 top1 を押し下げていた**という解釈で，Q2 の理論（事前分布が均一な設定では単一クラスの intercept シフトは Bayes 最適から離れる方向）と整合する．過剰な一般化は避けるべきで，本反復が示したのは「本データ・本分類器において，事前分布が均一化済みの訓練設定に単一クラスの経験的 intercept を重ねると全体 accuracy を損なう」までである．
-
-**論点 2: ECE 悪化（0.055085→0.076640）の解釈 — 判定材料ではなく所見**
-
-事前登録の成功条件に ECE は「報告のみ」として置かれており，判定に用いないのが妥当である．その上で中身を確認したところ，**これは較正の質的な劣化ではなく，accuracy だけが上がって confidence 分布が動かなかったことの算術的な帰結**である．
-
-- 平均 confidence は 0.5466→0.5398 とほぼ不変，accuracy は 0.5960→0.6164．平均ギャップ（conf - acc）は -0.0493→-0.0766 で，**符号は一貫して負（過小確信）**．10 ビンすべてで acc > conf（新）となっており，ECE ≈ |平均ギャップ| が成立する単調な過小確信である．過大確信側への崩れ（危険な方向）は起きていない．
-- 内訳を分けると，single ドメイン行（n=1498）が conf 0.5419 / acc 0.6302（ギャップ -0.088），compound 行（n=100）が conf 0.5080 / acc 0.4100（ギャップ +0.098）で，compound 側は基準線から一切動いていない（0.41 で同値）．つまり ECE の悪化はすべて single 行の accuracy 上昇に由来する．
-- 構造的な原因として，較正（temperature）は単一ラベルの訓練データで当てているのに，評価の正解判定は `selected_domain in expected_domains` という複数正解許容であるため，single 行でも過小確信が出やすい．加えて，基準線の ECE が見かけ上良かったのは **education への +0.7/+0.05 が過大確信を人為的に注入して過小確信を部分的に打ち消していたため**であり，補正を外したことでもともとの過小確信が露出したと読める．「ECE が良い基準線」は補正のアーティファクトだったという点は，今後 ECE を横比較する際の注意点として残す．
-- 今後のレバーへの影響: 絶対的な confidence 値に閾値を置く施策（conformal 系列，`confidence_threshold`，`dispatch_policy` の gap 閾値など）は，分類器を触るレバーの後に**必ず temperature を当て直してから**評価する必要がある．単調な過小確信なので順位（AUROC 0.7460→0.7351，Brier 0.20242→0.20616 といずれも僅差で悪化）はほぼ保たれており，再較正 1 段で回復可能な種類の劣化である．なお conformal 系列の実行時配線は B115(2) でクローズ済みのため，本件が直ちに新規作業を要求するわけではない．
-
-**論点 3: education の recall -6.5pt / precision +17.3pt のトレードオフ**
-
-Q2 で事前に予測したとおりの方向であり，B116(1) により**撤去は維持する**．education だけを特別扱いする方向へは戻さない．education 単体は n=170 前後（単一ドメイン評価では n=150，SE=0.041）で ±8pt が 2SE に相当し，そもそも単体の増減を強く語れる標本ではない．一方で precision の上昇は選択行数 243→146 という大きな変化を伴っており Fisher p=0.001054 と有意である．全体としては「education の過剰選択を止めたぶん，全ドメインの割り当てが正常化した」と要約される．
-
-**想定外の挙動**: なし（言語崩れ・発散・OOM なし．fallback_rate=0.0，dispatch_failure_rate=0.00125 は基準線と同水準）．軸②③は answer_quality_accuracy=0.56 / end_to_end_accuracy=0.345 で，success_criteria (5) の 3SD=2.6pt を超える変化とは判定しない．
-
-**学び**
-
-1. **単一クラスだけの経験的 intercept 補正は，その補正で改善した指標（education recall）以上のコストを他 9 ドメインから徴収していた**．Iter44/52 の採用時は education recall を主基準にしていたため全体 top1 への負の寄与が見えず，2 反復ぶん誤った方向へ投資していた．ドメイン固有補正を禁じる B115 の方針は，本反復で定量的にも裏づけられた（+2.0pt の回収）．
-2. **fit 後に加算した補正は，旧 artifact からの減算で厳密に再現できる**という性質（調査 Q3）が非退行の証明手段としてそのまま使えた．「他 9 クラスがビット一致」を統計的にではなく構成的に示せたのは，`class_weight` 結合（Iter32）のような相互依存が無いことの直接的な証拠になっている．今後も fit 後 post-hoc 補正を入れる際は，この検証可能性を保つ設計にする価値がある．
-3. **較正指標は accuracy の変化に引きずられる**．confidence 分布を動かさずに accuracy だけを上げるレバーは，それ自体が良い変更であっても ECE を悪化させる．ECE 単独を成功条件に据えると，accuracy を上げるレバーを誤って棄却しうる．今後は ECE を見るときに必ず「平均 conf と平均 acc の符号付きギャップ」を併記する．
-4. 運用上の落とし穴 2 件（`mise run analyze` の引数なし実行が `results/iter45_preliminary/` を誤選択する，`mise run setup` の素の `uv sync` が research extra を落とす）は backlog B118 に記録した．
-
-**次の一手**: B116 の優先順位に従い，優先度 1 の**複合設問評価集合の拡充**（research_frontier 最上位）へ移る．config.yml の levers 末尾へ `compound_eval_set_expansion` を追加した（詳細と比較可能性の担保方針は backlog B118）．
-
 
