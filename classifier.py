@@ -28,10 +28,9 @@ temperature's shared-softmax output also sums to 1 across domains, just
 via a single scalar rescale of the logit vector rather than per-class
 isotonic/sigmoid calibrators.
 
-As of Iter57, the education domain additionally reports the raw
-probability plus EDUCATION_THRESHOLD (0.05) without renormalization,
-matching the adopted offline decision of Iter52/53; all other domains
-still report the raw probability unchanged.
+As of Iter77, all domains report the raw probability unchanged; the
+Iter57 education-only threshold addition (backlog B116) has been
+reverted (journal.md "Iteration 77").
 """
 
 import joblib
@@ -49,21 +48,15 @@ def load_domain_classifier(model_path: str) -> CalibratedClassifierCV:
     return joblib.load(model_path)
 
 
-# Adopted offline in Iter52/53 (education_per_class_threshold=0.05): added
-# to the education probability WITHOUT renormalization, so the probability
-# vector sums to 1.05. Iter51's threshold=0.3 failed because the added mass
-# was too large; 0.05 is the value adopted with exactly this semantics.
-EDUCATION_THRESHOLD = 0.05
-
-
 def estimate_confidence_classifier(
     classifier: CalibratedClassifierCV, domain: str, query_embedding: list[float]
 ) -> float:
     """Return this node's own domain's predicted probability from the shared classifier.
 
-    For the education domain only, EDUCATION_THRESHOLD is added to the raw
-    probability without renormalization (the adopted Iter52/53 decision);
-    all other domains are returned as the raw probability unchanged.
+    All domains are returned as the raw probability unchanged (Iter77:
+    the Iter57 education-only threshold addition was reverted per
+    backlog B116 -- domain-specific post-hoc corrections are no longer
+    applied to any single domain).
 
     Returns 0.0 (the same safe-default convention as
     estimate_embedding_confidence's zero-vector case) when the classifier
@@ -74,6 +67,4 @@ def estimate_confidence_classifier(
         return 0.0
     domain_index = list(classifier.classes_).index(domain)
     probabilities = classifier.predict_proba([query_embedding])[0]
-    if domain == "education":
-        return float(probabilities[domain_index] + EDUCATION_THRESHOLD)
     return float(probabilities[domain_index])

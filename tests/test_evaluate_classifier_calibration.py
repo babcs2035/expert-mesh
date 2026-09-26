@@ -710,133 +710,63 @@ def test_set_construction_default_still_broken_with_raps_penalty_added() -> None
     assert size_default == 1
 
 
-# --- Iter75: education_threshold must reach calibration_source="eval_holdout" ---
+# --- Iter77: education_specific_correction_removal (backlog B116) ---
+#
+# predict_calibrated_rows() no longer accepts education_logit_bias /
+# education_threshold at all (both were removed from the function signature
+# along with classifier.py's EDUCATION_THRESHOLD and
+# train_domain_classifier.py's intercept_delta). The Iter75 tests above this
+# block (test_education_threshold_*, _make_iter75_classifier,
+# _parse_q_hat_from_stderr) exercised that now-removed keyword and are
+# deleted rather than adapted. This single replacement test fixes the
+# post-removal invariant instead: no domain, including education, receives
+# any post-hoc addition -- predict_calibrated_rows()'s output probabilities
+# must equal the classifier's raw predict_proba() values exactly.
 
-# 8-row synthetic dataset over 4 classes (a, education, b, c), 2 rows per class,
-# so StratifiedShuffleSplit(test_size=0.5) lands exactly 1 row per class in each
-# half. classifier.predict_proba always returns the SAME fixed 4-column vector
-# regardless of the embedding, with "education" deliberately placed 2nd by rank
-# (0.30, behind "b" at 0.32) at threshold=0.0 so that adding the +0.05 threshold
-# (-> 0.35) flips the rank order (education becomes rank-1). This rank flip is
-# what makes q_hat (computed from the true-class score population) sensitive to
-# education_threshold under calibration_source="eval_holdout": prior to the
-# Iter75 fix, this correction never reached the calibration side, so q_hat was
-# identical regardless of education_threshold (the bug this test guards against).
-_ITER75_CLASSES = ["a", "education", "b", "c"]
-_ITER75_RAW_PROBS = [0.10, 0.30, 0.32, 0.28]  # a, education, b, c
-_ITER75_N_ROWS = 8
-_ITER75_DATASET = [
+_ITER77_CLASSES = ["a", "education", "b", "c"]
+_ITER77_RAW_PROBS = [0.10, 0.30, 0.32, 0.28]  # a, education, b, c
+_ITER77_DATASET = [
     {
         "id": i,
         "query": f"query {i}",
-        "expected_domains": [_ITER75_CLASSES[i % 4]],
+        "expected_domains": [_ITER77_CLASSES[i % 4]],
     }
-    for i in range(_ITER75_N_ROWS)
+    for i in range(4)
 ]
 
 
-def _make_iter75_classifier() -> MagicMock:
-    """A classifier stub whose predict_proba always returns the same fixed 4-class distribution.
-
-    The constant output isolates the education_threshold's effect on the
-    calibration/evaluation scores from any embedding-dependent variation.
-    """
+def _make_iter77_classifier() -> MagicMock:
+    """A classifier stub whose predict_proba always returns the same fixed 4-class distribution."""
     classifier = MagicMock()
-    classifier.classes_ = _ITER75_CLASSES
+    classifier.classes_ = _ITER77_CLASSES
 
     def _predict_proba(embeddings: np.ndarray) -> np.ndarray:
-        return np.tile(_ITER75_RAW_PROBS, (len(embeddings), 1))
+        return np.tile(_ITER77_RAW_PROBS, (len(embeddings), 1))
 
     classifier.predict_proba.side_effect = _predict_proba
     return classifier
 
 
-def _make_iter75_ollama_client() -> MagicMock:
+def _make_iter77_ollama_client() -> MagicMock:
     """A fake OllamaClient whose embed() returns a fixed-length placeholder vector."""
     client = MagicMock()
     client.embed = AsyncMock(return_value=[1.0, 0.0])
     return client
 
 
-def _run_iter75(education_threshold: float | None) -> list[dict]:
-    """Run predict_calibrated_rows() under calibration_source='eval_holdout' with
-    the given education_threshold (None omits the keyword entirely, exercising
-    the default)."""
-    kwargs = dict(
-        conformal_prediction=True, confidence_level=0.90,
-        qhat_source="true_class", calibration_source="eval_holdout", holdout_seed=42,
-    )
-    if education_threshold is not None:
-        kwargs["education_threshold"] = education_threshold
-    return asyncio.run(
+def test_predict_calibrated_rows_applies_no_addition_to_any_domain() -> None:
+    """No domain (including education) receives a post-hoc probability addition.
+
+    Iter77 regression guard for backlog B116: predict_calibrated_rows()'s
+    output probabilities dict must equal the classifier's raw predict_proba()
+    output exactly, for every class, including "education".
+    """
+    rows = asyncio.run(
         predict_calibrated_rows(
-            _make_iter75_ollama_client(), "fake-embed-model",
-            _make_iter75_classifier(), _ITER75_DATASET, **kwargs,
+            _make_iter77_ollama_client(), "fake-embed-model",
+            _make_iter77_classifier(), _ITER77_DATASET,
         )
     )
-
-
-def test_education_threshold_0_0_is_unchanged_from_omitting_the_argument() -> None:
-    """education_threshold=0.0 (explicit) must reproduce omitting the argument exactly.
-
-    Backward-compatibility guard for the Iter75 change: rows produced with the
-    keyword explicitly set to its default value must be byte-for-byte identical
-    to the pre-Iter75 default code path.
-    """
-    rows_default = _run_iter75(education_threshold=None)
-    rows_explicit_zero = _run_iter75(education_threshold=0.0)
-    assert rows_default == rows_explicit_zero
-
-
-def test_education_threshold_applies_exactly_once_under_eval_holdout() -> None:
-    """Under calibration_source='eval_holdout', probabilities['education'] in the
-    output must be exactly raw_predict_proba['education'] + education_threshold
-    -- not +2x the threshold.
-
-    Direct regression guard for the Iter75 double-counting failure mode: prior
-    to the fix, education_threshold was applied once at the all_probs stage
-    (new) and unconditionally a second time in the per-row evaluation loop
-    (pre-existing), which would have produced +0.10 instead of +0.05 here.
-    """
-    rows = _run_iter75(education_threshold=0.05)
-    raw_education_prob = _ITER75_RAW_PROBS[_ITER75_CLASSES.index("education")]
     for row in rows:
-        assert row["probabilities"]["education"] == pytest.approx(raw_education_prob + 0.05)
-        assert row["probabilities"]["education"] != pytest.approx(raw_education_prob + 0.10)
-
-
-def test_education_threshold_propagates_to_calibration_side_q_hat(capsys: pytest.CaptureFixture) -> None:
-    """education_threshold must change q_hat under calibration_source='eval_holdout'.
-
-    Direct regression guard for the Iter75 investigation Q1 finding: before the
-    fix, calibration true-class scores were computed from the uncorrected
-    predict_proba output (L476), so q_hat printed to stderr was identical
-    regardless of education_threshold. The synthetic probability vector here
-    is constructed so the +0.05 threshold flips "education" past "b" in rank
-    order (see module comment above), which changes the true-class
-    nonconformity score for both the education-labeled AND the b-labeled
-    calibration row, and therefore q_hat.
-    """
-    capsys.readouterr()  # drain any prior output
-    _run_iter75(education_threshold=0.0)
-    q_hat_at_0_00 = _parse_q_hat_from_stderr(capsys.readouterr().err)
-
-    _run_iter75(education_threshold=0.05)
-    q_hat_at_0_05 = _parse_q_hat_from_stderr(capsys.readouterr().err)
-
-    assert q_hat_at_0_00 != q_hat_at_0_05, (
-        "q_hat did not change with education_threshold; the calibration-side "
-        "correction is not actually reaching the true-class score population "
-        "(Iter75 no-op guard)."
-    )
-    assert q_hat_at_0_00 == pytest.approx(0.68)
-    assert q_hat_at_0_05 == pytest.approx(0.65)
-
-
-def _parse_q_hat_from_stderr(stderr_text: str) -> float:
-    """Extract the q_hat=<value> diagnostic printed by predict_calibrated_rows()."""
-    for line in stderr_text.splitlines():
-        if "q_hat=" in line:
-            token = next(part for part in line.split() if part.startswith("q_hat="))
-            return float(token.removeprefix("q_hat="))
-    raise AssertionError(f"no q_hat= diagnostic found in stderr:\n{stderr_text}")
+        for class_name, raw_prob in zip(_ITER77_CLASSES, _ITER77_RAW_PROBS):
+            assert row["probabilities"][class_name] == pytest.approx(raw_prob)

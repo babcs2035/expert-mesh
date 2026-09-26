@@ -15,6 +15,62 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B118 [auto-decided 2026-09-26] Iter77 の判定（adopted）と次イテレーションのレバー選定（複合設問評価集合の拡充），および運用上の落とし穴 2 件の記録
+
+- **状況**: Iter77（`education_specific_correction_removal`）が主基準 3 つ（完遂・発火 2 種）と
+  非退行条件（他 9 ドメイン 18 指標に BH 補正後の有意退行 0 件）をすべて満たし **adopted** と
+  判定した．top1_accuracy は 0.595625→0.615625（McNemar p=2.46e-05，discordant 11 対 43）と
+  事前予測レンジ 0.58〜0.61 を上抜けした．次に振るレバーを決める必要が生じた．
+- **自動選択（次イテレーション）**: B116 の優先順位（複合評価集合拡充 > `embedding_model_replacement`
+  > 全ドメイン共通訓練データ拡充）の最上位である**複合設問評価集合の拡充**を選ぶ．
+  config.yml の levers 末尾へ `compound_eval_set_expansion` を追加した（research_frontier
+  最上位項目のレバー化．値は調査フェーズの結論で選ぶ 3 択
+  `existing_public_dataset` / `llm_generated_separate_generator` / `manual_authoring`）．
+  - **次イテレーションの `iteration_name` 案**: 「複合設問評価集合の拡充（既存公開データセットの
+    調査を起点に n=300〜400 へ）」
+- **根拠**:
+  1. B116 がユーザー決定として優先順位を明示しており，独断で順序を入れ替える理由がない．
+  2. 測定系の検出力不足（複合 100 行では discordant 15〜19 行しか出ず ±3〜4 行を検出できない）は
+     Iter63〜68 の 6 反復を「判定不能」で潰した真因であり，これを解消しないまま
+     `embedding_model_replacement` を試すと，複合ドメインへの効果が再び判定不能になる．
+     測定系の整備を先に済ませるほうが後続レバーの情報量が上がる．
+  3. Iter77 で 10 ドメイン均一な決定則へ戻ったため，今が「education だけ下駄を履いていない」
+     クリーンな基準線を確定できるタイミングでもある．
+- **付随する自動判断（research_frontier の未解決点 (3) への回答）**: 評価集合の拡充は
+  **既存 1,600 問を部分集合として保持する純粋な追加**に限定し，既存行の改変・削除は行わない．
+  これにより 1 回の本走から「全体（拡充後）」と「1,600 問サブセット」の両方の指標が算出でき，
+  Iter28 以降の過去基準線を実機で取り直すコスト（1 回 90〜150 分 × 多数）を回避できる．
+  新規追加行についてのみ，現行構成での基準線を追加行だけ流して取得する（追加分のみなので安価）．
+- **運用上の落とし穴 2 件（Iter77 実装フェーズからの申し送り．いずれも本反復のスコープ外で未修正）**:
+  1. `mise run analyze` を引数なしで実行すると，`ls -1d results/*/ | sort` のアルファベット順に
+     より `results/iter45_preliminary/` を誤選択する（`2026...` より `iter45...` が後に来るため）．
+     当面は `mise run analyze -- <timestamp>` の明示指定で回避する．恒久対応するなら
+     mise.toml のタスクを「日付形式のディレクトリのうち mtime 最新」を選ぶよう直すこと．
+  2. `mise run setup` の素の `uv sync` が research extra を落とすため，setup 後は
+     `uv sync --extra research` で復旧する必要がある．
+- **要レビュー**: (a) 次イテレーションを `compound_eval_set_expansion` にしてよいか
+  （`embedding_model_replacement` を先に回したい場合はここを差し替える）．
+  (b) 上記「既存 1,600 問を部分集合として保持する純粋な追加」という拡充方針で，
+  過去基準線の再取得を省略してよいか．(c) 落とし穴 2 件を独立の修正コミットとして
+  片付けるか，次反復のついでに直すか．
+
+## B117 [auto-decided 2026-09-26] config.yml の `education_specific_correction_removal` note の記述が実態と食い違っていた（撤去対象は 2 箇所ではなく 4 箇所）
+
+- **状況**: Iter77 の調査フェーズで撤去対象を棚卸ししたところ，config.yml の当該 note（B88 を引用）が
+  「`education_threshold=0.05` は実行時経路 `classifier.py` に未反映で実行時への影響はゼロ」と
+  記述しているのに対し，現 HEAD の `classifier.py:56,77-78` には `EDUCATION_THRESHOLD = 0.05` が
+  実在し，実行時に効いていることを確認した（Iter57 の `production_deployment_gap` で配線済み．
+  基準線 `results/20260923_150540/` の education confidence 最小値 0.050006 がその観測証拠）．
+  note は Iter57 以前の記述のまま更新されていなかった．
+- **自動判断**: config.yml の note は歴史的記録として書き換えず，Iter77 の journal 調査節に
+  正しい撤去対象一覧（4 箇所: `train_domain_classifier.py` の `intercept_delta`，
+  `classifier.py` の `EDUCATION_THRESHOLD`，`evaluate_classifier_calibration.py` の
+  `--education-threshold` と `--education-logit-bias`）を記載し，実装フェーズはそちらを正とする．
+- **根拠**: note の書き換えは過去の判断記録の改変になる一方，journal は反復ごとの一次記録であり，
+  最新の実態はそこに残すのが本リポジトリの運用に合う．
+- **要レビュー**: Iter77 完了後，`education_specific_correction_removal` レバーの note へ
+  「撤去済み・対象 4 箇所」と追記して閉じるかどうか．
+
 ## B116 [user-decided 2026-09-23] B115の確定（撤去の再考なし・データ調達方針・embedding自律着手）と，本実験必須化／ノード使い分けの絶対条件化
 
 - **状況**: B115 で残していた 3 つの未解決点にユーザーが回答し，加えて研究サイクル全体に適用する

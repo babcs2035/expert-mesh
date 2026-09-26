@@ -276,8 +276,6 @@ async def predict_calibrated_rows(
     classifier: CalibratedClassifierCV,
     dataset: list[dict],
     fine_tuned_embed_model: str | None = None,
-    education_logit_bias: float = 0.0,
-    education_threshold: float = 0.0,
     conformal_prediction: bool = False,
     calibration_dataset_path: str | None = None,
     confidence_level: float = 0.90,
@@ -474,19 +472,6 @@ async def predict_calibrated_rows(
                 )
         all_embeddings = np.array(all_embeddings)
         all_probs = classifier.predict_proba(all_embeddings)
-        # Apply the education per-class threshold here, once, so it reaches
-        # BOTH the calibration true-class scores below AND the evaluation
-        # probabilities cached into precomputed_eval_holdout. Previously this
-        # correction was applied only in the per-row evaluation loop further
-        # down, which broke exchangeability between calibration and
-        # evaluation scores under calibration_source="eval_holdout" (Iter75
-        # investigation Q1). The per-row loop below skips re-applying
-        # education_threshold whenever precomputed_eval_holdout is set, to
-        # avoid double-counting (+0.10 instead of +0.05).
-        if education_threshold > 0.0:
-            edu_idx = classes.index("education") if "education" in classes else -1
-            if edu_idx >= 0:
-                all_probs[:, edu_idx] += education_threshold
 
         splitter = StratifiedShuffleSplit(
             n_splits=1, test_size=0.5, random_state=holdout_seed
@@ -572,8 +557,7 @@ async def predict_calibrated_rows(
             f"set_construction={set_construction} "
             f"qhat_quantile_direction={qhat_quantile_direction} "
             f"randomization_seed={randomization_seed} "
-            f"raps_lambda={raps_lambda} raps_k_reg={raps_k_reg} "
-            f"education_threshold={education_threshold}",
+            f"raps_lambda={raps_lambda} raps_k_reg={raps_k_reg}",
             file=sys.stderr,
         )
 
@@ -597,25 +581,6 @@ async def predict_calibrated_rows(
                 query_embedding = local_model.encode(row["query"], normalize_embeddings=True,
                                                      show_progress_bar=False)
                 probabilities = classifier.predict_proba([query_embedding])[0]
-            # Apply post-hoc logit bias to education class
-            if education_logit_bias != 0.0:
-                edu_idx = classes.index("education") if "education" in classes else -1
-                if edu_idx >= 0:
-                    logits = np.log(probabilities + 1e-10)
-                    logits[edu_idx] += education_logit_bias
-                    logits_max = np.max(logits)
-                    exp_logits = np.exp(logits - logits_max)
-                    probabilities = exp_logits / np.sum(exp_logits)
-            # Apply per-class threshold to education class (lowers decision boundary).
-            # Skipped here when precomputed_eval_holdout supplied the probabilities,
-            # because that path already applied education_threshold once at L476-489
-            # (Iter75): re-applying it here would double-count it (+0.10 instead of
-            # +0.05) and, worse, leave the calibration true-class scores using the
-            # uncorrected distribution while evaluation used the corrected one.
-            if education_threshold > 0.0 and precomputed_eval_holdout is None:
-                edu_idx = classes.index("education") if "education" in classes else -1
-                if edu_idx >= 0:
-                    probabilities[edu_idx] += education_threshold
             # Compute conformal prediction set (uses original predict_proba probabilities)
             if conformal_prediction and cp_data is not None:
                 pred_set, set_size = _compute_prediction_set(
@@ -646,25 +611,6 @@ async def predict_calibrated_rows(
             else:
                 query_embedding = await ollama_client.embed(embedding_model, row["query"])
                 probabilities = classifier.predict_proba([query_embedding])[0]
-            # Apply post-hoc logit bias to education class
-            if education_logit_bias != 0.0:
-                edu_idx = classes.index("education") if "education" in classes else -1
-                if edu_idx >= 0:
-                    logits = np.log(probabilities + 1e-10)
-                    logits[edu_idx] += education_logit_bias
-                    logits_max = np.max(logits)
-                    exp_logits = np.exp(logits - logits_max)
-                    probabilities = exp_logits / np.sum(exp_logits)
-            # Apply per-class threshold to education class (lowers decision boundary).
-            # Skipped here when precomputed_eval_holdout supplied the probabilities,
-            # because that path already applied education_threshold once at L476-489
-            # (Iter75): re-applying it here would double-count it (+0.10 instead of
-            # +0.05) and, worse, leave the calibration true-class scores using the
-            # uncorrected distribution while evaluation used the corrected one.
-            if education_threshold > 0.0 and precomputed_eval_holdout is None:
-                edu_idx = classes.index("education") if "education" in classes else -1
-                if edu_idx >= 0:
-                    probabilities[edu_idx] += education_threshold
             # Compute conformal prediction set (uses original predict_proba probabilities)
             if conformal_prediction and cp_data is not None:
                 pred_set, set_size = _compute_prediction_set(
@@ -699,8 +645,6 @@ async def _run(
     ollama_port: int,
     output: TextIO,
     fine_tuned_embed_model: str | None = None,
-    education_logit_bias: float = 0.0,
-    education_threshold: float = 0.0,
     conformal_prediction: bool = False,
     calibration_dataset_path: str | None = None,
     confidence_level: float = 0.90,
@@ -719,8 +663,6 @@ async def _run(
     rows = await predict_calibrated_rows(
         ollama_client, embedding_model, classifier, dataset,
         fine_tuned_embed_model=fine_tuned_embed_model,
-        education_logit_bias=education_logit_bias,
-        education_threshold=education_threshold,
         conformal_prediction=conformal_prediction,
         calibration_dataset_path=calibration_dataset_path,
         confidence_level=confidence_level,
@@ -766,18 +708,6 @@ def main() -> None:
         default=None,
         help="Path to a fine-tuned SentenceTransformer model (optional). "
              "If provided, uses this local model for embeddings instead of Ollama.",
-    )
-    parser.add_argument(
-        "--education-logit-bias",
-        type=float,
-        default=0.0,
-        help="Post-hoc logit bias for education class (applied after predict_proba)",
-    )
-    parser.add_argument(
-        "--education-threshold",
-        type=float,
-        default=0.0,
-        help="Per-class threshold addition for education class (added to probability before argmax; lowers decision boundary)",
     )
     parser.add_argument(
         "--conformal-prediction",
@@ -891,8 +821,6 @@ def main() -> None:
                 args.ollama_port,
                 sys.stdout,
                 fine_tuned_embed_model=args.fine_tuned_embed_model,
-                education_logit_bias=args.education_logit_bias,
-                education_threshold=args.education_threshold,
                 conformal_prediction=args.conformal_prediction,
                 calibration_dataset_path=args.calibration_dataset,
                 confidence_level=args.confidence_level,
@@ -917,8 +845,6 @@ def main() -> None:
                     args.ollama_port,
                     f,
                     fine_tuned_embed_model=args.fine_tuned_embed_model,
-                    education_logit_bias=args.education_logit_bias,
-                    education_threshold=args.education_threshold,
                     conformal_prediction=args.conformal_prediction,
                     calibration_dataset_path=args.calibration_dataset,
                     confidence_level=args.confidence_level,

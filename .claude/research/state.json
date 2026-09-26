@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
   "iteration": 77,
-  "iteration_name": null,
-  "phase": "research",
+  "iteration_name": "education 固有補正の撤去と 10 ドメイン均一化",
+  "phase": "evaluate",
   "status": "running",
-  "current_lever": null,
-  "experiment_dir": null,
-  "experiment_deadline": null,
-  "updated_at": 1790168388,
+  "current_lever": "education_specific_correction_removal=revert_intercept_delta_and_threshold",
+  "experiment_dir": "results/20260926_171953",
+  "experiment_deadline": 1790421609,
+  "updated_at": 1790412700,
   "last_slack_ts": "1790149955.928859",
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
+  "iteration_thread_ts": "1790407934.947339",
+  "notion_toggle_created": true,
   "last_commit": "e825699"
 }

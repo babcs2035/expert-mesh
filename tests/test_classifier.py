@@ -5,7 +5,6 @@ import pytest
 from sklearn.linear_model import LogisticRegression
 
 from classifier import (
-    EDUCATION_THRESHOLD,
     estimate_confidence_classifier,
     load_domain_classifier,
 )
@@ -61,16 +60,23 @@ def test_estimate_confidence_classifier_returns_zero_for_unknown_domain() -> Non
     assert estimate_confidence_classifier(model, "finance", [1.0, 0.0]) == 0.0
 
 
-def test_estimate_confidence_classifier_adds_threshold_for_education_only() -> None:
-    """The education domain reports the raw probability plus EDUCATION_THRESHOLD."""
+def test_estimate_confidence_classifier_returns_raw_probability_for_all_domains() -> None:
+    """Iter77: no domain (including education) gets a post-hoc addition anymore.
+
+    Regression test replacing the pre-Iter77 EDUCATION_THRESHOLD-addition
+    test (backlog B116: domain-specific post-hoc corrections removed).
+    Every domain the toy classifier was trained on, including education,
+    must report exactly the raw predict_proba value.
+    """
     model = _toy_classifier_with_education()
     query = [0.0, -1.0]
-    raw_probability = float(
-        model.predict_proba([query])[0][list(model.classes_).index("education")]
-    )
-    assert estimate_confidence_classifier(model, "education", query) == pytest.approx(
-        raw_probability + EDUCATION_THRESHOLD
-    )
+    for domain in model.classes_:
+        raw_probability = float(
+            model.predict_proba([query])[0][list(model.classes_).index(domain)]
+        )
+        assert estimate_confidence_classifier(model, domain, query) == pytest.approx(
+            raw_probability
+        )
 
 
 def test_estimate_confidence_classifier_leaves_other_domains_unchanged() -> None:
