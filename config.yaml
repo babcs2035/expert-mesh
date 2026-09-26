@@ -87,7 +87,23 @@ dispatch_top_k: 2
 # dispatch <= 2.45) picked this point globally across max_k in {3,4,5,6},
 # with compound_domain_set_recall=0.425, single_domain_mean_dispatch=2.366,
 # overall_mean_dispatch=2.399375.
-dispatch_gap_threshold: 0.29
+# Iter83 recalibration (matched_budget_sweep_for_concat_distribution,
+# journal.md "Iteration 83"): Iter82's switch to concatenated (2048-dim)
+# embeddings shifted the rank1-rank2 confidence gap distribution rightward
+# (mean 0.4769 -> 0.5499, share of rows with gap<0.29 33.49% -> 25.30%),
+# making the T=0.29 threshold selected under the old (1024-dim) distribution
+# stale (Iter81 finding 1 / Iter82 finding 3). Re-swept offline (no real
+# nodes; scripts replay of results/20260927_050049/results.jsonl,
+# Iter82's own run) over gt in [0.20, 0.65] and picked the budget-matched
+# point closest to the Iter79 baseline compound_mean_dispatched_count
+# (1.8795): the gt=0.357-0.364 plateau gives compound_mean_dispatched_count
+# =1.8892 and compound_domain_set_recall=0.581928, +0.5% budget vs Iter79
+# (rejecting e.g. gt=0.40's +5.06pt recall gain, which comes with a +7.6%
+# budget increase and would confound calibration with budget growth). 0.36
+# is chosen over the plateau's own left edge (0.357) for margin against
+# floating-point/real-run confidence jitter landing on the adjacent lower
+# plateau (mean_k=1.8627).
+dispatch_gap_threshold: 0.36
 dispatch_gap_max_k: 4
 # aggregation_method (research_frontier item 5, 2026-07-30): how to pick the
 # final answer when dispatch_top_k > 1 produces multiple candidates. A no-op

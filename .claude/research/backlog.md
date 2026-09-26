@@ -15,6 +15,94 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B132 [auto-decided 2026-09-27] Iter83 の判定（adopted・収束）と，次レバー `cross_domain_training_data_augmentation` の確定
+
+- **状況**: Iter83（`dispatch_gap_threshold_recalibration` = `matched_budget_sweep_for_concat_distribution`，
+  `dispatch_gap_threshold` 0.29→0.36）は事前登録の `adopted` 条件をすべて満たした．
+  `compound_domain_set_recall` **0.539759 → 0.581928**（Iter79 基準線 0.548193 比 **+3.373pt**，
+  Iter82 比 **+4.217pt**），予算制約 `compound_mean_dispatched_count` **1.889157 ≤ 1.90**（Iter79 の
+  1.8795 比 +0.52%），830 スロットの対比較で **獲得 35 / 喪失 0，符号検定 p=5.82e-11**，
+  非退行①〜⑤すべて充足（top1 0.792689 ≥ 0.791645，per-domain 20 指標の BH 補正後の有意退行 0 件，
+  fallback 0.0 / dispatch_failure 0.000522，mean_duration_ms 2286.8 ≤ 2660.5，ECE 0.026 ≤ 0.08）．
+  **判定そのものに裁量は無い**．裁量が要ったのは (a) 申し送り 2 件の解釈，(b) 次レバーの確定，の 2 点．
+- **自動選択**:
+  - **(a-1) 「本走が 176 分 → 34 分に短縮した」は測定ミスと結論し，外的要因仮説を棄却した**．
+    `run_experiment.py` は逐次実行で `duration_ms` が ask フロー全体を測るため，その総和
+    （Iter82 70.8 分 / Iter83 73.0 分）は壁時計の下界である．起動時刻と `results.jsonl` の mtime から
+    復元した実経過は **Iter82 71.1 分 / Iter83 72.7 分**で総和と 0.4% 以内で一致する．
+    さらに k 構成比で標準化すると Iter83 の `mean_duration_ms` は 2217.4ms（Iter82 実測 2217.1ms）で，
+    **+3.1% は全て送出数の構成比シフトで説明され交絡は無い**．
+  - **(a-2) `single_domain_top1_accuracy` 0.785333 と 0.786875 は別集合の値で，どちらも正しい**と確定．
+    前者は single 1,500 行，後者は「既存 1,600 行部分集合」（single 1,500 + compound-001〜100）．
+    定義の齟齬ではなく表記の紛れであり，以後は母数を明記する．
+  - **(b) 次イテレーションのレバー**: **`cross_domain_training_data_augmentation`** =
+    **`hard_negative_mining_all_domains`**（`config.yml` の `levers` に既存・未試行．新規追記は不要）．
+    **次イテレーションの `iteration_name`**: **「全ドメイン共通の hard negative mining による分類器訓練データ拡充」**．
+  - **(c) `dispatch_gap_threshold_recalibration` は収束扱いとし，`dispatch_gap_threshold: 0.36` は
+    復元せず維持する**．今後の基準線は `results/20260927_070239/`．
+- **根拠**:
+  - (b) は B130 が「次々回の第一候補」として温存していたものであり，B115(3) のユーザー指示による
+    優先順位（複合評価集合の拡充 [Iter78 で消化済み] > `embedding_model_replacement`
+    [Iter80/81/82 で消化済み] > 全ドメイン共通ルールでの訓練データ拡充）でも次に来る．
+    未試行のレバーが残っているため，新レバーの考案や調査フェーズからの再探索は不要である．
+  - Iter83 が明確にしたとおり，**送出段のレバーは top1_accuracy を構造的に動かさない**．
+    config.yml の 2026-09-23 恒久ルール (3)（全自動での top1 向上の追求）へ戻るには，
+    分類器そのものに効くレバーが必要であり，訓練データの質がその筆頭である
+    （現行の最弱は education_recall 0.4120 / precision 0.5304）．
+  - **計画フェーズへの申し送り（重要）**: 本レバーは分類器を再訓練するので確信度分布が再び動く．
+    Iter81→82→83 で 3 回続けて観測した機序（学び 1）のとおり，**採用された場合は直後に
+    `dispatch_gap_threshold` の再較正イテレーションを 1 回挟むこと**．また今回の基準線は
+    `dispatch_gap_threshold=0.36` である点に注意（Iter82 以前の基準線と混同しない）．
+    非退行条件に **「rank1 以外が選ばれた行数」**（部分 dispatch 失敗の検出，学び 3）を補助指標として
+    加えること．top1 の許容幅を ±1 行に固定するのは狭すぎる．
+- **要レビュー**: (a-1) の結論を受けて，`run_experiment.py` に本走の開始・終了壁時計時刻を
+  results ディレクトリへ記録する小改修を入れるかどうか（**単一レバー原則に抵触しないよう，
+  レバー実験とは別のコミットで行う必要がある**ため今回は実施していない）．
+  併せて B131 要レビュー（主基準を top1 以外に置いた 1 反復の是非）は本反復で完了したので，
+  結果（adopted・top1 は構造的に不変で正味 +1 行のみ）を踏まえて事後確認されたい．
+
+## B131 [auto-decided 2026-09-27] Iter83 計画フェーズの設計判断（閾値 0.36 の確定・主基準の置き換え・予算制約の事前登録）
+
+- **状況**: レバー（`dispatch_gap_threshold_recalibration` = `matched_budget_sweep_for_concat_distribution`）と
+  `iteration_name` は B130 で確定済みで裁量は無い．計画フェーズで判断が要ったのは次の 4 点である．
+- **自動選択**:
+  - **(1) 閾値を `0.36` の 1 値に確定した**（B130 が例示した 0.357 ではない）．掃引は階段関数で
+    **0.357〜0.364 が同一の階段**（`compound_mean_dispatched_count`=1.8892，
+    `compound_domain_set_recall`=0.581928）であり，複合設問上の挙動は 0.357 と完全に同一である．
+    0.357 は階段の左端にあるため，実機の微小な確信度変動で下の階段（mean_k=1.8627）へ落ちうる．
+    **階段の内側に余裕がある 0.36 を採る**．
+  - **(2) `gt=0.40`（set_recall 0.598795，+5.06pt）を採らない**．gap escalation は閾値に対して
+    `k` が単調非減少なので被覆は予算を増やせばいくらでも買える．0.40 は Iter79 の送出予算を
+    +7.6% 超過しており，改善が「較正の効果」と「予算増の効果」の交絡になる．
+    **レバー名 `matched_budget_...` の意図どおり予算整合点のみを使う．**
+  - **(3) 主基準を `compound_domain_set_recall` へ置き換え，`compound_mean_dispatched_count ≤ 1.90`
+    を主基準の一部（予算制約）として事前登録した**．`aggregation_method=max_confidence` では
+    `select_best_dispatch_response()` が probe 時の confidence の最大値を採るため `selected_domain` は
+    rank 1 で決まり，top1 は gap 閾値と構造的に独立である（例外は rank 1 の dispatch が失敗した
+    1 行のみ）．top1 を主基準に据えると本レバーは定義上「効果なし」としか判定できない．
+    予算制約を外すと主基準が自明に満たせてしまうため，制約を非退行ではなく主基準側に置いた．
+  - **(4) invalid 判定の検出器を top1 ではなく `compound_mean_dispatched_count` に置いた**．
+    本レバーに限っては top1 が基準線と完全一致することこそ正常であり，
+    success_criteria (6) をそのまま適用すると必ず invalid になる．代わりに
+    **`compound_mean_dispatched_count` が Iter82 実測 1.6096 と小数点以下 4 桁まで一致したら invalid**
+    （config の 1 行が実行パスに到達していない）とした．
+- **根拠（本フェーズでオフライン実測．実機不使用，ローカルの `results/` のみ）**:
+  - G1（忠実度）: `probe_candidates` からの replay が gt=0.29 で Iter82 本走実測
+    （set_recall 0.5397590361 / mean_k 1.6096385542）と小数点以下 10 桁まで一致．
+  - G3（過適合）: 複合 415 行を偶奇で二分し交差適用．A で選んだ 0.387 → B で 0.5290→0.5942，
+    B で選んだ 0.336 → A で 0.5505→0.5649．**両方向とも改善**．ただし独立な hold-out ではない
+    （複合行は全て評価集合）という限界は journal に明記した．
+  - 文献: 閾値はスコアリングモデルに固有のハイパラで，モデルを替えたら再較正するのが標準
+    （Zellinger & Kim, arXiv:2501.09345, 2025；TREACLE, NeurIPS 2024）．予算制約下での比較も
+    routing 研究の標準（OmniRouter, arXiv:2502.20576）．
+- **要レビュー**: (3) の「主基準を top1 以外に置くイテレーションを 1 回挟む」ことの是非
+  （config.yml の 2026-09-23 恒久ルール (3)「全自動での top1_accuracy 向上を引き続き追求する」との関係）．
+  B130 要レビューからの継続論点である．確認箇所: journal.md「Iteration 83」計画節
+  「主基準を top1 から `compound_domain_set_recall` へ置き換える正当化」．
+  併せて **B130 が挙げた「`end_to_end_accuracy` は改善しうる」という見込みを本計画で否定した**
+  （max_confidence 集約では採点対象の `answer_text` が rank 1 由来のままなので機序が無い）点も
+  確認されたい．この予測の当否は本走で検証し，次フェーズで記録する．
+
 ## B130 [auto-decided 2026-09-27] Iter82 の判定（adopted）と，次レバー `dispatch_gap_threshold_recalibration` の起票
 
 - **状況**: Iter82（`embedding_view_concatenation=prefix_and_noprefix_concat`）は事前登録の
