@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 88,
-  "iteration_name": "hard negative 混合比の用量反応（25/75）と乱数種ばらつきの計測",
-  "phase": "reflect",
+  "iteration": 89,
+  "iteration_name": "埋め込みモデルの qwen3-embedding:4b への差し替え",
+  "phase": "evaluate",
   "status": "running",
-  "current_lever": "cross_domain_training_data_augmentation=hard_random_hybrid_ratio_25_75_all_domains",
-  "experiment_dir": "results/20260927_202256",
-  "experiment_deadline": 1790519268,
-  "updated_at": 1790514726,
-  "last_slack_ts": "1790513950.232309",
-  "iteration_thread_ts": "1790505434.983189",
+  "current_lever": "embedding_model_replacement=qwen3_embedding_4b",
+  "experiment_dir": "results/20260927_232950",
+  "experiment_deadline": 1790530916,
+  "updated_at": 1790526149,
+  "last_slack_ts": "1790525641.937299",
+  "iteration_thread_ts": "1790515619.059829",
   "notion_toggle_created": true,
-  "last_commit": "6b7ed76"
+  "last_commit": "5c85558"
 }

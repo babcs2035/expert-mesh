@@ -1,7 +1,7 @@
 # Unified configuration for all nodes: shared settings and per-node settings
 # (host/port/domain/model names). Hostnames, IPs, model names, and deploy
 # paths are documented ONLY in this file — never hardcode them in code.
-embedding_model: qwen3-embedding:0.6b
+embedding_model: qwen3-embedding:4b
 # Iter82 (embedding_view_concatenation=prefix_and_noprefix_concat): the query
 # embedding fed to the domain classifier is now the 2048-dim concatenation
 # [prefix なし, prefix あり] of two Ollama /api/embeddings calls, produced by

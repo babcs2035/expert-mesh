@@ -881,6 +881,124 @@ Random/BestSingle/Oracle baseline 0.112082/0.128384/1.0（不変，`best_single_
 
 **判定は分析・考察フェーズに委ねる**（本セクションは実装・実験フェーズの機械可読な実測値の記録のみ）。
 
+### Iteration 89（embedding_model_replacement=qwen3_embedding_4b）
+
+`config.yaml:4`の`embedding_model`のみ変更（`qwen3-embedding:0.6b`→`qwen3-embedding:4b`，1行）。
+`node.py`・`aggregator.py`・`classifier.py`・`train_domain_classifier.py`・`build_dataset.py`・
+`expert_backend.py`・`data/dataset.jsonl`・`data/classifier_train_iter87_hybrid.jsonl`は無変更
+（`expert_backend.py`のR2補正〈`num_ctx`指定〉はG0-a/G0-bがR1で合格したため未適用）。
+
+**G0（VRAM・所要時間．静的予算式ではなく実機実測で判定）**
+
+- G0-a（wafl-ctrl5）: `bge-m3`・swallow-8Bを`ollama stop`で退避後，`qwen3-embedding:4b`をロードして
+  常駐**4.4GB・100% GPU**を確認（**PASS**）。
+- G0-b（deploy後，全10ノード`ollama ps`）: 初回計測でwafl500・wafl507の2ノードのみ
+  `qwen3-embedding:4b`が`56%/44% CPU/GPU`（`qwen3.5:4b-q4_K_M`との共存でVRAM逼迫）。
+  **R1**（全10ノードで`ollama stop qwen3.5:4b-q4_K_M`→embeddingsエンドポイント呼び出しで再ロード）を適用し，
+  全10ノードで`qwen3-embedding:4b`が**100% GPU**であることを確認（**PASS**，R1で着地。R2/R3は不要）。
+- G0-c（予備20問，`data/dataset.jsonl`先頭20行）: HTTP 500エラー**0件**，平均所要**1288.65ms**
+  （≤3090ms＝基準線`mean_duration_ms`の2倍，**PASS**）。
+
+**G1（report-only．`data/classifier_train_iter87_hybrid.jsonl` 2,327行のみの5-fold StratifiedKFold CV．
+評価集合3,435行は未参照）**
+
+| 埋め込みモデル | cv_accuracy | cv_macro_f1 | 次元 |
+|---|---|---|---|
+| `qwen3-embedding:0.6b`（基準線と同一構成） | 0.751615 | 0.747161 | 2048（1024×2ビュー） |
+| `qwen3-embedding:4b` | **0.804465** | 0.798825 | 5120（2560×2ビュー） |
+
++5.29ptのCV差（本走top1の予測値としては扱わない，計画節Q3の解釈規則どおり）。
+
+**G2（検出力の事前登録．評価3,435行のargmax replay，`metrics.compute_mcnemar_test`を流用）**
+
+旧artifact（`f6c33edb...`，0.6b・2048次元）と新artifact（4b・5120次元で新規訓練した候補モデル）を
+3,435行で`predict`し，`id`でペアリングしてMcNemar検定を実施:
+
+- discordant_a_only=119, discordant_b_only=220, discordant_pairs=**339**（≥30，**PASS**）
+- 旧argmax accuracy 0.802620 → 新argmax accuracy 0.832023（**+2.940pt**）
+- 本走のMcNemar有意境界（事前算出）: `1.96·√339/3435` = **1.05pt**
+
+**変更したもの**
+
+1. `config.yaml:4` `embedding_model`: `qwen3-embedding:0.6b`→`qwen3-embedding:4b`（1行．本レバーの本体）。
+2. `models/domain_classifier.joblib`: 4b・2ビュー連結（5120次元）で再訓練。
+   訓練コマンド（Iter87節から`--embedding-model`のみ差し替え，wafl-ctrl5のOllamaへ
+   `ssh -fNT -L 11499:localhost:11434 wafl-ctrl5`トンネル経由）:
+   ```
+   uv run python -m scripts.train_domain_classifier \
+       --train-data data/classifier_train_iter87_hybrid.jsonl \
+       --embedding-model qwen3-embedding:4b \
+       --embedding-instruction "Given a user question, identify the single academic or professional domain it belongs to" \
+       --embedding-view-concat \
+       --ollama-host 127.0.0.1 --ollama-port 11499 \
+       --output models/domain_classifier.joblib
+   ```
+   旧版は`models/domain_classifier_pre_iter89_qwen3_0.6b.joblib`（sha256`f6c33edb...`，Iter87と同一）へ退避。
+   新artifactは`models/domain_classifier_iter89_4b.joblib`にも複製。
+3. `data/embcache_*`: 新規作成・再生成（すべて2ビュー`{plain, __p1}`）。
+   - `data/embcache_train_iter89_qwen3-embedding_0.6b{,__p1}.npy`（G1比較用，2,327行×1024次元）
+   - `data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy`（G1・本番訓練特徴，2,327行×2560次元）
+   - `data/embcache_eval_qwen3-embedding_0.6b{,__p1}.npy`（G2用，**3,435行**へ再生成，旧キャッシュは1,915行のみだった）
+   - `data/embcache_eval_qwen3-embedding_4b{,__p1}.npy`（G2用，新規，3,435行×2560次元）
+
+| ファイル | sha256 |
+|---|---|
+| `models/domain_classifier.joblib`（現行．Iter89で再訓練，`n_features_in_`=5120） | `ff8aad9cf824992f0a99d07d5506ea9ebdbc3491914a165959c3496df7f2cfd6` |
+| `models/domain_classifier_iter89_4b.joblib`（上と同一内容の複製） | `ff8aad9cf824992f0a99d07d5506ea9ebdbc3491914a165959c3496df7f2cfd6` |
+| `models/domain_classifier_pre_iter89_qwen3_0.6b.joblib`（退避．Iter87と同一） | `f6c33edb1b80a43dbd4d7153b9088b97d220d4557958d0149fe043f0c47594d2` |
+| `data/classifier_train_iter87_hybrid.jsonl`（無変更） | `63e73c201a8bf46a47c9933b33cc53ab28ada6033d0d6f33d63c71cf0359aa7d` |
+
+到達確認: 全10ノードで`ollama list`に`qwen3-embedding:4b`存在・`config.yaml`の`embedding_model: qwen3-embedding:4b`一致・
+`models/domain_classifier.joblib`のsha256が`ff8aad9c...`で一致・`n_features_in_`=5120を確認済み（`mise run deploy`の
+smoke_check・本フェーズでのssh実測の双方）。`ruff check`は変更ファイル起因の新規エラー0件（既存のリポジトリ内
+未修正エラーのみ）。`uv run pytest`は既存9件FAIL（無関係，リポジトリ既知のB122）＋309件PASSで新規失敗なし。
+
+**本走**（`results/20260927_232950/`，3,435問1回。基準線はIter87本走`results/20260927_174150/`，top1=0.801456）
+
+主要指標（`uv run python metrics.py --results results/20260927_232950/results.jsonl --json`実測）:
+
+| 指標 | 基準線（Iter87） | Iter89 | 差 |
+|---|---|---|---|
+| **top1_accuracy（全3,435）** | 0.801456（95%CI [0.787782, 0.814456]） | **0.830859**（95%CI [0.817954, 0.843024]） | **+2.940pt** |
+| single_domain_top1（3,020） | — | 0.836093 | — |
+| compound_domain_top1（415） | — | 0.792771 | — |
+| cohens_kappa | — | 0.816651 | — |
+| misrouting_rate | — | 0.169141 | — |
+| mean_duration_ms | 1544.912 | 1643.249 | +98.34 |
+| ECE | 0.045717 | 0.023073 | -0.0226 |
+| Brier | — | 0.110203 | — |
+| AUROC | — | 0.838008 | — |
+
+McNemar検定（`metrics.compute_mcnemar_test`，id完全対応3,435行）: discordant_a_only=123／
+discordant_b_only=224／discordant_pairs=347／p値=**7.949e-08**（有意）。
+
+per-domain 20指標のBH補正（q=0.05，`metrics.compute_domain_recall_mcnemar_test`／
+`compute_domain_precision_fisher_test`／`apply_benjamini_hochberg`）: **有意差4件，いずれも改善方向**
+（recall:business_economics 0.8492→0.9188 p=2.84e-05／recall:education 0.3626→0.4180 p=5.98e-03／
+precision:general 0.8113→0.9214 p=6.71e-03／precision:mathematics 0.8976→0.9514 p=5.75e-03）。
+**有意な退行は0件**。他16指標もBH補正後有意差なし。
+per-domain詳細（recall/precisionの順）: business_economics 0.9188/0.8182，computer_science 0.9058/0.9377，
+education 0.4180/0.6351，general 0.5119/0.9214，history_culture 0.8701/0.7622，legal 0.6255/0.8261，
+mathematics 0.8167/0.9514，medical 0.8073/0.8109，natural_science 0.7842/0.8622，social_science 0.6107/0.8297。
+
+非退行②（複合被覆）: compound_domain_set_recall 0.566265→0.562651（下限0.539759以上，**PASS**）。
+非退行③（複合予算）: compound_mean_dispatched_count 1.879518→1.903614（上限2.10以内，**PASS**）。
+非退行④: fallback_rate 0.0→0.0（**PASS**），dispatch_failure_rate 0.001456→0.001164（**PASS**，≤0.005）。
+非退行⑤: rank1以外が選ばれた行数（`selected_domain`≠`probe_candidates`最大confidenceドメイン） 5→4（≤15，**PASS**）。
+非退行⑥: mean_duration_ms 1544.912→1643.249（≤1853.9，**PASS**）。
+非退行⑦: ECE 0.045717→0.023073（≤0.08，**PASS**）。
+
+報告のみ: answer_quality_accuracy 0.577152，end_to_end_accuracy 0.417467（`mise run analyze`実測，
+`graded_row_count`=3020/`total_row_count`=3435）。
+
+不変条件確認: `total_questions`=3435（一致），`compound_domain_question_count`=415（一致），
+新artifact sha256（`ff8aad9c...`）は基準線（`f6c33edb...`）・Iter84〜88のいずれとも不一致。
+本走top1（0.830859）はG2オフラインreplay予測（argmax accuracy 0.832023）から**0.116pt乖離のみ**
+（1.0pt未満）。invalid条件（G0失敗・n_d<30・total_questions不一致・sha256/n_features_in_不一致）は
+いずれにも該当しない。
+
+**判定は分析・考察フェーズに委ねる**（本セクションは実装・実験フェーズの機械可読な実測値の記録のみ）。
+
 ## E10 ドメイン別 LoRA アダプタ
 
 生成は3段階（各スクリプトの docstring 参照）:
