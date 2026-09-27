@@ -310,6 +310,115 @@ G2'の予測（medical_recall 0.7842→0.7552，p=0.190430）と本走実測（0
 
 **判定は分析・考察フェーズに委ねる**（本セクションは実装・実験フェーズの機械可読な実測値の記録のみ）。
 
+### Iteration 84（cross_domain_training_data_augmentation=hard_negative_mining_all_domains）
+
+`config.yaml`・`node.py`・`aggregator.py`・`classifier.py`・`train_domain_classifier.py`・
+`build_dataset.py` は無変更（`git diff --stat` は `scripts/mine_hard_negatives.py`（新規）と
+`data/MANIFEST.md`・`.claude/research/*` のみ）。新規 `scripts/mine_hard_negatives.py` が，
+`data/classifier_train.jsonl`（1,427行，本反復でも無変更，sha256 `eb89bf7b...`）に対し，
+現行 artifact の `predict_proba` による正解ドメイン確率 `p_true` が低い JMMLU 未使用行
+（10ドメイン共通規則，各ドメイン上限100件，legalのみプール0件）を各ドメイン100行追加した
+`data/classifier_train_iter84_hardneg.jsonl` を生成する（詳細な選択規則は journal.md
+「Iteration 84」計画節を参照．本ファイルは生成コマンドと実測値のみを記録する）。
+
+生成コマンド（wafl-ctrl5 限定）:
+
+```
+uv run python -m scripts.mine_hard_negatives \
+    --train-data data/classifier_train.jsonl \
+    --eval-data data/dataset.jsonl \
+    --classifier-model models/domain_classifier.joblib \
+    --per-domain 100 \
+    --jmmlu-zip <local JMMLU.zip> \
+    --embedding-model qwen3-embedding:0.6b \
+    --embedding-instruction "Given a user question, identify the single academic or professional domain it belongs to" \
+    --embedding-view-concat \
+    --ollama-host 127.0.0.1 --ollama-port 11499 \
+    --output data/classifier_train_iter84_hardneg.jsonl
+
+uv run python -m scripts.train_domain_classifier \
+    --train-data data/classifier_train_iter84_hardneg.jsonl \
+    --embedding-model qwen3-embedding:0.6b \
+    --embedding-instruction "Given a user question, identify the single academic or professional domain it belongs to" \
+    --embedding-view-concat \
+    --ollama-host 127.0.0.1 --ollama-port 11499 \
+    --output models/domain_classifier.joblib
+```
+
+プール実測（`--per-domain 100` 適用前，JMMLU 全 CSV 行のうち重複行・評価集合 1,915 行・
+既存訓練 1,427 行を除いた件数）: medical 1110 / history_culture 779 / natural_science 776 /
+business_economics 705 / mathematics 348 / computer_science 251 / social_science 244 /
+education 232 / general 125 / legal 0（計 4,570）。journal.md 計画節の事前登録値（natural_science
+783・education 233・合計 4,578）とは各 7 件・1 件だけ少ない。原因は同一 JMMLU タスク CSV 内に
+literal に重複した設問行が存在したため（`college_physics` 内 6 件・`conceptual_physics` 内 1 件・
+`high_school_psychology` 内 1 件；ドメイン間の重複ではなく同一タスク内の重複であることを実データで
+確認済み）。本スクリプトはプール構築時に設問文の重複を除去するため件数がその分減るが，
+各ドメインとも選定数 N=100 に対し十分な余裕があり，選定結果（各ドメイン100件，legalのみ0件，
+計900件）に影響はない。
+
+| ファイル | sha256 | 行数 |
+|---|---|---|
+| `data/classifier_train.jsonl`（無変更） | `eb89bf7b0ad6303d41f2b668549f85362988de1eaee7b4faf98b3d3f5edcd9ef` | 1427 |
+| `data/classifier_train_iter84_hardneg.jsonl`（新規） | `fc28f1c66a5548df33721aaeefd23879db9592661fb7c08ba5bdfc61a64f73b6` | 2327（既存1427 + 追加900） |
+| `models/domain_classifier.joblib`（現行．Iter84 で再訓練，`n_features_in_`=2048） | `34e4d33bcfb0695a48b410cb70fd1d3d38973e048631b1c1ffe516df423b34c9` | — |
+| `models/domain_classifier_pre_iter84_baseline.joblib`（Iter84 直前の退避 = Iter83 本番，`21e16ec6...`系統ではなく`1cfcd3d8...`） | `1cfcd3d836c5b5b421b8a47a487c3fb3ba996dd54aadcebae688cdfc8bcd0a48` | — |
+
+キャッシュファイル（wafl-ctrl5，`ssh -fNT -L 11499:localhost:11434 wafl-ctrl5`）:
+`data/embcache_pool_qwen3-embedding_0.6b.npy`（プール4,570行のprefixなし view）・
+`data/embcache_pool_qwen3-embedding_0.6b__p1.npy`（同 prefixあり view）・
+`data/embcache_pool_qwen3-embedding_0.6b.npy.meta.json`（プールの query 列ハッシュとレコード件数）。
+
+F2（データ）: 新ファイル2,327行．先頭1,427行が`data/classifier_train.jsonl`とバイト一致。
+追加900行のドメイン別内訳 `{legal: 0, 他9ドメイン: 100}`。追加900行は評価集合1,915行・既存訓練
+1,427行の設問文と重複0件，追加900行同士の重複も0件，id重複0件。すべてPASS。
+
+F3（artifact）: 新artifact sha256 `34e4d33b...`（基準線`1cfcd3d8...`と異なる），`n_features_in_`=2048，
+`classes_`は10ドメイン。退避ファイルsha256は基準線と一致。PASS。
+
+G5（本走前のreplay，`/tmp/iter84_replay.py`＋新artifact＋キャッシュ済み評価集合埋め込み，
+gt=0.36）: top1_accuracy予測=0.806266（事前登録レンジ0.800〜0.815内），compound_domain_set_recall
+予測=0.573494（非退行②の下限0.539759を上回る），compound_mean_dispatched_count予測=2.048193
+（非退行③の上限2.10以内）。
+
+F4（配布，deploy後wafl500〜509全10ノード）: 全ノードでartifact sha256が`34e4d33b...`に一致，
+`config.yaml`の`dispatch_gap_threshold: 0.36`も全ノードで一致。smoke_check（git-status/hashes/probe）
+すべてPASS。
+
+F5（実行時経路，`data/dataset_20.jsonl`先頭20問の予備実行 vs オフラインreplay）: `confidence`・
+`dispatched_domains`が20/20一致（dispatch失敗0件）。PASS。
+
+本走実測（`results/20260927_110526/`，1,915問フルスペック，実測約63分。基準線は
+Iter83本走`results/20260927_070239/`）:
+top1_accuracy 全1915行 0.792689→0.804700（+1.201pt，Wilson 95% CI [0.786342, 0.821838]，
+McNemar continuity-corrected chi2=2.674033，**p=0.101997（非有意）**，discordant_a_only(基準線正解→
+新誤り)=79／discordant_b_only(基準線誤り→新正解)=102，検出限界 `1.96*sqrt(181)/1915`=1.378pt
+（実測Δ1.201ptはこの検出限界を下回る）。
+既存1,600行部分集合（single 1500 + compound-001〜100）top1: 0.787500→0.808125。
+複合415行top1: 0.816867→0.795181。single_domain_top1: 0.786000→0.807333。
+Cohen's kappa: 0.761499→0.785973。漏洩72行（B125既知，education46/history_culture26）を除いた
+1,843行top1: 0.804700算出用の1915行に対し0.811177（1843行のみ）。
+
+非退行指標: fallback_rate 0.0→0.0（PASS），dispatch_failure_rate 0.000522→0.001567（≤0.005，PASS），
+ECE 0.026→0.075591（≤0.08，PASS，ただし基準線比+4.96pt），mean_duration_ms 2286.9→2280.408
+（≤2744.3，PASS），rank1以外が選ばれた行数 2→3（≤10，PASS）。
+compound_domain_set_recall 0.581928→0.573494（非退行②の下限0.539759以上，PASS）。
+compound_mean_dispatched_count 1.889157→2.048193（非退行③の上限2.10以内，PASS，Iter83比+8.4%）。
+報告のみ: answer_quality_accuracy 0.570667→0.580667，end_to_end_accuracy 0.350914→0.362924，
+Random/BestSingle/Oracle baseline 0.121671/0.126893/1.0（不変）。
+
+per-domain recall/precision 計20指標（BH補正q=0.05，`metrics.py`の
+`compute_domain_recall_mcnemar_test`／`compute_domain_precision_fisher_test`／
+`apply_benjamini_hochberg`を使用）: **有意差2件**—**education_recall（0.412→0.313，p=0.000427，
+悪化方向）**，history_culture_recall（0.801→0.870，p=0.000796，改善方向）。他18指標はBH補正後
+有意差なし。per-domain詳細（baseline→new，recall/precision）:
+business_economics 0.8182/0.7746→0.8139/0.7611，computer_science 0.8268/0.8884→0.8571/0.9041，
+education 0.4120/0.5304→0.3133/0.6759，general 0.4626/0.8750→0.5022/0.8769，
+history_culture 0.8009/0.7400→0.8701/0.7701，legal 0.6626/0.8610→0.6420/0.9123，
+mathematics 0.6710/0.8564→0.7013/0.8757，medical 0.7510/0.8153→0.7427/0.7553，
+natural_science 0.6494/0.8571→0.6580/0.7958，social_science 0.4545/0.7554→0.5108/0.7239。
+
+**判定は分析・考察フェーズに委ねる**（本セクションは実装・実験フェーズの機械可読な実測値の記録のみ）。
+
 ## E10 ドメイン別 LoRA アダプタ
 
 生成は3段階（各スクリプトの docstring 参照）:
