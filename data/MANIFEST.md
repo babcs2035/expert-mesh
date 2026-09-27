@@ -718,6 +718,169 @@ Random/BestSingle/Oracle baseline 0.112082/0.128384/1.0（不変，`best_single_
 
 **判定は分析・考察フェーズに委ねる**（本セクションは実装・実験フェーズの機械可読な実測値の記録のみ）。
 
+### Iteration 88（cross_domain_training_data_augmentation=hard_random_hybrid_ratio_25_75_all_domains）
+
+`config.yaml`・`node.py`・`aggregator.py`・`classifier.py`・`scripts/mine_hard_negatives.py`・
+`scripts/train_domain_classifier.py`・`build_dataset.py`・`data/dataset.jsonl`・`data/classifier_train.jsonl`
+は無変更（`git diff --stat` は `data/MANIFEST.md`・`.claude/research/*` のみで，`scripts/` 配下の diff は 0 行）。
+採掘コマンドの `--random-count` を Iter87 の `50` から `75` へ変更し，`--classifier-model` を
+`models/domain_classifier_pre_iter84_baseline.joblib`（`1cfcd3d836c5...`）へ明示指定，`--output` のみ差し替え，
+他は Iter87 のコマンドから1文字も変更していない（F0: 採掘前に `models/domain_classifier.joblib` が
+`f6c33edb...`（Iter87，全10ノード配布済み）であることを確認済み。採掘のための上書き復元は行っていない）:
+
+```
+uv run python -m scripts.mine_hard_negatives \
+    --train-data data/classifier_train.jsonl \
+    --eval-data data/dataset.jsonl \
+    --classifier-model models/domain_classifier_pre_iter84_baseline.joblib \
+    --per-domain 100 \
+    --random-count 75 --random-seed 87 \
+    --jmmlu-zip /tmp/expert-mesh-cache/JMMLU.zip \
+    --embedding-model qwen3-embedding:0.6b \
+    --embedding-instruction "Given a user question, identify the single academic or professional domain it belongs to" \
+    --embedding-view-concat \
+    --ollama-host 127.0.0.1 --ollama-port 11499 \
+    --output data/classifier_train_iter88_hybrid2575.jsonl
+
+uv run python -m scripts.train_domain_classifier \
+    --train-data data/classifier_train_iter88_hybrid2575.jsonl \
+    --embedding-model qwen3-embedding:0.6b \
+    --embedding-instruction "Given a user question, identify the single academic or professional domain it belongs to" \
+    --embedding-view-concat \
+    --ollama-host 127.0.0.1 --ollama-port 11499 \
+    --output models/domain_classifier.joblib
+```
+
+プール実測（Iter86/87 と完全に同一，`pool_hash=221e45e8...`，計3,127行）: business_economics 505 /
+computer_science 100 / education 109 / general 100 / history_culture 579 / mathematics 148 /
+medical 910 / natural_science 576 / social_science 100 / legal 0。選定結果は各ドメイン100件
+（「最難25 ＋ 残プールから無作為75」，computer_science・social_science・generalはプール=N=100のため
+無作為側が残り全量で確定し**Iter86・Iter87と集合として完全一致（no-op）**），legalのみ0件，計900件。
+
+| ファイル | sha256 | 行数 |
+|---|---|---|
+| `data/classifier_train.jsonl`（無変更） | `eb89bf7b0ad6303d41f2b668549f85362988de1eaee7b4faf98b3d3f5edcd9ef` | 1427 |
+| `data/classifier_train_iter88_hybrid2575.jsonl`（新規） | `c341baef5e7c42c92490ed4ca76a4e726933e4e7e8b8a9049a70056f636fd502` | 2327（既存1427 + 追加900） |
+| `models/domain_classifier.joblib`（現行．Iter88で再訓練，`n_features_in_`=2048） | `51b9ced581f275b0726dfc12f709bb82124f1e780969a5c602582d8b1eb40b34` | — |
+| `models/domain_classifier_iter88_hybrid2575.joblib`（上と同一内容の複製） | `51b9ced581f275b0726dfc12f709bb82124f1e780969a5c602582d8b1eb40b34` | — |
+
+**F2ゲート実測**: 出力2,327行，先頭1,427行が`data/classifier_train.jsonl`とバイト一致。追加900行と評価集合
+3,435行・既存1,427行・追加行同士の重複はいずれも0件，id重複0件。ドメイン別追加数は{legal: 0, 他9ドメイン各100}
+（計画表と完全一致）。cs・social_science・generalの追加100行はIter86・Iter87の同ドメイン100行と集合として
+完全一致（no-op確認，PASS）。**入れ替わり行数（domain+queryの同一性ベース，idはhard/random比率変更で
+番号が振り直されるため raw line 一致では測れないことを確認した上で算出）: Iter87の追加900行との入れ替わり
+実測309行，Iter86の追加900行との入れ替わり実測300行と，事前登録の予測値に完全一致（PASS）**。
+F2の決定論的検証: 同じ採掘コマンドの`--random-count`を`0`/`50`に替えた一時出力が，それぞれ
+`data/classifier_train_iter86_hardneg.jsonl`／`data/classifier_train_iter87_hybrid.jsonl`と
+バイト完全一致することを確認した（確認後に一時ファイルは削除済み）。
+
+**F3ゲート**: 新artifactのsha256（`51b9ced5...`）は`1cfcd3d8...`（pre_iter84）・`fd1ccd7d...`（Iter86）・
+`f6c33edb...`（Iter87）のいずれとも不一致。`n_features_in_`=2048，`classes_`は10ドメイン。
+
+**F4ゲート**: `mise run deploy`後，全10ノード（wafl500〜509）でartifact sha256=`51b9ced5...`一致，
+`docker compose exec app wc -l /app/data/dataset.jsonl`=3435（10/10）を実機確認（`smoke_check`のgit-status/
+hashes/probeもPASS）。
+
+**F5ゲート**: 予備20問（`data/dataset_20.jsonl`）の`confidence`・`selected_domain`・`dispatched_domains`が，
+新artifact＋既存埋め込みキャッシュのオフライン予測と**20/20完全一致**。
+
+**5b: 種87/88/89 × 比50/50・25/75 の必須report-only計測（B143・B144(C)）**
+
+6構成のうち50/50種87（`models/domain_classifier_iter87_hybrid.joblib`）と25/75種87
+（`models/domain_classifier_iter88_hybrid2575.joblib`）は既存artifactを再利用，残り4構成
+（50/50種88・89，25/75種88・89）は追加採掘・再訓練した。`data/embcache_eval_qwen3-embedding_0.6b{,__p1}.npy`
+（1,915行，`[plain, instructed]`の順で連結し2048次元）を特徴量として`predict_proba`し，argmax（=rank_1，
+`aggregation_method=max_confidence`下では`selected_domain`と一致）で1,915行部分集合のtop1を算出した
+（本手法は基準線artifactに適用すると50/50種87の値が Iter87 実測の本走前replay予測 0.810966 と完全一致し，
+忠実度を確認済み）。
+
+| 構成 | replay top1（1,915行） |
+|---|---|
+| 50/50 種87 | 0.810966 |
+| 50/50 種88 | 0.813055 |
+| 50/50 種89 | 0.809922 |
+| 25/75 種87 | 0.806266 |
+| 25/75 種88 | 0.809399 |
+| 25/75 種89 | 0.807833 |
+
+比ごとの3種平均/SD（標本SD）/レンジ: 50/50 = 平均0.811314・SD 0.001595・レンジ0.003133（種間max0.31pt）。
+25/75 = 平均0.807833・SD 0.001567・レンジ0.003133（種間max0.31pt）。
+**同一比・異種間のΔの絶対値の最大値は両比とも0.003133（0.31pt）**。これは本反復の事前投影（比の効果
++0.2〜+0.5pt，点推定+0.28pt）と同程度の規模であり，種由来のノイズと比の効果が同オーダーであることを
+示す（判定はしない。分析フェーズの結論に委ねる）。
+
+**本走前の着地点記録（B136，25/75種87artifactで実施）**: 1,915行部分集合replay top1=0.806266，
+compound_domain_set_recall予測0.553012，compound_mean_dispatched_count予測1.783133。
+per-domain（predicted，1,915部分集合）: education precision/recall=0.6149/0.3906，
+natural_science precision/recall=0.8427/0.6494，medical precision/recall=0.8117/0.8050，
+legal precision/recall=0.8953/0.6337，history_culture precision/recall=0.7529/0.8312。
+
+**本走**: `results/20260927_202256/`（3,435問，約91分で完走，timeout 180分以内）。
+
+**主要メトリクス**
+
+全体（3,435問）: top1_accuracy = 0.801456（Iter87基準線）→ **0.801164**（**Δ = −0.03pt**，Wilson 95%CI
+[0.787484, 0.814172]），single_domain_top1 = 0.799007→0.798344（n=3,020），
+compound_top1 = 0.819277→0.821687（n=415），fallback_rate = 0.0→0.0，
+dispatch_failure_rate = 0.001456→0.000291（1行），mean_duration_ms = 1544.912→1546.784。
+
+主基準: `compute_mcnemar_test`でcontinuity-corrected chi2=0.0，**p=1.0（非有意，α=0.05）**，
+discordant_a_only（Iter87正解→Iter88誤り）=64／discordant_b_only（Iter87誤り→Iter88正解）=63，
+discordant_pairs=127，有意境界`1.96・√(n_d)/3435`=0.612pt。**主基準(i)非有意・(ii)Δ=−0.03pt<+1.0pt**
+（判定語の確定は分析フェーズに委ねる）。
+
+1,915行部分集合（実測）top1 = 0.805222（本走前replay予測0.806266と乖離0.104pt，`selected_domain`行一致率
+1913/1915 = 99.90%）。
+
+**層別Δ（基準線p_true の五分位，pre_iter84の実測run `results/20260927_130237/` の`probe_candidates`から
+p_true を実測して算出．各n=687，境界値がIter86/87の記録値（Q1≤0.3542／Q2≤0.7209／Q3≤0.9022／Q4≤0.9697）と
+完全一致することを確認した上で算出）**
+
+| 層 | 上限p_true | pre_iter84 | Iter87基準線 | Iter88 | Δ（vs Iter87基準線） | Δ（vs pre_iter84，用量反応3点目） |
+|---|---|---|---|---|---|---|
+| Q1 | 0.3542 | 0.0451 | 0.1630 | 0.1354 | **−2.77pt** | +9.02pt |
+| Q2 | 0.7209 | 0.8923 | 0.8632 | 0.8748 | +1.16pt | −1.75pt |
+| Q3 | 0.9022 | 1.0000 | 0.9898 | 0.9985 | +0.87pt | −0.15pt |
+| Q4 | 0.9697 | 1.0000 | 0.9942 | 0.9985 | +0.44pt | −0.15pt |
+| Q5 | 0.9985 | 0.9942 | 0.9971 | 0.9985 | +0.15pt | +0.44pt |
+
+参考（用量反応3点，pre_iter84比）: Q1 +14.85pt（Iter86）→+11.79pt（Iter87）→**+9.02pt（Iter88）**，
+Q2 −6.84→−2.91→**−1.75pt**，Q3 −2.33→−1.02→**−0.15pt**，Q4 −1.02→−0.58→**−0.15pt**，
+Q5 +0.44→+0.29→**+0.44pt**。全体Δtop1（pre_iter84比）は+1.019pt（Iter86）→+1.514pt（Iter87）→
+**+1.485pt（Iter88，0.801164−0.786317）**。
+
+非退行①: per-domain recall/precision計20指標（BH補正q=0.05，`metrics.py`の`compute_domain_recall_mcnemar_test`／
+`compute_domain_precision_fisher_test`／`apply_benjamini_hochberg`）で**有意退行0件**（legal_recall生p=0.003283
+・mathematics_recallの生p=0.013328はBH補正前は小さいが，BH閾値（20件中の順位×0.05/20）を上回らず非有意）。
+**education_recall（0.3626→0.3811，+1.85pt，生p=0.098960，非有意）・natural_science_precision（0.8424→0.8541，
++1.17pt，生p=0.687276，非有意）はいずれもBH補正後有意差なし**。他18指標もBH補正後有意差なし。
+per-domain詳細（Iter88実測，recall/precisionの順，前セクションと同じ表記）:
+business_economics 0.8538/0.7914，computer_science 0.8665/0.9068，education 0.3811/0.6274，
+general 0.5040/0.8038，history_culture 0.8585/0.7283，legal 0.6337/0.7979，
+mathematics 0.8121/0.8906，medical 0.7846/0.8141，natural_science 0.7471/0.8541，
+social_science 0.5840/0.7631。
+
+非退行②（複合被覆）: compound_domain_set_recall 0.566265→0.553012（下限0.539759以上，**PASS**）。
+非退行③（複合予算）: compound_mean_dispatched_count 1.879518→1.783133（上限2.10以内，**PASS**）。
+非退行④: fallback_rate 0.0→0.0（**PASS**），dispatch_failure_rate 0.001456→0.000291（1行，
+≤0.005，**PASS**）。
+非退行⑤: rank1以外が選ばれた行数（`selected_domain`≠`probe_candidates`最大confidenceドメイン）
+5→1（≤15，**PASS**）。
+非退行⑥: mean_duration_ms 1544.912→1546.784（≤1853.9，**PASS**）。
+非退行⑦: ECE 0.045717→0.022189（≤0.08，**PASS**）。
+
+報告のみ: answer_quality_accuracy 0.587417→0.585762，end_to_end_accuracy 0.411063→0.407860
+（`mise run analyze`実測，`graded_row_count`=3020/`total_row_count`=3435，ノイズ床3SD=2.6pt以内），
+Random/BestSingle/Oracle baseline 0.112082/0.128384/1.0（不変，`best_single_domain_baseline`の
+ドメイン別最大値はmedical 0.128384）。Brier=0.124825・AUROC=0.822177（n=3434）。
+
+不変条件確認: `total_questions`=3435（一致），`compound_domain_question_count`=415（一致），
+新artifact sha256は`1cfcd3d8...`／`fd1ccd7d...`／`f6c33edb...`のいずれとも不一致。**追加900行と評価集合の
+重複は0件**（絶対条件）。本走top1（1,915行部分集合実測0.805222）はオフラインreplay予測（0.806266）から
+0.104pt乖離のみ（1.0pt未満）。invalid条件はいずれにも該当しない。
+
+**判定は分析・考察フェーズに委ねる**（本セクションは実装・実験フェーズの機械可読な実測値の記録のみ）。
+
 ## E10 ドメイン別 LoRA アダプタ
 
 生成は3段階（各スクリプトの docstring 参照）:

@@ -2099,7 +2099,19 @@ levers:
             `education` recall（点推定 −2.54pt のまま）と `natural_science` precision は
             引き続き個別に明記して監視する．
             **プールの構造的上限（変わらない）**: computer_science・social_science・general は
-            M=100=N のため，追加行数 N=100 を保つ限りどんな抽出規則でも no-op である．"}
+            M=100=N のため，追加行数 N=100 を保つ限りどんな抽出規則でも no-op である．
+            **[2026-09-27 Iter88 分析フェーズ・backlog B145 で追記．本レバーは打ち止め（closed）]**
+            Iter88（25/75）は `no_effect` 確定（top1 0.801456→0.801164，Δ −0.03pt，McNemar chi2=0.0 p=1.0，
+            discordant 127．非退行①〜⑦すべて PASS）．用量反応 3 点（pre_iter84 比）は
+            +1.019（100/0）→ +1.514（50/50）→ +1.485pt（25/75）で，二次近似の頂点は hard 比 36.7%・
+            peak +1.566pt．**頂点と 50/50 の差はわずか 0.05pt しかなく，比の刻みで得られる余地は無い．**
+            さらに 5b の種ばらつき計測（比 {50/50, 25/75} × 種 {87,88,89} の replay）で
+            **同一比・異種間の Δ の絶対値の最大値が両比とも 0.31pt** と実測され，比の効果（replay 上の
+            対応差 −0.35pt）と同オーダーであることが確定した．本走 1 回の McNemar 検出限界は 0.612pt，
+            80% 検出力の必要 Δ は約 0.92pt であり，**比の差はこの測定系の分解能を構造的に下回る**．
+            したがって B143 が予告した純無作為 0/100 の対照（選択肢 α）も 1 回の本走では判定できないため
+            実施しない．**本レバーは `hard_random_hybrid_all_domains`（50/50，Iter87 adopted）を
+            最終構成として打ち止めとする．** 新しい値を追加しないこと．"}
   - {name: compound_eval_set_expansion,
      values: [existing_public_dataset, llm_generated_separate_generator, manual_authoring],
      note: "[2026-09-26 backlog B118 で追加．research_frontier 最上位項目のレバー化]

@@ -15,6 +15,102 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B145 [auto-decided 2026-09-27] Iter88 の判定（`no_effect`）・測定分解能の確定・`cross_domain_training_data_augmentation` の打ち止めと次レバー `qwen3_embedding_4b` の選定
+
+- **状況**: Iter88（`hard_random_hybrid_ratio_25_75_all_domains`，本走 `results/20260927_202256/`）は
+  top1 0.801456 → **0.801164（Δ = −0.03pt）**，McNemar chi2 = 0.0 / **p = 1.0（非有意）**，discordant 127
+  （a_only 64 / b_only 63），Wilson 95%CI [0.787484, 0.814172]．非退行①〜⑦は**すべて PASS**（BH 補正後の有意退行 0 件）．
+  F0〜F5・G0 全 PASS，入れ替わり行数は事前登録の決定論的予測値（Iter87 比 309・Iter86 比 300）に ±0 で一致し，
+  invalid 条件のいずれにも該当しない．判断が要ったのは (a) 判定語，(b) 5b の種ばらつき実測の解釈，
+  (c) 本レバーの去就，(d) 次レバーと次イテレーション名の 4 点．
+- **自動選択**:
+  - **(a) 判定は `no_effect`**．事前登録（Iter86 から一字も変えずに据え置いたもの）は `no_effect` を
+    「|Δtop1| < 0.5pt **または** McNemar が非有意」と定義しており，実測は |Δ| = 0.03pt（第 1 項）と
+    p = 1.0（第 2 項）の**両方を独立に満たす**．`adopted` は主基準 (i)(ii) の AND が不成立，
+    `partial` は (i) が不成立，`rejected` は Δ > −0.5pt かつ非退行全 PASS のため，いずれも該当しない．
+    **Iter86 を `rejected`・Iter87 を `adopted` にしたのと同一条文をそのまま適用した結果である**（B131 以来の運用）．
+  - **(b) 5b の結果を「本測定系の分解能の確定」として記録する．**
+    同一比・異種間の Δ の絶対値の最大値は **50/50・25/75 とも 0.31pt**（replay 1,915 行，種 87/88/89）．
+    比の効果は事前投影 +0.28pt・replay の種対応差 −0.35pt で**完全に同オーダー**．
+    本走 1 回の McNemar 有意境界は `1.96·√127/3435` = **0.612pt**，80% 検出力に必要な Δ は約 **0.92pt**．
+    さらに**同一本走を分割すると 1,915 行サブセットで Δ = −0.47pt，残る 1,520 行で Δ = +0.53pt と符号が逆転**する．
+    **結論: 本測定系（3,435 問・1 本走・種 1 個）で判定できるのは概ね 0.9pt 以上の効果量に限られる．**
+  - **(c) `cross_domain_training_data_augmentation` は打ち止め（closed）**．config.yml の当該 note に明記した．
+    B143 が予告した (α) 純無作為 0/100 の対照は**実施しない**．最終構成は Iter87 の 50/50（`f6c33edb...`）．
+    artifact は復元条項どおり `f6c33edb...` へ戻し，全 10 ノードで実機確認済み（分析フェーズ内で完了）．
+  - **(d) 次レバーは `embedding_model_replacement` = `qwen3_embedding_4b`**．
+    **次イテレーション（89）の `iteration_name`: 「埋め込みモデルの qwen3-embedding:4b への差し替え」**．
+- **根拠**:
+  - (b)(d): 今回の結果は「比の微調整はこの測定系の分解能を下回る」ことを示したので，
+    **同系列の比の刻み（10/90 等）を続けることは原理的に結論を生まない**．次レバーは
+    「効果量が 0.9pt を明確に上回る見込み」を選定基準に置いた．`qwen3_embedding_4b` は
+    MTEB multilingual が現行 0.6b の 64.33 に対し 69.45（+5.12pt）で，**特徴空間そのものを入れ替える**ため
+    効果量の期待値が桁違いに大きい（0.6b への差し替え自体が Iter79 系列で複数 pt の変化を生んだ実績がある）．
+    B116 (3) により config.yaml のスキーマ変更を含めユーザー事前承認済みで，着手前の追加確認は不要．
+  - 採らなかった代替: (α) 純無作為 0/100 — 上記 (b) により 1 回の本走では判定不能．事前登録の申し送りが
+    「種ばらつきが比の差と同程度なら (β) を推す」と定めた条件に実測が該当した．
+    (β) `compound_eval_set_expansion`（research_frontier 最上位） — top1 を上げるレバーではなく測定系の整備であり，
+    全基準線の再取得（1 回 90〜150 分 × 複数）を伴う．**ただし学び 2 により将来の優先度は上がった**ので，
+    `qwen3_embedding_4b` の結果を見た後に再評価する（申し送り）．
+    (γ) `bge_m3` — 同じレバーの別値だが MTEB で 4b に劣り，先に上位を試すのが合理的．
+    (δ) education への個別手当て — 2026-09-23 恒久運用ルール (1) に抵触するため検討しない
+    （今回 education_recall は +1.85pt と改善方向だが非有意であり「直った」とは記録しない）．
+  - 計画フェーズで必ず押さえるべき点（申し送り）: (1) 埋め込み次元が 1024 → 2560 に変わり
+    `embedding_view_concat=true` の下で特徴量は 5120 次元になる．`n_features_in_` の検証値を引き直すこと．
+    (2) **全 10 ノードに `qwen3-embedding:4b` を pull する必要がある**（`tools/node_models.py`）．
+    (3) **非退行⑥（`mean_duration_ms` ≤ 基準線 +20%）が今回初めて現実的なリスクになる**（現行 probe latency 5ms）．
+    予備 20 問で probe latency を実測してから本走に進むこと．
+    (4) wafl-ctrl5（RTX 3060 12GB）の VRAM 競合を実機確認すること（config.yml の lever note が明示）．
+    (5) 埋め込みキャッシュ（`data/embcache_eval_*`）は全面的に作り直しになる．
+- **要レビュー**: (a) 非退行を全 PASS しながら効果ゼロという結果に `no_effect` を当てた判定，
+  (c) 純無作為 0/100 の対照を実施せずレバーを打ち止めにした判断（測定分解能を理由にしている），
+  (d) research_frontier 最上位の `compound_eval_set_expansion` を後回しにして `qwen3_embedding_4b` を先に採った判断．
+  確認箇所は journal.md「Iteration 88 実行済み」節の学び 1・学び 2 と，config.yml の
+  `cross_domain_training_data_augmentation` note 末尾（打ち止めの記載）．
+
+## B144 [auto-decided 2026-09-27] Iter88 計画フェーズの設計判断（採掘スコア artifact の指定方法・非退行⑥の閾値更新・5b の必須化と範囲）
+
+- **状況**: Iter88 のレバーは B143 (d) で確定済み（`cross_domain_training_data_augmentation` =
+  `hard_random_hybrid_ratio_25_75_all_domains`）で選定の裁量は無いが，実装の細部に 3 点の判断が要った．
+  B143 (c) が「`models/domain_classifier.joblib` = `f6c33edb...`（Iter87 artifact）を全 10 ノードへ配布済みの
+  状態で維持する」と定める一方，採掘の p_true スコアは Iter86/87 と同一の `1cfcd3d8...`（pre_iter84 基準線）で
+  計算しなければ用量反応の 3 点比較が成立しない，という緊張関係がある．
+- **自動選択**:
+  - **(A) 採掘時に `--classifier-model models/domain_classifier_pre_iter84_baseline.joblib` を明示指定する．**
+    Iter87 のように `models/domain_classifier.joblib` を上書き復元する運用は採らない．基準線 artifact
+    `f6c33edb...` は実機・ローカルとも触らずに維持し，手順 7（`mise run deploy`）で初めて新 artifact へ置き換わる．
+  - **(B) 非退行⑥（`mean_duration_ms`）の閾値を 1888.9 → 1853.9 へ更新する．**
+    規則そのもの（「基準線 +20% 以内」）は Iter86/87 から一字も変えず，基準線が 1574.096 → 1544.912 へ
+    更新されたことに伴って閾値が算術的に従うだけである（結果としてわずかに厳しくなる．緩めていない）．
+    非退行②③④⑤⑦は絶対値で書かれた条文なのでそのまま据え置く．
+  - **(C) B143 が必須と定めた report-only 手順（5b）の範囲を「比 {50/50, 25/75} × 種 {87, 88, 89} の 6 構成，
+    うち既存 2 構成を再利用し追加採掘・再訓練は 4 構成」と確定し，計画節に必須手順として明記した．**
+    replay は 1,915 行キャッシュ埋め込み上で行う（`data/embcache_eval_qwen3-embedding_0.6b{,__p1}.npy` の
+    shape が (1915, 1024) であることを本フェーズで実測確認した．3,435 行分のキャッシュは存在しない）．
+    **種の選び直しには使わない**旨を計画節に明記した．
+- **根拠**:
+  - (A): `_run()`（L347）は `joblib.load(args.classifier_model)` しか読まないため，CLI 指定だけで
+    Iter86/87 と同一のスコアリングが再現する．**本フェーズで実測検証した**——`1cfcd3d8...` で p_true を再計算し
+    `--random-count 0` で選定すると `data/classifier_train_iter86_hardneg.jsonl` の追加 900 行と差分 0 行，
+    `--random-count 50 --random-seed 87` で選定すると `data/classifier_train_iter87_hybrid.jsonl` の追加 900 行と
+    差分 0 行で再現した．上書き復元を避けることで，Iter86 で積み残された「復元 → 再配布 → 再復元」の往復と
+    その取りこぼしリスクが構造的に消える．
+  - (B): 「規則は据え置き，基準線の更新に伴う数値は従う」が B131 以来の運用と整合する．
+    閾値を 1888.9 のまま据え置くと，基準線が下がったぶんだけ条件が緩むことになる．
+  - (C): Iter87 では 5b を「余力がある場合のみ」に置いた結果，実施されず未測定のまま残った（B143 根拠節）．
+    Iter88 の比の差は投影で 0.3〜0.5pt 規模であり，種由来の分散と同程度になりうるため，
+    先に押さえないと結果の解釈が成立しない．追加コストは wafl-ctrl5 上のオフライン処理 4 構成分のみで，
+    本走（wafl500〜509）には一切影響しない．
+- **本フェーズの実測（判定に使う前提値）**: 採掘プールは Iter86/87 と完全に同一（計 3,127 行，
+  `pool_hash=221e45e8...`）．JMMLU.zip sha256 = `3ba7d912...`（MANIFEST 一致，G0 PASS）．
+  25/75・種 87 の選定は **Iter87 比 309 行・Iter86 比 300 行**が入れ替わる（超幾何期待値 298.9 と整合）．
+  **computer_science・social_science・general は M=100=N のため今回も厳密に no-op（入れ替わり 0 行）**で，
+  比をどう振っても動かない 300 行（追加 900 行の 33.3%）が構造的に存在する．education も 8 行のみ．
+  追加 900 行の平均 p_true は 0.4491（100/0）→ 0.5606（50/50）→ **0.6330（25/75）**で，用量の刻みは劣線形．
+- **要レビュー**: (A) 採掘スコア artifact を CLI 指定で分離する設計，(B) 非退行⑥の閾値を基準線更新に追従させた判断，
+  (C) 投影上の最頻着地が `no_effect`（主基準到達確率 約 5%）と分かった上で判定規則を据え置き本走を実施する判断
+  （config.yml 絶対条件 (A) により本走は省略しない）．確認箇所は journal.md「Iteration 88」調査節 Q2〜Q4 と計画節．
+
 ## B143 [auto-decided 2026-09-27] Iter87 の判定（`adopted`）と，次レバー `hard_random_hybrid_ratio_25_75_all_domains` の選定
 
 - **状況**: Iter87（`cross_domain_training_data_augmentation` = `hard_random_hybrid_all_domains`，

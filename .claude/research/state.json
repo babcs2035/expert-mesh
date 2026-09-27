@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 87,
-  "iteration_name": "hard negative と無作為抽出の半々混合による訓練データ拡充",
-  "phase": "analyze",
+  "iteration": 88,
+  "iteration_name": "hard negative 混合比の用量反応（25/75）と乱数種ばらつきの計測",
+  "phase": "reflect",
   "status": "running",
-  "current_lever": "cross_domain_training_data_augmentation=hard_random_hybrid_all_domains",
-  "experiment_dir": "results/20260927_174150",
-  "experiment_deadline": 1790509762,
-  "updated_at": 1790510400,
-  "last_slack_ts": "1790504198.313859",
-  "iteration_thread_ts": "1790496868.037399",
+  "current_lever": "cross_domain_training_data_augmentation=hard_random_hybrid_ratio_25_75_all_domains",
+  "experiment_dir": "results/20260927_202256",
+  "experiment_deadline": 1790519268,
+  "updated_at": 1790514726,
+  "last_slack_ts": "1790513950.232309",
+  "iteration_thread_ts": "1790505434.983189",
   "notion_toggle_created": true,
-  "last_commit": "c14e276"
+  "last_commit": "6b7ed76"
 }

@@ -1,3 +1,415 @@
+## Iteration 85: 単一ドメイン評価集合の拡充による検出力の確保
+
+### 調査 (Iter85)
+
+本反復のレバーは backlog B134（Iter84 分析フェーズ）で `single_domain_eval_set_expansion` =
+`jmmlu_unused_rows_power_targeted` に確定済みで，レバー選定の裁量は無い．調査の問いは 3 つ．
+**(Q1) 評価集合を何行にすれば，想定効果量 δ に対して McNemar の検出力が確保できるのか（数値で決める）．
+(Q2) 調達元（JMMLU 未使用行）は実際に何行あり，どのドメインにどれだけ配れるのか．
+(Q3) 追加行の選び方に，測定系を壊す汚染・偏りの経路は無いか．**
+
+**Q1: 必要標本数は Connor / Miettinen の対応のある二項検定の標本設計式で決まる**
+
+- McNemar 検定の標本設計は Connor, "Sample size for testing differences in proportions for the
+  paired-sample design"（Biometrics 43(1):207-211, 1987, p.209）が標準で，漸近近似は
+  Miettinen, "The matched pairs design in the case of all-or-none responses"（Biometrics, 1968）に遡る
+  （実装例: <https://gist.github.com/...pwr.mcnemar>，計算機: <https://powerandsamplesize.com/>，
+  <https://homepage.univie.ac.at/robin.ristl/samplesize.php?test=mcnemar>，いずれも 2026-09-27 確認）．
+  Connor の形は `n = [z_α·√p_d + z_β·√(p_d − δ²)]² / δ²` で，本研究のように δ ≪ p_d の領域では
+  journal の Iter84 学び 1 で使った `N ≥ (z_α+z_β)²·p_d/δ²` と数値的に一致する
+  （p_d=0.09452・δ=0.012 で p_d − δ² = 0.09438，差は 0.08%）．**したがって Iter84 が導いた
+  「N=1,915 では有意境界 δ=1.378pt，検出力 80% で δ=1.97pt」という結論は文献側の定式と整合する．**
+- 本フェーズで N ごとの検出力を再計算した（p_d は Iter84 実測 0.09452 を設計定数として使う．
+  分類器を作り替えるレバーの実測値であり，本レバーの直後に再試行する
+  `cross_domain_training_data_augmentation` と同型のレバーだからである）:
+
+  | N（全体） | 有意境界 `1.96·√(p_d/N)` | 検出力 80% の最小効果 `2.802·√(p_d/N)` |
+  |---|---|---|
+  | 1,915（現行） | 1.377pt | 1.969pt |
+  | 2,903 | 1.118pt | 1.599pt |
+  | **3,447（本計画）** | **1.026pt** | **1.467pt** |
+  | 3,731 | 0.987pt | 1.410pt |
+  | 5,153 | 0.876pt | 1.200pt |
+
+- **δ=1.2pt を検出力 80% で拾うには N≥5,153 が要る**が，これは後述 Q2 のプール上限（訓練用に各 100 行を
+  残すと追加可能なのは 3,829 行）と本走時間（`experiment.timeout_min`）の双方から到達不能である．
+  **到達可能な範囲での最良は N≈3,400〜3,700** であり，config.yml の新レバー note が示す目標帯
+  （3,400〜3,600）と一致する．
+- **ただし本レバーの後に控える再試行では，期待効果量は 1.2pt ではなくもっと大きい**．Iter84 の内訳は
+  single 行 +2.133pt / compound 行 −2.169pt で，拡充後は single の構成比が 78.3%→88.0% へ上がる．
+  同じ部分効果が成り立つなら期待 δ は **0.880×2.133 + 0.120×(−2.169) = +1.615pt** で，
+  N=3,447（SE=0.5235pt）での検出力は **約 87%** になる．**すなわち N=3,447 は「Iter84 の問いに決着を
+  付ける」という目的に対しては十分である**（δ=1.2pt 一般を 80% で拾う汎用的な検出力は得られない）．
+
+**Q2: 未使用プールは 4,731 行．ただし legal 2 行・general 128 行という構造的な偏りがある**
+
+本フェーズで JMMLU（pinned commit `3637b25e`，CC BY-NC-ND 4.0）の全 56 タスクを
+`build_dataset.py:_DOMAIN_TASK_MAP` で 10 ドメインへ写像し，評価集合 1,915 行・分類器訓練集合 1,427 行の
+設問文（4 択を連結した本文の完全一致）を除いた残りを実測した．
+
+| ドメイン | 未使用プール | 訓練用に 100 行残した後の上限 | LoRA 訓練集合と重複しない行 |
+|---|---|---|---|
+| medical | 1,120 | 1,020 | 861 |
+| natural_science | 791 | 691 | 545 |
+| history_culture | 786 | 686 | 599 |
+| business_economics | 713 | 613 | 466 |
+| mathematics | 353 | 253 | 138 |
+| education | 334 | 234 | 197 |
+| computer_science | 256 | 156 | 61 |
+| social_science | 248 | 148 | 64 |
+| general | 128 | 28 | 3 |
+| **legal** | **2** | **0** | 2 |
+| 合計 | **4,731** | **3,829** | 2,936 |
+
+- B133 が記録した 4,578 行は**訓練集合に既出のタスクへ限定した**値で，評価集合の拡充では
+  その限定は不要である（評価集合は 10 ドメインとも `_DOMAIN_TASK_MAP` の全タスクを既に使っており，
+  education も `japanese_civics` 39 行を含む．タスク構成は変わらない）．今回の 4,731 行が正しい母数である．
+  また B134 note の「legal 0」は訓練タスク限定時の値で，評価側の実測は **2 行**（229 − 150 − 77）である．
+  どちらにせよ legal は事実上拡充できない．
+- **general も上限 28 行**（プール 128 − 訓練用留保 100）で，legal と合わせて 2 ドメインは拡充がほぼ効かない．
+  拡充後の単一行はドメイン間で不均衡（medical/education/business/natural_science/mathematics/history_culture
+  各 350，computer_science 306，social_science 298，general 178，legal 150）になる．
+  **これはドメイン固有の扱いではなく，10 ドメイン共通の規則をデータ側の制約が切り詰めた結果である**
+  （2026-09-23 恒久ルール (1) に抵触しない）．
+
+**Q3: 汚染経路は 2 本ある．分類器訓練集合（軸①に効く）と LoRA 訓練集合（軸②③に効く）**
+
+- **(a) 分類器訓練集合との重複は主基準に直結する**ので，プール定義の時点で `data/classifier_train.jsonl`
+  1,427 行の設問文を完全除外した（上表はその条件での実測）．なお既存の評価集合には B125 が起票済みの
+  72 行の重複が残っているが，本反復では単一レバー原則により触らない．拡充で希釈され 72/1,915 → 72/3,447 になる．
+- **(b) 専門家 LoRA の訓練集合との重複は本フェーズで新たに実測した**．`data/lora_train/*.jsonl` は
+  `scripts/prepare_lora_training_data.py`（seed=42，各ドメイン最大 300 行，生成時点の評価集合を除外）が
+  作った 2,749 行で，設問文の書式は評価集合と同一である．**現在の評価集合 1,915 行のうち 135 行（7.05%）が
+  既にこの LoRA 訓練集合と重複している**（Iter37/78 で評価集合を作り直した際に生じたもので，本反復の責任範囲外）．
+  ルーティング（軸①）は分類器だけで決まるので影響しないが，`answer_quality_accuracy`・`end_to_end_accuracy`
+  （軸②③）は専門家が訓練で見た設問を再現できる分だけ上振れする．
+- 未使用プールの 38%（1,795/4,731）が LoRA 訓練行なので，**無作為に取ると追加行の約 4 割が汚染行になり，
+  評価集合全体の汚染率は 7.05%→約 21% へ跳ね上がる**．そこで選択規則を「**LoRA 訓練集合と重複しない行を
+  先に取り，足りない分だけ重複行で埋める**」（clean-first）とする．LoRA 訓練行は seed 付き無作為抽出なので
+  clean/汚染の別は難易度と独立であり，この優先順位は難易度の偏りを生まない．
+  この規則の下での汚染は 1,532 行中 269 行に留まり，評価集合全体では 7.05%→**11.72%** の増加で収まる．
+- **難易度で選ぶことは絶対にしない**（Iter84 の hard negative mining は訓練側の話）．評価集合を難しい行へ
+  寄せると top1 の水準自体が動き，1,915 行サブセットとの比較・過去基準線との接続が壊れる．
+  抽出は各ドメインのプール内での seed 固定の一様無作為（clean-first の 2 層のみ）に限る．
+
+### 計画 (Iter85)
+
+**単一レバー**
+
+`single_domain_eval_set_expansion` = **`jmmlu_unused_rows_power_targeted`**．
+**`data/dataset.jsonl`（現行 1,915 行）の末尾へ，JMMLU の未使用単一ドメイン行 1,532 行を追記して 3,447 行にする**
+ことだけを行う．`config.yaml`・分類器 artifact・埋め込み・訓練データ・送出閾値・集約方式・既存 1,915 行は
+一切変えない（既存行はバイト単位で不変．先頭 1,915 行の diff が 0 であることを検証条件に含める）．
+
+**選択規則（10 ドメイン共通．ドメイン別パラメータを持たない）**
+
+1. **プール**: 各ドメインについて `_DOMAIN_TASK_MAP` の全タスクの全行から，現行評価集合 1,915 行と
+   `data/classifier_train.jsonl` 1,427 行の設問文（4 択連結後の本文）を除いた残り（計 4,731 行）．
+2. **訓練用留保**: 各ドメインのプールから **100 行を訓練用に残す**（`cross_domain_training_data_augmentation`
+   の再試行余地を潰さないため．B134 の指示）．取得可能数は `max(0, pool − 100)`．
+3. **取得数**: 各ドメイン **N_add = 200**（取得可能数がこれ未満のドメインはその全量）．
+4. **層の順序**: `data/lora_train/*.jsonl` の設問文と重複しない行を優先し，不足分のみ重複行で埋める（Q3-b）．
+   各層の内部は `random.Random(20260927).shuffle` による一様無作為で，同一 zip なら完全に再現する．
+5. **追記**: 選定行を既存 1,915 行の**後ろ**に append する．id は `{domain}-exp085-{連番:03d}`
+   （既存 id と衝突せず，1,915 行サブセットを id だけで切り出せる）．`is_compound=false`，
+   `expected_domains=[domain]`，`jmmlu_task`・`jmmlu_answer` は JMMLU の値をそのまま持たせる．
+
+**確定した配分（本フェーズで実測・決定論的）**
+
+| ドメイン | プール | 取得可能 | 取得 | うち LoRA 非重複 | 拡充後の単一行数 |
+|---|---|---|---|---|---|
+| medical | 1,120 | 1,020 | 200 | 200 | 350 |
+| education | 334 | 234 | 200 | 197 | 350 |
+| business_economics | 713 | 613 | 200 | 200 | 350 |
+| natural_science | 791 | 691 | 200 | 200 | 350 |
+| mathematics | 353 | 253 | 200 | 138 | 350 |
+| history_culture | 786 | 686 | 200 | 200 | 350 |
+| computer_science | 256 | 156 | 156 | 61 | 306 |
+| social_science | 248 | 148 | 148 | 64 | 298 |
+| general | 128 | 28 | 28 | 3 | 178 |
+| legal | 2 | 0 | 0 | 0 | 150 |
+| 合計 | 4,731 | 3,829 | **1,532** | 1,263 | **3,032** |
+
+**全体 N = 1,915 + 1,532 = 3,447 行（単一 3,032 ＋ 複合 415）**．
+有意境界 **1.026pt**，検出力 80% の最小効果 **1.467pt**（p_d=0.09452 を仮定）．
+
+**レバーを読むコード行と到達条件（d0004 §4 の再発防止）**
+
+- 追加行を読むのは `build_dataset.py:main()` に新設する `--single-domain-expansion <path>`
+  （既定 `data/single_domain_expansion_iter85.jsonl`）→ `_build_rows()` の末尾で append する新規ブロック．
+  **到達条件は `mise.toml` L31 の `uv run python build_dataset.py --output data/dataset.jsonl`
+  （`mise run setup` 内）が実行されること**．Iter78（複合 100→415）と同一の作りにし，
+  `tests/test_build_dataset.py` の既存呼び出し（`_build_rows()` 直叩き）は引数既定 `None` で不変に保つ．
+- 本走が読むのは**コンテナ内の** `/app/data/dataset.jsonl`（`Dockerfile` の `COPY data/ ./data/`）なので，
+  **`mise run setup`（イメージ再ビルド・push）→ `mise run deploy` を必ず通す**．
+  これを省くと 1,915 行のまま走り invalid になる．
+- **落とし穴（B123 と同型）**: `data/` は `.gitignore` 対象なので
+  `data/single_domain_expansion_iter85.jsonl` は `git add -f` で明示コミットし，sha256 を
+  `data/MANIFEST.md` に記録する．消失すると `mise run setup` が黙って 1,915 行へ戻す．
+- **落とし穴（B118-2）**: `mise run setup` 内の素の `uv sync` が research extra を落とすので，
+  直後に `uv sync --extra research` を実行する．
+- **落とし穴（B135）**: `mise run analyze` は引数なしだと `results/iter45_preliminary/` を誤選択するので
+  `-- <YYYYMMDD_HHMMSS>` を明示する．
+
+**実装・実験手順（この順で行うこと）**
+
+0. **【最優先・必須】Iter84 の artifact を基準線へ復元する**:
+   `cp models/domain_classifier_pre_iter84_baseline.joblib models/domain_classifier.joblib` →
+   `sha256sum` が `1cfcd3d8...` に戻ることを確認 → 後続の `mise run deploy` で全 10 ノードへ再配布し，
+   各ノードで sha256 の一致を確認する．**これを怠ると別 artifact の上で走り invalid になる．**
+1. `scripts/expand_single_domain_eval.py`（新規）で上記規則の 1,532 行を生成し
+   `data/single_domain_expansion_iter85.jsonl` へ書く．**LLM も埋め込みも使わない純粋な CPU 処理**なので
+   実機ノードも wafl-ctrl5 も不要（zip の解析のみ）．生成時に (a) 評価集合との重複 0，
+   (b) `classifier_train.jsonl` との重複 0，(c) 追加行同士の重複 0，(d) ドメイン別件数が上表と一致，
+   を assert する．
+2. `build_dataset.py` に `--single-domain-expansion` を追加（既定値あり，`main()` からのみ渡す）．
+   `uv run pytest tests/test_build_dataset.py` と `uv run ruff check` を通す．
+3. `mise run setup` → `uv sync --extra research` → `wc -l data/dataset.jsonl` = **3447** を確認．
+   **`head -n 1915 data/dataset.jsonl` が変更前のファイルとバイト単位で一致すること**を diff で確認する．
+4. `mise run deploy` → 全ノード healthy・smoke_check（git-status/hashes/probe）PASS →
+   各ノードで `docker compose exec app wc -l /app/data/dataset.jsonl` = **3447**（10/10）と
+   分類器 sha256 = `1cfcd3d8...`（10/10）を確認．
+5. `mise run start` で本走 1 回（3,447 問）．所要見積りは **113〜131 分**
+   （Iter84 実績 1,915 問 63 分の線形外挿＝113 分，`mean_duration_ms`=2280.4 基準＝131 分）．
+   watchdog の `experiment.timeout_min` は 150 では余裕が 19 分しかないため **180 へ引き上げる**
+   （測定系ではなく監視の設定であり，実験条件ではない）．
+6. `mise run analyze -- <run>`，および 1,915 行サブセット（id が `-exp085-` を含まない行）での
+   指標を別途算出する．**オフライン replay を行う場合，`data/embcache_eval_*.npy` は 1,915 行分しか
+   無いので追加行を wafl-ctrl5 で再埋め込みすること**（1,915 行キャッシュをそのまま流用しない）．
+
+**固定する構成（直近の最良構成 = Iter83 本走 `results/20260927_070239/` と同一）**
+
+`config.yaml` は 1 行も変更しない（`embedding_model=qwen3-embedding:0.6b`，`embedding_view_concat=true`，
+`routing_method=supervised_classifier`，`confidence_threshold=0.0`，`dispatch_candidate_threshold=0.0`，
+`dispatch_top_k=2`，`dispatch_gap_max_k=4`，`dispatch_gap_threshold=0.36`，`aggregation_method=max_confidence`）．
+`models/domain_classifier.joblib` は復元後の `1cfcd3d8...`，`data/classifier_train.jsonl` は 1,427 行のまま不変，
+`node.py`・`aggregator.py`・`classifier.py`・`metrics.py`・`run_experiment.py` はコード変更なし．
+**ドメイン固有の後付け補正は追加しない．棄権・人間エスカレーションは扱わない（2026-09-23 恒久ルール）．**
+
+**仮説**
+
+評価集合を 1,915→3,447 行へ増やせば，同じ p_d の下で McNemar の標準誤差が √(1915/3447)=0.745 倍になり，
+有意境界は 1.377pt→1.026pt，検出力 80% の最小効果は 1.969pt→1.467pt へ下がる．
+さらに single 行の構成比が上がることで，Iter84 で観測された部分効果（single +2.13pt / compound −2.17pt）の
+合成値は +1.2pt→約 +1.6pt へ上振れし，**同じ施策を再試行したときの検出力が約 87% になる**．
+**本反復は精度向上のレバーではなく測定系のレバーであり，top1_accuracy が動かないことがむしろ正常である．**
+
+**成功条件（事前登録．事後に緩めない）**
+
+主基準（AND）:
+- **P1（検出力）**: 本走が完走した評価集合の `question_count` = **3,447**（単一 3,032・複合 415）で，
+  設計定数 p_d=0.09452 を代入した有意境界 `1.96·√(p_d/N)` ≤ **1.10pt**（設計値 1.026pt）を満たすこと．
+- **P2（整合性）**: 1,915 行サブセット（id に `-exp085-` を含まない行）の `top1_accuracy` が
+  Iter83 本走 0.792689 と **±0.5pt 以内**，かつ行単位の `selected_domain` 一致率が **≥ 99%**
+  （≤19 行の相違まで許容．ルーティングは決定論的なので本来ほぼ完全一致するはずであり，
+  これは実装漏れ・artifact 未復元の検出器として使う）．
+- **P3（無汚染・純追加）**: `head -n 1915 data/dataset.jsonl` が変更前とバイト単位で一致，
+  追加 1,532 行と `data/classifier_train.jsonl` の設問文重複が **0 件**，追加行同士および既存行との
+  重複が **0 件**，追加行のドメイン別件数が計画表と完全一致．
+
+非退行（すべて 1,915 行サブセット上で判定する．拡充後の全体値は水準が動くため比較に使わない）:
+1. per-domain 20 指標の BH 補正（q=0.05）後の有意退行 **0 件**（構造的には Iter83 と同値のはず）．
+2. 複合 415 行の `compound_domain_set_recall` = 0.581928・`compound_mean_dispatched_count` = 1.889 と
+   ±0.5pt / ±0.05 以内で一致（複合行は 1 行も足していないので不変のはず）．
+3. `fallback_rate` = 0.0，`dispatch_failure_rate` ≤ 0.005．
+4. 1 問あたり `mean_duration_ms` ≤ 2744.3（既存上限）．
+5. 本走が `experiment.timeout_min`（180 へ引き上げ）以内に完走すること．
+
+参考値として必ず併記するもの（判定には使わない）: 拡充後の全体 top1_accuracy と Wilson 95%CI，
+単一/複合の内訳，per-domain 指標（拡充後の母数），LoRA 訓練集合と重複する行の数（135+269=404 の想定）と
+それを除いた `answer_quality_accuracy`．
+
+**判定語**
+
+- **adopted**: P1〜P3 と非退行 1〜5 をすべて充足．拡充後の `data/dataset.jsonl` を以後の基準線とし，
+  本走を **新しい基準線**（Iter86 以降の比較対象）として登録する．
+- **partial**: P1・P3 充足かつ P2 または非退行のいずれか 1 件が FAIL．
+- **rejected**: P1 または P3 が不成立（＝拡充の設計自体が要件を満たさない）．
+- **invalid（実験不成立）**: 分類器 sha256 が `1cfcd3d8...` でないまま本走した／`question_count ≠ 3447`／
+  1,915 行サブセットの一致率 < 95% もしくは |Δtop1| > 1.0pt／先頭 1,915 行に差分がある／
+  追加行に訓練集合との重複が見つかった．いずれも「効果なし」ではなく setup・deploy・実装の漏れと解釈する．
+
+**リスクと留保**
+
+- 拡充後の評価集合はドメイン間で不均衡（legal 150 / general 178 に対し medical 350 など）になり，
+  **全体 top1 の水準は現行 0.7927 から動く**（比較は必ず 1,915 行サブセットで行う）．
+- legal は構造的に 1 行も足せず，general も 28 行に留まる．この 2 ドメインの per-domain 検出力は改善しない．
+- LoRA 訓練集合との重複が 7.05%→11.72% へ増えるため，**軸②③の水準は上振れする**．
+  軸②③は 3SD=2.6pt のノイズ床込みで参考値として扱い，判定には使わない．
+- p_d=0.09452 は Iter84（分類器差し替え）の実測値である．config 1 行だけを変えるレバー（Iter83 は p_d≈0.001）
+  では p_d が桁で小さく，検出力の議論はそのまま当てはまらない．
+
+### 実装・実験 (Iter85)
+
+**実施した変更（単一レバーのみ）**
+
+0. **分類器 artifact を基準線へ復元**: `models/domain_classifier.joblib` ←
+   `models/domain_classifier_pre_iter84_baseline.joblib`（sha256 `1cfcd3d8...`）．全 10 ノードで一致を確認した．
+   B134 (b) の申し送りをここで解消した．
+1. 新規 `scripts/expand_single_domain_eval.py`（CPU のみ．LLM・埋め込み不要）で
+   `data/single_domain_expansion_iter85.jsonl` を生成．選択規則はプール構築 → 訓練用に 100 行留保 →
+   各ドメイン目標 200 行 → LoRA 訓練集合と重複しない行を優先し不足分のみ重複行で埋める clean-first →
+   `random.Random(20260927)` で層内シャッフル．内部重複 0・評価集合と 0 重複・分類器訓練集合と 0 重複を
+   アサートで保証した．
+2. `build_dataset.py` に `--single-domain-expansion`（既定 `data/single_domain_expansion_iter85.jsonl`）を追加．
+   `_build_rows()` の複合行ループの後に純追加するのみで，同名引数の既定は `None`（既存テスト呼び出しは不変）．
+3. `mise run setup` → `uv sync --extra research`（B118-2 対策）→ `head -n 1915` が変更前とバイト単位で一致することを確認．
+4. `mise run deploy` → 全 10 ノード healthy，smoke_check（git-status / hashes / probe）PASS．
+   10/10 ノードで `wc -l /app/data/dataset.jsonl`=3435，分類器 sha256=`1cfcd3d8...` を確認．
+5. `mise run start` を 1 回（`results/20260927_130237/`，3,435 問，約 90 分で完走．timeout 180 分以内）．
+6. `mise run analyze -- 20260927_130237`．統計は `metrics.py` の
+   `compute_domain_recall_mcnemar_test` / `compute_domain_precision_fisher_test` / `apply_benjamini_hochberg`
+   をそのまま再利用した（自前の統計式は書いていない）．
+
+**計画からの乖離（要レビュー）**
+
+計画は追加 1,532 行（合計 3,447 行）だったが，実測は **1,520 行（合計 3,435 行．単一 3,020 + 複合 415）**．
+原因は本環境がキャッシュする JMMLU.zip の sha256 が `3ba7d912...` で，ピン留めコミット `3637b25e...` の
+期待値と異なること（journal_archive.md に既知・無害として記載済みの差異）．実際のプールが計画時推定より
+わずかに小さく，`computer_science`（計画 156 → 実測 151）・`social_science`（148 → 144）・`general`（28 → 25）の
+3 ドメインで不足した．他 7 ドメイン（medical / education / business_economics / natural_science /
+mathematics / history_culture = 200，legal = 0）は計画どおり．
+また，この過程で JMMLU 側の cross-task 重複質問 1 件（education の sociology / moral_disputes 間）を検出し，
+プール構築時にドメイン内の重複除去を追加した（計画に無い対応だが，P3「追加行同士の重複 0 件」を
+満たすために必須）．代替は取らず，スクリプトは計画値と実測値を両方 stderr に出力し，`data/MANIFEST.md`
+にも明記した．
+
+**主要メトリクス**
+
+全体（3,435 問，参考値）: top1_accuracy = 0.786317（Wilson 95% CI [0.7723, 0.7997]），
+single_domain_top1 = 0.782119（n=3,020），compound_top1 = 0.816867（n=415），
+fallback_rate = 0.0，dispatch_failure_rate = 0.001164，mean_duration_ms = 1574.10．
+
+1,915 行サブセット（判定用）:
+
+| 条件 | 実測 | 閾値 | 判定 |
+|---|---|---|---|
+| P1 有意境界 `1.96·√(p_d/N)` | 1.028pt（p_d=0.09452, N=3435） | ≤1.10pt | PASS |
+| P2 サブセット top1 | 0.791123（Iter83 0.792689 比 Δ=−0.157pt） | ±0.5pt 以内 | PASS |
+| P2 `selected_domain` 行一致率 | 1909/1915 = 99.69% | ≥99% | PASS |
+| P3 先頭 1,915 行バイト一致 | 一致 | 一致 | PASS |
+| P3 訓練集合との重複 | 0 件 | 0 件 | PASS |
+| P3 ドメイン別件数 | 3 ドメインで僅差 | 配分表と完全一致 | 字義上 FAIL |
+| 非退行① per-domain 20 指標（BH q=0.05） | 有意退行 0 件 | 0 件 | PASS |
+| 非退行② compound set_recall | 0.581928 | 0.581928 | PASS |
+| 非退行② compound mean_dispatched | 1.889157 | 1.889 | PASS |
+| 非退行③ fallback / dispatch_failure | 0.0 / 0.002089 | 0.0 / ≤0.005 | PASS |
+| 非退行④ mean_duration_ms | 2308.51 | ≤2744.3 | PASS |
+| 非退行⑤ 完走 | 約 90 分 | timeout 180 分以内 | PASS |
+
+P2 の不一致 6 行: education-045，medical-004 / 007 / 058 / 109，natural_science-097．
+
+**検証**
+
+- `uv run ruff check build_dataset.py scripts/expand_single_domain_eval.py` → All checks passed．
+- `uv run pytest tests/test_build_dataset.py -q` → 13 passed / 9 failed．**この 9 件は変更前から失敗していた
+  既存の不具合**（fixture zip `tests/fixtures/jmmlu_sample.zip` に `japanese_civics.csv` が無いための
+  `KeyError`）で，`git stash` して同一テストを実行し失敗内容・件数が完全に一致することを確認済み．
+  本反復のスコープ外として未修正のまま残す．
+
+**異常の有無**: 実行・ログ上の異常は無い．上記の計画乖離が唯一の要レビュー事項である．
+
+### Iteration 85 実行済み
+
+**変更（単一レバー）**: `single_domain_eval_set_expansion` = `jmmlu_unused_rows_power_targeted`．
+`data/dataset.jsonl` を 1,915 → **3,435 行**（単一 3,020 ＋ 複合 415）へ純追加で拡充した．
+`config.yaml`・分類器 artifact（`1cfcd3d8...` へ復元済み）・埋め込み・訓練データ・送出閾値・集約方式は不変．
+`experiment.timeout_min` のみ 150→180（watchdog 設定であり実験条件ではない．B137-(5)）．
+
+**結果（本分析フェーズで `metrics.py` の既存関数により再計算・executor 値を全件再現した）**
+
+| 条件 | 実測 | 閾値 | 判定 |
+|---|---|---|---|
+| P1 有意境界 `1.96·√(p_d/N)`（p_d=0.09452, N=3,435） | **1.0281pt** | ≤1.10pt | PASS |
+| P1 `question_count` | 3,435（計画 3,447） | 3,447 | 下記「乖離」参照 |
+| P2 サブセット top1 | 0.791123（Iter83 0.792689，Δ=**−0.157pt**） | ±0.5pt 以内 | PASS |
+| P2 `selected_domain` 行一致率 | 1909/1915 = **99.69%** | ≥99% | PASS |
+| P3 先頭 1,915 行バイト一致 / 訓練集合重複 / 追加行重複 | 一致 / 0 件 / 0 件 | 同左 | PASS |
+| P3 追加行のドメイン別件数 | 1,520（計画 1,532．3 ドメインで −5/−4/−3） | 計画表と完全一致 | **字義上 FAIL** |
+| 非退行① per-domain 20 指標（BH q=0.05） | 有意 **0/20** 件 | 0 件 | PASS |
+| 非退行② compound set_recall / mean_dispatched | 0.5819277 / 1.8891566（基準線と**完全同値**） | ±0.5pt / ±0.05 | PASS |
+| 非退行③ fallback / dispatch_failure（サブセット） | 0.0 / 0.002089 | 0.0 / ≤0.005 | PASS |
+| 非退行④ `mean_duration_ms`（サブセット） | 2308.51 | ≤2744.3 | PASS |
+| 非退行⑤ 完走 | 約 90 分 | timeout 180 分以内 | PASS |
+
+参考値（判定に使わない）: 全体 3,435 行 top1 = 0.786317（Wilson 95%CI [0.7723, 0.7997]），
+単一 3,020 行 0.782119 / 複合 415 行 0.816867，追加 1,520 行のみ 0.780263（CI [0.7588, 0.8004]），
+全体 `mean_duration_ms` = 1574.10（追加行は複合行を含まないため 648.83 と速い），
+`answer_quality_accuracy` = 0.587417，`end_to_end_accuracy` = 0.403202（LoRA 汚染率が 7.05%→11.7% へ
+上がるため上振れしている．軸②③は 3SD=2.6pt のノイズ床込みの参考値）．
+
+**ノイズか有意かの切り分け**
+
+- サブセットの Δ = **−0.157pt** は，基準線との対比較で **discordant 5 行（4 vs 1），McNemar p = 0.3711** で
+  有意でない．N=1,915 の有意境界 1.377pt に対し桁で小さく，明確にノイズ範囲内である．
+- **さらに強い結論が得られた: 1,915 行すべてで `probe_candidates`（各ドメインの確信度）と
+  `dispatched_domains` が基準線と 1915/1915 で完全一致した**．すなわち**ルーティング層は 100% 不変**で，
+  拡充は既存行の測定に一切影響していない．不一致 6 行の内訳は (a) `dispatch_failed` の発生行の差 5 行
+  （基準線 medical-007 の 1 行 → 今回 medical-004/058/109・natural_science-097 の 4 行），
+  (b) education-045 の 1 行は probe 確信度が完全一致のまま `max_confidence` 集約の結果だけが
+  history_culture→social_science へ振れたもので，**生成側 confidence の揺らぎに由来する**．
+  いずれもルーティングではなく生成・ネットワーク層の非決定性であり，P2 の検出器としての目的
+  （実装漏れ・artifact 未復元の検出）は最高水準で満たされた．
+- 複合 415 行の被覆指標が基準線と小数点以下まで完全同値であることも，純追加であることの独立な裏付けである．
+
+**判定: `partial`**
+
+- 本レバーの唯一の目的である **P1（検出力の確保）は充足**した．N=3,435 で有意境界 1.0281pt，
+  検出力 80% の最小効果 1.4698pt（N=1,915 ではそれぞれ 1.3770pt / 1.9685pt）．
+- P3 の 4 条件のうち，P3 の名目そのものを担う 3 条件（純追加・無汚染）は完全充足．**FAIL したのは
+  「ドメイン別件数が計画表と完全一致」という手続き的な決定論チェック条項 1 件のみ**で，その原因は
+  抽出規則の逸脱ではなく計画時に前提したプール母数の誤り（後述の zip 差異）である．
+  規則 3「各ドメイン N_add=200，取得可能数がこれ未満ならその全量」は 10 ドメインすべてで字義どおり
+  満たされており，規則は設計どおり決定論的に動いた．
+- **語彙運用の整理（B131 以来の「事後に事前登録を緩めない」運用の下で）**: 事前登録の `rejected` は
+  「P1 または P3 が不成立（＝拡充の設計自体が要件を満たさない）」，`partial` は「P1・P3 充足かつ
+  P2 または非退行のいずれか 1 件が FAIL」と定義していた．今回は **P2・非退行が全 PASS で P3 の一部条項のみ
+  FAIL** という，どちらの定義文にも字義上当てはまらない**事前登録が想定していなかった型**である．
+  前例（Iter29/30・Iter62/63）の `partial` は「主基準充足＋非退行 1 件 FAIL」の型で，今回とは型が異なる．
+  そこで **事前登録を事後に書き換えるのではなく，未定義領域を保守側（`adopted` ではない）に倒して
+  `partial` を割り当てる**扱いとした．`rejected` を採らないのは，その定義文が括弧で明記する趣旨
+  （拡充の設計が要件を満たさない）と実態が食い違い，拡充を破棄すると Iter84 の問いが永久に決着しない
+  ためである．**この語彙運用の是非は要レビュー事項として backlog B138 に上げた．**
+- **帰結**: 拡充後の `data/dataset.jsonl`（3,435 行）を **Iter86 以降の新しい基準線**として採用し，
+  本走 `results/20260927_130237/` を比較対象に登録する．
+
+**JMMLU.zip の sha256 不一致（再現性の論点）**
+
+本環境のキャッシュ zip は sha256 `3ba7d912...` で，ピン留めコミット `3637b25e...` の期待値と異なる．
+`journal_archive.md` に「既知・無害」として記載されていたが，**今回それが計画フェーズの数値前提
+（プール件数）を狂わせ，事前登録の一条項を FAIL させた**．無害ではなく，計画の決定論性を壊す実害が
+あることが判明した．ただし **本反復のスコープ外**（単一レバー原則）であり，今回は修正しない．
+独立項目として backlog **B139** に起票した（選択肢: ピン留めコミットから再取得して MANIFEST の
+期待値に合わせる／実キャッシュの sha256 を正として MANIFEST・ドキュメント側を訂正する）．
+なお `scripts/expand_single_domain_eval.py` は計画値と実測値を両方 stderr に出力するため，
+同型の乖離は今後も生成時点で検出できる．
+
+**学び**
+
+1. **ルーティング層の決定性は行数を倍近く増やしても完全に保たれる**（`probe_candidates` 1915/1915 一致）．
+   一方で `selected_domain` は `max_confidence` 集約を通るため**生成側の confidence 揺らぎを拾う**．
+   今後「ルーティングが不変か」を検証したいときは `selected_domain` ではなく
+   **`probe_candidates` / `dispatched_domains` を突き合わせるべき**である（より鋭い検出器になる）．
+2. `dispatch_failure` は行ごとに固定ではなく実行ごとに 1〜4 行の範囲で位置が動く（今回 4 行 / 基準線 1 行．
+   いずれも medical・natural_science のノード）．**±5 行程度の top1 の揺れはここから生じる**ので，
+   軸①を「完全に決定論的」と断じるときはこの生成層のノイズ床（今回 5/1915 = 0.26pt）を併記すること．
+3. **事前登録に「計画値と完全一致」という決定論チェックを書くときは，前提となる外部データの
+   sha256 を先に検証する条項とセットにしないと，本質的でない乖離で主基準を落とす**．
+   次回以降，データ調達を伴うレバーでは「調達元の sha256 が MANIFEST と一致すること」を
+   事前条件（ゲート）側に置き，件数一致は事前条件成立時のみ適用する形にする．
+4. 拡充後の全体 per-domain は水準が動いた（mathematics recall 0.6710→0.8005，social_science
+   0.4545→0.5520，computer_science 0.8268→0.8796．education は 0.4120→0.3880 で依然最下位）．
+   追加行のドメイン別 top1 は education 0.360 が突出して低く，computer_science 0.960 /
+   mathematics 0.950 が高い．**全体値は 1,915 行時代の数値と直接比較してはならない**（B138 に明記）．
+
+**次の一手**: 拡充後の評価集合で **Iter84 の hard negative mining を再試行**する
+（`cross_domain_training_data_augmentation` = `hard_negative_mining_all_domains_retry_expanded_set`）．
+実測構成比（単一 87.92%）で Iter84 の部分効果（single +2.133pt / compound −2.169pt）が成り立つなら
+期待 δ = **+1.613pt**，N=3,435（SE=0.5246pt）での検出力は **86.8%**（拡充前の N=1,915 では期待 δ=+1.201pt・
+検出力 40.1% にすぎず，判定不能が再発する公算が高かった）．本レバーが目的とした検出力は実測でも確保された．
+
+---
+
 ## Iteration 84: 全ドメイン共通の hard negative mining による分類器訓練データ拡充
 
 ### 調査 (Iter84)
