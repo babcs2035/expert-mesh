@@ -72,7 +72,9 @@ experiment:
   results_glob: "results/*/results.jsonl"
   # metrics.py は --results 必須のため，最新の実行結果を動的に解決してから渡す．
   metrics_cmd: "uv run python metrics.py --results $(ls -1dt results/*/ | head -1)results.jsonl --json"
-  timeout_min: 150                 # 1600 問（Iter25 以降）の実測は 96-101 分（Iter27 の 3 実行）．余裕を見て 150 分
+  timeout_min: 180                 # 1600 問（Iter25 以降）の実測は 96-101 分（Iter27 の 3 実行）で 150 分としていたが，
+                                   # Iter85 で評価集合を 1,915→3,447 行へ拡充し，見積りが 113〜131 分になったため 180 分へ引き上げた
+                                   # （watchdog の設定であり実験条件ではない．backlog B137）
   poll_interval_sec: 120
 
 # journal.md に残す直近イテレーション数．超過分は自動で journal_archive.md へ移す
@@ -1982,7 +1984,8 @@ levers:
             **コスト**: 中．埋め込み再計算・分類器再訓練はオフラインで完結するが，最終確認は
             1600 問の実機本走（約 90〜150 分）を要する（2026-09-23 ユーザー指示により省略しない）．
             出典: docs/d0008（Ollama embedding モデル比較，2026年）．"}
-  - {name: cross_domain_training_data_augmentation, values: [hard_negative_mining_all_domains],
+  - {name: cross_domain_training_data_augmentation,
+     values: [hard_negative_mining_all_domains, hard_negative_mining_all_domains_retry_expanded_set],
      note: "[2026-09-23 backlog B115 / docs/d0008] 訓練データの質向上を，education 等の特定
             ドメインではなく **10 ドメイン全てに同一ルールを適用する**形で試みる．
             Iter32 で判明した『`class_weight='balanced'` は `sample_weight` と数式レベルで
@@ -1999,7 +2002,29 @@ levers:
             resampling 系（Iter32〜34，rejected）とは異なり，全ドメイン均等の抽出のため，
             education_recall 単体ではなく top1_accuracy 全体を主基準とすること）．
             **単一レバー原則との関係**: 抽出ルールを 1 つ決めたら，全ドメインへ同一パラメータ
-            （追加件数・閾値）で適用し，ドメインごとにパラメータを変えない．"}
+            （追加件数・閾値）で適用し，ドメインごとにパラメータを変えない．
+            ---
+            **[2026-09-27 backlog B138 で値 `hard_negative_mining_all_domains_retry_expanded_set` を追加]**
+            Iter84 の `hard_negative_mining_all_domains` は Δtop1 +1.201pt を出しながら
+            McNemar p=0.101997 で非有意となり rejected になった．真因はレバーではなく**測定系の
+            検出力不足**（N=1,915 では有意境界 δ=1.378pt）で，Iter85 が評価集合を 3,435 行へ拡充して
+            有意境界 1.0281pt を確保した．**本値は Iter84 と完全に同一の抽出手順・同一の
+            ハイパーパラメータを，拡充後の評価集合の上で再実行して決着させるもの**であり，
+            手順を変えてはならない（変えると Iter84 との比較が成立しない）．
+            **期待効果と検出力**: 実測構成比（単一 3,020 / 3,435 = 87.92%）で Iter84 の部分効果
+            （single +2.133pt / compound −2.169pt）が成り立つなら期待 δ=+1.613pt，SE=0.5246pt，
+            **検出力 86.8%**（拡充前は期待 δ=+1.201pt・検出力 40.1%）．
+            **基準線**: Iter85 本走 `results/20260927_130237/`（3,435 行，top1=0.786317．
+            分類器 sha256 `1cfcd3d8...`）．artifact `models/domain_classifier_pre_iter84_baseline.joblib`
+            と再訓練手順は保存済み．
+            **訓練プール**: Iter85 は各ドメイン 100 行を訓練用に留保済みなので，再訓練の余地は残っている．
+            **最大の失点候補**: Iter84 で非退行①に触れた `education_recall`（0.4120→0.3133，p=0.000427）．
+            拡充後の education 行は 350 行（拡充前 233 行）あり検出力が上がっているため，同じ退行が
+            出れば今度は確実に検出される．計画フェーズで **education の母数を明記した上で**
+            事前登録すること（B134 の学び 2）．
+            **事前登録の構成（B139 の再発防止）**: 訓練データ調達を伴うため，
+            「調達元の sha256 が MANIFEST と一致すること」を事前条件（ゲート）に置き，
+            「件数が計画表と完全一致」はその事前条件成立時にのみ適用する条項構成にすること．"}
   - {name: compound_eval_set_expansion,
      values: [existing_public_dataset, llm_generated_separate_generator, manual_authoring],
      note: "[2026-09-26 backlog B118 で追加．research_frontier 最上位項目のレバー化]

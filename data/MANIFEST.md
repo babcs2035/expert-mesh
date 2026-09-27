@@ -60,13 +60,46 @@ uv run python build_dataset.py \
 
 | ファイル | sha256 | 行数 |
 |---|---|---|
-| `data/dataset.jsonl` | `2d4397542e67d71cec1d447ceb8f9636f67af254e885bd7e0eafd309a81d2f0c` | 1915 |
+| `data/dataset.jsonl`（Iteration 78 時点） | `2d4397542e67d71cec1d447ceb8f9636f67af254e885bd7e0eafd309a81d2f0c` | 1915 |
 | `data/compound_questions_generated.jsonl` | `1bfb5add6a5f4028c3ceb52531987aaea595c409bfaca1c98bbf48c80901d3c6` | 315 |
 | `data/classifier_train.jsonl` | `eb89bf7b0ad6303d41f2b668549f85362988de1eaee7b4faf98b3d3f5edcd9ef` | 1427（無変更） |
 
 出典: JMMLU（`nlp-waseda/JMMLU`, commit `3637b25e444ccfdcde4d23a783cbe8e674faa01b`）．ライセンス CC BY-NC-ND 4.0．
 複合設問の LLM 生成部分（`compound-101` 以降）は本リポジトリの生成・独立検証パイプラインの出力であり，
 JMMLU 由来ではない．
+
+**2026-09-27 更新（Iteration 85, `single_domain_eval_set_expansion=jmmlu_unused_rows_power_targeted`）**:
+JMMLU の未使用単一ドメイン行を `data/single_domain_expansion_iter85.jsonl` として純追加し，評価データセットを
+1915 行→**3435 行**（単一 3020 ＋ 複合 415）へ拡張した．既存 1915 行はバイト単位で無変更（`head -n 1915`
+で確認済み．`build_dataset.py:_build_rows()` の複合行ループの**後**に append するため）．分類器訓練データ
+（`data/classifier_train.jsonl`）も無変更（ハッシュ一致，上表参照）．`models/domain_classifier.joblib` は
+Iter84 実行前の基準線（`1cfcd3d8...`，下記 E6 節参照）へ復元して使用した．
+
+**計画（journal.md「Iteration 85」計画節・backlog B137）からの実測乖離**: 計画は 1,532 行の追加
+（合計 3447 行）を見込んでいたが，実際に生成されたのは **1,520 行**（合計 3435 行）だった．原因は
+本リポジトリがキャッシュする JMMLU.zip の sha256 が `3ba7d912...`（ピン留めコミット `3637b25e...` が
+期待するものと異なる．journal_archive.md に既記載の既知の無害な差異）で，`computer_science`
+（計画 156→実測 151）・`social_science`（148→144）・`general`（28→25）の 3 ドメインで実際のプールが
+計画時の推定よりわずかに小さかったため．他 7 ドメイン（medical・education・business_economics・
+natural_science・mathematics・history_culture は計画通り 200，legal は計画通り 0）は計画値と一致．
+検出力条件（P1: `1.96·√(p_d/N)` ≤ 1.10pt）は N=3435 でも 1.028pt で引き続き満たす（設計値 1.026pt から
+0.002pt の劣化のみ）．`scripts/expand_single_domain_eval.py` はこの乖離を実行時に許容範囲内として記録し，
+`main()` が計画値と実測値の両方を stderr に出力する．
+
+生成コマンド（`scripts/expand_single_domain_eval.py` の docstring 参照．LLM・埋め込み不要，CPU のみ）:
+
+```
+uv run python scripts/expand_single_domain_eval.py \
+    --output data/single_domain_expansion_iter85.jsonl \
+    --jmmlu-zip /path/to/JMMLU.zip
+
+uv run python build_dataset.py --output data/dataset.jsonl
+```
+
+| ファイル | sha256 | 行数 |
+|---|---|---|
+| `data/dataset.jsonl`（Iteration 85 時点，現行） | `a48fcf17ec1116732c611425eab800a2a92f7921211bd928f99a5d1e9cb77958` | 3435 |
+| `data/single_domain_expansion_iter85.jsonl` | `b880b29c26f481fc9e7a24dff0901f34d7d495273acafe949174f515abec94c4` | 1520 |
 
 ## E6 教師あり分類器
 

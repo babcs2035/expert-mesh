@@ -624,6 +624,7 @@ _RESTRICTED_LICENSE_TASKS: frozenset[str] = frozenset(
 # rather than being regenerated each time — otherwise the evaluation set
 # would be non-deterministic across runs). See _load_generated_compound_questions().
 _DEFAULT_GENERATED_COMPOUND_QUESTIONS_PATH = "data/compound_questions_generated.jsonl"
+_DEFAULT_SINGLE_DOMAIN_EXPANSION_PATH = "data/single_domain_expansion_iter85.jsonl"
 
 # Hand-authored compound-domain questions (design doc 4.3: "questions
 # spanning multiple domains"). JMMLU's four-choice questions each belong to
@@ -1147,18 +1148,43 @@ def _load_generated_compound_questions(path: str | None) -> list[tuple[str, list
     return [(json.loads(line)["query"], json.loads(line)["expected_domains"]) for line in lines]
 
 
+def _load_single_domain_expansion(path: str | None) -> list[dict]:
+    """Load Iter85's pre-built single-domain expansion rows from `path`.
+
+    Returns [] if path is None or the file is missing, so a clean checkout
+    without data/single_domain_expansion_iter85.jsonl (or a caller that omits
+    `path`, e.g. the existing test suite's direct _build_rows() calls)
+    still produces the pre-Iter85 1,915-row dataset unchanged. Rows are
+    already fully formed (id, query, expected_domains, is_compound,
+    jmmlu_task, jmmlu_answer) by scripts/expand_single_domain_eval.py, so
+    they are appended as-is rather than re-derived here.
+    """
+    if path is None:
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [line for line in f if line.strip()]
+    except FileNotFoundError:
+        return []
+    return [json.loads(line) for line in lines]
+
+
 def _build_rows(
     jmmlu_zip_path: str | None,
     domain_target_size: int,
     exclude_restricted_license_tasks: bool,
     domain_task_map: dict[str, list[str]],
     generated_compound_questions_path: str | None = None,
+    single_domain_expansion_path: str | None = None,
 ) -> list[dict]:
     """Assemble JMMLU-derived single-domain rows and hand-authored + LLM-generated compound rows.
 
     generated_compound_questions_path defaults to None (skip) so existing
     callers that don't pass it are unaffected by Iter78's expansion; main()
     passes the real data/compound_questions_generated.jsonl path.
+    single_domain_expansion_path defaults to None (skip) for the same
+    reason, w.r.t. Iter85's expansion; main() passes the real
+    data/single_domain_expansion_iter85.jsonl path.
     """
     zip_bytes = _load_jmmlu_zip_bytes(jmmlu_zip_path)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -1198,6 +1224,7 @@ def _build_rows(
                 "is_compound": True,
             }
         )
+    rows.extend(_load_single_domain_expansion(single_domain_expansion_path))
     return rows
 
 
@@ -1409,9 +1436,20 @@ def main() -> None:
             "pre-Iter78 1,600-row dataset; pass '' to disable explicitly."
         ),
     )
+    parser.add_argument(
+        "--single-domain-expansion",
+        default=_DEFAULT_SINGLE_DOMAIN_EXPANSION_PATH,
+        help=(
+            "Iter85: JSONL of additional single-domain rows (already fully formed, ids "
+            "{domain}-exp085-NNN) built by scripts/expand_single_domain_eval.py, appended "
+            "after the compound rows. Missing file falls back to the pre-Iter85 1,915-row "
+            "dataset; pass '' to disable explicitly."
+        ),
+    )
     args = parser.parse_args()
 
     generated_compound_questions_path = args.generated_compound_questions or None
+    single_domain_expansion_path = args.single_domain_expansion or None
 
     eval_task_map = None
     if args.domain_task_map_for_eval is not None:
@@ -1424,6 +1462,7 @@ def main() -> None:
         args.exclude_restricted_license_tasks,
         eval_task_map if eval_task_map is not None else _DOMAIN_TASK_MAP,
         generated_compound_questions_path=generated_compound_questions_path,
+        single_domain_expansion_path=single_domain_expansion_path,
     )
     if args.output is None:
         for row in eval_rows:
