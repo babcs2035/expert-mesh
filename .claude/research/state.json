@@ -7,9 +7,9 @@
   "current_lever": "single_domain_eval_set_expansion=jmmlu_unused_rows_power_targeted",
   "experiment_dir": "results/20260927_130237",
   "experiment_deadline": 1790493148,
-  "updated_at": 1790487853,
+  "updated_at": 1790487880,
   "last_slack_ts": "1790487463.663939",
   "iteration_thread_ts": "1790480765.895679",
   "notion_toggle_created": true,
-  "last_commit": "daf19df"
+  "last_commit": "a134bdd"
 }
