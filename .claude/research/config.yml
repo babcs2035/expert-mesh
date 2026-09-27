@@ -2113,7 +2113,8 @@ levers:
             実施しない．**本レバーは `hard_random_hybrid_all_domains`（50/50，Iter87 adopted）を
             最終構成として打ち止めとする．** 新しい値を追加しないこと．"}
   - {name: compound_eval_set_expansion,
-     values: [existing_public_dataset, llm_generated_separate_generator, manual_authoring],
+     values: [existing_public_dataset, llm_generated_separate_generator, manual_authoring,
+              llm_generated_separate_generator_scaleup_730],
      note: "[2026-09-26 backlog B118 で追加．research_frontier 最上位項目のレバー化]
             複合設問評価集合（現状 100 行）を拡充し，複合ドメインに関する判定の検出力を確保する．
             Iter63〜68 の 6 反復が『判定不能』で終わった真因は測定系そのもの（discordant
@@ -2134,7 +2135,40 @@ levers:
             **成功条件**: 次回の計画フェーズで具体化する．本レバーは精度向上ではなく測定系の整備で
             あるため，主基準は top1_accuracy の改善ではなく『拡充後の複合行で discordant が
             検出力目安を満たすこと』『1,600 問サブセットの指標が Iter77 本走
-            （top1=0.615625，results/20260926_171953/）と整合すること』に置く．"}
+            （top1=0.615625，results/20260926_171953/）と整合すること』に置く．
+            **[2026-09-28 Iter90 計画フェーズ・backlog B148 で追記．値 `llm_generated_separate_generator_scaleup_730` を追加]**
+            Iter78 で (ii) `llm_generated_separate_generator` を適用し複合行 100 → 415 行を達成済み（adopted）．
+            Iter90 で B116 (2) の調達順位に従い **2 度目の (i) 既存公開データセット調査**を tavily-search 6 クエリ ＋
+            Hugging Face Datasets API 20 クエリで実施したが，「日本語」「自然文」「1 行に 2 ドメインラベル」の
+            3 条件を同時に満たす公開データセットは**再び見つからなかった**（M2QA・RouterArena・RouterBench・
+            RouterEval・MMLU-ProX-Japanese・JamC-QA・lawqa_jp・JMED-LLM・AnswerCarefully・MASSIVE いずれも
+            単一ラベルかドメインラベル無し．出典は journal.md「Iteration 90」調査節 Q1 の表）．
+            JMMLU からの派生も **CC BY-NC-ND 4.0（改変禁止）** と `build_dataset.py:629-632` の記述
+            （4 択問題は単一タスクに属し cross-domain な曖昧さを表現できない）により不可（同 Q2）．
+            **よって `existing_public_dataset` は 2 度の独立した調査で不成立とし，本レバーでは今後選ばない．**
+            代わりに (ii) の規模拡大として本値を追加する．内容は
+            `scripts/generate_compound_eval_questions.py --target-per-pair 14`（7 → 14）のみで，
+            生成器 `qwen3.5:9b` ≠ 検証器（judge_model）という循環的妥当性回避の構成は Iter78 から一字も変えない．
+            複合行 415 → 730，全体 3,435 → 3,750 行．**上限が 730 行なのは実行時間の制約**である——
+            Iter89 本走の実測で複合行は 8.057 s/行・単一行は 0.762 s/行であり，
+            80% 検出力に必要な n ≈ 1,265 行は 1 回の本走（timeout 180 分）に収まらない（約 249 分）．
+            **`manual_authoring` は B116 (2) の順位で (ii) より下位のため未着手のまま残す．**
+            ---
+            **[2026-09-28 Iter90 分析フェーズ・backlog B149 で追記．本レバーは打ち止め（closed）]**
+            Iter90 は **`partial`**．主基準①（730/3,750）②（既存 3,435 行 diff 0 件）③（n_d=78≥74，
+            有意境界 3.238→**2.371pt** ≤2.6pt）⑤（45 ペア×14 行）は PASS，主基準④（品質 ≤6/30）は
+            2 名の独立判定が 6 と 9〜10 に割れて**判定不能**，非退行④（top1 のビット単位一致）と
+            ⑥（`mean_duration_ms`）は FAIL だが**いずれも条文側の前提の誤りが原因でレバー起因ではない**
+            （詳細は journal.md「Iteration 90 実行済み」）．
+            **複合 730 行は採用し，Iter91 以降の基準線は `results/20260928_032909/` とする．**
+            **本レバーで新しい値を追加しないこと．** 理由は 2 つ．(1) 本レバーの目的だった
+            「Iter89 で見えた複合 −2.65pt が本物か」は決着した——730 行の replay で **−1.10pt・
+            discordant 43/35・p = 0.428** と有意境界 2.371pt を下回り，**悪化の疑いは支持されない**．
+            (2) さらに n を増やす経路は実行時間に阻まれる——実測 π̂_d = 0.10685 の下で
+            80% 検出力（−2.65pt 級）には n ≈ 1,000 行・約 196 分が要り `timeout_min` 180 分を超える．
+            `manual_authoring` は (iii) の最終手段であり，(ii) が成功した以上，着手する理由が無い．
+            **残る品質上の課題（`general` 組の不適合率が 2 反復連続で突出）は backlog B149 に
+            申し送るのみとし，ドメイン固有の生成規則変更は 2026-09-23 恒久運用ルール (1) により行わない．**"}
 
   - {name: embedding_input_instruction_prefix,
      values: [qwen3_instruct_classification_prefix],
@@ -2286,6 +2320,47 @@ levers:
             `cross_domain_training_data_augmentation` を再試行し，Iter84 の +1.2pt が
             本物かどうかを決着させる（Iter84 の artifact
             `models/domain_classifier_pre_iter84_baseline.joblib` と再訓練手順は保存済み）．"}
+
+  # --- 【2026-09-28 Iter90 分析フェーズ新設・backlog B149】停止条件 (1)（既存 levers の
+  #     有望な値が尽きたので，journal の学びから自分で新レバーを考案して末尾へ追記する）に従う ---
+  - {name: classifier_regularization_strength,
+     values: [l2_C_selected_by_train_only_cv],
+     note: "[2026-09-28 backlog B149（Iter90 分析フェーズ）で追加]
+            **起点となる実測（本フェーズで実施．評価集合には一切触れていない）**: Iter89 で埋め込みを
+            `qwen3-embedding:4b` へ差し替えたことで特徴次元が 2048（0.6b 連結）→ **5120**（4b 連結）へ
+            2.5 倍になったが，`scripts/train_domain_classifier.py` の `LogisticRegression` は
+            **`C` を明示しておらず sklearn 既定の C=1.0 のまま**である．訓練行は 2,327 行しかなく
+            p=5120 >> n=2327 の領域に入っている．訓練集合内の層化 5-fold CV
+            （`data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy` ＋
+            `data/classifier_train_iter87_hybrid.jsonl`，`class_weight=None`）で C を掃引した実測は
+            C=0.01: 0.7129 / 0.1: 0.7387 / 0.3: 0.7817 / **1.0（現行）: 0.8144** / 3.0: 0.8328 /
+            **10.0: 0.8354** / 100.0: 0.8333（fold 間 SD 約 0.018）で，
+            **現行の C=1.0 は正則化が強すぎる側に外れており，C=3〜10 で CV 精度が +1.8〜2.1pt 高い**．
+            本走の McNemar 有意境界は約 1.0pt なので，この規模の効果なら**判定可能**である
+            （Iter89 学び『判定不能と事前に分かるレバーには着手しない』の条件を満たす）．
+            **内容（単一レバー）**: `scripts/train_domain_classifier.py` の
+            `LogisticRegression(...)` に `C` を明示して再訓練するのみ．埋め込み・訓練データ・
+            評価集合・`CalibratedClassifierCV` の設定・`_extract_sample_weights()` の
+            ドメイン均衡重み・`dispatch_*` 系 config は一切変えない．
+            **C の選び方（リーク防止の絶対条件）**: C は **`data/classifier_train_iter87_hybrid.jsonl`
+            の内部の層化 k-fold CV だけで 1 値に決める**．`data/dataset.jsonl`（評価集合）の
+            指標を見て C を選んではならない．選んだ C とその CV 曲線を本走前に journal の計画節へ
+            事前登録し，本走は 1 回だけ行う（複数の C を本走して良い方を採ることを禁じる．
+            Iter88 の『種を複数試して良い方を採ってはならない』と同じ規律）．
+            **10 ドメイン均一性（2026-09-23 恒久運用ルール (1) への適合）**: C は全クラス共通の
+            単一スカラーであり，ドメインごとに値を変えない．ドメイン固有の後付け補正ではない．
+            **主基準**: top1_accuracy の McNemar 有意改善（Wilson 95%CI 併記）．
+            基準線は Iter90 本走 `results/20260928_032909/`（3,750 行，top1 = 0.829867，
+            分類器 sha256 `ff8aad9c...`）．
+            **非退行**: per-domain 20 指標の BH 補正後の有意退行 0 件，`fallback_rate` = 0.0，
+            `dispatch_failure_rate` ≤ 0.005，複合 730 行の `compound_domain_set_recall`・
+            `compound_mean_dispatched_count`．**『基準線とビット単位で一致』という条項は書かないこと**
+            （Iter90 学び 1．デプロイを挟むと既存行の確信度が全スロット動く．再現性の床は
+            top1 ±0.25pt・正誤反転行 ≤1.0%）．
+            **事前検証**: 新 artifact での replay（キャッシュ埋め込み 3,435 行＋複合新 315 行）で
+            top1 と per-domain を本走前に予測し journal へ記録する（Iter87〜89 で 3 反復連続
+            0.12pt 以内の一致が実証済み）．予備 20 問の突き合わせは同一セッション内なので
+            ビット単位一致を要求してよい（Iter90 学び 2）．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

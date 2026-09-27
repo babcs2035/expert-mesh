@@ -98,8 +98,49 @@ uv run python build_dataset.py --output data/dataset.jsonl
 
 | ファイル | sha256 | 行数 |
 |---|---|---|
-| `data/dataset.jsonl`（Iteration 85 時点，現行） | `a48fcf17ec1116732c611425eab800a2a92f7921211bd928f99a5d1e9cb77958` | 3435 |
+| `data/dataset.jsonl`（Iteration 85 時点） | `a48fcf17ec1116732c611425eab800a2a92f7921211bd928f99a5d1e9cb77958` | 3435 |
 | `data/single_domain_expansion_iter85.jsonl` | `b880b29c26f481fc9e7a24dff0901f34d7d495273acafe949174f515abec94c4` | 1520 |
+
+**2026-09-28 更新（Iteration 90, `compound_eval_set_expansion=llm_generated_separate_generator_scaleup_730`）**:
+複合設問（`compound-416`〜`compound-730`）を LLM 生成 + 独立検証で 315 行追加し，
+`data/compound_questions_generated.jsonl` を **315 行 → 630 行**（45 ドメインペア × 14 件）へ純追加．
+評価データセットは 3,435 行 → **3,750 行**（単一 3,020 ＋ 複合 730）へ拡張した．既存 315 行
+（`compound-101`〜`compound-415`）はビット単位で無変更（`head -n 315` の diff 0 バイトで確認済み）．
+単一ドメイン 3,020 行・分類器訓練データ（`data/classifier_train.jsonl`）も無変更．
+
+生成器 `qwen3.5:9b` と検証器（`judge_model`＝Swallow 8B）は Iter78 と一字も変えていない．CLI の
+`scripts/generate_compound_eval_questions.py --output` は毎回ファイル全体を上書きするため（`--target-per-pair 14`
+を直接渡すと 630 行を新規サンプリングし直し，既存 315 行の純追加という B118 の条件を満たせない），
+本反復では同スクリプトの `generate_all_rows()` を Iter78 の「追い上げパス」と同じ手法で直接呼び出し，
+既存 315 行を近重複参照に含めたうえで **新規 7 件/ペアだけ**を生成し，既存ファイルの末尾へ追記した
+（スクリプト本体は無変更）:
+
+```
+# 第1パス（45ペア x 12件生成 -> 検証 -> 各ペア7件に切り詰め；14ペアが目標未達で273/315行）
+# 第2パス（不足14ペアの計42件だけを対象に generate_all_rows() をペア単体で再呼び出し。
+#   近重複参照に第1パスの採択済み273件も追加。コード変更なし）
+# どちらのパスも scripts/generate_compound_eval_questions.py の内部関数を直接呼ぶ小さな
+# 使い捨てドライバから実行（同スクリプトの --output は全体上書きのため、CLI 直接実行では
+# 既存315行の純追加にならない。ドライバの引数は以下と同一）:
+#   generator_model=qwen3.5:9b, verifier_model=schroneko/llama-3.1-swallow-8b-instruct-v0.1:q4_k_m,
+#   ollama_host=127.0.0.1, ollama_port=11499, per_pair=12,
+#   near_duplicate_reference_texts に既存315行 + 既存100件手作成 + classifier_train.jsonl +
+#   classifier_train_multidomain*.jsonl（計3,345件参照）を使用
+# 新規315行を既存315行の末尾へ追記（cat 済み315行 + 新規315行 = 630行）
+
+uv run python build_dataset.py \
+    --output data/dataset.jsonl \
+    --classifier-train-output data/classifier_train.jsonl
+```
+
+品質確認（3-gram Jaccard，`scripts/generate_compound_eval_questions.py:_char_ngram_jaccard` を再利用）:
+新規 315 行と既存 315 行・既存 100 件手作成の全 415 件参照に対する近重複（≥0.6）**0 件**（最大値
+0.1484）．新規 315 行どうしの pairwise 近重複も **0 件**（最大値 0.1411）．45 ペアすべてちょうど 14 行．
+
+| ファイル | sha256 | 行数 |
+|---|---|---|
+| `data/dataset.jsonl`（Iteration 90 時点，現行） | `2114e04880cf94f9ab16d4615aa9abd764166ba122f7615d7a4b54d7fd7fb2ee` | 3750 |
+| `data/compound_questions_generated.jsonl`（現行） | `da0ddd915e7ae851ec03479c894c0826655823734883b6cd7867bfbcee252c4f` | 630 |
 
 ## E6 教師あり分類器
 

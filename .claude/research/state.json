@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 89,
-  "iteration_name": "埋め込みモデルの qwen3-embedding:4b への差し替え",
+  "iteration": 90,
+  "iteration_name": "複合設問評価集合の拡充（既存公開データセットの調査と追加）",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "embedding_model_replacement=qwen3_embedding_4b",
-  "experiment_dir": "results/20260927_232950",
-  "experiment_deadline": 1790530916,
-  "updated_at": 1790526149,
-  "last_slack_ts": "1790525641.937299",
-  "iteration_thread_ts": "1790515619.059829",
+  "current_lever": "compound_eval_set_expansion=llm_generated_separate_generator_scaleup_730",
+  "experiment_dir": "results/20260928_032909",
+  "experiment_deadline": 1790545169,
+  "updated_at": 1790544835,
+  "last_slack_ts": "1790544013.609369",
+  "iteration_thread_ts": "1790527046.624519",
   "notion_toggle_created": true,
-  "last_commit": "5c85558"
+  "last_commit": "79e032e"
 }
