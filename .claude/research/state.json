@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 85,
-  "iteration_name": "単一ドメイン評価集合の拡充による検出力の確保",
+  "iteration": 86,
+  "iteration_name": "拡充した評価集合での hard negative mining 再試行",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "single_domain_eval_set_expansion=jmmlu_unused_rows_power_targeted",
-  "experiment_dir": "results/20260927_130237",
-  "experiment_deadline": 1790493148,
-  "updated_at": 1790487880,
-  "last_slack_ts": "1790487463.663939",
-  "iteration_thread_ts": "1790480765.895679",
+  "current_lever": "cross_domain_training_data_augmentation=hard_negative_mining_all_domains_retry_expanded_set",
+  "experiment_dir": "results/20260927_152208",
+  "experiment_deadline": 1790501228,
+  "updated_at": 1790496000,
+  "last_slack_ts": "1790487956.291399",
+  "iteration_thread_ts": "1790488636.062409",
   "notion_toggle_created": true,
-  "last_commit": "a134bdd"
+  "last_commit": "0737ed6"
 }

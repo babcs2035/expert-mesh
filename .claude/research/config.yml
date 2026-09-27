@@ -1985,7 +1985,8 @@ levers:
             1600 問の実機本走（約 90〜150 分）を要する（2026-09-23 ユーザー指示により省略しない）．
             出典: docs/d0008（Ollama embedding モデル比較，2026年）．"}
   - {name: cross_domain_training_data_augmentation,
-     values: [hard_negative_mining_all_domains, hard_negative_mining_all_domains_retry_expanded_set],
+     values: [hard_negative_mining_all_domains, hard_negative_mining_all_domains_retry_expanded_set,
+              hard_random_hybrid_all_domains],
      note: "[2026-09-23 backlog B115 / docs/d0008] 訓練データの質向上を，education 等の特定
             ドメインではなく **10 ドメイン全てに同一ルールを適用する**形で試みる．
             Iter32 で判明した『`class_weight='balanced'` は `sample_weight` と数式レベルで
@@ -2024,7 +2025,47 @@ levers:
             事前登録すること（B134 の学び 2）．
             **事前登録の構成（B139 の再発防止）**: 訓練データ調達を伴うため，
             「調達元の sha256 が MANIFEST と一致すること」を事前条件（ゲート）に置き，
-            「件数が計画表と完全一致」はその事前条件成立時にのみ適用する条項構成にすること．"}
+            「件数が計画表と完全一致」はその事前条件成立時にのみ適用する条項構成にすること．
+            ---
+            **[2026-09-27 backlog B141 で値 `hard_random_hybrid_all_domains` を追加]**
+            Iter86（`hard_negative_mining_all_domains_retry_expanded_set`）は **rejected**．
+            主基準は PASS（top1 0.786317→0.796507，Δ+1.019pt，McNemar p=0.044011）だったが，
+            非退行①で BH 補正後の有意悪化 2 件（`education` recall 0.387991→0.344111 p=0.003948，
+            `natural_science` precision 0.872928→0.802885 p=0.008897）が出て事前登録の
+            rejected 条項（`education_recall` の有意退行の再現を名指しで含む）に該当した．
+            **確定した機序（層別 Δ で 2 反復連続の再現）**: 基準線 p_true の五分位で
+            Q1 +14.85pt / Q2 −6.84 / Q3 −2.33 / Q4 −1.02 / Q5 +0.44（Iter84 は +18.02 / −5.74 /
+            −3.92 / −2.09 / −0.26）．**最難層の大幅改善と，易しい 3 層の広く浅い退行の差し引き**である．
+            さらに，ドメイン別 recall Δ は採掘プール規模に対応する（プール上位の history_culture 579 行
+            +6.03pt・natural_science 576 行 +4.18pt が有意改善，プールが N=100 に肉薄した
+            education 109 行が −4.39pt で有意悪化）．行単位では education の喪失 30 行のうち 21 行が
+            medical へ流れ，medical の押し出しが natural_science の誤検出（9→42 行）を生んでいる．
+            **つまり『各ドメイン最難 N=100』という 10 ドメイン共通の規則を，プール規模が不均一な
+            状況へ適用すると実効強化量が不均一になる**（ドメイン固有の弱さの話ではなく規則側の性質）．
+            **本値の内容**: 追加件数・ドメイン別内訳（{legal: 0, 他 9 ドメイン各 100} = 900 行）・
+            出力書式・id 規則をすべて Iter86 と同一に保ったまま，**各ドメインの内訳を
+            『最難 50 行 ＋ 残プールからの無作為 50 行』へ変える**（10 ドメイン一律．
+            ドメインごとに比率を変えない）．無作為側の乱数種は固定し MANIFEST に記録する．
+            **狙い**: Q2〜Q4 の退行が『最難行だけで境界を張り直す』ことに由来するなら，
+            易しい行を同数混ぜることで退行が減り，非退行①を満たしたまま Q1 の改善を一部残せるはずである．
+            **根拠**: 不確実性サンプリングは候補間の情報量の分散が大きいときにのみ無作為を上回り，
+            無作為を混ぜた方が安定するという先行研究（\"A More Robust Baseline for Active Learning by
+            Injecting Randomness\" <https://www.csie.ntu.edu.tw/~htlin/paper/doc/wsdm22aloe.pdf>，
+            Tripp <https://www.austintripp.ca/blog/2025-04-02-active-learning-random>．
+            いずれも Iter84/86 の調査節で引用済み）．
+            **留保（計画フェーズで事前に明記すること）**: プール = 100 = N の 3 ドメイン
+            （computer_science・social_science・general）では，混合しても選ばれる集合が Iter86 と
+            同一になり本値は no-op である．実質的に変わるのは medical・history_culture・
+            natural_science・business_economics・mathematics・education の 6 ドメインに限られる．
+            **基準線**: Iter86 と同じ `results/20260927_130237/`（3,435 行，top1=0.786317，
+            分類器 sha256 `1cfcd3d8...`）．**Iter86 artifact は採用しない**ので，実装フェーズの最初に
+            `models/domain_classifier_pre_iter84_baseline.joblib` からの復元と `mise run deploy` を行うこと
+            （Iter86 の分析フェーズでこの復元が未実施のまま残っている）．
+            **成功条件・非退行条件**: Iter86 の事前登録をそのまま踏襲する
+            （主基準 = McNemar 有意 AND Δtop1 ≥ +1.0pt，非退行① 20 指標 BH q=0.05 で有意退行 0 件，
+            ②〜⑦も同一）．**ドメイン固有の後付け補正は追加しない（2026-09-23 恒久運用ルール (1)）．**
+            **除外集合の恒久規則（B140）**: 採掘プールからは評価集合と `classifier_train.jsonl` に加え，
+            過去に生成した全 `data/classifier_train_iter*.jsonl` と `data/*_expansion_*.jsonl` を除外すること．"}
   - {name: compound_eval_set_expansion,
      values: [existing_public_dataset, llm_generated_separate_generator, manual_authoring],
      note: "[2026-09-26 backlog B118 で追加．research_frontier 最上位項目のレバー化]

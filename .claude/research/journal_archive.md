@@ -1,3 +1,273 @@
+## Iteration 83: 連結埋め込みの確信度分布に合わせた送出 gap 閾値の再較正
+
+### 調査 (Iter83)
+
+本反復のレバーは backlog B130（Iter82 分析フェーズ）で `dispatch_gap_threshold_recalibration` = `matched_budget_sweep_for_concat_distribution` に確定済みで，レバー選定の裁量は無い．調査の問いは 3 つ．**(Q1) 「スコアリングモデルを変えたら送出／棄却の閾値を較正し直す」という手続きは先行研究上どう扱われているか（本リポジトリで 2 回続けて観測した現象の一般性）．(Q2) 閾値を上げれば送出数も被覆も単調に増えるのだから，「set_recall が上がった」を成功条件にしてよいのか（＝評価設計の問題）．(Q3) 評価集合そのもので閾値を選ぶことの過適合リスクをどう抑えるか．**
+
+**Q1: 閾値はスコアリングモデルに固有のハイパラであり，モデルを差し替えたら再較正するのが標準である**
+
+- Zellinger & Kim, "Rational Tuning of LLM Cascades via Probabilistic Modeling"（arXiv:2501.09345，2025，<https://arxiv.org/abs/2501.09345>）は，カスケードの confidence 閾値を「カスケードを構成するモデル群に対して連続最適化で決めるハイパラ」として定式化している．閾値はモデルの確信度分布の形に依存するので，**構成モデルが変われば閾値は別の最適点へ移る**というのがこの定式化の前提である．
+- TREACLE（"Efficient Contextual LLM Cascades through Budget-Constrained Policy Learning"，NeurIPS 2024，<https://proceedings.neurips.cc/paper_files/paper/2024/file/a6deba3b2408af45b3f9994c2152b862-Paper-Conference.pdf>，2026-09-27 確認）でも，比較対象の "Calibrated cascade"（FrugalGPT 系）の閾値は **validation set で tune する**と明記されており，スコア推定器を変えたら閾値も引き直す扱いである．
+- 適合予測（conformal prediction）でも同じ構造である．非適合スコアの分布から分位点として閾値を決めるため，**スコア関数（＝ここでは埋め込み＋分類器）を変えたら較正集合から閾値を取り直す**のが手続きそのものに組み込まれている（例: <https://daniel-bethell.co.uk/posts/conformal-prediction-guide>，2026-09-27 確認）．
+- **本リポジトリの観測との接続**: Iter81 学び 1・Iter82 学び 3 で 2 回続けて「特徴量を変えた後に `dispatch_gap_threshold=0.29` の未較正が残る」ことを観測した．これは本研究に固有の不具合ではなく，上記の一般則がそのまま現れたものと解釈できる．**Iter58 で決めた T=0.29 は，当時の埋め込み（prefix なし 1024 次元）の確信度分布に対して選ばれた値**であり，Iter82 で特徴量を 2048 次元連結へ変えた時点で前提が失効している．
+
+**Q2: 「set_recall が上がった」は単独では成功条件にならない．送出予算を揃えた比較（iso-budget）にしなければならない**
+
+- `aggregator.select_dispatch_targets()` の gap escalation（L87-91）は `k` を 1 から始めて隣接 rank の gap が閾値未満の間だけ増やす規則であり，**閾値を上げれば `k` は単調非減少，したがって被覆も単調非減少**である．実際，本フェーズのオフライン掃引でも gt を 0.20→0.65 と上げる間，`compound_domain_set_recall` は 0.4964→0.6916 へ単調に増え，`compound_mean_dispatched_count` は 1.369→2.706 へ単調に増えた．**閾値を上げるだけで被覆は好きなだけ買える**から，被覆の増加そのものには情報量が無い．
+- 予算制約下での比較は routing 研究の標準的な枠組みでもある．OmniRouter（arXiv:2502.20576，<https://arxiv.org/html/2502.20576v6>，2026-09-27 確認）は品質制約つきのコスト最小化として定式化し，品質閾値を等号で満たす点で比較する．TREACLE も "budget-constrained" を明示している．
+- **したがって本反復の主基準は「送出予算を Iter79 基準線と同じ水準（`compound_mean_dispatched_count` ≈ 1.88）に固定した上で `compound_domain_set_recall` が基準線を上回ること」とする**．これは B130 のレバー名 `matched_budget_sweep_for_concat_distribution` の意図そのものである．予算上限を非退行条件として**事前に固定**し，その枠内での被覆改善だけを成果として数える．
+
+**Q3: 過適合リスクは残るが，(i) 予算整合点を選ぶ（argmax を選ばない）・(ii) split-half の交差確認，で抑える**
+
+- 実務上の注意として FrugalGPT 系の解説（<https://www.komos.studio/blog/frugalgpt-llm-cascades>，2026-09-27 確認）は「**閾値の調整に使っていない hold-out を必ず持て．調整集合で良く見えた閾値が新しい仕事で失敗することがある**」と述べている．本研究には複合設問の hold-out が無く（複合 415 行がそのまま評価集合である），掃引も評価集合上で行っている．**この限界は消せないので明記する．**
+- 抑制策 1: **掃引の argmax（gt を上げられるだけ上げた点）を選ばない**．予算整合点は「被覆を最大化する点」ではなく「Iter79 と同じコストで比較するために外から決まる点」なので，評価集合へのフィッティングの自由度は事実上 1 次元ぶん潰れている．
+- 抑制策 2: **split-half の交差確認（本フェーズで実測済み）**．複合 415 行を偶奇で A（208 行）/ B（207 行）に分け，片方で予算整合閾値を選んでもう片方へ適用した．A で選んだ gt=0.387 を B へ適用すると set_recall 0.5290→**0.5942**，B で選んだ gt=0.336 を A へ適用すると 0.5505→**0.5649**．**どちらの向きでも改善し，符号は反転しない**．半分ずつでは予算整合点が 0.336〜0.387 とばらつく（単調・平坦な曲線の上で予算目標に最も近い点を拾うため）が，被覆の改善方向は安定している．
+
+### 計画 (Iter83)
+
+**単一レバー**
+
+`dispatch_gap_threshold_recalibration` = **`matched_budget_sweep_for_concat_distribution`**．`config.yaml:90` の **`dispatch_gap_threshold` を `0.29` から `0.36` へ変える**こと**だけ**を行う．再訓練も新規実装も無く，変更は config 1 行（＋説明コメント）である．
+
+**閾値 0.36 を選んだ理由（候補を 1 値に絞る手続き．B130 の事前登録要件）**
+
+本フェーズで `results/20260927_050049/results.jsonl`（Iter82 本走）の `probe_candidates` から `aggregator.select_dispatch_targets()` の gap escalation 規則を再現し（`confidence_threshold=0.0`・`dispatch_candidate_threshold=0.0`・`gap_max_k=4`），gt を 0.20〜0.65 まで 0.01 刻み（0.350〜0.395 は 0.005 刻み）で掃引した．**実機は使っていない**（ローカルの results.jsonl のみ．2026-09-23 恒久ルール）．
+
+| gt | `compound_mean_dispatched_count` | `compound_domain_set_recall` | 全 1,915 行の mean dispatched |
+|---|---|---|---|
+| 0.29（現行＝Iter82 本走の実測値） | 1.6096 | 0.539759 | 1.4078 |
+| 0.34 | 1.8000 | 0.569880 | 1.5384 |
+| 0.355 | 1.8627 | 0.578313 | 1.5911 |
+| **0.357〜0.364（同一の階段．採用点）** | **1.8892** | **0.581928** | **1.6010**（gt=0.36） |
+| 0.37 | 1.9277 | 0.585542 | 1.6287 |
+| 0.40 | 2.0217 | 0.598795 | 1.7055 |
+| 0.50 | 2.3012 | 0.630120 | 1.8914 |
+| （参考）Iter79 基準線 gt=0.29 | 1.8795 | 0.548193 | 1.5608 |
+
+- **予算整合点は 0.357〜0.364 の階段である**．Iter79 基準線の複合送出予算 1.8795 に対し，この階段は 1.8892（+0.5%）で最も近い（下側の隣接階段 gt=0.355 は 1.8627 で -0.9%，距離はやや遠い）．
+- **階段の中央に近い 0.36 を採る**．0.357 は階段の左端にあり，実機の浮動小数点表現や将来の微小な確信度変動で隣の階段（1.8627）へ落ちうる．0.36 なら階段の内側に余裕があり，同じ予測値（mean_k=1.8892 / set_recall=0.581928）を安定して与える．B130 が例示した 0.357 と**複合設問上の挙動は完全に同一**である．
+- **gt=0.40（set_recall 0.598795）は採らない**．Q2 のとおり被覆は予算を増やせば単調に買えるので，予算を +7.6%（1.8795→2.0217）増やして得た +5.06pt は「較正の効果」と「予算増の効果」の交絡である．**本反復が主張したいのは「同じコストで被覆が増える」ことであり，そのためには予算整合点しか使えない．**
+
+**固定する構成（直近の最良構成 = Iter82 本走 `results/20260927_050049/` の構成そのまま）**
+
+`config.yaml` の `embedding_model=qwen3-embedding:0.6b`・`embedding_instruction`（Iter81 の P1 文言）・`embedding_view_concat=true`・`routing_method=supervised_classifier`・`confidence_threshold=0.0`・`dispatch_candidate_threshold=0.0`・**`dispatch_top_k=2`**・**`dispatch_gap_max_k=4`**・`aggregation_method=max_confidence`・`judge_model`・`classifier_model_path`，分類器 artifact `models/domain_classifier.joblib`（**sha256 `1cfcd3d8...`，`n_features_in_`=2048．再訓練しない**），`data/dataset.jsonl`（1,915 行，ビット単位で不変），`data/classifier_train.jsonl`（1,427 行，不変），各ノードの `light_model` / `expert_model`，`probe_timeout_s` / `dispatch_timeout_s`，`node.py`・`aggregator.py`・`classifier.py`・`metrics.py`・`run_experiment.py`（いずれも**コード変更なし**）．**ドメインごとに閾値を変えること，およびドメイン固有の後付け補正は 2026-09-23 恒久運用ルールにより行わない．閾値は 10 ドメイン共通の単一スカラーである．**
+
+**仮説（事前登録．本走前に数値で記録する）**
+
+「Iter82 で採用した連結埋め込みにより rank1−rank2 gap の分布が右へ移動した（平均 0.4769→0.5499，gap<0.29 の行の割合 33.49%→25.30%）ため，Iter58 に旧分布上で選ばれた `dispatch_gap_threshold=0.29` は現構成では過度に厳しい．これを 0.36 へ戻すと，**Iter79 基準線と同じ送出予算のまま複合設問の被覆が基準線を上回る**．」
+
+**着地点予測（`probe_candidates` からの決定論的 replay．G1 で忠実度を確認済み）**
+
+| 指標 | Iter82 本走実測（直近基準線） | Iter79 本走（旧基準線） | **Iter83 予測値（gt=0.36）** |
+|---|---|---|---|
+| `compound_domain_set_recall` | 0.539759 | 0.548193 | **0.581928**（Iter82 比 **+4.217pt**，Iter79 比 **+3.373pt**） |
+| 複合 415 行の被覆スロット数（分母 830） | 448 | 455 | **483**（Iter82 比 獲得 +35 / 喪失 0，符号検定 p=5.82e-11） |
+| `compound_mean_dispatched_count` | 1.6096 | 1.8795 | **1.8892** |
+| `compound_domain_jaccard_mean` | 0.458072 | — | **0.456466**（送出数が増える分わずかに低下．報告のみ） |
+| 全 1,915 行の mean dispatched | 1.4078 | 1.5608 | **1.6010** |
+| 複合 415 行の k 分布（k=1 / 2 / 4） | 310 / 31 / 74 | — | **278 / 21 / 116** |
+| `top1_accuracy`（全 1,915 行） | 0.792167 | 0.753003 | **0.792167（不変）**．許容幅 ±0.06pt（下記の構造的理由により最大 1 行） |
+| `mean_duration_ms` | 2217.1 | 2301.4 | **≈2320**（Iter82 2217.1@k=1.408 と Iter79 2301.4@k=1.561 の線形内挿 ≒ 551ms/送出．非退行枠 2660.5 に対し余裕あり） |
+| `answer_quality_accuracy` / `end_to_end_accuracy` | 0.572667 / 0.351958 | 0.569333 / 0.335770 | **構造的にはほぼ不変**．生成の揺らぎ（3SD=2.6pt）の範囲でのみ動く |
+
+**top1 と下流指標が構造的に動かない理由（B130 の申し送りに対する精密化）**
+
+`aggregation_method=max_confidence` の下で最終回答を選ぶ `aggregator.select_best_dispatch_response()`（`aggregator.py:104-119`）は `DispatchResponse.confidence` の最大値を採るが，この confidence は **`/probe` 時に計算された同一の値**である（同関数 docstring に明記）．したがって送出先を増やしても選ばれるのは常に rank 1 であり，`selected_domain` は gap 閾値と独立に決まる．**例外は rank 1 への `/dispatch` が失敗した行だけ**で，そこでは候補が増えたぶん rank 2 が拾われうる（Iter82 の `dispatch_failure_rate` は 0.000522 ＝ 1,915 行中 1 行）．よって `top1_accuracy`・per-domain recall/precision・kappa・ECE は**最大 1 行（0.052pt）の幅でしか動きえない**．`answer_quality_accuracy` / `end_to_end_accuracy` も採点対象の `answer_text` が rank 1 由来のままなので，動くとすれば生成のランダム性による．**B130 の「`end_to_end_accuracy` は送出候補が増えることで改善しうる」は max_confidence 集約の下では機序が無く，本計画では「ノイズ床 2.6pt の範囲で不変」と予測する**（この予測の当否自体も本走で記録する）．
+
+**レバーを読むコード行と，そこへ到達する条件（「config は変えたが実行パスに到達しない」失敗への恒久対策．省略不可）**
+
+| 経路 | レバーを読む行 | 到達条件 | 到達確認の手段 |
+|---|---|---|---|
+| **実行時側（本体）** | `node.py:225` `gap_threshold=config.get("dispatch_gap_threshold")` → `aggregator.select_dispatch_targets()` の `aggregator.py:87-91`（`while k < ceiling and (candidates[k-1].confidence - candidates[k].confidence) < gap_threshold`） | 依頼者ノード wafl500 のコンテナが**配布後の** `config.yaml` を読むこと．`config.yaml` は `mise.toml:69` の `rsync` で各ホストへ配られ，コンテナは `docker-compose.yml` 経由でマウントする | **F2**: 全 10 ノードで `grep '^dispatch_gap_threshold:' $REMOTE_DIR/config.yaml` が `0.36`．加えて deploy 内の smoke_check（hashes）で config.yaml のハッシュ一致 |
+| **記録側（指標の分母）** | `run_experiment.py:98` `gap_threshold=config.get("dispatch_gap_threshold")`．ここは `dispatched_domains` を再計算する**独立した 2 回目の呼び出し**（Iter58 のコメント参照） | 同上（同じ config を読む） | **F3**: 予備 20 問の `dispatched_domains` が同 20 問のオフライン replay（gt=0.36）と一致すること．ここが未到達なら `dispatched_domains` だけ旧閾値で記録され，実際の送出と乖離する |
+| 設定 → 各ノード | `mise.toml:69` の `rsync ... config.yaml` | `mise run deploy` の実行 | **F2** |
+| **効いたことの直接証拠** | — | — | **F3'**: 本走完了後の `compound_mean_dispatched_count` が **1.6096（Iter82 実測）と一致しない**こと．一致したら閾値が実行パスに届いていない（下記 invalid 条件） |
+| **到達しない経路（確認のみ．変更しない）** | 埋め込み（`expert_backend.embed_query_views()`）・分類器（`classifier.py`）・`train_domain_classifier.py` | 本反復では一切触らない | artifact sha256 が **`1cfcd3d8...` のまま不変**であること，`config.yaml` の diff が `dispatch_gap_threshold` 行（＋コメント）のみであること |
+
+**オフラインで先に確認できること / 実機本走でしか確認できないこと**
+
+- **オフラインで確認できる（ローカルの `results/` のみ．実機不使用）**: G1（掃引の忠実度），G2（着地点の事前登録），G3（split-half 交差確認）．いずれも**本フェーズで実測済み**で，下表に結果を記載する．
+- **実機本走でしか確認できない**: `mean_duration_ms`（送出数増加の実コスト），`dispatch_failure_rate`（送出先が増えることでのタイムアウト増），`fallback_rate`，`answer_quality_accuracy` / `end_to_end_accuracy`，および「`config.yaml` の 1 行が本当に実行時挙動を変えたか」（F2/F3/F3'）．
+- **config.yml 冒頭の絶対条件 (A) により，変更を適用したら wafl500〜509 での 1,915 問フルスペック本走を必ず 1 回実施する．掃引の予測がどれだけ確かでも本走を省略しない**（2026-09-23 恒久ルール: 事前シミュレーションは本走の代替ではない）．
+
+**事前ゲート（結果を見る前に固定する．G1〜G3 は本フェーズで実測済み）**
+
+| ゲート | 内容 | 実測 | 判定 |
+|---|---|---|---|
+| **G1（掃引の忠実度）** | 本フェーズの replay を gt=0.29 で走らせ，Iter82 本走の実測 `compound_domain_set_recall`=0.539759 / `compound_mean_dispatched_count`=1.6096 を再現すること | replay: set_recall **0.5397590361**，mean_k **1.6096385542**．Iter79 基準線でも gt=0.29 で set_recall 0.5481927711 / mean_k 1.8795180723 を再現 | **PASS**（小数点以下 10 桁まで一致．掃引は実行時挙動を忠実に再現している） |
+| **G2（着地点の事前登録）** | gt=0.36 の予測 `compound_mean_dispatched_count` と `compound_domain_set_recall` を**本走前に**数値で記録すること | **mean_k=1.8892 / set_recall=0.581928**（上表に全項目記載） | **PASS**（記録済み．合格条件は課さない） |
+| **G3（評価集合への過適合の確認）** | 複合 415 行を偶奇で二分し，片方で選んだ予算整合閾値をもう片方へ適用して改善の符号が反転しないこと | A で選んだ 0.387 → B: 0.5290→**0.5942**．B で選んだ 0.336 → A: 0.5505→**0.5649**．**両方向とも改善** | **PASS** |
+| **F1（変更の最小性）** | `git diff` が `config.yaml` の `dispatch_gap_threshold` 行（＋説明コメント）のみであること．`.py` の変更が 0 件であること | 本走前に確認 | 実装フェーズで判定 |
+| **F2（配布）** | deploy 後，全 10 ノードで `grep '^dispatch_gap_threshold:' $REMOTE_DIR/config.yaml` が `0.36`．artifact sha256 が `1cfcd3d8...` で不変 | 本走前に確認 | 実装フェーズで判定 |
+| **F3（実行時経路）** | 先頭 20 問の予備実行の `dispatched_domains`（集合・長さの双方）が同 20 問のオフライン replay（gt=0.36）と **20/20 一致**すること | 本走前に確認．**不一致なら本走に進まない** | 実装フェーズで判定 |
+
+**成功条件・非退行条件（事前登録．結果を見る前に固定する）**
+
+直近基準線は **Iter82 本走 `results/20260927_050049/`**（全 1,915 行: top1=0.792167，compound_domain_set_recall=0.539759，compound_mean_dispatched_count=1.6096，fallback=0.0，dispatch_failure=0.000522，ECE=0.025448，mean_duration_ms=2217.1，answer_quality=0.572667，end_to_end=0.351958）．予算整合の参照点として **Iter79 本走 `results/20260926_221822/`**（set_recall=0.548193，compound_mean_dispatched_count=1.8795，全 1,915 行 mean dispatched=1.5608）も併記する．
+
+| 区分 | 指標 | 基準線 | 合格条件 |
+|---|---|---|---|
+| **主基準（効果）** | `compound_domain_set_recall`（複合 415 行，分母 830 スロット） | Iter82: 0.539759 / Iter79: 0.548193 | **(i) Iter79 の 0.548193 を上回り，かつ (ii) Iter82 の 0.539759 に対し +3.0pt 以上（≥ 0.5698）**．2 条件の AND |
+| **主基準の予算制約（必須・これが無いと主基準は自明に満たせる）** | `compound_mean_dispatched_count` | Iter79: 1.8795 | **≤ 1.90**（Iter79 の予算 +1.1% 以内）．超過したら「予算を増やして被覆を買っただけ」として rejected |
+| **非退行①（構造的不変の確認）** | 全 1,915 行 `top1_accuracy` | 0.792167 | **≥ 0.791645（-0.052pt = 1 行まで）**．**理論上は完全不変であり，2 行以上動いたら実装漏れ・別要因の混入を疑い invalid 判定の検討へ回す** |
+| **非退行②** | per-domain recall/precision 計 20 指標（BH 補正 q=0.05） | Iter82 実測 | **有意退行 0 件**（構造的に不変が期待される） |
+| **非退行③** | `fallback_rate` / `dispatch_failure_rate` | 0.0 / 0.000522 | fallback = 0.0，**dispatch_failure ≤ 0.005**（送出数が増えるためここが binding になりうる） |
+| **非退行④** | `mean_duration_ms` | 2217.1 | **≤ 2660.5（+20% 以内）**．予測 ≈2320 |
+| **非退行⑤** | ECE | 0.025448 | **≤ 0.08**（rank 1 の confidence のみに依存するため不変が期待される） |
+| 報告のみ | `compound_domain_jaccard_mean` / 複合 k 分布 / 全 1,915 行 mean dispatched | 0.458072 / (310,31,74) / 1.4078 | 予測 0.456466 / (278,21,116) / 1.6010 と対比して記録 |
+| 報告のみ | `answer_quality_accuracy` / `end_to_end_accuracy` | 0.572667 / 0.351958 | **3SD=2.6pt のノイズ床**（success_criteria (5)）を適用．超えない限り有意と判定しない |
+| 報告のみ | 全 1,915 行 top1 / 既存 1,600 行部分集合 top1 / 複合 415 行 top1 | 0.792167 / 0.786875 / 0.816867 | 毎回併記 |
+| 報告のみ | Random / BestSingle / Oracle | 0.121671 / 0.12689 / 1.0 | success_criteria (3) により毎回併記 |
+
+**主基準を top1 から `compound_domain_set_recall` へ置き換える正当化**
+
+1. 上記「top1 と下流指標が構造的に動かない理由」のとおり，`max_confidence` 集約の下で `selected_domain` は rank 1 のみで決まり gap 閾値と独立である．**top1 を主基準に据えれば，本レバーは定義上「効果なし」としか判定できない**．
+2. success_criteria (1) は主基準を top1 の McNemar と定めているが，これは「ルーティング先の選択」を動かすレバーを前提にした規定である．本レバーが動かすのは「何件へ送るか」であり，対応する軸①の指標は `compound_domain_set_recall`（複合設問の被覆）である．**success_criteria (1) の趣旨（同一問題集合での対比較・効果量の併記）は維持し，対象指標だけを置き換える**．検定は 830 スロットの対ペア（喪失 a / 獲得 b）に対する符号検定で行い，検出限界 `1.96·sqrt(n_d)/830` を併記する（予測 n_d=35 なら 1.40pt）．
+3. top1 は非退行①として**「動かないこと」を確認する側**に回す．これは success_criteria (6)（主要指標が完全一致したら invalid を疑う）の裏返しで，**本レバーに限っては top1 が完全一致することこそ正常**である．したがって invalid 判定は top1 ではなく `compound_mean_dispatched_count` で行う（下記）．
+4. 予算制約を非退行ではなく**主基準の一部**に置いた．被覆は閾値を上げれば単調に買えるため（Q2），予算制約を外した「set_recall 改善」は主張として空である．
+
+**判定規則（事前登録）**
+
+- **adopted**: 主基準 (i)(ii) と予算制約（`compound_mean_dispatched_count` ≤ 1.90）を満たし，非退行①〜⑤をすべて満たす．
+- **partial**: 予算制約と非退行①〜⑤は満たすが，set_recall が Iter79 の 0.548193 は上回るものの Iter82 比 +3.0pt に届かない（0.548193 < 実測 < 0.5698）．**予測 0.581928 からの乖離の原因**（`dispatch_failure` の増加，probe confidence の実行時変動など）を必ず特定して記録したうえで，`dispatch_gap_threshold` を 0.29 へ復元し，レバーは収束扱いとする．
+- **no_effect**: set_recall が Iter82 実測 0.539759 と ±0.5pt 以内．この場合は「閾値が効いていない」疑いが濃いので，**先に F2/F3/F3' を再検証**してから結論を書く（invalid との切り分け）．
+- **rejected**: set_recall が Iter79 の 0.548193 以下，または予算制約違反（`compound_mean_dispatched_count` > 1.90），または非退行①〜⑤のいずれかに違反．
+- **invalid（実験不成立）**: F1・F2・F3 のいずれか不合格，`question_count != 1915`，`compound_domain_question_count != 415`，**または `compound_mean_dispatched_count` が Iter82 実測 1.6096 と小数点以下 4 桁まで完全一致**（＝ config の 1 行が実行パスに到達していない．success_criteria (6) の本レバー版），または `top1_accuracy` が 2 行以上（0.11pt 超）動いた場合（構造的に起こりえないため別要因の混入を疑う）．
+- **復元手順（partial / no_effect / rejected 共通）**: `config.yaml:90` を `dispatch_gap_threshold: 0.29` へ戻し（Iter58 の説明コメントは残す），`mise run deploy` を再実行して全 10 ノードで値と smoke_check を確認する．**artifact は触らない**（本反復では再訓練していないので `1cfcd3d8...` のまま）．`data/MANIFEST.md` の artifact 行は本反復では変更しない．
+
+**実験手順**
+
+1. **前提確認**: `wc -l data/dataset.jsonl` = 1915，`sha256sum models/domain_classifier.joblib` = `1cfcd3d8...`，`config.yaml` の `embedding_view_concat: true` と `embedding_instruction` が存在すること．
+2. **変更**: `config.yaml:90` を `dispatch_gap_threshold: 0.36` へ．直前のコメントブロック（L72-89）に **Iter83 で 0.29 から再較正した経緯・掃引の出典（`results/20260927_050049/`）・予算整合の根拠**を追記する．**`.py` は 1 行も変えない．**
+3. **F1**: `git diff --stat` が `config.yaml` のみであることを確認．`uv run ruff check .`（pre-existing 23 件のみ）・`uv run pytest tests/`（pre-existing 9 件 FAIL は B122．新規失敗 0 件）．
+4. `mise run setup`（**直後に `uv sync --extra research` で research extra を復旧．B118 落とし穴 2**）→ `wc -l data/dataset.jsonl` = 1915 を再確認．
+5. `mise run deploy` → **F2** と smoke_check の pass を確認．
+6. **先頭 20 問の予備実行 → F3**．`dispatched_domains` をオフライン replay（gt=0.36）と突き合わせ，**不一致なら本走に進まない**．
+7. **wafl500〜509 で 1,915 問のフルスペック本走を 1 回**（絶対条件 A）．起動直後に `state.json` を `status=waiting_experiment`・`experiment_dir`・`experiment_deadline`（開始時刻 + 150×60 + 600 秒）へ更新．**送出数が増えるため所要時間は Iter82 の 176 分より延びうる**点に注意．`mise run analyze -- <timestamp>` まで実施（**引数なし実行は `results/iter45_preliminary/` を誤選択する．B118 落とし穴 1**）．
+8. 指標を「全 1,915 行」「既存 1,600 行部分集合」「複合 415 行」の 3 通りで算出し，**Iter82 `results/20260927_050049/` と id ペアリング**して比較する．複合被覆は 830 スロットの対ペア（喪失 / 獲得）と符号検定を報告する．**F3'（`compound_mean_dispatched_count` が 1.6096 と異なること）を必ず確認する．**
+9. **G2 の予測値と本走実測の一致／不一致を必ず記録する**（Iter82 の G2' と同じ扱い．予測手続きの妥当性検証として蓄積する）．
+10. `data/MANIFEST.md` は artifact を変えないため更新不要．ただし journal に本走ディレクトリと gt 値を記録する．
+
+**期待効果とリスク**
+
+期待効果は「Iter82 で採用した連結埋め込みの真価を，古い前提（Iter58 に旧分布上で決めた T=0.29）から解放して測り直す」ことである．同じ送出コストで複合設問の被覆が Iter79 比 +3.37pt になるという予測が当たれば，「特徴量を変えたら閾値を較正し直す」という手続きを本研究の標準工程に組み込む根拠になる（3 回目の同型観測）．リスクは 3 つ．(1) **送出数が +13.7%（全 1,915 行 1.408→1.601）増えることによる所要時間と `dispatch_failure_rate` の悪化**（非退行③④で監視．予測では余裕があるが実測でしか分からない）．(2) **閾値を評価集合上で選んでいること**（G3 の split-half で符号の安定性は確認したが，独立な hold-out ではない．限界として明記する）．(3) **`k=4` の行が 229→367 行へ増える**ため，複数ノードへの同時送出が増えてノード側の負荷が上がる（`dispatch_timeout_s` に対する余裕が縮む）．
+
+### 実験 (Iter83)
+
+**変更・検証（F1〜F3'，計画で事前登録した内容に全て一致）**
+
+- **F1（変更の最小性）PASS**: `git diff --stat` は `config.yaml`（+18/-1 行．全て `dispatch_gap_threshold: 0.29→0.36` の 1 行変更と直前コメントブロックへの追記）のみ．`.py` の変更 0 件．`uv run ruff check .` は既存 23 件のまま（新規 0 件）．`uv run pytest tests/` は 309 passed / 既存 9 件 FAIL（`tests/test_build_dataset.py`，backlog B122，未変更）のまま，新規失敗 0 件．
+- `mise run setup` → `uv sync --extra research`（B118 落とし穴 2 の手順どおり）→ `mise run deploy`．smoke_check は全 10 ノードで `config.yaml matches deployed container` を確認し pass．
+- **F2（配布）PASS**: 全 10 ノード（wafl500〜509）で `grep '^dispatch_gap_threshold:' $REMOTE_DIR/config.yaml` が `0.36`．分類器 artifact sha256 は `1cfcd3d836c5b5b421b8a47a487c3fb3ba996dd54aadcebae688cdfc8bcd0a48` でローカル・wafl500 とも一致（不変）．
+- **F3（実行時経路）PASS**: `data/dataset.jsonl` 先頭 20 行を `data/f3_20_iter83.jsonl` として作成し `docker cp` でコンテナへ投入，`mise run start -- --dataset data/f3_20_iter83.jsonl --output f3_20_iter83.jsonl`（`results/20260927_070120/`）で予備実行．同 20 行の `probe_candidates` を用いたオフライン replay（T=0.36, max_k=4，`aggregator.select_dispatch_targets()` の gap escalation 規則をそのまま再実装）と `dispatched_domains` を突き合わせ，**20/20 完全一致**（k=1 の 16 行・k=4 の 4 行を含む）．一時ファイルは確認後にローカルから削除済み．
+- 本走: `mise run start -- --dataset data/dataset.jsonl --output results.jsonl`．実験ディレクトリ **`results/20260927_070239/`**．起動時に `state.json` を `status=waiting_experiment`・`experiment_dir=results/20260927_070239`・`experiment_deadline=1790469794`（起動 1790460194 + 150×60 + 600 秒）へ更新．所要 **約 34 分**（1790460159 起動 〜 1790462279 完了，`run_experiment.log` の `completed 1915 questions` 到達）．Iter82 の 176 分より大幅に短い（要因は未調査．同一 gt=0.29 ではなく gt=0.36 で送出数が増えているにもかかわらず短縮しており，ノード側の GPU 競合状況・キャッシュ効果等の外的要因が寄与した可能性がある．**分析フェーズでの解釈対象として申し送る**）．`mise run analyze -- 20260927_070239` を実施し全 10 ノードのログ回収・axis2/3 指標算出まで完了．
+- **F3'（invalid 検出）PASS**: `compound_mean_dispatched_count` 実測 **1.889156626506024** は Iter82 実測 1.6096385542 と明確に異なる（config の 1 行が実行パスに到達している）．
+
+**取得した主要メトリクス（`metrics.py --json`，`results/20260927_070239/results.jsonl`）**
+
+| 指標 | Iter82 基準線 | Iter79 参照 | **Iter83 事前登録予測** | **Iter83 実測** |
+|---|---|---|---|---|
+| `compound_domain_set_recall` | 0.539759 | 0.548193 | 0.581928 | **0.5819277108433735** |
+| `compound_covered_domain_count`（分母 830） | 448 | 455 | 483 | **483** |
+| `compound_mean_dispatched_count` | 1.6096385542 | 1.8795180723 | 1.8892 | **1.889156626506024** |
+| `compound_domain_jaccard_mean` | 0.458072 | — | 0.456466 | **0.4564658634538148** |
+| `top1_accuracy`（全 1,915 行） | 0.792167 | 0.753003 | 0.792167（±0.06pt=1行） | **0.7926892950391645**（Iter82比 +0.0522pt＝ちょうど 1 行分） |
+| `single_domain_top1_accuracy`（`single_domain_question_count`=1,500 行） | 0.785333 | — | 予測同様 | **0.786**（Iter82 実測は 0.7853333333333333，計画節記載の 0.786875 とは定義がやや異なる可能性があり要確認） |
+| `compound_domain_top1_accuracy`（415 行） | 0.816867 | — | 予測同様 | **0.8168674698795181** |
+| `mean_duration_ms` | 2217.1 | 2301.4 | ≈2320 | **2286.826631853786**（analyze 経由の axis23 集計では 2286.932079414838，四捨五入誤差程度の差） |
+| `dispatch_failure_rate` | 0.000522 | — | ≤0.005 | **0.0005221932114882506**（不変） |
+| `fallback_rate` | 0.0 | — | 0.0 | **0.0** |
+| `ece` | 0.025448 | — | ≤0.08（構造的不変予測） | **0.02599932343980014** |
+| `brier_score` | — | — | 報告のみ | **0.13758931835315297** |
+| `auroc` | — | — | 報告のみ | **0.7819100091827365** |
+| `cohens_kappa` | — | — | 報告のみ | **0.762239834086364** |
+| `answer_quality_accuracy` | 0.572667 | 0.569333 | ノイズ床内で不変 | **0.5706666666666667** |
+| `end_to_end_accuracy` | 0.351958 | 0.335770 | ノイズ床内で不変 | **0.35091383812010446** |
+
+**G2（着地点の事前登録）との一致**: `compound_domain_set_recall`（0.581928 予測 vs 0.5819277108433735 実測，小数点以下 4 桁一致）・`compound_mean_dispatched_count`（1.8892 予測 vs 1.889156626506024 実測）・`compound_domain_jaccard_mean`（0.456466 予測 vs 0.4564658634538148 実測）・`compound_domain_top1_accuracy`（0.816867 予測 vs 0.8168674698795181 実測）は**いずれも 4 桁以上で一致**．`top1_accuracy` は予測どおり「不変（許容幅 1 行）」の範囲に収まり，実際に動いたのは **ちょうど 1 行**（Iter83 0.7926892950391645 − Iter82 0.7921671018276762 = 0.0005221932114883 ≒ 1/1915）で，計画節に記載した「rank1 dispatch 失敗行のみ動きうる」という機序の予測と整合する．`mean_duration_ms` は予測 ≈2320ms に対し実測 2286.8ms（-33ms，予測の線形内挿誤差の範囲）．
+
+**Iter82 との id ペアリング（分析フェーズ向けの準備）**: `results/20260927_050049/results.jsonl`（Iter82）と `results/20260927_070239/results.jsonl`（Iter83）は行数（1,915）・`id` 列の並び順ともに完全一致することを確認済み（`ids_82 == ids_83` が `True`）．したがって行インデックスでの直接ペアリングにより，830 スロット（複合 415 行 × 2 ドメイン）の獲得/喪失対と符号検定は分析フェーズでそのまま既存実装（`scripts/analyze_iter52.py` 等の `mcnemar_2x2` / `wilson_ci` パターン）を再利用して計算できる状態にある．**符号検定の実施・解釈自体は本フェーズでは行わない**．
+
+**異常の有無**: `ollama ps`（wafl500〜502 で確認）に OOM・異常な CPU フォールバックは無し（`qwen3.5:4b-q4_K_M` の 25%/75% CPU/GPU 分割は Iter79 以降と同一パターンで新規異常ではない）．`mise run deploy` の smoke_check は全項目 pass．本走・予備実行とも exit code 0．
+
+**運用上の申し送り（新規）**: 予備 20 問実行時，`data/` はイメージビルド時に COPY されるため，ビルド後に作成したデータファイルはコンテナ内に存在せず `FileNotFoundError` になった（1 回目の予備実行が失敗）．`docker cp` でコンテナへ直接投入することで解決した．journal archive の Iter69/73 等では「先頭 20 行を一時ファイルとして投入」とだけ記載されており，この「イメージ COPY 後に作った一時データはコンテナに無い」という具体的な失敗モードは今回初めて踏んだため，次回の予備実行担当者向けに明記する．
+
+### Iteration 83 実行済み（分析・考察）
+
+**判定: adopted**（事前登録の判定規則を結果を見る前の定義のまま機械的に適用．条件の緩和は行っていない）
+
+**1. 事前登録条件の機械的な当てはめ**
+
+| 区分 | 指標 | 合格条件（事前登録） | Iter83 実測 | 判定 |
+|---|---|---|---|---|
+| 主基準 (i) | `compound_domain_set_recall` | > Iter79 の 0.548193 | **0.5819277108** | PASS（+3.373pt） |
+| 主基準 (ii) | 同上 | ≥ 0.5698（Iter82 比 +3.0pt） | 同上 | PASS（**+4.217pt**） |
+| 主基準の予算制約 | `compound_mean_dispatched_count` | ≤ 1.90 | **1.8891566265** | PASS（Iter79 の 1.8795 比 +0.52%） |
+| 非退行① | 全 1,915 行 `top1_accuracy` | ≥ 0.791645 | **0.7926892950**（+0.0522pt＝正味 +1 行） | PASS |
+| 非退行② | per-domain recall/precision 計 20 指標（BH q=0.05） | 有意退行 0 件 | **有意 0 件**（そもそも値が動いたのは 4 指標のみ，いずれも discordant ≤2 行，最小 p=0.4795） | PASS |
+| 非退行③ | `fallback_rate` / `dispatch_failure_rate` | 0.0 / ≤0.005 | **0.0** / **0.000522**（1 行） | PASS |
+| 非退行④ | `mean_duration_ms` | ≤ 2660.5 | **2286.83** | PASS |
+| 非退行⑤ | `ece` | ≤ 0.08 | **0.0259993** | PASS |
+| invalid 検出 | `compound_mean_dispatched_count` が 1.6096 と 4 桁一致 | 不一致であること | 1.8892（明確に不一致） | invalid でない |
+| invalid 検出 | `top1_accuracy` が 2 行以上動く | 1 行以内 | 正味 1 行 | invalid でない |
+
+参照点（success_criteria (3)）: Random 0.121671 / BestSingle 0.126893（legal）/ Oracle 1.0．top1 Wilson 95% CI = [0.773956, 0.810251]．
+報告のみ: `compound_domain_jaccard_mean` 0.4564659（予測 0.456466 と一致・微減），複合 415 行の k 分布 (k=1/2/4) = **278 / 21 / 116**（予測と完全一致，Iter82 は 310/31/74），全 1,915 行 mean dispatched 1.601044（予測 1.6010），`answer_quality_accuracy` 0.570667（-0.200pt），`end_to_end_accuracy` 0.350914（-0.104pt）＝いずれも 3SD=2.6pt のノイズ床内で不変，`brier` 0.137589 / `auroc` 0.781910 / `cohens_kappa` 0.762240，既存 1,600 行部分集合 top1 0.787500，複合 415 行 top1 0.816867（完全不変），single 1,500 行 top1 0.786000．
+
+**2. 830 スロットの対ペアと符号検定（本フェーズで実測）**
+
+Iter82 `results/20260927_050049/` と Iter83 `results/20260927_070239/` を行インデックスでペアリング（id 列完全一致）．複合 415 行 × 2 ドメイン = 830 スロットの被覆を対比較した．
+
+- **獲得 35 / 喪失 0**（両方被覆 448，両方未被覆 347）．**喪失が 1 件も無い**のは gap escalation が閾値に対して単調（k が非減少）であることの直接の帰結で，理論と完全に整合する．
+- 符号検定（両側，厳密二項）: n_d=35，**p = 5.82e-11**．計画節に事前登録した予測（獲得 +35 / 喪失 0 / p=5.82e-11）と**完全一致**した．
+- 効果量: set_recall 差 +0.042169（95% CI [+0.028198, +0.056139]，paired 差の正規近似）．検出限界 1.96·√35/830 = 1.397pt に対し実測 4.217pt で，**ノイズ幅の 3.0 倍**．軸①（ルーティング系）は決定論的なので success_criteria (5) のノイズ床は適用しない．
+
+**3. 予測（G2）と実測の一致 — 事前登録手続きの検証**
+
+`compound_domain_set_recall`・`compound_mean_dispatched_count`・`compound_domain_jaccard_mean`・複合 k 分布・全体 mean dispatched・獲得/喪失対・符号検定 p の**全項目が本走実測と一致**した．加えて，本走の `probe_candidates` を Iter82 のものと全 1,915 行 × 10 ドメインで突き合わせたところ **最大絶対差 0.0（ビット単位で同一）**であった．probe の確信度は埋め込みと分類器が同一である限り実機を経ても完全に決定論的であり，**`probe_candidates` からのオフライン replay は本走の送出挙動を（dispatch 失敗を除いて）完全に予測できる**ことが 2 回目の確認として確立した．ただし恒久ルールどおり本走を省略はしない．
+
+**4. 申し送り 1（本走所要 176 分 → 34 分）への回答: 「34 分」は測定ミスであり，外的要因による高速化は起きていない**
+
+- `duration_ms` の総和は Iter82 **70.8 分** / Iter83 **73.0 分**である．`run_experiment.py:146-160` は 1 行ずつ**逐次**実行し，`duration_ms`（同 48-50 行）は probe+dispatch を含む ask フロー全体の実測値なので，**総和は壁時計時間の下界**になる．したがって Iter83 が 34 分で終わることは構造的にありえない．
+- 実際の経過時間は復元できる．Iter83: 起動 1790460194（`state.json` の `experiment_deadline` 1790469794 − 9600）→ ローカル `results.jsonl` の mtime 1790464555 で **72.7 分**．Iter82: 起動 1790452839（journal 記載）→ mtime 1790457103 で **71.1 分**．**どちらも duration_ms 総和と 0.4% 以内で一致する．**
+- すなわち両走とも約 71〜73 分であり，Iter82 の「176 分」も Iter83 の「34 分」も**壁時計の測定窓の取り違え**である（前者は deploy/analyze を含み，後者はポーリングログの一部区間しか見ていないと考えられる）．**外的要因（GPU 競合等）による高速化という仮説は棄却する．**
+- `mean_duration_ms` への交絡も無いことを直接示せた．k 別の平均所要は k=1: 1968.6→1944.9ms，k=2: 3345.4→3747.5ms（n=50 と少なく振れる），k=4: 3481.3→3483.5ms とほぼ不変で，**Iter83 の所要を Iter82 の k 構成比で標準化すると 2217.4ms（Iter82 実測 2217.1ms との差 0.3ms = 0.01%）**．+3.1% の増加は**全て送出数の構成比シフトで説明され，1 問あたりの実コストは変わっていない**．非退行④の判定は健全である．
+
+**5. 申し送り 2（`single_domain_top1_accuracy` 0.785333 vs 0.786875）への回答: 両方正しく，別の集合を指す**
+
+- 0.785333 = **`single_domain_top1_accuracy`**（複合を除く single 1,500 行．1178/1500）．
+- 0.786875 = **「既存 1,600 行部分集合」top1**（single 1,500 行 + `compound-001`〜`compound-100` の計 1,600 行．Iter78 の拡充前の評価集合と同一．1259/1600）．
+- 計画節の表がこの 2 つを並記していたため実験フェーズが同一指標と誤認した．**定義の齟齬ではなく表記の紛れ**である．Iter83 実測は前者 0.786000，後者 0.787500．以後は必ず「single 1,500 行」「既存 1,600 行部分集合」と母数を明記する．
+
+**6. top1 が動いた 3 行の精査（計画の構造予測に対する補正）**
+
+top1_accuracy の変化は正味 +1 行だが，**対ペアの不一致は 3 行**あった．内訳は次のとおりで，**いずれも本レバーとは無関係な一過性のノード側失敗**である．
+
+| id | Iter82 | Iter83 | 機序 |
+|---|---|---|---|
+| `medical-033` | dispatch 失敗（`selected_domain=None`） | 成功 | 一過性のタイムアウト．k は両走とも 1 |
+| `medical-007` | 成功 | dispatch 失敗 | 同上（失敗行が 1 行から 1 行へ「移動」しただけ） |
+| `natural_science-079` | `medical` を選択（rank2，conf 0.2889） | `natural_science` を選択（rank1，conf 0.4117） | **両走とも同一の 4 ドメインへ送出**．Iter82 では rank1 ノードの `/dispatch` 応答だけが欠落し，`select_best_dispatch_response()` が生き残った rank2 を選んだ．`dispatch_failed` は全滅時にしか立たないため**この部分失敗はフラグに現れない** |
+
+計画の「top1 は最大 1 行しか動きえない」は，`dispatch_failure_rate`（全滅）だけを数えていた点で不完全だった．正しくは**「k≥2 の行では rank1 の部分失敗によって rank2 が選ばれうる」**ので，動きうる行数は k≥2 の行数（Iter83 では 417 行）に一過性失敗率を掛けた分だけある．本走では 1 行（0.052pt）に留まったが，**±1 行という許容幅は原理的には狭すぎた**．なお本レバーは k≥2 の行を 323→417 行へ増やすので，この経路の露出はわずかに増える（今回は実測で増えていない）．
+
+**7. 考察 — 本反復が示したこと，示していないこと**
+
+- **示したこと**: 送出予算を Iter79 と同水準（1.8795 → 1.8892，+0.52%）に固定したまま，複合設問の被覆が **+3.373pt**（Iter79 比）改善した．すなわち Iter82 の連結埋め込みは，旧分布上で決めた `T=0.29` の下では被覆をむしろ下げて見えていたが（0.548193→0.539759），**較正し直せば同じコストでより良い候補集合を出せる**．喪失 0 件という非対称な内訳は，改善が「たまたま入れ替わった」のではなく単調な包含関係の拡大であることを示す．
+- **示していないこと（過剰一般化の禁止）**: (a) 本レバーは `selected_domain` を動かさないので，**top1_accuracy の改善には一切寄与しない**（実際 +1 行は一過性失敗に由来）．(b) 閾値は複合 415 行＝評価集合そのもので選んでおり，**独立な hold-out は無い**．G3 の split-half（A→B: 0.5290→0.5942，B→A: 0.5505→0.5649）で符号の安定性は確認したが，効果量の大きさは楽観側に偏りうる．(c) 予算整合点を選んだため「較正の効果」を単離できたが，**より大きい予算でどこまで被覆が伸びるかは別問題**である（gt=0.40 で 0.598795）．
+- **レバーの扱い**: `dispatch_gap_threshold_recalibration` は **adopted・収束**とする．`config.yaml` の `dispatch_gap_threshold: 0.36` はそのまま残す（復元しない）．今後の基準線は **`results/20260927_070239/`** である．
+
+**8. 学び（次の自分向け）**
+
+1. **特徴量を変えるレバーの後には必ず閾値較正の反復を 1 回挟む**．Iter81・Iter82・Iter83 と 3 回続けて同型の現象を観測した（確信度分布が動けば固定閾値の意味も動く）．文献上も標準の手続き（Zellinger & Kim 2025，TREACLE 2024，conformal prediction）であり，**本研究の標準工程に組み込む**．次に埋め込み・分類器・訓練データを動かすレバー（例: `cross_domain_training_data_augmentation`）を採用したら，その直後に同じ較正を再度行うこと．
+2. **単調なハイパラを動かすレバーでは「効果」は必ず予算を揃えて測る**．gap 閾値は上げれば被覆が単調に買えるので，予算制約を非退行ではなく**主基準の一部**に事前登録した設計は機能した（今回 0.40 を採っていれば +5.06pt と見栄えは良いが交絡していた）．同型のレバー（top_k，候補閾値など）でも同じ枠組みを使う．
+3. **`dispatch_failed` フラグは「全送出先が失敗した」ときしか立たない．部分失敗は results.jsonl から直接は分からず，`selected_domain` が rank1 でないことでしか検出できない**（本フェーズで `natural_science-079` として初めて具体的に観測）．k を増やすレバーの非退行条件を「top1 が ±1 行」と書くのは狭すぎる．今後は **「rank1 以外が選ばれた行数」を補助指標として数える**こと．
+4. **壁時計の所要時間は `duration_ms` の総和と突き合わせて検算する**．逐次実行なので総和は下界であり，これを下回る報告値は測定窓の取り違えである（Iter82「176 分」/ Iter83「34 分」は両方とも誤り．実際は 71.1 分 / 72.7 分）．`run_experiment.py` が開始・終了の壁時計時刻を results 側に記録していないことが根本原因で，将来の計測のために記録を足す余地がある（backlog B132 に記載）．
+5. **所要時間の比較は k 構成比で標準化してから行う**．今回 +3.1% の増加は 100% が k 構成比シフトによるもので，1 問あたりの実コストは 0.01% しか動いていなかった．生の平均だけを見ると「遅くなった」と誤読する．
+6. **`probe_candidates` はビット単位で再現する**（Iter82 と Iter83 で全 1,915 行 × 10 ドメインの最大絶対差 0.0）．送出段だけを動かすレバーは実機を使わずに完全に事前予測でき，事前登録の信頼度は高い．本走は恒久ルールにより省略しないが，予測と実測の乖離が出たら**まずノード側の一過性失敗を疑う**のが正しい順序である．
+
+---
+
 ## Iteration 82: prefix 有無の埋め込み連結（2048 次元）による medical 退行の回避
 
 ### 調査 (Iter82)
