@@ -251,19 +251,43 @@ async def embed_pool(
 
 
 def select_hard_negatives(
-    pool: list[dict], p_true: np.ndarray, per_domain: int
+    pool: list[dict], p_true: np.ndarray, per_domain: int,
+    random_count: int = 0, seed: int = 0,
 ) -> list[dict]:
-    """Return the per_domain hardest (lowest p_true) rows for each domain, sorted by
-    domain name, with deterministic (p_true, task, query) ordering within a domain.
+    """Return, per domain, the `per_domain - random_count` hardest (lowest p_true)
+    rows plus `random_count` rows drawn uniformly at random from the remaining pool
+    (Iter87 hard/random hybrid; random_count=0 reproduces the Iter84/86 pure
+    hard-negative behavior exactly).
+
+    Within a domain, the pool is first sorted into a full deterministic order by
+    (p_true, task, query) -- this fixes the "hardest" prefix and gives the random
+    draw a stable index space to permute, so results never depend on dict/set
+    iteration order. The random draw itself uses `numpy.random.default_rng(seed)`,
+    consumed once per domain in sorted-domain-name order, so a fixed seed always
+    reproduces the same selection. The final per-domain selection (hard rows +
+    random rows) is re-sorted by (p_true, task, query) before ids are assigned, so
+    the output format and id scheme ("{domain}-hardneg-{seq:03d}") match Iter84/86
+    byte-for-byte when random_count=0; when random_count>0 the seq number no longer
+    reflects a difficulty rank, only the tie-broken (p_true, task, query) order.
     """
     by_domain: dict[str, list[tuple[float, dict]]] = defaultdict(list)
     for row, p in zip(pool, p_true):
         by_domain[row["domain"]].append((float(p), row))
 
+    rng = np.random.default_rng(seed)
     selected: list[dict] = []
     for domain in sorted(by_domain):
         ranked = sorted(by_domain[domain], key=lambda t: (t[0], t[1]["task"], t[1]["query"]))
-        chosen = ranked[:per_domain]
+        hard_count = max(per_domain - random_count, 0)
+        hard_part = ranked[:hard_count]
+        remaining = ranked[hard_count:]
+        if random_count > 0 and remaining:
+            draw = min(random_count, len(remaining))
+            idx = rng.permutation(len(remaining))[:draw]
+            random_part = [remaining[i] for i in idx]
+        else:
+            random_part = []
+        chosen = sorted(hard_part + random_part, key=lambda t: (t[0], t[1]["task"], t[1]["query"]))
         for seq, (p, row) in enumerate(chosen, start=1):
             selected.append(
                 {
@@ -322,7 +346,7 @@ async def _run(args: argparse.Namespace) -> None:
     proba = model.predict_proba(features)
     p_true = np.array([proba[i, class_index[row["domain"]]] for i, row in enumerate(pool)])
 
-    selected = select_hard_negatives(pool, p_true, args.per_domain)
+    selected = select_hard_negatives(pool, p_true, args.per_domain, args.random_count, args.random_seed)
     write_output(args.train_data, selected, args.output)
 
     selected_counts = Counter(row["domain"] for row in selected)
@@ -344,6 +368,17 @@ def main() -> None:
     parser.add_argument("--eval-data", default="data/dataset.jsonl")
     parser.add_argument("--classifier-model", default="models/domain_classifier.joblib")
     parser.add_argument("--per-domain", type=int, default=100)
+    parser.add_argument(
+        "--random-count", type=int, default=0,
+        help="Iter87 hard/random hybrid: number of the per-domain rows drawn uniformly "
+        "at random from the remaining pool instead of by hardness rank (default 0 "
+        "reproduces the Iter84/86 pure hard-negative behavior)",
+    )
+    parser.add_argument(
+        "--random-seed", type=int, default=0,
+        help="Seed for numpy.random.default_rng() used by --random-count (ignored when "
+        "--random-count is 0)",
+    )
     parser.add_argument("--jmmlu-zip", default=None, help="Local JMMLU.zip path; downloads the pinned commit if omitted")
     parser.add_argument("--embedding-model", required=True)
     parser.add_argument("--embedding-instruction", required=True)

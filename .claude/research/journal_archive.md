@@ -1,3 +1,507 @@
+## Iteration 84: 全ドメイン共通の hard negative mining による分類器訓練データ拡充
+
+### 調査 (Iter84)
+
+本反復のレバーは backlog B132（Iter83 分析フェーズ）で `cross_domain_training_data_augmentation` =
+`hard_negative_mining_all_domains` に確定済みで，レバー選定の裁量は無い．調査の問いは 3 つ．
+**(Q1) 「モデルが苦手な行を優先的に訓練集合へ足す」という選択規則は，無作為に同数足すより本当に良いのか．
+(Q2) 最難帯の行はラベル雑音・外れ値であり，足すとむしろ害になるという警告が知られている．本研究のデータで
+それは当てはまるのか．(Q3) 追加する行はどこから調達するか（B116(2) の調達順位に従う）．**
+
+**Q1: hard example / hard negative mining は「情報量の高い行を選ぶ」系の標準手法だが，優位性は無条件ではない**
+
+- 能動学習の uncertainty sampling（Lewis & Gale 1994 以来の定番）は「モデルが最も不確かな事例を選ぶ」規則で，
+  本レバーの選択規則と数学的に同型である．Sharma & Bilgic, "Evidence-Based Uncertainty Sampling for Active
+  Learning"（DMKD 2017, <http://www.cs.iit.edu/~ml/pdfs/sharma-dmkd17.pdf>，2026-09-27 確認）は，
+  単純さと実証的成功から最も頻用される戦略だと位置づけている．Zhu et al., "Active Learning with Sampling by
+  Uncertainty and Density"（COLING 2008, <https://aclanthology.org/C08-1143.pdf>）はテキスト分類で
+  無作為抽出が明確に劣ることを報告している．
+- ただし優位性は無条件ではない．Tripp, "Why your active learning algorithm may not do better than random"
+  （<https://www.austintripp.ca/blog/2025-04-02-active-learning-random>，2026-09-27 確認）は，
+  (i) 候補間で情報量の分散が大きいこと，(ii) 情報量の推定（確信度）が信頼できること，が成立して初めて
+  無作為を上回ると整理している．**本研究の分類器は `CalibratedClassifierCV(method="temperature")` で
+  較正済み（Iter83 本走の ECE=0.026）なので (ii) は満たす**．(i) は本フェーズのオフライン実測（G3）で確認した．
+- 検索分野の hard negative mining でも，ANCE（Xiong et al., ICLR 2021）・NV-Retriever（Moreira et al.,
+  2024）が「積極的に掘った negative は性能を上げるが，制御しないと訓練を不安定にする」と報告されている
+  （ECI, arXiv 2603.20990, <https://arxiv.org/html/2603.20990v1>，2026-09-27 確認の関連研究節より）．
+
+**Q2: 「最難帯＝ラベル雑音」という警告は本研究のデータには当てはまらなかった（実測で確認）**
+
+- Thakur et al. の RLHN（2025）は，掘った hard negative 集合に含まれる false negative とラベル雑音が
+  dense retriever の劣化の主因だと報告している（ARHN, arXiv 2604.11092,
+  <https://arxiv.org/html/2604.11092v1>，2026-09-27 確認の関連研究節より）．
+- 分類側でも同じ警告がある．"Hard Example Mining" のパターン整理（<https://distilledpatterns.org/patterns/hard-example-mining>，
+  2026-09-27 確認）は **「高損失事例の大半がラベル雑音・破損・対象外事例であるとき」「データ集合が小さく
+  反復的な mining がすぐ過適合を起こすとき」は使うべきでない**と明記する．Frontiers in AI, "Beyond
+  uncertainty in modern active learning for trustworthy AI"（2026,
+  <https://www.frontiersin.org/journals/artificial-intelligence/articles/10.3389/frai.2026.1844765/full>，
+  2026-09-27 確認）も「不確実性ベースの取得関数は外れ値・雑音・配備分布から遠い事例を過剰に選びうる」と述べる．
+- **本研究の該当リスク**: ドメインラベルは JMMLU のタスク名から決定論的に割り当てた代理ラベルであり，
+  境界（例: `professional_psychology`→medical と `high_school_psychology`→education）は本質的に曖昧である．
+  最難帯にこの種の「代理ラベルとしては無理のある行」が集中している可能性がある．
+- **実測（G4）**: 最難から順に取る純粋な least-confidence と，最難 10 件 / 20 件を飛ばしてから取る変種を
+  オフラインで比較したところ，**純粋版が最良**（3 seed 平均 top1: pure 0.7929 / skip10 0.7887 / skip20 0.7740）．
+  **本研究のデータでは最難帯の除外は改善に寄与しない**ので，追加パラメータを持たない純粋版を採る．
+
+**Q3: 追加行は JMMLU の未使用行から調達する（B116(2) の調達順位 (i)「既存の信頼できる公開データセット」に該当）**
+
+- 現行の訓練集合 `data/classifier_train.jsonl`（1,427 行）は JMMLU（`nlp-waseda/JMMLU`, commit
+  `3637b25e`，CC BY-NC-ND 4.0）の各ドメイン 150 行の無作為標本で，評価集合 1,500 行とは別の乱数種で抽出
+  されている．**同じタスク群には未使用の行が大量に残っている**ので，新たなデータ生成（LLM 合成・人手作成）は
+  不要である．出典・ライセンス・ドメイン適合性はいずれも既存データセットと同一で，新たな検討事項は生じない．
+- 本フェーズで未使用プールを実測した（評価集合 1,500 行・現行訓練 1,427 行の設問文を両方除外）:
+
+  | ドメイン | 現行訓練で使用中のタスクに限った未使用プール |
+  |---|---|
+  | medical | 1,110 |
+  | natural_science | 783 |
+  | history_culture | 779 |
+  | business_economics | 705 |
+  | mathematics | 348 |
+  | computer_science | 251 |
+  | social_science | 244 |
+  | education | 233 |
+  | general | 125 |
+  | **legal** | **0** |
+  | 合計 | **4,578** |
+
+- **legal のプールは 0 である**．JMMLU の legal 対応タスクは `international_law` + `jurisprudence` の
+  227 行しかなく，150 行が評価集合，残る 77 行が訓練集合に既に入っている（`build_dataset.py` の
+  `build_classifier_training_rows` docstring が既に指摘している構造的制約）．**したがって legal だけは
+  追加行が 0 件になる**．これはドメイン固有の特別扱いではなく，10 ドメイン共通の規則をデータ側の制約が
+  切り詰めた結果である．`_extract_sample_weights()` が `n_samples/(n_classes*n_domain_samples)` で
+  ドメイン別の実効重み合計を常に均等化するため，**legal の実効重みは追加後も他ドメインと完全に等しい**
+  （1 行あたりの重みが 1.85→3.02 へ上がるだけ）．legal の非退行は個別に監視する．
+- **プールを「現行訓練集合に既に登場しているタスク」へ限定する**（上表はその条件での実測値）．無制限にすると
+  education に `japanese_civics` が流入するが，これは **Iter36（0.0529 で崩壊）・Iter37（invalid）・
+  Iter38（hybrid で education_recall 0.4000 へ悪化）で 3 回失敗が記録された変更**であり，本レバー
+  （hard な行の選択）とタスク構成変更の 2 レバーが混ざる．タスク構成を固定することで単一レバーを保つ．
+  この限定で影響を受けるのは education のみ（330→233），他 9 ドメインの数値は変わらない．
+
+### 計画 (Iter84)
+
+**単一レバー**
+
+`cross_domain_training_data_augmentation` = **`hard_negative_mining_all_domains`**．
+**`data/classifier_train.jsonl`（1,427 行）へ，現行分類器が正解ドメインへ低い確率しか与えない未使用 JMMLU 行を
+10 ドメイン共通の規則で各 100 行（プールが足りないドメインはプール全量）追加した
+`data/classifier_train_iter84_hardneg.jsonl`（2,327 行）で分類器を再訓練すること**だけ**を行う．
+埋め込みモデル・instruction・連結仕様・送出閾値・集約方式・集約コードは一切変えない．
+
+**選択規則（10 ドメイン共通．ドメインごとにパラメータを変えない）**
+
+1. **プール**: JMMLU（pinned commit `3637b25e`）の各ドメインについて，**現行訓練集合にそのドメインで
+   既に登場しているタスク**の全行から，評価集合 1,915 行の設問文と現行訓練集合 1,427 行の設問文を除外した残り
+   （合計 4,578 行）．
+2. **難易度スコア**: 現行 artifact `models/domain_classifier.joblib`（sha256 `1cfcd3d8...`，`n_features_in_`=2048）
+   に現行と同一の埋め込み（`qwen3-embedding:0.6b`，prefix なし ⊕ prefix ありの 2048 次元連結）を与えて
+   `predict_proba` を計算し，**正解ドメインの確率 p_true を難易度スコア（小さいほど hard）とする**．
+3. **選定**: 各ドメインについて p_true の昇順で先頭 **N=100** 件（プールが 100 未満ならプール全量）．
+   同値は (JMMLU タスク名, 設問文) の辞書順で決定論的に解く．
+4. **追加**: 選定行を既存 1,427 行の**後ろに追記**する．既存行は 1 行も改変・削除しない．
+   id は `{domain}-hardneg-{連番:03d}`．`sample_weight` は付けない（`_extract_sample_weights()` が
+   ドメイン数から自動計算するため未使用．`train_domain_classifier.py` docstring 参照）．
+
+**N=100 を選んだ理由**: G3 のオフライン実測で最良だったのは「追加行数 / 元の訓練行数 ≒ 56%」の点である
+（713 行に 399 行を追加）．現行の 1,427 行に対する同比率は約 800 行で，10 ドメイン共通の切りの良い値としては
+N=100（追加 900 行，+63%）が最も近い．N=100 でプールの過半を使い切るのは general のみ（100/125 = 80%）で，
+そこでは hard 選択の優位が無作為と同程度へ縮むだけで害は観測されていない（G3 の N=60 条件＝プールの 80% に相当）．
+
+**固定する構成（直近の最良構成 = Iter83 本走 `results/20260927_070239/` の構成そのまま）**
+
+`config.yaml` は **1 行も変更しない**．`embedding_model=qwen3-embedding:0.6b`，
+`embedding_instruction`（Iter81 の P1 文言），`embedding_view_concat=true`，`routing_method=supervised_classifier`，
+`confidence_threshold=0.0`，`dispatch_candidate_threshold=0.0`，`dispatch_top_k=2`，`dispatch_gap_max_k=4`，
+**`dispatch_gap_threshold=0.36`（Iter83 で採用．今回は触らない）**，`aggregation_method=max_confidence`，
+`judge_model`，`classifier_model_path`．`data/dataset.jsonl`（1,915 行，ビット単位で不変），
+`data/classifier_train.jsonl`（1,427 行，**ビット単位で不変**．追加分は別ファイルへ書く），
+`node.py`・`aggregator.py`・`classifier.py`・`metrics.py`・`run_experiment.py`・`train_domain_classifier.py`
+（いずれも**コード変更なし**）．**ドメイン固有の後付け補正は 2026-09-23 恒久運用ルールにより追加しない．
+N・選択規則・プールの定義は 10 ドメイン共通である．**
+
+**仮説（事前登録．本走前に数値で記録する）**
+
+「現行の訓練集合は各ドメイン 150 行の無作為標本で，決定境界の近傍が十分に張られていない．同一タスク群には
+未使用行が 4,578 行残っている．**現行分類器が正解ドメインへ低い確率しか与えない行を 10 ドメイン共通の規則で
+各 100 行追加すると，同数を無作為に追加した場合より境界が精緻化され，`top1_accuracy` が向上する**．
+効果は education（recall 0.4800）・social_science（0.6867）・general（0.6933）など境界の弱いドメインに
+相対的に大きく出ると予想するが，**ドメインごとの調整は一切行わない**．」
+
+**オフライン事前実測（本フェーズで実施．実機不使用．`data/embcache_*` と `results/` のみを使用）**
+
+| ゲート | 内容 | 実測 | 判定 |
+|---|---|---|---|
+| **G1（replay の忠実度）** | キャッシュ埋め込み（`embcache_eval_qwen3-embedding_0.6b{,__p1}.npy`）＋現行 artifact から `select_dispatch_targets()` の gap escalation を再現し，Iter83 本走を再現できるか | `compound_domain_set_recall`=**0.5819277108**，`compound_mean_dispatched_count`=**1.8891566265**，複合 k 分布 (278,21,116) が**本走実測と完全一致**．全 1,915 行 top1 は 0.793211（本走 0.792689，**差 1 行**） | **PASS**（本走の経路指標はオフラインで事前に予測できる） |
+| **G2（訓練経路の決定性）** | `data/classifier_train.jsonl` とキャッシュ埋め込みから再訓練した分類器が，配備中の artifact と一致するか | 再訓練モデルと artifact の評価集合 1,500 行 top1 が **0.786667 で完全一致** | **PASS**（訓練に乱数由来の揺らぎは無い．差が出れば必ず訓練データの差） |
+| **G3（選択規則の有効性．本レバーの中核）** | 訓練 1,427 行を各ドメイン 50% で seed / pool に分割し，seed で訓練した分類器で pool を採点．hard 上位 N 件と無作為 N 件を seed へ足して再訓練し，評価集合 1,500 行の top1 を比較（3 seed × N∈{20,40,60}） | 平均 top1: seed のみ 0.7649 / N=20 hard **0.7887** vs rand 0.7749（**+1.38pt**）/ N=40 hard **0.7929** vs rand 0.7778（**+1.51pt**）/ N=60 hard 0.7894 vs rand 0.7864（+0.30pt）．**9 対比較中 8 で hard が上回る**．N=40 hard（1,112 行）は**全 1,427 行で訓練した現行構成の 0.7867 すら上回る** | **PASS** |
+| **G4（最難帯を除外すべきか）** | N=40 固定で，最難 10 件 / 20 件を飛ばしてから取る変種を比較（3 seed） | 平均 top1: pure hard **0.7929** / skip10 0.7887 / skip20 0.7740．**除外は改善しない** | **PASS**（純粋な least-confidence を採用．追加パラメータを持たない） |
+| **G5（着地点の事前登録）** | 下表を本走前に記録すること．**実装フェーズでは，新 artifact を作った直後に同じ replay を走らせ，本走前に予測値を journal へ追記すること**（G1 により本走の経路指標は事前に確定できる） | 下表 | 実装フェーズで判定（合格条件は課さない） |
+
+G3 の測定上の注意: 評価集合 1,500 行のうち 72 行は現行訓練集合と設問文が重複している（**既知の欠陥．
+backlog B125 に起票済み**．education 46 / history_culture 26）．G3/G4 はこの 72 行を除いた 1,428 行でも
+同時に算出しており，結論（hard > rand，pure > skip）は同一である．本反復で追加する 900 行は評価集合と
+0 件重複なので，漏洩の割合は 72/1,427 から 72/2,327 へ下がる．72 行は基準線・新構成の双方に等しく含まれ，
+対比較を歪めない．
+
+**着地点予測（事前登録）**
+
+| 指標 | Iter83 本走実測（基準線 `results/20260927_070239/`） | **Iter84 予測値** |
+|---|---|---|
+| `top1_accuracy`（全 1,915 行） | 0.792689 | **0.800〜0.815．点推定 0.807（+1.4pt）** |
+| 単一 1,500 行 top1 | 0.786000 | +1〜+3pt |
+| 複合 415 行 top1 | 0.816867 | ほぼ不変〜微増 |
+| 既存 1,600 行部分集合 top1 | 0.787500 | +1〜+3pt |
+| `education` recall / precision | 0.4800 / 0.5304 | 上振れ余地が最大．ただし個別の成功条件は課さない |
+| `legal` recall / precision | 0.8800 / 0.8610 | **追加行 0 件の唯一のドメイン．非退行の監視対象** |
+| `compound_domain_set_recall` | 0.581928 | **予測不能（確信度分布が動くため）**．非退行の枠内で報告 |
+| `compound_mean_dispatched_count` | 1.889157 | **上振れ／下振れの両方がありうる**．非退行の枠内で報告 |
+| `mean_duration_ms` | 2286.9 | 送出数に比例．非退行枠 2744.3 |
+| ECE | 0.026 | 0.02〜0.05 |
+| `answer_quality_accuracy` / `end_to_end_accuracy` | 0.570667 / 0.350914 | ノイズ床 3SD=2.6pt（success_criteria (5)）の範囲でのみ判定 |
+| rank1 以外が選ばれた行数 | 2 | ≤ 10 |
+| Random / BestSingle / Oracle | 0.121671 / 0.126893 / 1.0 | success_criteria (3) により毎回併記 |
+
+**許容幅とノイズ床の根拠（B132 申し送り 3 への回答．「±1 行」を使わない理由）**
+
+- 訓練パイプラインは埋め込みを固定すればビット決定的である（G2 で確認）．実行時に残る揺らぎは ollama の
+  埋め込み再計算だけで，その大きさは**オフライン replay と Iter83 本走の差＝1,915 行中 1 行（0.052pt）**である．
+- しかし **Iter83 は送出段だけを動かすレバーで `selected_domain` が構造的に不変だったのに対し，本反復は
+  分類器そのものを作り替える**．よって「基準線との差が 1 行以内であること」を非退行条件にするのは誤りであり，
+  **非退行は (a) per-domain の検定（BH 補正 q=0.05），(b) 複合指標の明示レンジ，(c) 運用指標の上限**で判定する．
+- 主基準 `top1_accuracy` は McNemar の対比較で判定する．検出限界は discordant ペア数 n_d に対し
+  `1.96·sqrt(n_d)/1915` で，n_d≈100 なら 1.02pt，n_d≈150 なら 1.25pt である．**採用閾値 +1.0pt は
+  この検出限界とほぼ同じ水準**なので，閾値の充足だけでなく McNemar の有意性も同時に要求する（下記 AND 条件）．
+
+**成功条件・非退行条件（事前登録．結果を見る前に固定する）**
+
+基準線は **Iter83 本走 `results/20260927_070239/`**（全 1,915 行: top1=0.792689，単一 1,500 行 top1=0.786000，
+複合 415 行 top1=0.816867，1,600 行部分集合 top1=0.787500，`compound_domain_set_recall`=0.581928，
+`compound_mean_dispatched_count`=1.889157，fallback=0.0，dispatch_failure=0.000522，ECE=0.026，
+mean_duration_ms=2286.9，answer_quality=0.570667，end_to_end=0.350914，rank1 以外が選ばれた行数=2）．
+
+| 区分 | 指標 | 基準線 | 合格条件 |
+|---|---|---|---|
+| **主基準（効果）** | 全 1,915 行 `top1_accuracy` | 0.792689 | **(i) McNemar 対比較（α=0.05）で有意，かつ (ii) +1.0pt 以上（≥ 0.802689）**．2 条件の AND．Wilson 95% CI と検出限界 `1.96·sqrt(n_d)/1915` を併記する |
+| **非退行①** | per-domain recall / precision 計 20 指標（BH 補正 q=0.05） | Iter83 実測 | **有意退行 0 件**．特に **legal（唯一の追加 0 件ドメイン）**と，教師データが増えたのに悪化したドメインが無いことを個別に明記する |
+| **非退行②（複合被覆）** | `compound_domain_set_recall` | 0.581928 | **≥ 0.539759（Iter82 水準を下回らない）**．gt=0.36 は新しい確信度分布に対して未較正なので，Iter83 水準の維持は要求しない |
+| **非退行③（複合予算）** | `compound_mean_dispatched_count` | 1.889157 | **≤ 2.10（Iter83 比 +11% 以内）**．超過は「送出コストの実質的な悪化」として rejected |
+| **非退行④** | `fallback_rate` / `dispatch_failure_rate` | 0.0 / 0.000522 | fallback = 0.0，dispatch_failure ≤ 0.005 |
+| **非退行⑤（B132 申し送り 2）** | **rank1 以外が選ばれた行数**（`selected_domain` ≠ `probe_candidates` の最大確信度ドメイン） | 2 | **≤ 10**．部分 dispatch 失敗の検出器．超過したら送出段の失敗が top1 を汚染している疑いとして原因を特定してから判定する |
+| **非退行⑥** | `mean_duration_ms` | 2286.9 | **≤ 2744.3（+20% 以内）** |
+| **非退行⑦** | ECE | 0.026 | **≤ 0.08** |
+| 報告のみ | `answer_quality_accuracy` / `end_to_end_accuracy` | 0.570667 / 0.350914 | 3SD=2.6pt のノイズ床（success_criteria (5)）を超えない限り有意と判定しない |
+| 報告のみ | 単一 1,500 行 / 複合 415 行 / 既存 1,600 行部分集合の top1 | 0.786000 / 0.816867 / 0.787500 | 毎回併記 |
+| 報告のみ | Random / BestSingle / Oracle | 0.121671 / 0.126893 / 1.0 | success_criteria (3) により毎回併記 |
+| 報告のみ | 漏洩 72 行を除いた 1,843 行の top1 | — | B125 の絶対値水増しの影響を切り分けるため併記 |
+
+**判定規則（事前登録）**
+
+- **adopted**: 主基準 (i)(ii) を満たし，非退行①〜⑦をすべて満たす．
+- **partial**: McNemar が有意で Δtop1 が +0.5〜+1.0pt，かつ非退行①〜⑦を満たす．
+  **G3 の予測（hard 選択の優位 +1.5pt）からの乖離の原因**（プール規模の違い，基準訓練集合が大きいことによる
+  逓減，最難帯の雑音など）を特定して記録したうえで，N を変えた再試行の是非を backlog へ起票する．
+- **no_effect**: |Δtop1| < 0.5pt または McNemar が非有意．**先に F3/F4/F5 を再検証**してから結論を書く
+  （artifact が実際に差し替わっているか・各ノードへ配布されたか）．
+- **rejected**: Δtop1 ≤ −0.5pt，または非退行①〜⑦のいずれかに違反．
+- **invalid（実験不成立）**: F1〜F5 のいずれか不合格，`question_count != 1915`，
+  `compound_domain_question_count != 415`，**新 artifact の sha256 が `1cfcd3d8...`（基準線）と一致**
+  （＝再訓練が反映されていない），または**本走の top1 が新 artifact のオフライン replay 予測から 1.0pt 以上乖離**
+  （＝実行時経路が predicted と別の artifact を読んでいる疑い）．
+- **復元手順（partial / no_effect / rejected 共通）**:
+  `cp models/domain_classifier_pre_iter84_baseline.joblib models/domain_classifier.joblib` で artifact を戻し
+  （sha256 が `1cfcd3d8...` に戻ることを確認），`mise run deploy` を再実行して全 10 ノードで smoke_check を通す．
+  `data/classifier_train.jsonl` と `config.yaml` は本反復で一切触っていないので復元不要．
+  `data/classifier_train_iter84_hardneg.jsonl` は記録として残す（過去の `classifier_train_iter*.jsonl` と同じ扱い）．
+
+**レバーを読むコード行と，そこへ到達する条件（「変更したが実行パスに到達しない」失敗への恒久対策．省略不可）**
+
+| 経路 | レバーが効く箇所 | 到達条件 | 到達確認の手段 |
+|---|---|---|---|
+| **訓練側（オフライン）** | `scripts/train_domain_classifier.py` の `--train-data` | 新しい JSONL を渡すこと | **F2** |
+| **実行時側（本体）** | `classifier.py:load_domain_classifier()` → `estimate_confidence_classifier()` が `config.yaml` の `classifier_model_path`（= `models/domain_classifier.joblib`）を読む | 各ノードのコンテナが**配布後の** artifact を読むこと．artifact は `mise.toml` の `rsync` で配られる | **F4**: 全 10 ノードで artifact の sha256 が新値で一致（deploy 内の smoke_check） |
+| **記録側（指標の分母）** | `run_experiment.py:98` の `dispatched_domains` 再計算（gap_threshold=0.36，今回は不変） | 同上 | **F5** |
+| **到達しない経路（確認のみ．変更しない）** | 埋め込み（`expert_backend.embed_query_views()`）・`aggregator.py`・`config.yaml` | 本反復では一切触らない | **F1**: `config.yaml` の diff 0 行，`.py` の既存ファイルの diff 0 行 |
+
+**事前ゲート（実行パス到達確認．実装フェーズで判定する）**
+
+| ゲート | 内容 |
+|---|---|
+| **F1（変更の最小性）** | `git diff` が `scripts/mine_hard_negatives.py`（新規）・`data/MANIFEST.md`・`.claude/research/*` のみ．**`config.yaml` の diff は 0 行**．`node.py`・`classifier.py`・`aggregator.py`・`train_domain_classifier.py`・`build_dataset.py` の diff は 0 行 |
+| **F2（データ）** | `data/classifier_train_iter84_hardneg.jsonl` が **2,327 行**．先頭 1,427 行が `data/classifier_train.jsonl` と**バイト一致**．追加 900 行の設問文が `data/dataset.jsonl` の 1,915 行および既存 1,427 行と **0 件重複**．ドメイン別の追加数が **{legal: 0, 他 9 ドメイン: 100}**．id の重複 0 件．`data/classifier_train.jsonl` の sha256 が `eb89bf7b...` のまま不変 |
+| **F3（artifact）** | 新 `models/domain_classifier.joblib` の sha256 が基準線 `1cfcd3d8...` と**異なる**．`n_features_in_`=2048，`classes_` が 10 ドメイン．退避ファイル `models/domain_classifier_pre_iter84_baseline.joblib` の sha256 = `1cfcd3d8...` |
+| **F4（配布）** | `mise run deploy` 後，全 10 ノードで artifact の sha256 が新値で一致．`grep '^dispatch_gap_threshold:' $REMOTE_DIR/config.yaml` が全ノードで `0.36` |
+| **F5（実行時経路）** | 先頭 20 問の予備実行の `confidence`（rank1 の値）と `dispatched_domains` が，同 20 問のオフライン予測（新 artifact ＋ キャッシュ埋め込み，gt=0.36）と **20/20 一致**すること．**不一致なら本走に進まない** |
+
+**実験手順**
+
+1. **前提確認**: `wc -l data/dataset.jsonl` = 1915，`wc -l data/classifier_train.jsonl` = 1427，
+   `sha256sum models/domain_classifier.joblib` = `1cfcd3d8...`，`config.yaml` の
+   `embedding_view_concat: true` / `embedding_instruction` / `dispatch_gap_threshold: 0.36`．
+2. **artifact 退避**: `cp models/domain_classifier.joblib models/domain_classifier_pre_iter84_baseline.joblib`．
+3. **hard negative の採掘**（**wafl-ctrl5 限定**．config.yml 絶対条件 (B)）:
+   新規 `scripts/mine_hard_negatives.py` を実装して実行する．プール構築は `build_dataset.py` の
+   `_parse_jmmlu_task_csv` / `_format_jmmlu_query` / `_DOMAIN_TASK_MAP` を**再利用**し（重複実装しない），
+   埋め込みは `expert_backend.embed_query_views(..., instruction=..., concat_views=True)` を使う
+   （訓練・実行時と同一関数．Iter36 型の train/eval 不一致を構造的に防ぐ）．
+   プール埋め込みは `data/embcache_pool_qwen3-embedding_0.6b{,__p1}.npy` へ保存し再実行を安くする．
+4. **再訓練**（**wafl-ctrl5 限定**）: `data/MANIFEST.md` の現行コマンドの `--train-data` だけを
+   `data/classifier_train_iter84_hardneg.jsonl` に差し替えて実行する（他の引数は 1 文字も変えない）．
+5. **本走前の着地点記録（G5）**: 新 artifact ＋ キャッシュ埋め込みで replay を走らせ，
+   予測 top1 / per-domain / `compound_domain_set_recall` / `compound_mean_dispatched_count` を
+   **本走前に** journal へ追記する．
+6. **配布**: `mise run deploy` → **F4**．
+7. **予備 20 問**（`data/dataset_20.jsonl`）→ **F5**．不一致なら本走に進まない．
+8. **本走**: wafl500〜509 で 1,915 問フルスペック 1 回（config.yml 絶対条件 (A)．事前 replay で
+   経路指標が予測できても省略しない）．想定所要は Iter83 実績から約 75 分．
+9. `data/MANIFEST.md` に新 artifact の sha256・新訓練ファイルの sha256 と行数・生成コマンドを追記する．
+
+**次イテレーションへの申し送り（B132 申し送り 1 の引き継ぎ）**
+
+本レバーは分類器を作り替えるので **rank1−rank2 gap の分布が再び動く**．Iter81→82→83 で 3 回続けて観測した
+機序のとおり，**本反復が adopted になった場合は，直後に `dispatch_gap_threshold` の再較正イテレーションを
+1 回挟むこと**（レバー `dispatch_gap_threshold_recalibration` の再オープン．予算整合点の掃引をやり直す）．
+単一レバー原則により本反復では閾値を触らないため，`dispatch_gap_threshold=0.36` は新分布に対して未較正のまま
+本走する．非退行②③はその前提で緩めに置いてある．
+
+### 実装・実験 (Iter84)
+
+**（この節はオーケストレータが rc-executor の報告から補完した．rc-executor は「journal への実験結果記入は
+分析・考察フェーズの担当」という自身の役割定義を理由に journal を編集せず，`data/MANIFEST.md` と戻り値に
+のみ記録した．G5 は「本走前に journal へ追記」を要件としていたため，この点は要件どおりに運用されていない．
+G5 の予測値そのものは本走前に算出・記録されており（下表），事後の辻褄合わせではない．運用ルールの
+不整合として backlog へ申し送る．）**
+
+**実施した変更**
+
+| 種別 | パス | 内容 |
+|---|---|---|
+| 新規 | `scripts/mine_hard_negatives.py`（369 行） | JMMLU 未使用プールから 10 ドメイン共通規則で hard negative を採掘．プール構築は `build_dataset.py` の `_DOMAIN_TASK_MAP` / `_parse_jmmlu_task_csv` / `_format_jmmlu_query` を再利用，埋め込みは `expert_backend.embed_query_views(..., concat_views=True)`（`train_domain_classifier.py`・`node.py` と同一関数） |
+| 生成 | `data/classifier_train_iter84_hardneg.jsonl` | 2,327 行（既存 1,427 行 ＋ 追加 900 行） |
+| 生成 | `data/embcache_pool_qwen3-embedding_0.6b{,__p1}.npy` | プール埋め込みキャッシュ |
+| 退避 | `models/domain_classifier_pre_iter84_baseline.joblib` | 基準線 artifact（sha256 `1cfcd3d8...`） |
+| 更新 | `models/domain_classifier.joblib` | 新 artifact（sha256 `34e4d33bcfb0695a48b410cb70fd1d3d38973e048631b1c1ffe516df423b34c9`，`n_features_in_`=2048，10 クラス） |
+| 追記 | `data/MANIFEST.md`（+109 行） | 生成コマンド・sha256・ゲート結果・本走実測値 |
+| **無変更** | `config.yaml`・`node.py`・`aggregator.py`・`classifier.py`・`train_domain_classifier.py`・`build_dataset.py`・`data/classifier_train.jsonl` | `git diff` 0 行．`classifier_train.jsonl` は sha256 `eb89bf7b...` 不変 |
+
+**事前ゲートの判定**
+
+| ゲート | 内容 | 結果 |
+|---|---|---|
+| **F1** | 変更の最小性（上記 6 ファイル ＋ 既存訓練データの diff が 0 行） | **PASS** |
+| **F2** | データ健全性: 2,327 行，先頭 1,427 行が既存ファイルとバイト一致，追加 900 行の内訳 `{legal: 0, 他 9 ドメイン: 各 100}`，id 重複 0，評価 1,915 行・既存訓練 1,427 行・追加行同士の重複いずれも 0 | **PASS** |
+| **F3** | 新 artifact が基準線と別物で，退避ファイルは基準線と一致 | **PASS** |
+| **G5** | 本走前 replay（新 artifact ＋ キャッシュ埋め込み） | **実施**（予測値は下表） |
+| **F4** | `mise run deploy` 後，全 10 ノードで artifact sha256 `34e4d33b...` 一致・`dispatch_gap_threshold: 0.36` 一致．健康チェック・smoke_check（git-status / hashes / probe）全合格 | **PASS** |
+| **F5** | 予備 20 問（`data/dataset_20.jsonl`）の `confidence`・`dispatched_domains` がオフライン予測と **20/20 完全一致** | **PASS** |
+
+**本走**: `results/20260927_110526/`（1,915 問フルスペック，所要約 63 分）．基準線は Iter83 本走
+`results/20260927_070239/`．
+
+**主基準の実測（判定は分析フェーズ）**
+
+| 指標 | 基準線（Iter83） | 事前登録の予測 | G5 の本走前 replay 予測 | **本走実測** |
+|---|---|---|---|---|
+| `top1_accuracy`（全 1,915 行） | 0.792689 | 0.800〜0.815（点推定 0.807） | 0.806266 | **0.804700**（+1.201pt） |
+| Wilson 95% CI | — | — | — | [0.786342, 0.821838] |
+| McNemar | — | α=0.05 で有意 | — | chi2=2.674033，**p=0.101997（非有意）** |
+| discordant（基準線正解→新誤り / 基準線誤り→新正解） | — | — | — | 79 / 102 |
+| 検出限界 `1.96·sqrt(n_d)/1915`（n_d=181） | — | — | — | 1.378pt（実測 Δ1.201pt は**これを下回る**） |
+
+**事前登録の主基準は AND 条件「(i) McNemar 有意 かつ (ii) +1.0pt 以上」であり，(ii) は満たすが (i) を
+満たさない．**
+
+**非退行条件の実測**
+
+| # | 条件 | 基準線 | 実測 | 充足 |
+|---|---|---|---|---|
+| ① | per-domain 20 指標（BH q=0.05）で有意退行 0 件 | — | **有意差 2 件**．`education_recall` 0.4120→**0.3133**（p=0.000427，**退行**），`history_culture_recall` 0.8009→0.8701（p=0.000796，改善）．他 18 指標は有意差なし | **不充足**（退行 1 件） |
+| ② | `compound_domain_set_recall ≥ 0.539759` | 0.581928 | 0.573494 | 充足 |
+| ③ | `compound_mean_dispatched_count ≤ 2.10` | 1.889157 | 2.048193（+8.4%） | 充足 |
+| ④ | fallback 0.0 / dispatch_failure ≤ 0.005 | 0.0 / 0.000522 | 0.0 / 0.001567 | 充足 |
+| ⑤ | rank1 以外が選ばれた行数 ≤ 10 | 2 | 3 | 充足 |
+| ⑥ | `mean_duration_ms ≤ 2744.3` | 2286.9 | 2280.408 | 充足 |
+| ⑦ | ECE ≤ 0.08 | 0.026 | 0.075591（+4.96pt） | 充足（ただし上限際） |
+
+**報告指標**
+
+| 指標 | 基準線 | 実測 |
+|---|---|---|
+| 既存 1,600 行部分集合 top1 | 0.787500 | 0.808125 |
+| `single_domain_top1`（single 1,500 行） | 0.786000 | 0.807333 |
+| 複合 415 行 top1 | 0.816867 | **0.795181**（低下） |
+| 漏洩 72 行除外（1,843 行）top1 | — | 0.811177 |
+| Cohen's kappa | 0.761499 | 0.785973 |
+| `answer_quality_accuracy` | 0.570667 | 0.580667 |
+| `end_to_end_accuracy` | 0.350914 | 0.362924 |
+| Random / BestSingle / Oracle baseline | — | 0.121671 / 0.126893 / 1.0（不変） |
+
+**per-domain 詳細（基準線 → 実測，recall / precision）**
+
+business_economics 0.8182/0.7746→0.8139/0.7611，computer_science 0.8268/0.8884→0.8571/0.9041，
+education 0.4120/0.5304→**0.3133**/0.6759，general 0.4626/0.8750→0.5022/0.8769，
+history_culture 0.8009/0.7400→**0.8701**/0.7701，legal 0.6626/0.8610→0.6420/0.9123，
+mathematics 0.6710/0.8564→0.7013/0.8757，medical 0.7510/0.8153→0.7427/0.7553，
+natural_science 0.6494/0.8571→0.6580/0.7958，social_science 0.4545/0.7554→0.5108/0.7239．
+
+**想定外の事象（分析フェーズへの申し送り）**
+
+1. **プール実測値が事前登録値から微小に乖離**: natural_science 783→776（-7），education 233→232（-1），
+   legal・他は一致．原因は JMMLU の**同一タスク CSV 内で文字通り重複している設問行**（`college_physics`
+   内 6 件，`conceptual_physics` 内 1 件，`high_school_psychology` 内 1 件）をプール構築時に重複排除した
+   ため（ドメイン間の混入ではなく同一タスク内の重複であることを実データで確認済み）．各ドメインとも
+   N=100 に対して十分な余裕があり，**最終選定結果（9 ドメイン各 100 件，legal 0 件，計 900 件）には
+   影響しない**．
+2. **`mise run analyze` の最新ディレクトリ自動検出が誤動作**: `ls -1d results/*/ | sort | tail -1` が
+   ASCII 順で `i` > `2` のため `results/iter45_preliminary/` を選んでしまう．今回は
+   `mise run analyze -- 20260927_110526` と明示指定して回避した（コード変更なし）．`mise.toml` 側の
+   既知の弱点として backlog へ記録する．
+3. **主基準の McNemar が非有意**（p=0.102）であり，G3 のオフライン推定（+1.51pt，9 対比較中 8 で hard
+   優位）から実効果幅（+1.201pt，検出限界 1.378pt 未満）へ乖離した．
+4. **`education_recall` が事前仮説に反して有意に退行**（0.4120→0.3133）．ただし `education_precision` は
+   0.5304→0.6759 と上昇しており，education へ張り出していた決定境界が引き締まった可能性がある．
+5. **複合 415 行 top1 が 0.816867→0.795181 と低下**する一方，single 1,500 行は 0.786000→0.807333 と
+   上昇した．hard negative が single 由来（JMMLU の単一タスク行）であることとの関係を分析フェーズで
+   検討すること．
+
+### Iteration 84 実行済み
+
+**変更（1 レバーのみ）**
+
+`cross_domain_training_data_augmentation` = `hard_negative_mining_all_domains`．
+`data/classifier_train.jsonl`（1,427 行）へ，現行分類器の正解ドメイン確率 `p_true` が低い JMMLU 未使用行を
+10 ドメイン共通規則で各 100 行（legal はプール 0 のため 0 行）追加した 2,327 行で分類器を再訓練し，
+`models/domain_classifier.joblib` を差し替えた（sha256 `1cfcd3d8...` → `34e4d33b...`）．
+`config.yaml`・既存 `.py`・`data/classifier_train.jsonl`・評価集合はいずれも diff 0 行（F1・F2 で確認）．
+
+**判定: rejected（事前登録の判定規則にそのまま該当．artifact は基準線へ復元する）**
+
+| 事前登録の条件 | 実測 | 充足 |
+|---|---|---|
+| 主基準 (i) McNemar α=0.05 で有意 | chi2=2.674033，**p=0.101997** | **不充足** |
+| 主基準 (ii) Δtop1 ≥ +1.0pt | 0.792689 → **0.804700**（+1.201pt，Wilson 95%CI [0.786342, 0.821838]） | 充足 |
+| 非退行① per-domain 20 指標（BH q=0.05）で有意退行 0 件 | `education_recall` 0.4120→**0.3133**（p=0.000427，退行）／`history_culture_recall` 0.8009→0.8701（改善） | **不充足** |
+| 非退行②〜⑦ | set_recall 0.573494 ≥ 0.539759，mean_dispatched 2.048193 ≤ 2.10，fallback 0.0／dispatch_failure 0.001567，rank1 以外 3 行 ≤ 10，mean_duration_ms 2280.4 ≤ 2744.3，ECE 0.075591 ≤ 0.08 | すべて充足 |
+
+判定規則の `rejected` 分岐（「非退行①〜⑦のいずれかに違反」）と `no_effect` 分岐（「McNemar が非有意」）が
+同時に成立する．**より厳しい `rejected` を採る**．BH 補正後に有意な実測の退行が 1 件ある以上，
+「効果が見えなかった」ではなく「害が確認された」と記録するのが正しいためである．
+`partial` は採らない: 本リポジトリの前例（Iter29/30 の較正系，Iter62/63 の multilabel 系）で `partial` は
+**主基準を満たしたうえで非退行が 1 件 FAIL した場合**に限って用いられており，今回は主基準 (i) が不成立で
+その前提を欠く．事前登録の `partial` 分岐（Δ +0.5〜+1.0pt かつ非退行全充足）にも該当しない．
+**`invalid` ではない**: F3（sha256 が別物）・F4（全 10 ノードで新 sha256 一致）・F5（予備 20 問が 20/20 一致）が
+すべて PASS で，本走 top1 0.804700 は新 artifact の replay 予測 0.806266 と 0.157pt しか違わない
+（invalid 判定の閾値 1.0pt 以内）．レバーは確かに実行パスへ到達している．
+
+**復元（必須．次の実験の前に行うこと）**: `cp models/domain_classifier_pre_iter84_baseline.joblib
+models/domain_classifier.joblib`（sha256 が `1cfcd3d8...` に戻ることを確認）→ `mise run deploy` で全 10 ノードへ再配布．
+本節の執筆時点では**まだ実施していない**（実機への配布は実験フェーズの操作のため）．
+以後の基準線は Iter83 本走 `results/20260927_070239/` のままである．
+
+**結果の内訳（本節で新たに実測した数値．すべて `results/20260927_070239` 対 `results/20260927_110526`）**
+
+| 母数 | 基準線 | 実測 | Δ | discordant（悪化/改善） | McNemar |
+|---|---|---|---|---|---|
+| 全 1,915 行 | 0.792689 | 0.804700 | **+1.201pt** | 79 / 102 | chi2=2.674，p=0.102（非有意） |
+| single 1,500 行 | 0.786000 | 0.807333 | **+2.133pt** | 54 / 86 | chi2=6.864，**p=0.0088（有意）** |
+| compound 415 行 | 0.816867 | 0.795181 | **−2.169pt** | 25 / 16 | chi2=1.561，p=0.212（非有意） |
+
+**論点 1: G3 のオフライン推定 +1.51pt と実効果 +1.201pt の乖離，および必要標本数**
+
+- 乖離そのものは小さい（0.31pt）．G3 は訓練 1,427 行を半分（713 行）に割った小規模設定で，
+  **追加行数／元の訓練行数 ≒ 56%** の点を測っていた．小さい訓練集合ほど 1 行あたりの限界情報量が大きいので，
+  G3 の +1.51pt は本走（1,427 行に +900 行）への上振れ気味の外挿である．実効果がその 8 割で出たこと自体は
+  仮説と整合し，**方向・桁とも外していない**．外れたのは効果量ではなく**検出力の見積り**である．
+- 計画時は「n_d≈100〜150 なら検出限界 1.02〜1.25pt」と見積り，採用閾値 +1.0pt をそこに合わせた．
+  実際の n_d は **181**（discordant 率 p_d=0.09452）で検出限界は **1.378pt** へ伸び，
+  +1.201pt はその内側に収まった．**分類器を作り替えるレバーは送出段のレバーより discordant を多く生む**
+  （Iter83 は正味 1 行）ため，n_d を 100〜150 と置いた前提自体が楽観的だった．
+- **必要標本数（今後の成功条件設計に使うこと）**: McNemar は `N ≥ (z_α+z_β)²·p_d/δ²` で見積れる．
+  実測 p_d=0.0945 のとき **δ=1.2pt を有意にするには N≥2,517（検出力 50%＝有意境界）・
+  N≥5,143（検出力 80%）・N≥6,885（検出力 90%）**．現行 N=1,915 で 80% の検出力が得られる最小効果は
+  **δ≥1.97pt**，有意境界でも **δ≥1.378pt** である．
+  **帰結: 「+1.0pt 以上 かつ McNemar 有意」という AND 条件は，N=1,915 では事実上満たせない事前登録だった**
+  （+1.0〜1.38pt の帯が構造的に判定不能になる）．今後は (a) 期待効果が 2pt 未満なら評価集合を先に増やす，
+  (b) それが出来ないなら閾値を検出限界（`1.96·sqrt(p_d/N)`）以上に置く，のどちらかを計画時に選ぶこと．
+
+**論点 2: `education_recall` の退行と `education_precision` の上昇（「境界の引き締まり」は single 行では正しく，compound 行では成り立たない）**
+
+- 指標の母数は expected に education を含む **233 行**（single 150 ＋ compound 83）である．内訳は
+  **single 72→62（−10）・compound 24→11（−13）**で，**退行 23 行のうち 57% が compound 行由来**である．
+- **single 行だけを見ると「引き締まり」の解釈は妥当**: recall 0.4800→0.4133（−6.67pt）に対し
+  precision 0.5669→0.7294（**+16.25pt**），**F1 は 0.5199→0.5277（+0.78pt）で微増**．
+  基準線で education が誤って吸い込んでいた行（medical 23・social_science 17 など計 55 行）は
+  新構成で 23 行（medical 8・legal 5・social_science 5 ほか）まで減り，**そのうち 29 行が正解ドメインへ復帰した**．
+  逆向きの流出は single の education 行 18 行（基準線で正解→新構成で誤り）で，行き先は **medical 10・
+  social_science 8**．差し引き −10 行（72→62）である．
+  すなわち single 行では「過剰に張り出していた education の決定境界が引き締まり，他ドメインの recall を押し上げた」
+  という解釈がデータと一致する（general F1 +4.69pt，history_culture F1 +5.50pt，computer_science F1 +2.91pt）．
+- **compound 行では純粋な損失**: education を含む 83 行で education が選ばれた回数が 24→11 へ落ち，
+  compound で悪化した 25 行のうち 16 行が expected に education を含む（education+general 7・
+  education+natural_science 4・education+legal 3・education+social_science 2）．
+  複合設問は「2 ドメインのどちらかが選ばれれば正解」なので，**張り出した education 境界は compound 行では
+  得点源として働いていた**．引き締めはその得点源を直接削る．
+- **母数込みの F1（233 行基準）は 0.46375→0.42815（−3.56pt）で悪化**する．すなわち
+  「F1 で見れば相殺される」とは言えない．**single 行に限れば +0.78pt，全母数なら −3.56pt** と結論が反転するので，
+  今後 education を論じるときは母数を必ず明記すること．
+- **2026-09-23 恒久ルールにより，education だけを狙った閾値・intercept・訓練データの後付け補正での是正は行わない．**
+  是正するなら 10 ドメイン共通の規則（例: 追加行数 N の変更，compound 行を含む評価での選択規則）でのみ行う．
+
+**論点 3: compound の低下（−2.169pt）と single の上昇（+2.133pt）の乖離**
+
+- 訓練へ追加した 900 行は**すべて JMMLU の単一タスク行**であり，複合設問は 1 行も含まない．
+  したがって本レバーは **single 行の分布上でのみ境界を精緻化し，compound 行にとっては分布外の変更**である．
+- compound で悪化した 25 行の遷移先は **medical 14・history_culture 4・business_economics 3** に集中する．
+  medical は precision が 0.8153→0.7553（−6.00pt）と落ちる一方 compound での被選択が 222→237 行へ増えており，
+  **「複合設問の文面に対して medical が過剰に立つ」方向へ境界が動いた**．
+  medical は未使用プールが最大（1,110 行）で，追加 100 行の情報量が最も豊富だった側である．
+- 機序の整理: **single 行では「1 つの正解ドメインを当てる」ので境界の引き締めが得になり，
+  compound 行では「2 つのうちどちらでもよい」ので境界の緩さが得になる**．両者は最適な境界が構造的に食い違う．
+  hard negative mining を single 行だけから採る限り，この食い違いは N を調整しても消えない．
+  **compound を守るには，訓練側に複合的な信号を入れるか，評価側で両者を分けて事前登録するかのどちらかが要る．**
+- なお compound の −2.169pt は discordant 25/16・chi2=1.561・p=0.212 で**単体では有意ではない**
+  （n=415 では ±4pt 程度が検出限界）．「compound が有意に壊れた」とまでは言えない点を記録しておく．
+
+**論点 4: ECE 0.026→0.075591 の悪化は「過信」ではなく「自信不足」への移行である**
+
+| 指標（全 1,915 行） | 基準線 | 新構成 |
+|---|---|---|
+| rank1 confidence 平均 | 0.7843 | 0.7306 |
+| top1_accuracy | 0.7927 | 0.8047 |
+| 平均確信度 − 正答率 | **−0.0084** | **−0.0741** |
+| rank1−rank2 gap 平均 | 0.6650 | 0.5967 |
+| gap の p25 / p50 / p75 | 0.4159 / 0.7730 / 0.9381 | 0.3557 / 0.6657 / 0.8636 |
+| gap < 0.36 の行の割合 | 21.78% | 25.22% |
+
+- 精度は上がったのに確信度が下がった．**最難帯 900 行を訓練へ足したことで `CalibratedClassifierCV`
+  （temperature）の温度が上がり，確率が一様側へ寄った**というのが素直な機序である．ECE の悪化は
+  過信ではなく**系統的な自信不足**（−7.41pt）で，方向は Iter29〜31 で扱った過信とは逆である．
+- gap 分布が一様に圧縮された結果，固定閾値 `dispatch_gap_threshold=0.36` に対して
+  **gap<0.36 の行が 21.78%→25.22% へ増え**，`compound_mean_dispatched_count` が 1.889→2.048（+8.4%）になった．
+  compound 行に限れば gap<0.36 は 33.01%→36.87%．これは Iter81→82→83 で 3 回観測した
+  「特徴量・分類器を変えると gap 閾値が未較正になる」機序の **4 回目**である．
+- **B132 申し送り 1（再較正イテレーションを挟むか）への回答**: 本反復は rejected で artifact を復元するので，
+  確信度分布は基準線へ戻り `gt=0.36` は較正済みのまま保たれる．**したがって今回は再較正を挟まない**．
+  ただし上の数値は，**分類器を作り替えるレバーが adopted になった時には必ず再較正が要る**ことを
+  4 例目として裏づける．次に分類器を差し替える反復では，計画時点で再較正をセットで予定すること．
+
+**学び**
+
+1. **N=1,915 の評価集合は +1.0〜1.4pt の効果を原理的に判定できない**（p_d≈0.095 のとき有意境界 1.378pt）．
+   この帯に入る効果を狙うレバーでは，事前登録の時点で「判定不能で終わる」ことが確定している．
+   Iter63〜68 の複合設問の検出力不足（n=100）と**同型の失敗が，今度は全体集合の側で起きた**．
+   `N ≥ (z_α+z_β)²·p_d/δ²` を計画フェーズの必須計算項目にすること．
+2. **single 行と compound 行では最適な決定境界が逆を向く**．single は引き締め，compound は緩さを好む．
+   単一ドメイン行だけから採った hard negative は前者しか最適化しないので，複合被覆とは構造的に
+   トレードオフになる．今後 `top1_accuracy`（全体）を主基準に置くレバーでは，この 2 部分集合の
+   内訳を必ず分解して報告すること（全体だけ見ると打ち消し合って「効果なし」に見える）．
+3. **難しい行を訓練へ足すと確率は一様側へ寄る**（精度は上がるのに確信度が下がる＝自信不足）．
+   ECE 悪化＝過信という先入観で読むと誤診する．較正の向きは毎回，平均確信度 − 正答率の符号で確かめること．
+4. **教科書どおりの hard negative mining は，本研究のデータでは「効果が無い」のではなく
+   「single では効き，compound と education で損を出し，正味が検出限界に埋もれる」**．
+   オフライン G3 の 9 対比較中 8 勝という強い事前証拠があっても，評価集合の母数が足りなければ確定できない．
+
+---
+
 ## Iteration 83: 連結埋め込みの確信度分布に合わせた送出 gap 閾値の再較正
 
 ### 調査 (Iter83)

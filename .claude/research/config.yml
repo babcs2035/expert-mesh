@@ -1986,7 +1986,7 @@ levers:
             出典: docs/d0008（Ollama embedding モデル比較，2026年）．"}
   - {name: cross_domain_training_data_augmentation,
      values: [hard_negative_mining_all_domains, hard_negative_mining_all_domains_retry_expanded_set,
-              hard_random_hybrid_all_domains],
+              hard_random_hybrid_all_domains, hard_random_hybrid_ratio_25_75_all_domains],
      note: "[2026-09-23 backlog B115 / docs/d0008] 訓練データの質向上を，education 等の特定
             ドメインではなく **10 ドメイン全てに同一ルールを適用する**形で試みる．
             Iter32 で判明した『`class_weight='balanced'` は `sample_weight` と数式レベルで
@@ -2065,7 +2065,41 @@ levers:
             （主基準 = McNemar 有意 AND Δtop1 ≥ +1.0pt，非退行① 20 指標 BH q=0.05 で有意退行 0 件，
             ②〜⑦も同一）．**ドメイン固有の後付け補正は追加しない（2026-09-23 恒久運用ルール (1)）．**
             **除外集合の恒久規則（B140）**: 採掘プールからは評価集合と `classifier_train.jsonl` に加え，
-            過去に生成した全 `data/classifier_train_iter*.jsonl` と `data/*_expansion_*.jsonl` を除外すること．"}
+            過去に生成した全 `data/classifier_train_iter*.jsonl` と `data/*_expansion_*.jsonl` を除外すること．
+            **ただし B142 (B) の判断により，この除外規則は『評価集合を拡充する方向』にのみ適用し，
+            訓練行の採掘方向には適用しない**（適用するとプール定義が second lever として動いてしまうため）．
+            ---
+            **[2026-09-27 backlog B143 で値 `hard_random_hybrid_ratio_25_75_all_domains` を追加]**
+            Iter87（`hard_random_hybrid_all_domains`，hard 50 / random 50）は **adopted**．
+            top1 0.786317→0.801456（Δ +1.514pt，McNemar chi2=11.508850 p=0.000693，discordant 226），
+            非退行① は BH 補正後の有意差が `history_culture_recall` の改善 1 件のみで**退行 0 件**，
+            非退行②〜⑦も全 PASS．Iter84/86 で 2 反復連続していた `education_recall` の有意退行は
+            再現しなかった（p=0.072486．ただし点推定は依然 −2.54pt で『差がない』ことの証明ではない）．
+            **確定した用量反応（2 点）**: hard 100/0 → Δ +1.019pt・非退行① FAIL，
+            hard 50/50 → Δ +1.514pt・全 PASS．層別 Δ は Q1 +11.79 / Q2 −2.91 / Q3 −1.02 / Q4 −0.58 /
+            Q5 +0.29（Iter86 は +14.85 / −6.84 / −2.33 / −1.02 / +0.44）で，
+            **Q1 の改善は入れ替わり行数に比例してしか減らない（−21%）のに，Q2〜Q4 の退行は
+            比例以上に消える（−43〜−58%）**という非対称が実測された．
+            **本値の内容**: 追加件数・ドメイン別内訳（{legal: 0, 他 9 ドメイン各 100} = 900 行）・
+            出力書式・id 規則・乱数種（87）をすべて Iter87 と同一に保ったまま，
+            **各ドメインの内訳を『最難 25 行 ＋ 残プールからの無作為 75 行』へ変える**
+            （10 ドメイン一律．ドメインごとに比率を変えない）．
+            **狙い**: 上記の非対称が 50/50 より先でも続くなら top1 はさらに伸びる．頭打ち・反転するなら
+            50/50 付近が最適比であると確定でき，どちらに転んでも用量反応が決着する．
+            **必須の report-only 手順**: 50/50 と 25/75 の双方について種 87/88/89 のオフライン replay
+            （1,915 行キャッシュ埋め込み．忠実度は Iter87 で本走との乖離 0.104pt として実証済み）を行い，
+            **種由来の Δ の散らばりを数値化してから比の差を解釈すること**．比の差は 0.3〜0.5pt 規模と
+            見込まれ，種由来の分散と同程度になりうる（B142 (A) の要レビュー事項）．
+            **種を複数試して良い方を採ってはならない**（本走に使う種は 87 で固定）．
+            **基準線**: Iter87 本走 `results/20260927_174150/`（3,435 行，top1 = 0.801456，
+            分類器 sha256 `f6c33edb...`）へ更新する．系列比較のため `results/20260927_130237/`
+            （top1 = 0.786317）も併記すること．Iter87 artifact は adopted のため復元せず実機に残っている．
+            **成功条件・非退行条件**: Iter86/87 の事前登録を踏襲するが，**基準線が更新されるため
+            主基準の絶対値は計画フェーズで引き直すこと**（Δ の条件そのものは緩めない）．
+            `education` recall（点推定 −2.54pt のまま）と `natural_science` precision は
+            引き続き個別に明記して監視する．
+            **プールの構造的上限（変わらない）**: computer_science・social_science・general は
+            M=100=N のため，追加行数 N=100 を保つ限りどんな抽出規則でも no-op である．"}
   - {name: compound_eval_set_expansion,
      values: [existing_public_dataset, llm_generated_separate_generator, manual_authoring],
      note: "[2026-09-26 backlog B118 で追加．research_frontier 最上位項目のレバー化]

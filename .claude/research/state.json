@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 86,
-  "iteration_name": "拡充した評価集合での hard negative mining 再試行",
-  "phase": "evaluate",
+  "iteration": 87,
+  "iteration_name": "hard negative と無作為抽出の半々混合による訓練データ拡充",
+  "phase": "analyze",
   "status": "running",
-  "current_lever": "cross_domain_training_data_augmentation=hard_negative_mining_all_domains_retry_expanded_set",
-  "experiment_dir": "results/20260927_152208",
-  "experiment_deadline": 1790501228,
-  "updated_at": 1790496000,
-  "last_slack_ts": "1790487956.291399",
-  "iteration_thread_ts": "1790488636.062409",
+  "current_lever": "cross_domain_training_data_augmentation=hard_random_hybrid_all_domains",
+  "experiment_dir": "results/20260927_174150",
+  "experiment_deadline": 1790509762,
+  "updated_at": 1790510400,
+  "last_slack_ts": "1790504198.313859",
+  "iteration_thread_ts": "1790496868.037399",
   "notion_toggle_created": true,
-  "last_commit": "0737ed6"
+  "last_commit": "c14e276"
 }
