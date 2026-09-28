@@ -1,0 +1,146 @@
+{
+  "n_existing": 2275,
+  "seeds": [
+    96,
+    196,
+    296
+  ],
+  "n_folds": 5,
+  "cv_accuracy_a_softmax": 0.8026373626373626,
+  "cv_accuracy_b_ovo": 0.7945787545787546,
+  "cv_delta_pt": -0.805860805860803,
+  "overall_mcnemar": {
+    "discordant_a_only": 138,
+    "discordant_b_only": 83,
+    "discordant_pairs": 221,
+    "chi2_statistic": 13.194570135746606,
+    "p_value": 0.0002807613924458163
+  },
+  "per_domain": {
+    "business_economics": {
+      "discordant_a_only": 7,
+      "discordant_b_only": 8,
+      "discordant_pairs": 15,
+      "chi2_statistic": 0.0,
+      "p_value": 1.0,
+      "bh_significant": false,
+      "recall_a": 0.816,
+      "recall_b": 0.8173333333333334,
+      "recall_delta_pt": 0.13333333333334085
+    },
+    "computer_science": {
+      "discordant_a_only": 3,
+      "discordant_b_only": 0,
+      "discordant_pairs": 3,
+      "chi2_statistic": 1.3333333333333333,
+      "p_value": 0.24821307898992373,
+      "bh_significant": false,
+      "recall_a": 0.92,
+      "recall_b": 0.916,
+      "recall_delta_pt": -0.40000000000000036
+    },
+    "education": {
+      "discordant_a_only": 25,
+      "discordant_b_only": 41,
+      "discordant_pairs": 66,
+      "chi2_statistic": 3.409090909090909,
+      "p_value": 0.06483815699206641,
+      "bh_significant": false,
+      "recall_a": 0.5350140056022409,
+      "recall_b": 0.5574229691876751,
+      "recall_delta_pt": 2.2408963585434205
+    },
+    "general": {
+      "discordant_a_only": 6,
+      "discordant_b_only": 2,
+      "discordant_pairs": 8,
+      "chi2_statistic": 1.125,
+      "p_value": 0.2888443663464848,
+      "bh_significant": false,
+      "recall_a": 0.7986666666666666,
+      "recall_b": 0.7933333333333333,
+      "recall_delta_pt": -0.5333333333333301
+    },
+    "history_culture": {
+      "discordant_a_only": 19,
+      "discordant_b_only": 1,
+      "discordant_pairs": 20,
+      "chi2_statistic": 14.45,
+      "p_value": 0.00014392985649713808,
+      "bh_significant": true,
+      "recall_a": 0.8523809523809524,
+      "recall_b": 0.8238095238095238,
+      "recall_delta_pt": -2.857142857142858
+    },
+    "legal": {
+      "discordant_a_only": 2,
+      "discordant_b_only": 2,
+      "discordant_pairs": 4,
+      "chi2_statistic": 0.25,
+      "p_value": 0.6170750774519738,
+      "bh_significant": false,
+      "recall_a": 0.8398268398268398,
+      "recall_b": 0.8398268398268398,
+      "recall_delta_pt": 0.0
+    },
+    "mathematics": {
+      "discordant_a_only": 4,
+      "discordant_b_only": 0,
+      "discordant_pairs": 4,
+      "chi2_statistic": 2.25,
+      "p_value": 0.13361440253771617,
+      "bh_significant": false,
+      "recall_a": 0.948,
+      "recall_b": 0.9426666666666667,
+      "recall_delta_pt": -0.5333333333333301
+    },
+    "medical": {
+      "discordant_a_only": 25,
+      "discordant_b_only": 11,
+      "discordant_pairs": 36,
+      "chi2_statistic": 4.694444444444445,
+      "p_value": 0.030260280020471653,
+      "bh_significant": false,
+      "recall_a": 0.6733333333333333,
+      "recall_b": 0.6546666666666666,
+      "recall_delta_pt": -1.866666666666672
+    },
+    "natural_science": {
+      "discordant_a_only": 5,
+      "discordant_b_only": 10,
+      "discordant_pairs": 15,
+      "chi2_statistic": 1.0666666666666667,
+      "p_value": 0.30169958247834794,
+      "bh_significant": false,
+      "recall_a": 0.876,
+      "recall_b": 0.8826666666666667,
+      "recall_delta_pt": 0.666666666666671
+    },
+    "social_science": {
+      "discordant_a_only": 42,
+      "discordant_b_only": 8,
+      "discordant_pairs": 50,
+      "chi2_statistic": 21.78,
+      "p_value": 3.057709796472352e-06,
+      "bh_significant": true,
+      "recall_a": 0.788,
+      "recall_b": 0.7426666666666667,
+      "recall_delta_pt": -4.533333333333333
+    }
+  },
+  "n_bh_significant_regressions": 2,
+  "p1_weak_domain_delta_sum_pt": 0.3742296918767485,
+  "p1_pass_ge_3pt": false,
+  "p2_pass_cv_delta_ge_1pt": false,
+  "p3_legal_recall_delta_pt": 0.0,
+  "p3_pass_legal_not_regressed": true,
+  "p4_proba_sums_ok_a": true,
+  "p4_proba_sums_ok_b": true,
+  "p4_mean_gap_lt_threshold_fraction_a": 0.20102564102564105,
+  "p4_mean_gap_lt_threshold_fraction_b": 0.08307692307692308,
+  "p4_gap_fraction_delta_pt": -11.794871794871797,
+  "p4_pass_gap_within_5pt": false,
+  "screening_gate_1_cv_delta_ge_1pt": false,
+  "screening_gate_2_zero_bh_regressions": false,
+  "screening_gate_pass": false
+}

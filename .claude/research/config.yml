@@ -2634,6 +2634,87 @@ levers:
             学習曲線 err ∝ n^(-0.127) の名目 n による外挿は 2 反復連続で 3〜5 倍の過大
             （実測/予測 = 0.21・0.36）であり，**足切り水準や着手可否の根拠に使わないこと**．"}
 
+  - {name: classifier_multiclass_decomposition,
+     values: [one_vs_one_pairwise_coupling, error_correcting_output_codes],
+     note: "[2026-09-28 Iter97 調査フェーズで追記・backlog B162．停止条件 (2)（levers 使い切り後の
+            再探索）を受けた新レバー]
+            **状況**: Iter88〜96 で『分類器の訓練データの量・重み・粒度』の系列を一巡し，どの腕でも
+            固定 5-fold CV は 0.80〜0.82 に張り付いた（B161 (g)1 により同系列は打ち止め）．
+            誤りは education（CV recall 0.5350）・medical（0.6733）に集中し，かつ Iter95/96 では
+            ドメイン間の**零和的な再配分**として現れた（機序 M5: クラス総重み一定
+            `sample_weight = n/(K*n_d)` の下では，行追加は情報の追加ではなく決定境界の再配分）．
+            この零和性は，**10 クラスが 1 つの softmax 正規化と 1 組の線形境界を共有している**という
+            定式化そのものに由来する．B161 (g)2 の申し送り（現在の定式化の外側を当たること）に対する
+            回答として，**多クラスを 1 本の softmax に解かせるのをやめ，クラス対ごとの二値問題へ
+            分解する**方向を起票する．
+            **内容（単一レバー）**: `scripts/train_domain_classifier.py:train_classifier()` の
+            base estimator を，現在の単一 softmax `LogisticRegression(max_iter=1000,
+            class_weight=None)` から `OneVsOneClassifier(LogisticRegression(max_iter=1000,
+            class_weight=None))`（45 個の対ごと二値 LR）へ変える．較正（`CalibratedClassifierCV
+            (method='temperature', ensemble=True, cv=5)`）・`sample_weight`・訓練行・埋め込み・
+            評価集合・dispatch 設定・`classifier.py` の推論経路は**一切変えない**．
+            10 ドメイン一律の規則であり 2026-09-23 恒久ルール (1)（ドメイン固有の後付け補正の禁止）に
+            適合する．棄権・エスカレーション系にも該当しない．
+            **文献的根拠**: Fürnkranz (2002) *Round Robin Classification*, JMLR 2:721-747
+            （https://www.jmlr.org/papers/volume2/fuernkranz02a/html/node3.html ）は，対ごとの
+            決定境界は one-against-all の境界より**単純になりうる**こと（Knerr et al. 1992 の
+            数字認識では，全体は線形分離不能だが対ごとには線形分離可能だった），および
+            Hsu & Lin (2002) が**線形カーネル SVM でこそ非線形カーネルより大きな OvO の優位**を
+            得たことを報告している．本研究の分類器はまさに線形ヘッドなので条件が一致する．
+            Galar et al. (2011) *Pattern Recognition* 44(8):1761-1776（ https://sci2s.ugr.es/ovo-ova ）
+            は多数の基底学習器で OvO が OvA を上回ることを実験的に示す．
+            **反証側**: Rifkin & Klautau (2004) *In Defense of One-Vs-All*, JMLR 5:101-141
+            （ https://www.jmlr.org/papers/volume5/rifkin04a/rifkin04a.pdf ）は『二値分類器が
+            十分に調整されていれば OvA は他のどの方式とも同等』と主張しており，効果が出ない
+            可能性も同程度に文献上支持される．したがって本レバーは**両論ある仮説の検定**であり，
+            事前スクリーニングの足切りを通らなければ素直に閉じること．
+            **実装上の必須注意（2026-09-28 に実測で確認済み．sklearn 1.9.0）**:
+            `CalibratedClassifierCV(OneVsOneClassifier(...))` へ `sample_weight` を渡すと，
+            sklearn は `UserWarning: Since OneVsOneClassifier does not appear to accept
+            sample_weight, sample weights will only be used for the calibration itself` を出して
+            **base estimator への重みを黙って捨てる**．この状態で走らせると『分解方式の変更』と
+            『クラス均衡重みの喪失』の 2 つを同時に変えることになり単一レバー原則が壊れる．
+            `sklearn.config_context(enable_metadata_routing=True)` の下で
+            `LogisticRegression(...).set_fit_request(sample_weight=True)` を付ければ 45 個すべての
+            対ごと LR へ重みが流れる（警告なしで動作することを確認済み）．**警告が 1 件でも出たら
+            実験は不成立として中断すること**．
+            **確率の健全性**: OvO の `decision_function`（投票ベース）を temperature 較正した
+            `predict_proba` は 10 クラスで和 1 を保つことを確認済み（`classifier.py:
+            estimate_confidence_classifier()` はこの性質に依存する）．ただし**確率の形は変わる**
+            ので，`dispatch_gap_threshold=0.36` に対する『gap < 0.36 の行の割合』が動きうる．
+            これは分解方式変更の不可避な帰結であり，スクリーニング段階で両腕の gap 分布を必ず併記
+            すること（gap 閾値そのものの再較正は別レバー `dispatch_gap_threshold_recalibration`
+            であり，同時に動かしてはならない）．
+            **計算量**: 対ごと LR 1 本の fit は実測 0.06 秒（400 行 × 5,120 次元）で，45 本でも
+            単一 softmax（1,820 行で 1.0 秒）と同オーダー．3 seed × 5-fold × 較正 5-fold の
+            スクリーニングでも wafl-ctrl5 の CPU で完結する（GPU 不要・再埋め込み 0 回）．
+            **同時に変えてはならないもの**: 訓練行（`data/classifier_train_iter94_dedup.jsonl`
+            2,275 行）・`sample_weight` の式・較正手法・埋め込みモデルと 2 ビュー連結・評価集合・
+            dispatch 系の設定・`classifier.py`．
+            **第 2 値 `error_correcting_output_codes`**（Dietterich & Bakiri 1995）は，OvO が
+            partial に終わった場合の予備値として置く．符号長という追加ハイパラを持つため
+            優先度は低い．
+            **【2026-09-28 Iter97 分析フェーズ・backlog B163】value
+            `one_vs_one_pairwise_coupling` は `closed`（本走なし）．ただし Iter95/96 の closed とは
+            異なり，事前スクリーニングで Δ が**負方向に有意**だったため**反証済みとして扱い，
+            再試行しないこと**．実測（`results/iter97_screening/screening_result.json`，
+            3 seed × 固定 5-fold，n=6,825）: 腕 A（現行 softmax）CV top1 = 0.802637，
+            腕 B（OvO）= 0.794579，**Δ = −0.806pt**（足切り ① +1.0pt に符号ごと不通過），
+            全体 McNemar χ²=13.19・**p=0.00028**（seed 除算した保守値でも p=0.033），
+            BH 後の有意退行 **2 件**（history_culture −2.86pt，social_science −4.53pt）で
+            足切り ② も不通過．P1（弱 2 クラスの recall Δ 合計 ≥ +3.0pt）は実測 +0.374pt で**反証**．
+            P4 は `gap<0.36` の行割合が 20.1%→8.3%（−11.8pt）で**逸脱**した（得票数という離散スコアを
+            temperature 較正した結果，上位 2 クラス差が人為的に広がった＝過信の疑い）．
+            単一レバー性は担保（`enable_metadata_routing` により 45 本全ての対ごと LR へ
+            `sample_weight` が到達・警告 0 件）．機序としては，対ごと分解が近傍クラスを多く持つ
+            クラス（social_science・history_culture）で標本分割による分散増大と非適格分類器の票を
+            招いたと読む．**M5 の構造的解釈（共有 softmax 正規化が零和性の原因）は支持されなかった**
+            （正側 +3.04pt 対 負側 −10.72pt で零和ではなく正味の損失．腕 A recall と Δ の
+            Spearman は +0.018, p=0.96 で Iter96 の −0.717 が消えた）．
+            **次は第 2 値 `error_correcting_output_codes` を，決定層の軸を閉じるための確認実験として
+            引く**（B163）．符号長は掃引せず計画フェーズで単一値を事前登録すること．
+            ここも通らなければ決定層の軸は打ち止めとし，入力表現／ラベルの軸へ移る．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #

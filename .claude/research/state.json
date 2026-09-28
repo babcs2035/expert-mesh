@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 96,
-  "iteration_name": "タスク構成比を保ったまま訓練行を増やし n の効果だけを測る",
-  "phase": "evaluate",
+  "iteration": 97,
+  "iteration_name": "分類器の多クラス分解を softmax から一対一へ変える",
+  "phase": "analyze",
   "status": "running",
-  "current_lever": "composition_preserving_volume_expansion=per_task_proportional_scale",
+  "current_lever": "classifier_multiclass_decomposition=one_vs_one_pairwise_coupling",
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1790597745,
-  "last_slack_ts": "1790597835.228929",
-  "iteration_thread_ts": "1790595503.156199",
+  "last_slack_ts": "1790601330.604509",
+  "iteration_thread_ts": "1790599594.455349",
   "notion_toggle_created": true,
-  "last_commit": "5546274"
+  "last_commit": "fa4ee35"
 }
