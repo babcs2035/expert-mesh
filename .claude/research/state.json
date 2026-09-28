@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 95,
-  "iteration_name": "未使用の JMMLU プールを全投入し訓練行を約 2 倍にする",
+  "iteration": 96,
+  "iteration_name": "タスク構成比を保ったまま訓練行を増やし n の効果だけを測る",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "classifier_training_volume_expansion=full_eval_disjoint_jmmlu_pool",
+  "current_lever": "composition_preserving_volume_expansion=per_task_proportional_scale",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1790590750,
-  "last_slack_ts": "1790594760.594209",
-  "iteration_thread_ts": "1790590813.612889",
+  "updated_at": 1790597745,
+  "last_slack_ts": "1790597835.228929",
+  "iteration_thread_ts": "1790595503.156199",
   "notion_toggle_created": true,
-  "last_commit": "b97fa5b"
+  "last_commit": "5546274"
 }

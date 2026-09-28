@@ -1,0 +1,144 @@
+{
+  "n_existing": 2275,
+  "n_addition": 996,
+  "n_holdout": 426,
+  "seeds": [
+    96,
+    196,
+    296
+  ],
+  "n_folds": 5,
+  "cv_accuracy_a_no_add": 0.8026373626373626,
+  "cv_accuracy_b_add": 0.8058608058608059,
+  "cv_delta_pt": 0.32234432234432564,
+  "overall_mcnemar": {
+    "discordant_a_only": 91,
+    "discordant_b_only": 113,
+    "discordant_pairs": 204,
+    "chi2_statistic": 2.161764705882353,
+    "p_value": 0.1414821214827935
+  },
+  "per_domain": {
+    "business_economics": {
+      "discordant_a_only": 13,
+      "discordant_b_only": 6,
+      "discordant_pairs": 19,
+      "chi2_statistic": 1.894736842105263,
+      "p_value": 0.16866861888781504,
+      "bh_significant": false,
+      "recall_a": 0.816,
+      "recall_b": 0.8066666666666666,
+      "recall_delta_pt": -0.9333333333333305
+    },
+    "computer_science": {
+      "discordant_a_only": 0,
+      "discordant_b_only": 2,
+      "discordant_pairs": 2,
+      "chi2_statistic": 0.5,
+      "p_value": 0.4795001221869535,
+      "bh_significant": false,
+      "recall_a": 0.92,
+      "recall_b": 0.9226666666666666,
+      "recall_delta_pt": 0.2666666666666595
+    },
+    "education": {
+      "discordant_a_only": 11,
+      "discordant_b_only": 40,
+      "discordant_pairs": 51,
+      "chi2_statistic": 15.372549019607844,
+      "p_value": 8.826126346805907e-05,
+      "bh_significant": true,
+      "recall_a": 0.5350140056022409,
+      "recall_b": 0.5756302521008403,
+      "recall_delta_pt": 4.06162464985994
+    },
+    "general": {
+      "discordant_a_only": 2,
+      "discordant_b_only": 7,
+      "discordant_pairs": 9,
+      "chi2_statistic": 1.7777777777777777,
+      "p_value": 0.18242243945173575,
+      "bh_significant": false,
+      "recall_a": 0.7986666666666666,
+      "recall_b": 0.8053333333333333,
+      "recall_delta_pt": 0.666666666666671
+    },
+    "history_culture": {
+      "discordant_a_only": 18,
+      "discordant_b_only": 3,
+      "discordant_pairs": 21,
+      "chi2_statistic": 9.333333333333334,
+      "p_value": 0.0022502265680857114,
+      "bh_significant": true,
+      "recall_a": 0.8523809523809524,
+      "recall_b": 0.8285714285714286,
+      "recall_delta_pt": -2.3809523809523725
+    },
+    "legal": {
+      "discordant_a_only": 0,
+      "discordant_b_only": 1,
+      "discordant_pairs": 1,
+      "chi2_statistic": 0.0,
+      "p_value": 1.0,
+      "bh_significant": false,
+      "recall_a": 0.8398268398268398,
+      "recall_b": 0.8441558441558441,
+      "recall_delta_pt": 0.43290043290042934
+    },
+    "mathematics": {
+      "discordant_a_only": 0,
+      "discordant_b_only": 2,
+      "discordant_pairs": 2,
+      "chi2_statistic": 0.5,
+      "p_value": 0.4795001221869535,
+      "bh_significant": false,
+      "recall_a": 0.948,
+      "recall_b": 0.9506666666666667,
+      "recall_delta_pt": 0.2666666666666706
+    },
+    "medical": {
+      "discordant_a_only": 7,
+      "discordant_b_only": 40,
+      "discordant_pairs": 47,
+      "chi2_statistic": 21.78723404255319,
+      "p_value": 3.046202480039284e-06,
+      "bh_significant": true,
+      "recall_a": 0.6733333333333333,
+      "recall_b": 0.7173333333333334,
+      "recall_delta_pt": 4.400000000000004
+    },
+    "natural_science": {
+      "discordant_a_only": 32,
+      "discordant_b_only": 1,
+      "discordant_pairs": 33,
+      "chi2_statistic": 27.272727272727273,
+      "p_value": 1.766860442398155e-07,
+      "bh_significant": true,
+      "recall_a": 0.876,
+      "recall_b": 0.8346666666666667,
+      "recall_delta_pt": -4.133333333333333
+    },
+    "social_science": {
+      "discordant_a_only": 8,
+      "discordant_b_only": 11,
+      "discordant_pairs": 19,
+      "chi2_statistic": 0.21052631578947367,
+      "p_value": 0.6463551955394902,
+      "bh_significant": false,
+      "recall_a": 0.788,
+      "recall_b": 0.792,
+      "recall_delta_pt": 0.40000000000000036
+    }
+  },
+  "c5_pool_domains_recall_delta_sum_pt": -2.7809523809523613,
+  "c5_depleted_domains_recall_delta_sum_pt": 5.827858416093701,
+  "p2_pool_domains_exceed_depleted": false,
+  "n_bh_significant_regressions": 2,
+  "screening_gate_1_cv_delta_ge_1pt": false,
+  "screening_gate_2_zero_bh_regressions": false,
+  "screening_gate_pass": false,
+  "secondary_holdout_accuracy_a": 0.8520620506999622,
+  "secondary_holdout_accuracy_b": 0.8628074158153614,
+  "secondary_holdout_delta_pt": 1.0745365115399141,
+  "p4_sign_consistent_with_primary": true
+}
