@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 98,
-  "iteration_name": "分類器の多クラス分解を誤り訂正出力符号へ変える",
-  "phase": "evaluate",
+  "iteration": 99,
+  "iteration_name": "埋め込みを日本語特化モデル ruri-v3-310m へ差し替える",
+  "phase": "research",
   "status": "running",
-  "current_lever": "classifier_multiclass_decomposition=error_correcting_output_codes",
+  "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1790607434,
-  "last_slack_ts": "1790606770.000599",
-  "iteration_thread_ts": "1790602816.467769",
-  "notion_toggle_created": true,
+  "last_slack_ts": "1790607605.280239",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
   "last_commit": "eb49a79"
 }
