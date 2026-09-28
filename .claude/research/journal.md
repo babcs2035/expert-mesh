@@ -1,3 +1,176 @@
+## Iteration 93: 分類器のラベル粒度を JMMLU タスク単位へ細分化しドメインへ写像する
+
+### 調査 (Iter93)
+
+Iter92 の学び 3（`education` は 4 タスクにまたがる多峰クラスで単一の線形境界に収まっていない，
+という仮説）を出発点に，backlog B153 (e) が指定したレバー `classifier_label_granularity` を検討した．
+本フェーズは (1) 文献調査，(2) 訓練集合内 CV による事前見積り（B151 (d)4 の足切り）の 2 本立てで行った．
+**評価集合 `data/dataset.jsonl` には一切触れていない．実機ノード wafl500〜509 も不使用**（特徴量は
+既存キャッシュから再構成したため Ollama 呼び出しも発生していない）．
+
+**(1) 文献調査（tavily-search）で分かったこと**
+
+- Silla & Freitas (2011), *A survey of hierarchical classification across different application domains*,
+  Data Mining and Knowledge Discovery 22(1-2):31-72,
+  <https://www.cs.kent.ac.uk/people/staff/aaf/pub_papers.dir/DMKD-J-2010-Silla.pdf> ——
+  「葉クラスで学習して親へ写像する」構成は *flat classification approach* として定式化済みの
+  標準的な比較対象である．本レバーはこの flat approach そのものであり，新規手法ではない．
+- Chen, Ding & Marculescu (2018), *Understanding the Impact of Label Granularity on CNN-Based
+  Image Classification*, IEEE ICDMW 2018, pp.895-904, <https://par.nsf.gov/servlets/purl/10121660>
+  —— CIFAR-10 / CIFAR-100 / ImageNet で細粒度ラベルによる学習が粗粒度の訓練精度・汎化精度の
+  **双方**を改善したと報告している．本レバーの期待の根拠にあたる肯定的な先行研究．
+- Novack, McAuley, Lipton & Garg (2023), *CHiLS: Zero-Shot Image Classification with Hierarchical
+  Label Sets*, ICML 2023, arXiv:2302.02551,
+  <https://proceedings.mlr.press/v202/novack23a/novack23a.pdf> —— (i) 各クラスのサブクラス集合を作り，
+  (ii) サブクラスをラベルとして予測し，(iii) 予測サブクラスを親へ写し戻す，という 3 段構成で
+  superclass 精度が改善する．さらに superclass 確率 × subclass 確率の積を採る変種も提示している
+  （後述の CV で腕 E として測った）．
+- **Pirovano et al. (2025), *The Advantage of Fine-Grained Training*, arXiv:2509.05130
+  （Scientific Reports, 2026, doi:10.1038/s41598-026-64362-6），<https://arxiv.org/abs/2509.05130>
+  —— 本反復の結果を最もよく説明する文献**．「細粒度ラベルでの学習は**普遍的には**精度を改善しない．
+  効果は (a) データの幾何とラベル階層の関係，具体的には細粒度タスクと粗粒度タスクが要求する決定境界の
+  重なり具合（著者らの言う *boundary redundancy*），(b) データセット規模，(c) モデルの容量
+  （過剰パラメータ化の度合い）に依存し，細粒度学習が有利な領域と粗粒度学習が有利な領域を分ける
+  遷移が存在する」．**すなわち「効くか効かないかはデータ側の構造で決まるので測るしかない」**．
+
+この最後の知見から，**本レバーは着手の前に訓練集合内 CV で測るべき典型例**と判断した
+（B153 (e) が課した B151 (d)4 の足切りとも整合する）．
+
+**(2) 訓練集合内 CV の設計**
+
+- 特徴量: `data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy`（2,319 行）と
+  `data/embcache_train_iter92_qwen3-embedding_4b_new20{,__p1}.npy`（20 行）から，Iter92 の
+  `/tmp/iter92/retrain.py` と同一の規則で 2,339 行 × 5,120 次元を再構成した（新規の埋め込み計算なし）．
+- サブクラスラベル: 設問文をキーに `/tmp/expert-mesh-cache/JMMLU.zip` へ逆引きし，
+  **2,339 行すべてが 56 タスクのいずれかに一致（未一致 0 行）**，かつ
+  **現行 `build_dataset.py:_DOMAIN_TASK_MAP` との食い違い 0 行**であることを確認した
+  （Iter92 の是正で写像ずれが解消されたことの独立な確認にもなっている）．
+  hard negative 行（`*-hardneg-*`）も全て JMMLU 由来でタスクを持ち，
+  B153 (e) が挙げたリスク (b)「サブクラス割り当て規則の未定義」は発生しなかった．
+- クラス構成: 56 タスク，1 タスクあたり **15〜95 行**（最小 `professional_medicine` 15 行）．
+  `CalibratedClassifierCV(cv=5)` の内側 fold にも 2 行以上が残るため，リスク (a) の懸念のうち
+  「fold が組めない」事象は起きなかった．
+- 外側 5-fold StratifiedKFold（層化キーは JMMLU タスク）× seed 0/1/2 の計 15 fold．
+  `sample_weight` は本番 `_extract_sample_weights()` と同じ**ドメイン均衡重み** `n/(K*n_d)`（K=10）を
+  全腕で共通に使い，変えるのは学習ラベルの粒度と写像規則だけにした（単一レバー原則）．
+
+### 計画 (Iter93)
+
+**単一レバー（事前登録）**: `classifier_label_granularity` =
+**`jmmlu_task_level_subclass_then_sum_to_domain`**．
+
+B153 (e) が計画フェーズへ委ねた「argmax 写像のみ／タスク確率のドメイン合算のどちらか 1 つを
+事前に決める」という論点は，**合算（sum）**を選ぶ．理由は 3 点である．
+(i) CV で合算が argmax 写像を上回った（後述），
+(ii) 合算は潜在サブクラスに関する周辺化そのもので，`classifier.py:estimate_confidence_classifier()` が
+前提とする「10 次元で総和 1 の確率ベクトル」を構成上そのまま保てる（argmax 写像では 10 次元確率を
+別途こしらえる必要があり，較正の意味が変わる），
+(iii) 10 ドメインへ同一の規則で適用するため 2026-09-23 恒久ルール (1) に抵触しない．
+
+**仮説**: `education` の recall が 0.65 付近で頭打ちなのは，4 つの JMMLU タスクにまたがる多峰クラスを
+単一の線形境界で表現しているためである．サブクラス単位で学習して確率をドメインへ合算すれば，
+多峰クラスを複数の線形境界の和で表現でき，`education`・`general`・`social_science` の recall が上がる．
+
+**固定する構成（Iter92 の最良構成）**: 埋め込み `qwen3-embedding:4b` の 2 ビュー連結（5,120 次元），
+instruction prefix 現行値，`CalibratedClassifierCV(method="temperature", cv=5, ensemble=True)`，
+`C`=1.0，`class_weight=None` ＋ドメイン均衡 `sample_weight`，`confidence_threshold=0.0`，
+`dispatch_top_k=1`，訓練 `data/classifier_train_iter92_civics_aligned.jsonl`（2,339 行），
+評価 `data/dataset.jsonl`（3,750 行，sha256 `2114e048...`）．
+**基準線は `results/20260928_111644/`（3,750 行，top1 = 0.835467）**．
+
+### 着手可否の判定 (Iter93) —— B151 (d)4 の足切りに不合格．本走は行わない
+
+**本番パイプライン（温度較正あり）での訓練集合内 CV．3 seed × 外側 5-fold ＝ 15 fold，n=2,339**
+
+| 腕 | 学習ラベル | ドメイン写像 | CV ドメイン精度 | Δ vs 現行 |
+|---|---|---|---|---|
+| **A（現行）** | ドメイン 10 クラス | — | **0.7961**（fold 間 sd 0.0174） | — |
+| B | JMMLU タスク 56 クラス | argmax タスク → ドメイン | 0.8045（sd 0.0133） | **+0.84pt** |
+| **C** | JMMLU タスク 56 クラス | タスク確率をドメインへ合算 | **0.8060**（sd 0.0158） | **+1.00pt** |
+
+**較正ラッパなしの素の `LogisticRegression`（同一分割，3 seed × 5 fold）での写像規則の比較**
+
+| 腕 | 内容 | CV | Δ vs A |
+|---|---|---|---|
+| A | ドメイン 10 クラス（現行） | 0.7996 | — |
+| B | タスク 56 クラス → argmax 写像 | 0.8109 | +1.13pt |
+| **C** | タスク 56 クラス → 確率合算 | **0.8147** | **+1.51pt** |
+| D | タスク 56 クラス（**タスク**均衡 `sample_weight`）→ 確率合算 | 0.8015 | +0.19pt |
+| E | ドメイン確率 × タスク合算確率（CHiLS の積） | 0.8105 | +1.08pt |
+
+**判定: 最良の腕 C でも本番パイプライン CV で +1.00pt であり，B151 (d)4 の足切り
+（訓練集合内 CV で +2.3pt 以上）に届かない．よって本走に進まない**（Iter89 の学び
+「判定不能と事前に分かるレバーには着手しない」，B153 (e) の着手条件，停止条件 (2)）．
+Iter91 で実測した伝達率 43% を当てると end-to-end の予測は **+0.43pt** で，
+再現性の床 ±0.25pt をかろうじて超える程度，事前登録し得る効果量閾値 1.0pt の半分未満である．
+Iter92（Δ +0.508pt，p = 0.0509）と同じ「境界上で判定語が決まらない」結果を繰り返すことになる．
+
+**さらに，非退行条件①を破る見込みが高い**（本走を行わない第 2 の理由）．
+腕 C の per-domain recall（較正あり，15 fold 合算）は次のとおりで，**改善と退行が真っ二つに割れる**．
+
+| ドメイン | タスク数 | A（現行） | C | Δ |
+|---|---|---|---|---|
+| education | 4 | 0.5411 | 0.6984 | **+15.7pt** |
+| social_science | 4 | 0.7773 | 0.8587 | +8.1pt |
+| general | 3 | 0.7960 | 0.8613 | +6.5pt |
+| legal | 2 | 0.8398 | 0.8701 | +3.0pt |
+| mathematics | 5 | 0.9520 | 0.9760 | +2.4pt |
+| computer_science | 5 | 0.9200 | 0.9400 | +2.0pt |
+| natural_science | 8 | 0.8720 | 0.8560 | −1.6pt |
+| business_economics | 8 | 0.8173 | 0.7813 | −3.6pt |
+| history_culture | 7 | 0.8494 | 0.7865 | −6.3pt |
+| **medical** | **10** | 0.6653 | 0.4893 | **−17.6pt** |
+
+**Δ はドメインあたりの JMMLU タスク数と明確に逆相関している**（タスク数 2〜5 の 6 ドメインは全て改善，
+7〜10 の 4 ドメインは全て退行）．機序は，タスク数の多いドメインでは 1 サブクラスあたりの行数が
+15〜38 行まで削られ，各サブクラスの境界推定の分散が増えるためと読める
+（`medical` は 10 タスク・最小 `professional_medicine` 15 行）．確率を合算しても，
+弱い境界を 10 本足したものは 10 倍のデータで引いた 1 本の境界に負ける．
+これは Pirovano et al. (2025) の「細粒度学習の利得はサブクラスあたりのデータ量と
+boundary redundancy に依存し，普遍的ではない」という主張の**本データでの実例**である．
+すなわち **Iter92 の学び 3 の仮説（`education` は多峰クラス）は CV 上は支持された**（education +15.7pt）
+一方で，**それを 10 ドメイン一律の規則として適用すると medical で失う分が上回る**．
+
+**代替の粒度も測ったが，やはり足切りに届かない．**
+タスク数の偏りを消すため「全ドメインを一律 k 個の潜在サブクラスへ分ける」（訓練 fold 内の埋め込みに
+対する k-means．fold 内で fit するのでリークしない）という 10 ドメイン均一な規則を素の
+`LogisticRegression`・3 seed × 5 fold で掃引した（基準 A = 0.8019，層化キーはドメイン）．
+
+| k | 2 | 3 | **4** | 5 | 6 | 8 |
+|---|---|---|---|---|---|---|
+| Δ vs A | +0.61pt | +1.03pt | **+1.68pt** | +1.15pt | +1.17pt | +0.38pt |
+
+k=4 が頂点の上に凸な曲線で，**退行するドメインが無い**点は腕 C より健全である
+（medical 0.6813→0.6973，history_culture 0.8494→0.8421，legal 0.8528→0.8398）．
+ただし素の LR で +1.68pt であり，較正ラッパを通すと本レバーでは利得が約 2/3 に縮む実測
+（腕 C: +1.51pt → +1.00pt）を当てると **+1.1pt 前後**と見込まれ，これも足切りに届かない．
+
+**本イテレーションの結論**: `classifier_label_granularity` は，値 `..._sum_to_domain`
+（当初案の `..._argmax_map_to_domain` を含む）・k-means 潜在サブクラス版のいずれも
+事前 CV が足切り +2.3pt に届かないため **本走を行わず，レバーを閉じる**．
+`config.yml` の当該レバーには本 CV の実測値を注記した（同じ案を再度引く無駄を避けるため）．
+
+**次の一手（rc-planner から人間／オーケストレータへの申し送り．backlog B154）**
+
+分類器側の手（埋め込みモデル・instruction prefix・ビュー連結・較正手法・正則化 `C`・クラス重み・
+訓練ラベル写像・ラベル粒度）は Iter79 以降で一巡し，**訓練 2,339 行・特徴 5,120 次元という
+現在の構成での訓練集合内 CV はどの腕でも 0.80〜0.82 に張り付いている**．
+残る方向は次の 3 つで，いずれも単一レバー原則の外側か人間判断を要する．
+
+- **(A1, 推奨) 測定系の是正**（B153 (f) が「優先度は (e) の次」とした項目）: 訓練と評価で設問文が
+  一致する残り 64 行を訓練から除去し，基準線を引き直す．精度レバーではないが，
+  絶対水準を最大 1.7pt 上振れさせうるバイアスを，論文化前に取り除ける．オフラインで準備でき，
+  新規データ源も不要．ただし基準線の本走 1 回（約 155 分）が要る．
+- **(A2) 外部の日本語データ源の調達**（B151 (d)1）: CV で最も弱いのは `education` 0.54 と
+  `medical` 0.67 で，hard negative プールの在庫は `education` 9 行・`legal`/`general`/`social_science` 0 行
+  （B151 (c)）．行数を増やす以外の手は本反復で尽きた．**ライセンス（NC/ND 条項）と評価集合との
+  重複の確認を伴うため，調達前に人間の確認を要する．**
+- **(A3) 足切り +2.3pt そのものの見直し**: この値は「伝達率 43% × end-to-end 効果量閾値 1.0pt」から
+  導いたものだが，1.0pt という閾値自体が Iter92 の学び 4 で「機序が予測どおり発火しても際どい」と
+  判明している．**+0.5pt 級の改善を積み上げる方針へ切り替えるなら**，腕 C（予測 +0.43pt）ではなく
+  k-means k=4（予測 +1.1pt・退行ドメインなし）が最有力の候補として残る．
+  **これは研究の合否基準の変更であり，人間の判断を仰ぎたい．**
+
 ## Iteration 92: 訓練ラベル写像を評価集合へ一致させる（japanese_civics の education 復帰）
 
 ### 調査 (Iter92)

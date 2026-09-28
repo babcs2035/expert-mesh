@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 92,
-  "iteration_name": "訓練ラベル写像を評価集合へ一致させる（japanese_civics の education 復帰）",
-  "phase": "evaluate",
+  "iteration": 93,
+  "iteration_name": "分類器のラベル粒度を JMMLU タスク単位へ細分化しドメインへ写像する",
+  "phase": "research",
   "status": "running",
-  "current_lever": "classifier_train_label_map_consistency=japanese_civics_realignment_to_eval_map",
-  "experiment_dir": "results/20260928_111644",
-  "experiment_deadline": 1790573033,
+  "current_lever": "classifier_label_granularity=jmmlu_task_level_subclass_then_sum_to_domain（事前 CV +1.00pt < 足切り +2.3pt のため本走見送り・要人間判断）",
+  "experiment_dir": null,
+  "experiment_deadline": null,
   "updated_at": 1790571954,
-  "last_slack_ts": "1790571522.718449",
-  "iteration_thread_ts": "1790560866.387699",
-  "notion_toggle_created": true,
-  "last_commit": "d449b0b"
+  "last_slack_ts": "1790572079.417299",
+  "iteration_thread_ts": null,
+  "notion_toggle_created": false,
+  "last_commit": "84b98b0"
 }
