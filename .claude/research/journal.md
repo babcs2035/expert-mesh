@@ -1,3 +1,404 @@
+## Iteration 95: 未使用の JMMLU プールを全投入し訓練行を約 2 倍にする
+
+### 調査 (Iter95)
+
+backlog B157 (d)(e) の申し送り「`levers` を使い切ったので調査フェーズから再探索し，tavily-search で
+関連研究・代替アプローチを重点調査して新レバーを考案せよ」に従い，(1) 現行基準線の誤りの内訳の再集計，
+(2) 訓練集合の構成と JMMLU プール残量の実測，(3) 学習曲線の実測，(4) 文献調査，の 4 点を行った．
+**評価集合 `data/dataset.jsonl` は読むだけで変更していない．`data/`・`models/`・`results/` への
+書き込みは 0 件．実機ノード wafl500〜509 も不使用**（新規の埋め込み計算も 0 件で，
+既存キャッシュ `data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy` のみを使った）．
+**（実施場所の申告）**(3) の学習曲線は sklearn の CPU 計算のみで GPU を使わないため，
+wafl-ctrl5 に Python 環境（uv も sklearn も未導入）を新設せずに開発ホスト上で実行した．
+2026-09-23 絶対条件 (B) が禁じている wafl500〜509 は一切使っていない．
+wafl-ctrl5 への環境構築は実装フェーズの作業として B158 に申し送る．
+
+**(1) 基準線 `results/20260928_160921/`（top1 = 0.833067）の誤り 626 件の内訳**
+
+| 区分 | n | top1 |
+|---|---|---|
+| 全体 | 3,750 | 0.8331 |
+| 単一ドメイン行 | 3,020 | 0.8434（誤り 473） |
+| 複合設問行 | 730 | 0.7904（誤り 153） |
+
+単一ドメイン行の per-domain recall は education 0.500（誤り 175 = 全体の 37%）・general 0.743・
+social_science 0.789・medical 0.837 で，残り 6 ドメインは 0.911〜0.957．
+**education の誤りは特定の 1 ドメインへ流れているのではなく business_economics 48 / history_culture 38 /
+legal 28 / medical 27 / social_science 21 と分散している**．JMMLU タスク単位に割ると
+japanese_civics 0.319（n=116，予測先は business_economics 39・education 37・history_culture 18・legal 17）・
+moral_disputes 0.553・sociology 0.588・high_school_psychology 0.630 で，
+**最悪は japanese_civics であり，その誤りの向き（経済・法・歴史）は公民という科目の内容そのものと一致する**．
+general の誤りも miscellaneous 0.391 に集中しており，同じく「内容が他ドメインと本質的に重なるタスク」である．
+すなわち education/general の低 recall の相当部分は**ラベルの意味的重なりに由来する**と読める．
+
+**(2) 訓練集合の構成と JMMLU プール残量（実測）**
+
+`data/classifier_train_iter94_dedup.jsonl`（2,275 行）の内訳は，各ドメイン 150 行の本体 ＋ 100 行の
+hard negative（Iter84/86/88 由来）で 250 行，ただし legal 77 行（プール枯渇）・education 238 行・
+history_culture 210 行である．JMMLU 全 56 タスクを突き合わせた結果，
+**評価にも訓練にも使われていない行が 2,232 行残っている**．
+
+| ドメイン | プール | 評価 | 訓練 | 未使用 |
+|---|---|---|---|---|
+| medical | 1,410 | 350 | 250 | **810** |
+| natural_science | 1,087 | 354 | 252 | **481** |
+| history_culture | 1,039 | 350 | 210 | **479** |
+| business_economics | 1,007 | 351 | 251 | **405** |
+| mathematics | 648 | 350 | 250 | 48 |
+| education | 598 | 351 | 238 | 9 |
+| legal / computer_science / social_science / general | 227 / 551 / 544 / 425 | 150 / 301 / 294 / 175 | 77 / 250 / 250 / 250 | **0** |
+
+つまり **`build_dataset.py` の per-domain サンプリング上限 150 が効いていただけで，データが尽きていた
+わけではない**（尽きているのは legal・computer_science・social_science・general・education の 5 つ）．
+特徴次元は 2 ビュー連結で d = 5,120，訓練行数は n = 2,275 で **d/n = 2.25 の過剰パラメータ領域**にある．
+
+なお，ドメイン内のタスク構成が訓練と評価でずれていることも実測した（全変動距離 TV：
+education 0.189 / medical 0.169 / history_culture 0.153 / …… / mathematics 0.032）．
+ただし **JMMLU プールの構成と評価集合の構成の TV は 0.017〜0.081 と小さい**ので，
+「プール比例で訓練を層化し直す」は評価集合を覗かずに書ける規則である．
+しかし medical で不足しているタスク（professional_medicine 1.000・nutrition 0.977・clinical_knowledge 0.905）は
+recall が高く，過剰なタスク（professional_psychology 0.658・college_medicine 0.714）は recall が低いので，
+**構成合わせは難しいタスクから訓練を奪う向きに働く**．採らない．
+
+**(3) 学習曲線の実測 —— err ∝ n^(-0.127)**
+
+既存キャッシュで再現した 2,255 行（評価と重複する行を除いた Iter88 訓練集合）に対し，
+層化 5-fold × 3 seed で，訓練側だけを 25/50/75/100% に層化サブサンプルして測った
+（テスト fold は同一，`LogisticRegression(max_iter=3000)` ＋ 既存と同じ `n/(K*n_d)` の balanced 重み，較正なし）．
+
+| 訓練行数 | CV accuracy | error |
+|---|---|---|
+| 451 | 0.7561 | 0.2439 |
+| 902 | 0.7718 | 0.2282 |
+| 1,353 | 0.7865 | 0.2135 |
+| 1,804 | 0.7954 | 0.2046 |
+
+逆べき乗則を当てると **α = 0.127**（n=1,804 の CV 0.7954 は B154 の実測 0.7961 と整合する）．
+外挿すると **n を 2 倍で CV +1.73pt，1.5 倍で +1.03pt**．Iter91 実測の伝達率 43% を当てた
+end-to-end の予測は **+0.74pt**（2 倍時）である．**再現性の床 ±0.25pt の約 3 倍**にあたる．
+
+**(4) 文献調査（tavily-search）**
+
+- Viering & Loog (2024), *The shape of learning curves: a review* / 学習曲線による意思決定の総説,
+  *Machine Learning*, <https://link.springer.com/article/10.1007/s10994-024-06619-7> ——
+  逆べき乗則による外挿で「あと何行増やせばどれだけ上がるか」を事前に見積もる手法は確立している．
+  Figueroa et al. (2012), *BMC Medical Informatics and Decision Making* 12:8 も同じ枠組み．
+  本反復 (3) はこの手続きそのものである．
+- Byrd & Lipton (2019), *What is the Effect of Importance Weighting in Deep Learning?*, ICML 2019,
+  <http://proceedings.mlr.press/v97/byrd19a/byrd19a.pdf> —— 訓練集合を**重み付け・再サンプリング**して
+  分布を合わせる操作は，訓練集合を完全に当てはめられる容量のモデルでは漸近的に効果が消える．
+  d/n = 2.25 の本研究の分類器はこの領域にあり，(2) の構成合わせ案を採らない理由の 1 つである．
+- Cichy & Rakotomamonjy 系ではなく，重み付けでなく**行数**を増やすべき，という同じ含意は
+  Lee et al. (2022) の重複除去論文（Iter94 で引用）とも矛盾しない．
+- Piedboeuf & Langlais (2023) / Cegin et al. (2025), *LLMs vs Established Text Augmentation Techniques
+  for Classification*, NAACL 2025, <https://aclanthology.org/2025.naacl-long.526.pdf> ——
+  LLM によるパラフレーズ増強が効くのは **1 ラベルあたり 5〜20 シード**の領域で，
+  30 シードを超えると既存手法との差が縮む．本研究は 1 ドメイン 77〜250 行なので，
+  **合成データ増強は本命ではない**．B116 (2) の「まず既存データセットを探す」にも合致する
+  （そして探した結果が下記）．
+- 外部の日本語データ源: JMMLU 以外で公民・教育行政を四択で覆う CC BY 級の公開データは見つからなかった．
+  llm-jp-eval の DATASET 一覧（<https://github.com/llm-jp/llm-jp-eval/blob/dev/DATASET_en.md>）で
+  日本語の人間試験系は JMMLU / MMMLU / MMLU-ProX / GPQA-JA に限られ，公民相当のタスクを持つのは JMMLU だけである．
+  Web 上の一問一答サイト（いちご ドリル等）は規約・ライセンスが不明で，B154 (A2) のとおり
+  **調達には人間の確認が要る**ため今回は選ばない．
+- RouterDC (Chen et al., NeurIPS 2024, arXiv:2409.19886,
+  <https://proceedings.neurips.cc/paper_files/paper/2024/hash/7a641b8ec86162fc875fb9f6456a542f-Abstract-Conference.html>)
+  —— ルータのエンコーダを 2 つの対照損失で学習する手法．sample-sample 損失は k-means クラスタで
+  同クラスタの設問を引き寄せる構成で，B154 (d) の k-means 潜在サブクラス（CV +1.68pt）と発想が近い．
+  ただしエンコーダの学習を伴い，Iter40〜43 で `embedding_adaptation` が全値 rejected になった系列と
+  同じ構造（単一レバー原則との両立が難しい）なので，今回は採らない．
+
+### 仮説 (Iter95)
+
+**B154 の『どの腕でも CV 0.80〜0.82 に張り付く』は推定量の限界ではなく，n = 2,275 の限界である．**
+Iter79〜93 が動かしたのは全て「固定 n のもとでの推定量の選び方」であり，n 自体は Iter88 以降
+変わっていない．d/n = 2.25 の過剰パラメータ領域では，推定量の選び方より n の増加が効く
+（Byrd & Lipton 2019 の含意，Viering & Loog 2024 の学習曲線）．未使用の JMMLU プール 2,232 行を
+投入して n を 4,507（d/n = 1.14）へ倍増させれば，学習曲線の外挿どおり CV で +1.7pt 前後，
+end-to-end で +0.7pt 前後の改善が出るはずである．
+**反証可能な予測**: 追加行が 0 の legal・computer_science・social_science・general・education の
+5 ドメインでは recall はほぼ動かず，追加行の多い medical（×4.2）・history_culture（×3.3）・
+natural_science（×2.9）・business_economics（×2.6）で改善が集中するはずである．
+この向きが出なければ仮説は誤りである．
+
+### 単一レバー (Iter95)
+
+- **レバー**: `classifier_training_volume_expansion` = `full_eval_disjoint_jmmlu_pool`
+  （config.yml の `levers` 末尾に本フェーズで追記．選定理由と要レビューは backlog B158）
+- **何を何から何へ**: 分類器の訓練集合を
+  `data/classifier_train_iter94_dedup.jsonl`（**2,275 行**）から
+  `data/classifier_train_iter95_fullpool.jsonl`（**4,507 行**，＋2,232 行）へ．
+  規則は「各ドメインの JMMLU タスクプールのうち，評価集合とも既存訓練集合とも重複しない行を全て足す」
+  の 1 つだけで，自由パラメータは無い．**既存 2,275 行は 1 行も削らない（純粋な追加）**．
+- **固定する構成（1 つも動かさない）**: 評価集合 `data/dataset.jsonl`（sha256 `2114e048...`，3,750 行）・
+  埋め込みモデル `qwen3-embedding:4b`・`embedding_instruction`（Iter81 の P1 文言）・
+  `embedding_view_concat: true`（2 ビュー連結 5,120 次元）・`CalibratedClassifierCV`（Iter31 以降の較正）・
+  `C=1.0`・重み `n/(K*n_d)`・`classifier.py` の推論経路・`dispatch_gap_threshold: 0.36`・
+  `dispatch_gap_max_k: 4`・`dispatch_top_k: 2`・`aggregation_method: max_confidence`・
+  expert/light モデルとノード割り当て．
+- **実装の要点**:
+  - `build_dataset.py` の `--domain-target-size` は評価集合と訓練集合で共用なので **CLI からの再生成は禁止**
+    （評価集合が変わってしまう）．新規スクリプト `scripts/expand_classifier_train_pool.py` で
+    既存 JSONL への追記として作る．追加行の id は `{domain}-pool095-NNN`，`sample_weight` は 1.0．
+  - 追加 2,232 行 × 2 ビュー＝ 4,464 回の埋め込み計算は **wafl-ctrl5 で行う（絶対条件 (B)）**．
+  - 再訓練は `scripts/train_domain_classifier.py` をハイパラ無変更で実行．
+    旧 artifact は `models/domain_classifier_pre_iter95_fullpool.joblib` へ退避（可逆にする）．
+  - 本走前に `mise run deploy` と sha256 確認．本走は wafl500〜509 で 3,750 問フルスペック（絶対条件 (A)）．
+
+### 成功条件（事前登録 / Iter95）
+
+**基準線**: `results/20260928_160921/`，top1 = **0.833067**（Wilson 95%CI [0.8208, 0.8447]，3,750 行）．
+再現性の床は ±0.25pt．
+
+**事前スクリーニング（本走 1 点を絞り込む手段であり，本走の代替ではない）**
+現行 2,275 行の層化 5-fold を固定し，各 fold の訓練側に追加プール行を足した腕と足さない腕を比較する
+（テスト fold が同一なので n の違う腕でも直接比較できる．3 seed × 5-fold，較正込みの本番パイプライン）．
+- **足切り: 固定 fold CV の改善が +1.0pt 未満なら本走を行わずレバーを閉じる**
+  （伝達率 43% で end-to-end +0.43pt，再現性の床の 1.7 倍にあたる．
+  B151 (d)4 の +2.3pt からの引き下げであり，要レビュー事項として B158 に記録した）．
+- **per-domain CV の Δ も出し，BH 補正後に有意退行が見込まれるドメインが 1 つでもあれば本走を行わない**
+  （追加行が 0 で相対的にクラスが痩せる legal 77 行・education 238 行を特に見る）．
+
+**本走の判定（効果量 × 有意性の 2 軸表．B154 (A4) の宿題に対応）**
+Δtop1 ＝ 新 − 基準線（pt），p ＝ McNemar 検定（同一 3,750 行，α=0.05）．
+
+| | p < 0.05 | p ≥ 0.05 |
+|---|---|---|
+| Δ ≥ +1.0 | **adopted** | 判定不能（検出力不足として記録） |
+| +0.25 ≤ Δ < +1.0 | **adopted_small**（採用．効果は小と明記） | 判定不能 |
+| \|Δ\| < 0.25 | no_effect | no_effect |
+| −1.0 < Δ ≤ −0.25 | **rejected** | 判定不能 |
+| Δ ≤ −1.0 | **rejected** | rejected |
+
+**事前予測はどのセルか**: 学習曲線の外挿（+0.74pt）から **`adopted_small`（+0.25 ≤ Δ < +1.0 かつ p<0.05）** を予測する．
+
+**必須の非退行条件（1 つでも破れたら artifact をロールバックする）**
+- C1: per-domain precision/recall 計 20 指標の BH 補正後の有意退行が **0 件**．
+- C2: `used_fallback` 率・`dispatch_failed` 件数が基準線から増えない．
+- C3: レバーが発火したことの証拠（新 artifact の sha256 が旧と異なる，訓練行数 4,507，
+  ノード上の `models/domain_classifier.joblib` の sha256 一致）．
+- C4（副基準・参考値）: Random / BestSingle / Oracle を併記し，BestSingle 超過を明示する（success_criteria (3)）．
+- C5（仮説の検証）: 追加行の多い 4 ドメイン（medical / history_culture / natural_science / business_economics）の
+  recall の Δ の合計が，追加行 0 の 5 ドメインの Δ の合計より大きいこと．
+  これが成り立たなければ「行数が効いた」とは書かない（偶然の変動として扱う）．
+- C6: 複合設問 730 行の `compound_domain_set_recall` と `compound_mean_dispatched_count` を併記する
+  （dispatch 予算が動いていないことの確認）．
+
+### 実装・実験 (Iter95) —— 事前スクリーニングの足切りに掛かり本走を見送り
+
+**実施場所**: 埋め込み計算・分類器の訓練評価は全て **wafl-ctrl5**（192.168.15.10）で実施した
+（絶対条件 (B) ／ backlog B158 (f) の申し送り）．wafl-ctrl5 には uv・sklearn が無かったため，
+本フェーズで `~/.local/bin/uv`（uv 0.12.19）をインストールし，リポジトリのコード一式
+（`build_dataset.py`・`expert_backend.py`・`metrics.py`・`scripts/`・`pyproject.toml`・`uv.lock`・
+`config.yaml`・`data/dataset.jsonl`・`data/classifier_train_iter94_dedup.jsonl`・
+`/tmp/expert-mesh-cache/JMMLU.zip`）を `~/expert-mesh-iter95/` へ rsync し，
+`uv sync --extra research --python 3.12` で環境を構築した（`--python 3.14` 系はデフォルトだと
+`safetensors` のビルド済み wheel が無くソースビルドで失敗したため 3.12 を明示指定．
+`pyproject.toml` の `requires-python>=3.12` の範囲内）．**wafl500〜509 は一切使っていない**．
+
+**1. 新規スクリプト（追記的実装）**
+
+- `scripts/expand_classifier_train_pool.py`（新規）: `data/classifier_train_iter94_dedup.jsonl`
+  （2,275 行，読むだけで変更せず）と `data/dataset.jsonl`（3,750 行，同）に対して素な JMMLU 行を
+  ドメインごとに全数追加し，`data/classifier_train_iter95_fullpool.jsonl` を新規生成する．
+  `build_dataset.py` の内部関数（`_load_jmmlu_zip_bytes`・`_parse_jmmlu_task_csv`・
+  `_format_jmmlu_query`・`_DOMAIN_TASK_MAP`）を再利用し，独自のサンプリングロジックは書いていない．
+  サンプリングではなく「残り全部を足す」ため乱数シードは無い（計画どおり自由パラメータ 0）．
+  開発ホスト上でローカル実行（GPU 不要・純粋な JSON 組立てのため絶対条件 (B) の対象外）．
+  **結果は計画時の実測値と完全一致**: 既存 2,275 行 → 4,507 行（+2,232 行），
+  内訳 medical +810 / natural_science +481 / history_culture +479 / business_economics +405 /
+  mathematics +48 / education +9 / legal・computer_science・social_science・general +0．
+  sha256: `data/classifier_train_iter94_dedup.jsonl` は `d6b23735...`（不変，Iter94 と同一）．
+  なお `natural_science` の新規追加行のうち 5 件は，JMMLU の異なるタスク CSV（例:
+  college_physics と conceptual_physics）に同一設問文が重複して存在するために 2 回登録されている
+  （両方とも `natural_science` ラベルなのでラベル矛盾は無い）．これは `build_dataset.py` の
+  既存のタスクプール方式（`_sample_domain_questions` も同様にタスク間の重複除去をしない）と
+  同じ挙動であり，本レバー固有の不具合ではない．
+- `scripts/embed_classifier_train_pool.py`（新規，wafl-ctrl5 専用ヘルパー）:
+  `train_domain_classifier.py` の `embed_query_views`（`instruction`＝config.yaml の
+  `embedding_instruction`，`concat_views=true`）をそのまま呼んで 4,507 行を 1 回だけ埋め込み，
+  `.npy` にキャッシュする．スクリーニングの 3 seed × 5 fold × 2 腕で同じ埋め込みを使い回すための
+  補助であり，本番 artifact ではない．wafl-ctrl5 のローカル Ollama（`127.0.0.1:11434`，
+  `qwen3-embedding:4b` は導入済み）に対して 4,507 行 × 2 ビュー＝9,014 回の `/api/embeddings`
+  呼び出しを行った（所要時間 約 43 分）．出力 `data/embcache_iter95_fullpool.npy`
+  （shape (4507, 5120)）．
+- `scripts/screen_classifier_training_volume_expansion.py`（新規，wafl-ctrl5 専用）:
+  事前登録した「固定 5-fold（既存 2,275 行のみに対する層化分割，3 seed）× 2 腕（無追加／全追加）」
+  スクリーニングを実装．`train_domain_classifier.py` の `train_classifier()`（較正込み本番パイプライン）
+  と `_extract_sample_weights()` をそのまま呼び，独自の分類器・較正ロジックは書いていない．
+  **統計量は `metrics.py` の既存実装をそのまま呼んだ**（`compute_top1_accuracy`・
+  `compute_mcnemar_test`・`compute_domain_recall_mcnemar_test`・`apply_benjamini_hochberg`）．
+  各 fold の out-of-fold 予測を `{id, selected_domain, expected_domains}` 形式に整形して渡すことで，
+  chi2・BH 補正を独自再導出せずに済ませた．
+
+**2. 事前スクリーニング結果（wafl-ctrl5，3 seed × 5-fold，較正込み本番パイプライン）**
+
+固定 fold CV top1 accuracy（out-of-fold，3 seed × 5-fold 併合，n=6,825＝2,275×3）:
+
+| 腕 | CV accuracy |
+|---|---|
+| A（無追加，現行 2,275 行） | 0.80322 |
+| B（全追加，4,507 行） | 0.80689 |
+| **Δ (B−A)** | **+0.366pt** |
+
+McNemar（3 seed 併合，discordant a_only=133 / b_only=158）: p = 0.1595．
+
+**足切り判定 1（事前登録の CV +1.0pt 基準）: 不通過．** +0.366pt は学習曲線外挿（+1.73pt）の
+約 1/5 に留まり，B158 (d) で引き下げた後の足切り +1.0pt にも届かない．
+
+per-domain recall Δ（B−A，BH 補正 q=0.05，10 指標）:
+
+| ドメイン | 追加行数 | recall Δ (pt) | p | BH 有意 |
+|---|---|---|---|---|
+| education | +9 | **+8.54** | 1.1e-12 | 有意（改善） |
+| general | +0 | +1.33 | 0.0094 | 有意（改善） |
+| computer_science | +0 | +0.93 | 0.0233 | 有意（改善） |
+| medical | +810 | +2.27 | 0.0506 | 非有意（境界） |
+| social_science | +0 | +0.67 | 0.383 | 非有意 |
+| mathematics | +48 | +0.13 | 1.0 | 非有意 |
+| legal | +0 | 0.00 | 1.0 | 非有意（discordant 0 件） |
+| business_economics | +405 | −0.67 | 0.424 | 非有意 |
+| **history_culture** | **+479** | **−5.08** | **2.4e-7** | **有意（退行）** |
+| **natural_science** | **+481** | **−5.20** | **3.0e-8** | **有意（退行）** |
+
+**足切り判定 2（per-domain の有意退行が 1 件でもあれば本走しない）: 不通過．**
+`natural_science`・`history_culture` の 2 ドメインで BH 補正後も有意な recall 退行が見られる．
+計画時に名指しした懸念ドメイン（追加 0 行の `legal`・`education`）はどちらも退行していない
+（`legal` は動かず，`education` はむしろ最大の改善）．**退行が出たのは，仮説が「最も改善する」と
+予測していた「追加行が多い」側の 2 ドメイン（`natural_science` +481・`history_culture` +479）で
+あり，狙いと真逆の向きに出た．**
+
+**C5（仮説の反証可能な予測）の検証**: 追加行の多い 4 ドメイン
+（medical/history_culture/natural_science/business_economics）の recall Δ 合計 = **−8.68pt**，
+追加 0 行の 5 ドメイン（legal/computer_science/social_science/general/education，
+`education` は実質ほぼ 0 の +9 行なのでここに含めた計画どおりの区分）の Δ 合計 = **+11.48pt**．
+事前登録の予測（前者 > 後者）は **反証された**（`c5_hypothesis_holds: false`）．
+「n を増やせば学習曲線どおりに効く」という Iter95 の仮説は，少なくともこの構成では支持されない．
+考えられる機序（示唆であり未検証）: `history_culture`・`natural_science` は元々タスク数が多い
+ドメイン（7・8 タスク）で，追加行がタスク間の構成比を大きく変える（例:
+`natural_science` は元 250 行に対し新規 481 行を追加するため合計の 66% が新規データになる）．
+Iter93 の学び（journal「Iteration 93」節，タスク数の多いドメインほど細粒度化で退行しやすい）と
+方向性が整合する——ただし本イテレーションではこの機序を追加検証していないため断定しない．
+
+**足切り判定（事前登録の 2 条件）: 両方とも不通過．計画の停止規則により本走を行わない．**
+計画時の 2 軸判定表・end-to-end 予測（+0.74pt，`adopted_small` を予測）は，本走を行っていないため
+どのセルにも到達しない（そもそも本走の前段ゲートで閉じた）．
+
+**3. 本番コードへの変更は 0 件（絶対条件 (A) との整合）**
+
+足切りに掛かったため，計画の記述どおり「本番コードへの変更を適用しないまま結果を記録してフェーズ3へ
+渡す」を実施した．具体的には次を**行っていない**:
+`scripts/train_domain_classifier.py` による本番 `models/domain_classifier.joblib` の再訓練，
+`models/domain_classifier_pre_iter95_fullpool.joblib` への退避，`mise run deploy`，
+wafl500〜509 での本走．**`config.yaml`・`models/domain_classifier.joblib`・`data/dataset.jsonl` は
+1 バイトも変更していない**（sha256 は Iter94 終了時点から不変: `dataset.jsonl` = `2114e048...`）．
+施策（訓練集合の追加）を適用していないので，絶対条件 (A)（適用したら必ず本走）には抵触しない
+（計画フェーズが明記した停止規則どおり）．
+
+**4. 新規に追加したファイル（副作用の全量）**
+
+- `scripts/expand_classifier_train_pool.py`・`scripts/embed_classifier_train_pool.py`・
+  `scripts/screen_classifier_training_volume_expansion.py`（新規スクリプト 3 本，リポジトリにコミット対象）．
+- `data/classifier_train_iter95_fullpool.jsonl`（4,507 行，新規生成．**未使用のまま**．
+  どのコードからも読まれない＝本番の実行時挙動には影響しない）．
+- wafl-ctrl5 上のみ: `~/expert-mesh-iter95/`（uv 環境一式）・`data/embcache_iter95_fullpool.npy`
+  （埋め込みキャッシュ，5,120 次元 × 4,507 行）・`/tmp/iter95_screening.json`（スクリーニング結果）．
+  いずれも wafl-ctrl5 のローカルディスクのみで，このリポジトリの git 管理下にはない．
+  次イテレーション以降で不要になれば削除してよい（本フェーズでは削除していない）．
+- `models/`・`data/dataset.jsonl`・`config.yaml` への変更は 0 件．
+
+**5. 詰まった点**
+
+- wafl-ctrl5 の `uv` が既定で python 3.14（free-threaded ビルド）を選び，`safetensors` の
+  prebuilt wheel が無くソースビルド（cargo/maturin）に失敗した．`--python 3.12` を明示して解決した．
+- `ssh host "... & echo done"` 形式のバックグラウンド起動は，リダイレクト先を用意していても
+  ssh セッション自体がすぐには返らず，このエージェントのシェルツール側の 120 秒タイムアウトで
+  バックグラウンド送りになる事象が 2 回あった（実害無し，別途 `tail -f` でポーリングして対処）．
+
+### Iteration 95 実行済み —— 判定 `closed`（事前スクリーニング足切り不通過・本走なし）
+
+**変更（本番への適用は 0 件）**: 新規スクリプト 3 本（`scripts/expand_classifier_train_pool.py`・
+`scripts/embed_classifier_train_pool.py`・`scripts/screen_classifier_training_volume_expansion.py`）と
+新規データ `data/classifier_train_iter95_fullpool.jsonl`（4,507 行，git 管理外・どのコードからも
+読まれない）のみ．`models/`・`config.yaml`・`data/dataset.jsonl` は 1 バイトも変更していない．
+施策を本番へ適用していないので 2026-09-23 絶対条件 (A)（適用したら必ず本走）には抵触しない．
+
+**結果（固定 5-fold CV，3 seed 併合，n=6,825）**: 無追加 2,275 行 0.80322 → 全追加 4,507 行 0.80689，
+**Δ = +0.366pt（McNemar p = 0.1595，discordant 133/158）**．事前登録の足切り +1.0pt に不通過．
+per-domain recall Δ は education +8.54 / general +1.33 / computer_science +0.93 が BH 後有意な改善，
+**history_culture −5.08・natural_science −5.20 が BH 後有意な退行**で，有意退行 1 件でも本走しないという
+足切り条件 2 にも不通過．C5（追加行の多い 4 ドメインの Δ 合計 > 追加 0 の 5 ドメインの Δ 合計）は
+**−8.68pt 対 +11.48pt で反証された**．
+
+#### 分析（ノイズか信号か・本走が無いので何が言えないか）
+
+- **全体 Δ = +0.366pt はノイズと区別できない**．p = 0.1595 であり，かつ 3 seed は同じ 2,275 行を
+  3 通りに分割し直したものなので独立標本ではなく，n=6,825 として扱った p は楽観側に寄っている．
+  一方 **per-domain の ±5pt 級は偶然変動ではない**（p = 2.4e-7 / 3.0e-8）．すなわち
+  「全体は動かないが，ドメイン間で ±5pt の再配分が起きた」が今回の信号である．
+- **本走をしていないので end-to-end の Δ は存在しない．** CV Δ から e2e を予測する手続き
+  （伝達率 43%）は Iter91 の 1 点の実測に基づく外挿で，(i) 伝達率が腕の種類によらず一定，
+  (ii) CV のテスト分布と評価集合 `data/dataset.jsonl` の分布が同じ意味を持つ，という 2 つの仮定に
+  依存する．今回は後述のとおり **(ii) が破れている疑いが濃い**ため，0.366 × 0.43 = +0.16pt という
+  e2e 予測値は参考値ですらなく，**符号すら保証されない**．したがって本レバーについて言えるのは
+  「事前登録した足切りを通らなかった」ことだけであり，「実機で効かない／退行する」とは言えない．
+- **学習曲線の外挿（n 倍増で CV +1.73pt）は当たらなかった（実測はその約 1/5）**．外挿が暗黙に
+  仮定していたのは「追加行が既存行と同分布であること」で，今回の追加行はそうではなかった（下記）．
+
+#### 考察 —— C5 の反証は「n は効かない」ではなく「n と構成比が交絡していた」
+
+機序の候補を，既存の数値と過去の journal だけから整理する（いずれも本反復では追加検証していない）．
+
+- **(M1) スクリーニングのテスト fold が旧訓練分布のままである（測定側の交絡．最有力）．**
+  固定 5-fold のテスト fold は既存 2,275 行から作るので，そのドメイン内タスク構成は
+  `build_dataset.py` の per-domain 上限 150 によるサンプリング構成である．腕 B はその同じドメインの
+  クラス条件分布を **JMMLU プール構成へ動かす**（全プール追加後の構成 ≒ プール構成）．
+  計画フェーズの実測では，訓練 vs 評価 の全変動距離は education 0.189 / medical 0.169 /
+  history_culture 0.153 と大きい一方，**プール vs 評価 は 0.017〜0.081 と小さい**．
+  つまり今回の操作は **評価集合には近づくが，CV のテスト fold からは遠ざかる**向きである．
+  追加行が多いドメインほどこのずれが大きく，そこだけ recall が落ち，追加 0 のドメインは
+  競合クラスが自分の領域から退いた分だけ上がる．観測された符号パターン（−8.68 / +11.48，
+  総和はほぼ相殺で +0.366pt）はこの説明とちょうど整合する．**history_culture / natural_science の
+  −5pt を「本番でも退行する」と読むのは誤り得る．**
+- **(M2) 較正の非対称性**: 重みは `n/(K*n_d)` の balanced 相当なのでクラス事前分布そのものは
+  正規化されるが，`CalibratedClassifierCV` の較正はクラスごとのスコア分布の推定に依存する．
+  クラスあたり行数が 250 行 対 1,060 行と 4 倍に開くと，較正曲線の推定精度がクラス間で非対称になる．
+- **(M3) ドメイン内のタスク多様性（Iter93 の学びの裏返し）**: タスク数の多い history_culture (7)・
+  natural_science (8) では追加行が別タスクの峰を厚くし，単一の線形境界がそちらへ引かれる．
+  ただし **medical は 10 タスク・+810 行で改善している（+2.27pt, p=0.0506）**ので，
+  タスク数だけでは符号を説明できない．「タスク数」より「構成比の移動量」のほうが説明力が高く，
+  この点でも (M1) が優る．
+- **(M4)** `natural_science` の重複 5 行（異なるタスク CSV に同一設問）は規模として無関係．
+
+したがって **C5 の反証は「訓練量 n は効かない」を意味しない．今回の設計では
+n の増加とドメイン内タスク構成比の移動が完全に交絡しており，純粋な n の効果は未測定のままである．**
+
+#### 判定
+
+- **`closed`**（Iter93 の `classifier_label_granularity` と同じ扱い：事前 CV の足切りに不通過で
+  本走を行わずレバーを閉じる）．**`rejected` ではない**．`rejected` は本走の 2 軸表に基づく判定語であり，
+  本走が無い以上そのセルには到達していない．`classifier_training_volume_expansion` は
+  値 `full_eval_disjoint_jmmlu_pool` をもって closed とし，config.yml の当該 note に実測値を注記した
+  （同じ案を再度引かないため）．
+
+#### 学び（次の自分が読んで分かる形）
+
+1. **訓練分布そのものを動かすレバー（行の追加・削除・再重み付け）を訓練集合内 CV で足切りすると，
+   テスト fold が旧分布のままであるために，変更したクラスへ系統的に不利なバイアスがかかる．**
+   この型のレバーでは，スクリーニング設計の段階で「腕 A と腕 B でテスト fold が同じ意味を持つか」を
+   必ず確認すること．具体的な回避策は 2 つある．(a) 追加行の構成比を既存構成比に一致させて
+   分布を動かさない（次イテレーションの方針），(b) プール側から層化して取り分けた
+   hold-out 行をテスト集合に足す（評価集合を覗かずに済む）．
+2. **学習曲線 err ∝ n^(-α) による外挿は「追加行が既存行と同分布」を暗黙に仮定している．**
+   本研究の既存訓練行は per-domain 上限 150 のサンプリングで構成が歪んでいたため，
+   残りプールを足す操作は n の増加と同時に分布のシフトを伴った．外挿値を足切り閾値と比べる前に，
+   追加行の由来分布が既存行と同じかを確認すること．
+3. **JMMLU プールは尽きていない**（未使用 2,232 行．内訳は本イテレーション「調査 (2)」の表）．
+   `legal`・`computer_science`・`social_science`・`general`・`education` の 5 ドメインだけが枯渇しており，
+   n を触る手は「4 ドメインだけを太らせる」形にしかならない．この非対称性自体が (M1) の交絡の源である．
+4. 運用面: wafl-ctrl5 には uv が無く，既定の python 3.14（free-threaded）では `safetensors` の
+   wheel が無くビルドに失敗する．`uv sync --extra research --python 3.12` を明示すること．
+
 ## Iteration 94: 訓練集合と評価集合で重複する設問 64 行を除去し基準線を引き直す
 
 ### 調査 (Iter94)
@@ -429,346 +830,4 @@ k=4 が頂点の上に凸な曲線で，**退行するドメインが無い**点
   判明している．**+0.5pt 級の改善を積み上げる方針へ切り替えるなら**，腕 C（予測 +0.43pt）ではなく
   k-means k=4（予測 +1.1pt・退行ドメインなし）が最有力の候補として残る．
   **これは研究の合否基準の変更であり，人間の判断を仰ぎたい．**
-
-## Iteration 92: 訓練ラベル写像を評価集合へ一致させる（japanese_civics の education 復帰）
-
-### 調査 (Iter92)
-
-backlog B151 (c) の指示により `levers` を使い切った状態からの再探索である．B151 (d) が挙げた 4 観点
-（日本語 legal/education/social_science/general の公開データ源／クラス不均衡下の線形分類器／複合クエリの
-ルーティング／訓練集合内 CV で +2.3pt 以上を見込めること）を出発点に tavily-search で文献を当たりつつ，
-**基準線 `results/20260928_032909/`（3,750 行，top1 = 0.829867）の誤りがどこに集中しているかを
-`jmmlu_task` 単位まで分解した**．その結果，候補レバーを机上で比較する前に**測定系の側に
-未発見の不整合が 1 つ残っていること**が分かったので，本反復はそれを主題にする．
-
-**(1) 文献調査（tavily-search）で分かったこと**
-
-- Menon et al. (2021), *Long-tail learning via logit adjustment*, ICLR 2021, arXiv:2007.07314,
-  <https://arxiv.org/abs/2007.07314> —— クラス事前確率に基づく logit 補正は，重み付けよりも
-  長尾クラスの誤りを直接減らす．**本研究への適用可能性の見積り**: 本研究で事前分布が偏っているのは
-  `legal`（77 行 / 他 9 ドメイン各 250 行）だけであり，τ=1 の補正が動かすのは訓練行の 3.3%，
-  訓練集合内 CV 換算で高々 +0.2pt 程度にしかならない．B151 (d) 4 の足切り（CV +2.3pt）に
-  遠く届かないため，**今回は採らない**（Iter89 の学び「判定不能と事前に分かるレバーには着手しない」）．
-- Northcutt et al. (2021), *Pervasive Label Errors in Test Sets Destabilize Machine Learning
-  Benchmarks*, NeurIPS Datasets & Benchmarks,
-  <https://datasets-benchmarks-proceedings.neurips.cc/paper/2021/file/f2217062e9a397a1dca429e7d70bc6ca-Paper-round1.pdf>
-  —— 実務では「補正前のテスト精度」しか見えないため，ラベル定義の誤りはモデル側の差として
-  誤読されやすい．**本反復の発見はまさにこの型である**（後述）．
-- Nevin et al. (2025), *The effects of mismatched train and test data cleaning*,
-  <https://pmc.ncbi.nlm.nih.gov/articles/PMC12190241> —— 訓練側と評価側で前処理・整形が食い違うと，
-  モデル選択の判断そのものが変わりうる．**断定は避けるが**，本研究で 3 反復続けて分類器側のレバーが
-  no_effect だったことと整合的な説明を与える可能性がある．
-- Tunstall et al. (2022) SetFit 系の実務報告（Cloudera FFL, *Few-Shot Text Classification*,
-  <https://few-shot-text-classification.fastforwardlabs.com>）—— 凍結埋め込み上の軽量分類器は
-  **クラスあたり 8〜30 例**で実用水準に達し，100 例以上は飽和しやすい．
-  **本反復への含意**: 後述の欠落サブクラスに対し 34 行しか用意できないが，この範囲は
-  「効果が出るなら出る」水準ではある（保証ではない）．
-- JMMLU のライセンス: 『日本問題』（japanese_civics・japanese_idiom・japanese_geography）の著作権は
-  New Style（VIST 学習塾）にあり **CC BY-NC-ND 4.0**，japanese_history / world_history は STEP 社で
-  研究・評価目的以外の商用利用禁止（<https://huggingface.co/datasets/nlp-waseda/JMMLU>，
-  <https://github.com/nlp-waseda/JMMLU>）．`build_dataset.py:_RESTRICTED_LICENSE_TASKS` はこの 5 タスクを
-  列挙しており，`mise.toml:31` の `build_dataset.py --output data/dataset.jsonl` は
-  `--exclude-restricted-license-tasks` を**渡していない**（＝評価集合には japanese_civics が入る）．
-  **B151 (d) 1 が求めた「JMMLU 以外の日本語データ源の調達」は今回は不要と判断した**．理由は
-  次節のとおり，既存データの中に未使用の正解信号が残っていることが分かったためである．
-
-**(2) 基準線の誤りの所在 —— `education` の不足分はほぼ全量が 1 タスクに集中している**
-
-`data/dataset.jsonl` の `jmmlu_task` で基準線 `results/20260928_032909/` の単一ドメイン行を割ると:
-
-| ドメイン / タスク | n | recall | 主な誤送先 |
-|---|---|---|---|
-| education / **japanese_civics** | 116 | **0.0086 (1/116)** | history_culture 59・business_economics 36・legal 15 |
-| education / high_school_psychology | 73 | 0.685 | medical 14 |
-| education / sociology | 85 | 0.659 | history_culture 15 |
-| education / moral_disputes | 76 | 0.645 | social_science 12・legal 11 |
-| general / miscellaneous | 69 | 0.391 | history_culture 14・natural_science 10 |
-| general / formal_logic ・ logical_fallacies | 106 | 0.98 / 0.964 | — |
-| social_science / philosophy | 77 | 0.610 | education 21 |
-
-- **education_recall 0.4457 の不足 194 行のうち 115 行（全 3,750 行の 3.07pt）が japanese_civics 1 タスク**
-  である．他 3 タスクは 0.645〜0.685 で，10 ドメイン中の中位と同程度でしかない．
-- `general` も同型で，0.7429 の不足はほぼ `miscellaneous`（0.391）に集中し，形式論理系 2 タスクは 0.97 前後．
-
-**(3) 原因は分類器ではなく訓練側のタスク→ドメイン写像のずれ（本フェーズで実測）**
-
-`/tmp/expert-mesh-cache/JMMLU.zip` の設問文をキーに，本番訓練ファイル
-`data/classifier_train_iter87_hybrid.jsonl`（2,327 行）の各行を JMMLU のタスクへ逆引きした結果:
-
-- **`education` ラベル 250 行の内訳は high_school_psychology 87 / moral_disputes 87 / sociology 76 で，
-  japanese_civics は 0 行**．
-- 一方 **japanese_civics 22 行が `history_culture` ラベルで訓練集合に入っている**．
-  これは誤送先第 1 位（59 行）と一致しており，**現行の訓練データは「公民の設問は history_culture」と
-  明示的に教えている**．
-- 訓練集合 2,327 行のうち現行 `_DOMAIN_TASK_MAP` と食い違う行は **24 行のみ**で，そのうち 22 行が
-  この japanese_civics である（残り 2 行は international_law → business_economics 1 行，
-  high_school_microeconomics → mathematics 1 行）．つまり**ずれは 1 タスクに限局している**．
-- 経緯: `data/classifier_train.jsonl`（1,427 行，sha256 `eb89bf7b...`）は Iter37/38 の写像更新より前に
-  作られたまま再生成されておらず，Iter84 の hard negative 採掘は「現行訓練集合に既出のタスクへプールを
-  限定する」方針（backlog B133 (2)）を採ったため，旧写像がそのまま温存された．
-  一方 `data/dataset.jsonl` は Iter85（単一ドメイン拡充）・Iter90（複合拡充）で現行
-  `_DOMAIN_TASK_MAP` に基づき再構築されており，**評価側だけが新写像に移っていた**．
-
-**Iter36/37/38 の否定的所見との関係（重要．前提が逆である）**: Iter38
-（`education_hybrid_proxy_and_civics`）は rejected だが，当時の実装検証項目に
-「eval: education 150（旧 proxy のみ），japanese_civics = 0 件 — PASS」と明記されているとおり，
-**評価集合から japanese_civics を除いた上で訓練へ 150 行入れた**構成だった（訓練だけに存在する希釈）．
-現在は符号が逆で，**評価側に 116 行あり訓練側が 0 行**である．
-backlog B133 (2) が civics の流入を避けた判断も，評価側の再構築より前の情報に基づく．
-したがって過去 3 回の失敗は本反復の変更を否定しない（断定を避けて言えば，
-「同じ変更が別の前提の下で測られたもの」であって再現実験ではない）．
-
-**(4) リーク上限の実測 —— 訓練へ回せる japanese_civics は 34 行が上限**
-
-JMMLU の japanese_civics は全 150 問．内訳は **評価集合に 116 問 / 訓練集合に 22 問（うち 8 問は
-評価集合とも重複）/ どちらにも未使用 20 問**．よって**評価集合を汚さずに訓練へ回せるのは
-14（非重複の既存訓練行）＋ 20（未使用）＝ 34 行が上限**である．
-評価集合に載っている 116 問を訓練へ入れることは絶対にしない．
-
-**(5) 副次的に見つかった測定系の欠陥（本反復では直さない．backlog B152 へ記録）**
-
-訓練 2,327 行と評価 3,750 行の**設問文完全一致が 72 行**ある（うち 64 行はラベルも一致）．
-`build_classifier_training_rows()` は `exclude_queries=eval_queries` で重複を排除する設計だが，
-本番の訓練ファイルは評価集合の拡充（Iter85/90）より前に作られたため事後的に重複が生じた．
-**本反復では (4) の civics 8 行だけを削除し，残り 64 行には触れない**（単一レバー原則）．
-
-### 計画 (Iter92)
-
-**単一レバー**: `classifier_train_label_map_consistency` = **`japanese_civics_realignment_to_eval_map`**
-（config.yml の `levers` 末尾に本フェーズで追記．backlog B152 に選定理由を記録）．
-
-**仮説**: `education` の recall が低いのは代理タスクの意味的ギャップでも分類器の容量不足でもなく，
-**評価集合の education の 33%（116/350）を占める japanese_civics を，訓練データが
-`history_culture` として明示的に教えているため**である．訓練側の写像を評価側と一致させれば，
-japanese_civics の recall が 0.0086 から大きく上がり，top1_accuracy が +1.0pt 以上動く．
-
-**変更点（データのみ．コードは 1 行も変えない）**
-
-`data/classifier_train_iter92_civics_aligned.jsonl` を新規に作り，
-`data/classifier_train_iter87_hybrid.jsonl` との差分を次の 3 点だけにする．
-
-1. 評価集合に出現しない japanese_civics 訓練行 **14 行**: `domain` を `history_culture` → `education`．
-2. 評価集合と設問文が重複する japanese_civics 訓練行 **8 行**: 削除．
-3. 訓練にも評価にも未使用の japanese_civics **20 問**: `education` 行として追加．
-
-結果は **education 250→284 行 / history_culture 250→228 行 / 合計 2,327→2,339 行**．
-`scripts/train_domain_classifier.py`・`build_dataset.py`・`config.yaml`・`classifier.py`・
-`data/dataset.jsonl` は無変更（`C` は Iter91 で revert 済みの既定 1.0 のまま）．
-
-**固定する構成（Iter90 の最良構成）**: 埋め込み `qwen3-embedding:4b` の 2 ビュー連結（5,120 次元），
-instruction prefix は現行値のまま，`CalibratedClassifierCV(method="temperature", cv=5, ensemble=True)`，
-`class_weight=None` ＋ `_extract_sample_weights()` のドメイン均衡重み，`confidence_threshold=0.0`，
-`dispatch_top_k=1`，評価集合 `data/dataset.jsonl` 3,750 行．
-
-**再訓練の手順（絶対条件）**
-
-- 埋め込み計算は **wafl-ctrl5 上で行う**（2026-09-23 恒久運用ルール．wafl500〜509 は本走以外に使わない）．
-- **既存キャッシュを再利用し，新規に埋め込むのは追加 20 行だけにする**
-  （`data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy` の該当行を流用）．
-  B149 (d) の `qwen3-embedding:4b` のセッション跨ぎ非決定性（最大絶対差 0.011406）と本レバーの効果が
-  交絡するのを避けるための措置であり，**2,319 行の特徴量が基準線 artifact と同一であることを
-  G0-b で確認する**．同等の結果が得られる別経路を採ってもよいが，その場合も同一性の確認は必須とする．
-
-**本走前のゲート（G0．すべて本走前に journal へ記録する）**
-
-| # | 内容 | 合格条件 |
-|---|---|---|
-| G0-a | 新訓練ファイルの構成検証 | 合計 2,339 行 / education 284 / history_culture 228 / japanese_civics 行は全て `education` かつ 34 行 / `history_culture` の japanese_civics 0 行 / 新・改変行と `data/dataset.jsonl` の設問文重複 0 件 |
-| G0-b | 特徴量の同一性 | 変更していない 2,319 行の埋め込みがキャッシュとビット一致 |
-| G0-c | 変更の最小性 | `git diff --stat` に `scripts/`・`build_dataset.py`・`config.yaml`・`classifier.py`・`node.py`・`aggregator.py` が現れないこと．`data/dataset.jsonl` の sha256 不変 |
-| G0-d | オフライン replay による効果量の事前登録 | 新 artifact で `data/dataset.jsonl` を replay し，top1・per-domain・japanese_civics 部分集合 recall を**本走前に**記録する（**予測の事前登録のみ．採否の判断には使わない**．Iter91 で replay が分類器 argmax 精度を小数 6 桁一致で当てることが実証済み） |
-| G0-e | **デプロイ** | **wafl500〜509 には Iter91 の `C`=10.0 artifact が載ったままである（B151 (b)）．本走前に必ず `mise run deploy` を実行し，10 台すべてで新 artifact の sha256 一致と smoke_check PASS を確認すること** |
-
-**成功条件（事前登録．基準線は `results/20260928_032909/`，3,750 行，top1 = 0.829867）**
-
-- **主基準（両方を満たすとき `adopted`）**
-  - (i) Δtop1_accuracy **≥ +1.0pt**（≥ 0.839867）かつ McNemar 両側 p < 0.05（Wilson 95%CI 併記）．
-  - (ii) education 単一 350 行の recall **≥ 0.55**（基準線 0.4457）**かつ** japanese_civics 部分集合
-    116 行の recall **≥ 0.30**（基準線 0.0086）．
-- **非退行（1 つでも破れば `partial`）**
-  - ① per-domain recall/precision 20 指標（単一 3,020 行）の BH 補正 q=0.05 後の有意退行 0 件．
-    **history_culture は訓練行が 22 行減るため最も危ない**（基準線 recall 0.9114）．
-  - ② 複合 730 行の正解率 **≥ 0.7932**（基準線 0.8082 − 1.5pt）かつ複合行での McNemar 有意退行なし．
-  - ③ `fallback_rate` = 0.0，`dispatch_failure_rate` ≤ 0.005，`mean_duration_ms` ≤ 3,040（基準線 2,531 の 1.2 倍）．
-- **判定語**: (i)(ii) と非退行①〜③がすべて成立 → `adopted`．
-  (i)(ii) のいずれかが成立し非退行が破れる → `partial`．
-  (i) が非有意または |Δtop1| < 0.5pt → `no_effect`．到達確認 G0-a〜G0-c が破れる → `invalid`．
-  （B149 (c)・B151 要レビュー (a) の「判定語を排他的な決定木へ書き直す」という宿題は未承認のため，
-  本反復では上記の順に**上から順に最初に当てはまったものを採る**と明示して曖昧さを消す．）
-
-**期待効果（事前登録の点予測）**: japanese_civics recall 0.0086 → **0.45**（116 行中 52 行．
-SetFit 系の実務報告が示す「クラスあたり 30 例前後で実用水準」の下端にあたる 34 行しか用意できないため，
-飽和水準には届かないと見込む）．これが overall へ **+1.36pt**，history_culture の減少分 −0.1pt 前後，
-差引 **Δtop1 = +1.0〜+1.5pt** と予測する．B151 (d) 4 の「訓練集合内 CV +2.3pt」という足切りは，
-**訓練集合に japanese_civics の education 行が 1 行も無い以上，訓練集合内 CV ではこの欠陥が
-そもそも観測できない**ため本レバーには適用できない（伝達率 43% は分類器の容量を触るレバーの値であり，
-訓練と評価の分布ずれを直すレバーには当てはまらない）．代わりに G0-d の replay を事前登録の予測として使う．
-
-**測定上の注記（分析フェーズへの申し送り）**: 変更点 2 で削除する 8 行は評価集合にも含まれるため，
-削除によって汎化と無関係に最大 **0.21pt**（8/3,750）だけ top1 が上振れしうる．
-分析フェーズでは**この 8 行を除いた 3,742 行での top1 も必ず併記すること**．
-
-**不成立だった場合の次の一手**: japanese_civics recall が 0.30 に届かない場合，34 行という行数が
-不足しているのか（→ 外部の日本語公民データ源の調達．ライセンス確認が要るため人間判断）
-それとも `education` というクラス定義自体が 4 タスクをまたいで多峰的すぎるのか（→ クラス定義の再検討）
-を切り分けること．
-
-### 実装・実験 (Iter92)
-
-**変更（コード 0 行）**: `data/classifier_train_iter92_civics_aligned.jsonl`（2,339 行，sha256
-`39c4ca52...`）を新規作成した．差分は事前登録どおり 3 点のみ — (1) `history_culture` → `education`
-への付け替え 14 行（`history_culture-train-002,006,009,024,025,051,052,053,056,063,085,103,110,148`），
-(2) 評価集合と設問文が重複する 8 行の削除（同 `-013,014,020,078,099,118,120,135`），
-(3) 訓練・評価とも未使用の japanese_civics 20 問を `education` として追加（`education-civics-001`〜`-020`）．
-education 250→284 / history_culture 250→228．追加 20 行の設問整形は `build_dataset.py` の
-`_parse_jmmlu_task_csv()` / `_format_jmmlu_query()` をそのまま import して生成した（自前整形なし）．
-再訓練は wafl-ctrl5 の Ollama（127.0.0.1:11499）で実施し，変更のない 2,319 行は
-`data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy` を直接インデックス参照で再利用，
-新規 embed は追加 20 行のみ（`embed_query_views` と同じ plain→instructed の順）．
-新 artifact `models/domain_classifier.joblib` sha256 `98da6f2d0d44...`（n_features_in_=5120），
-旧版（基準線と同一 `ff8aad9c...`）は `models/domain_classifier_pre_iter92_civics.joblib` へ退避（可逆）．
-`data/MANIFEST.md` 追記済み．再訓練スクリプトは `/tmp/iter92/retrain.py`（リポジトリ外）．
-
-**G0 ゲート**: a（構成検証: 2,339 行／education 284／history_culture 228／japanese_civics 行は全て
-education かつ 34 行／history_culture 内の japanese_civics 0 行／評価集合との設問文重複 0 件）**PASS**，
-b（特徴量同一性: 2,319 行はキャッシュから直接インデックス参照．スクリプト内 assert で検証）**PASS**，
-c（変更の最小性: `git diff --stat` に `scripts/`・`build_dataset.py`・`config.yaml`・`classifier.py`・
-`node.py`・`aggregator.py` は一切現れず，`data/dataset.jsonl` sha256 不変 `2114e048...`，
-`train_domain_classifier.py` の `C` は既定 1.0 のまま差分 0 行）**PASS**，
-d（replay による予測の事前登録: top1 0.831467→0.836267，Δ+0.48pt，McNemar p=0.0636，
-japanese_civics recall 0.0086→0.2241，education recall 0.4429→0.4943．**採否判断には使わない**）**記録済**，
-e（デプロイ: `mise run deploy` 後，全 10 ノード wafl500〜509 で artifact sha256 が `98da6f2d0d44...` に
-一致，smoke_check も全台 PASS）**PASS**．
-
-**本走**: `results/20260928_111644/`（3,750 問，フルスペック 1 回，所要約 155 分 < timeout 180 分）．
-基準線は `results/20260928_032909/`（top1 = 0.829867）．
-
-| 指標 | 基準線 | 本反復 | Δ |
-|---|---|---|---|
-| top1（全 3,750 行） | 0.829867 | 0.835467 | **+0.560pt**（McNemar p = 0.032015，discordant 33/54） |
-| top1（3,742 行．重複削除 8 行を除外） | 0.831641 | 0.836718 | +0.508pt（McNemar p = 0.050894，discordant 33/52） |
-| education 単一 350 行 recall | 0.445714 | 0.497143 | +5.143pt |
-| japanese_civics 部分集合 116 行 recall | 0.008621 | 0.232759 | +22.414pt（1/116 → 27/116） |
-| 複合 730 行 top1 | 0.808219 | 0.805479 | −0.274pt（McNemar p = 0.789268） |
-
-per-domain 20 指標の BH 補正（q=0.05）後の**有意退行は 0 件**（生の p 値では `recall:education` の
-p = 0.005820 が最小だが，BH のランク 1 閾値 0.0025 に対し不足．他は p > 0.2）．
-運用指標は `fallback_rate` 0.0/0.0，`dispatch_failure_rate` 0.000533→0.000800（≤0.005），
-`mean_duration_ms` 2531.5→2535.3（≤3040）で全て基準内．
-
-**逸脱・注記**: (1) `mise run deploy` はツールタイムアウト 2 分を超えるためバックグラウンド実行へ
-切り替えて完走を待った（コマンド自体は正常終了．Iter89 と同種の運用上の事象）．
-(2) G0-b の「ビット一致」はキャッシュからの直接インデックス参照という構成上，独立に再計算して
-差分を測る形の検証ではなく，同じ配列を使い回していることによる構造的な保証である．
-埋め込みのセッション跨ぎ非決定性（B149 (d)）とは交絡しない設計だが，この違いは明記しておく．
-(3) 本走は途中経過のポーリングのみで完走を待ち，強制終了等は行っていない．
-
-### Iteration 92 実行済み
-
-**変更**: コード 0 行．`data/classifier_train_iter92_civics_aligned.jsonl`（2,339 行，sha256
-`39c4ca52...`）を新規作成し，訓練側の japanese_civics のラベルを評価側の `_DOMAIN_TASK_MAP` へ
-一致させた（`history_culture`→`education` 付け替え 14 行／評価集合と設問文が重複する 8 行を削除／
-訓練・評価とも未使用の 20 問を `education` として追加．education 250→284，history_culture 250→228）．
-新 artifact `models/domain_classifier.joblib` sha256 `98da6f2d0d44...`．G0-a〜e は全て PASS
-（評価集合 sha256 不変，wafl500〜509 の 10 台で artifact sha256 一致，smoke_check PASS）で，
-**レバーが発火していることは確認済みである**．
-
-**結果（本走 `results/20260928_111644/` 対 基準線 `results/20260928_032909/`）**
-
-| 指標 | 基準線 | 本反復 | Δ | p |
-|---|---|---|---|---|
-| top1（3,750 行） | 0.829867 (3112/3750) | 0.835467 (3133/3750) | +0.560pt | McNemar 0.031418（54 改善 / 33 悪化） |
-| **top1（3,742 行．訓練削除 8 行を除外．主報告値）** | 0.831641 | 0.836718 | **+0.508pt** | **0.050894** |
-| education 単一 350 行 recall | 0.445714 | 0.497143 | +5.143pt | — |
-| japanese_civics 116 行 recall | 0.008621 (1/116) | 0.232759 (27/116) | **+22.414pt** | **exact McNemar 2.98e-8（26 改善 / 0 悪化）** |
-| **japanese_civics を除く 3,634 行** | — | — | **−5 行（28 改善 / 33 悪化）** | **0.608921** |
-| 複合 730 行 top1 | 0.808219 | 0.805479 | −0.274pt | 0.789268 |
-
-per-domain 20 指標の BH 補正（q=0.05）後の有意退行 **0 件**（生 p 最小は `recall:education` の
-0.005820 だが BH ランク 1 閾値 0.0025 に不足）．運用指標は全て基準内（`fallback_rate` 0.0，
-`dispatch_failure_rate` 0.000800 ≤ 0.005，`mean_duration_ms` 2535.3 ≤ 3040）．
-
-**ノイズか信号か**: 本測定系の再現性の床は top1 ±0.25pt，そこから導かれる McNemar 有意境界は
-0.249pt である（B149 恒久申し送り 1，Iter88 実測）．Δ = +0.560pt（3,742 行で +0.508pt）は床の
-約 2.0〜2.2 倍であり，**符号は信号として読める**．ただし +1.0pt に対しては約半分で，
-主基準 (i) が要求した効果量には届いていない．一方 **japanese_civics 部分集合の 26 改善 / 0 悪化
-（exact p = 2.98e-8）はノイズでは説明不能**であり，狙った機序が発火したことは確定した．
-
-**主報告値の選択（論点 3）**: 削除した 8 行は評価集合にも含まれるため事前登録どおり両方を出したうえで，
-**3,742 行版（Δ +0.508pt，p = 0.050894）を主報告値とする**．理由は，削除された 8 行の正誤変化は
-汎化とは無関係な構成上の産物（基準線ではこの 8 行が `history_culture` ラベルで訓練に入っており
-確実な誤りを作っていた）だからである．実際に生じた上振れは **+2 行 = +0.053pt** に留まり，
-事前に見積もった最大 0.21pt よりはるかに小さい（基準線 0/8 正解，本反復 2/8 正解）．
-2 つの数字の差は 0.05pt で，どちらを採っても効果量の結論は変わらないが，p 値は 0.031 と 0.051 で
-有意水準 0.05 をまたぐ．**保守側（3,742 行，p = 0.050894 ＝ 非有意）を主として扱う．**
-
-**判定: `partial`（主たる判定語）**
-
-事前登録の判定条文を literal に当てはめた結果を先に書く．
-- `adopted`: (i) Δtop1 ≥ +1.0pt が不成立（+0.508〜+0.560pt）．(ii) education recall 0.497 < 0.55，
-  japanese_civics recall 0.2328 < 0.30 も不成立．**不成立**．
-- `partial`（「(i)(ii) のいずれかが成立し非退行が破れる」）: (i)(ii) はいずれも不成立，
-  非退行①〜③は全て充足．**literal には不成立**．
-- `no_effect`（「(i) が非有意 **または** |Δtop1| < 0.5pt」）: 主報告値 3,742 行では p = 0.050894 で
-  非有意のため **literal には成立する**（3,750 行を採れば p = 0.031418 で有意，|Δ| = 0.560 ≥ 0.5 となり
-  literal には不成立となる．**どちらの行数を採るかで判定語が変わる**）．
-- `invalid`: G0-a〜e 全 PASS のため不成立．
-
-すなわち**事前登録の判定木には，「有意性は境界上だが効果量が閾値の半分・非退行は全充足・
-狙った機序は明確に発火」という今回の状態を受け止める枝が無い**（B151 要レビュー (a) が指摘した
-条文の重なりとは逆向きの，網羅性の欠落である）．そのうえで主たる判定語を **`partial`** とする．
-根拠は次の 3 点である．
-1. `no_effect` は「レバーが効かなかった」ことを記録する語だが，japanese_civics 26 改善 / 0 悪化
-   （p = 2.98e-8）は**レバーが意図した経路で確実に効いたことを直接示す**．この状態を `no_effect` と
-   記録すると，次の自分が「訓練／評価のラベル写像ずれは直しても効かない」という誤った事実を
-   引き継ぐ．Iter91 の `no_effect`（Δ +0.16pt・床の内側・機序の証拠なし）とは質的に異なる．
-2. `partial` の語義は「事前登録した成功条件の一部だけを満たした」であり，今回は
-   主基準 (ii) の 2 条件のうち方向・機序は実現したが水準（0.30 / 0.55）に未達，
-   (i) は効果量未達という状態で，この語義には合致する．条文の文言（「非退行が破れる」）に
-   合致しないのは条文側の欠落である．
-3. Iter90 も「設計どおりに動いたが数値基準は未達」で `partial` と記録しており，用語の一貫性を保てる．
-
-**artifact の採否: 維持（ロールバックしない．論点 2）**
-
-`models/domain_classifier.joblib` は新版 `98da6f2d0d44...` のまま，wafl500〜509 も新版配布済みのまま
-据え置く（旧版 `ff8aad9c...` は `models/domain_classifier_pre_iter92_civics.joblib` に保持，可逆）．
-Iter91 で倹約側の既定（効果が測れず退行がある変更は入れない）を採ったのと条件が異なる:
-Iter91 は Δ +0.16pt（床 ±0.25pt の**内側**＝効果が測れない）かつ `legal_recall` に有意退行 1 件だった．
-今回は Δ が床の 2 倍以上・退行 0 件・運用指標も基準内である．加えて本変更は精度チューニングではなく，
-**訓練ラベルが評価側のラベル定義と矛盾していたという欠陥の是正**であり，仮に Δ が 0 でも
-矛盾した訓練データへ戻す積極的な理由が無い．**次イテレーションの基準線は
-`results/20260928_111644/`（3,750 行，top1 = 0.835467）へ更新する**（評価集合 `data/dataset.jsonl` は
-sha256 不変 `2114e048...` なので行数・母集団は基準線間で一致する）．
-再訓練を行う場合の訓練ファイルは `data/classifier_train_iter92_civics_aligned.jsonl` である．
-
-**学び**
-
-1. **`education` の低 recall の主因は分類器側ではなく，訓練ラベルが評価ラベル定義と矛盾していたこと
-   だった．**Iter89〜91 の 3 反復にわたって分類器側のレバー（埋め込み・正則化）が no_effect だった
-   背景にはこれがあった可能性が高い（断定はしない．Nevin et al. 2025 の「訓練／評価の整形不一致は
-   モデル選択の判断自体を変えうる」と整合的な実例である）．**モデル側を触る前に，訓練と評価の
-   ラベル定義が同一の写像から生成されているかを毎回確認すること．**
-2. **効果は狙った 116 行の中にほぼ完全に閉じており，波及も副作用も無かった．**civics を除く
-   3,634 行では 28 改善 / 33 悪化（p = 0.61）で**正味 −5 行**である．すなわち
-   「+0.56pt は civics 由来 +26 行と，それ以外での −5 行の差引」であり，
-   **このレバーで overall を動かせる上限は評価集合中の該当タスクの行数で決まる**．
-   訓練データの局所的な修正が全体へ波及するという期待は，今回のデータでは支持されない．
-3. **34 行では civics recall は 0.233 にしか届かなかった（事前予測 0.45 の半分）．**
-   計画が事前登録した切り分け（行数不足か，`education` クラス定義の多峰性か）に対しては，
-   **行数不足だけでは説明しきれない**と読む．他 3 代理タスク（psychology 0.685・sociology 0.659・
-   moral_disputes 0.645）はそれぞれ 76〜87 行で 0.65 前後に留まっており，行数を増やしても
-   0.65 付近が `education` クラスの天井である可能性がある．**`education` は 4 タスクにまたがる
-   多峰クラスであり，単一の線形境界で表現しきれていない**という仮説が次の検討対象になる
-   （→ Iter93 の新レバー `classifier_label_granularity` へ．backlog B153）．
-4. **事前登録の効果量閾値は，機序の指標（部分集合 recall）と overall 指標の両方に置いたうえで，
-   「部分集合の寄与から overall の上限を先に計算しておく」べきだった．**今回 civics 116 行が
-   全問正解になっても overall は +3.07pt が上限であり，実際に得られた recall 0.233 では
-   構造的に +0.69pt が上限だった．すなわち **+1.0pt という主基準は，機序が事前予測どおり
-   （recall 0.45）に発火しても達成が際どい水準に設定されていた**．次回以降，
-   「部分集合の期待改善 × 部分集合の母集団比」を計画時に必ず計算して閾値の実現可能性を検算すること．
-5. 判定木の網羅性: `no_effect` の条文（非有意 **または** |Δ| < 0.5pt）は，
-   「有意だが効果量が閾値未達」を `no_effect` に落としてしまう幅がある．
-   B151 (a) の宿題（判定語を排他的な決定木へ書き直す）は未承認のままだが，
-   **今回はその欠落が実際に判定語の選択を左右した**．次の計画フェーズは，
-   主基準の効果量条件と有意性条件を分けた 2 軸の表として判定語を定義すること（B153 要レビュー）．
 

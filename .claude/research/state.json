@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 94,
-  "iteration_name": "訓練集合と評価集合で重複する設問 64 行を除去し基準線を引き直す",
+  "iteration": 95,
+  "iteration_name": "未使用の JMMLU プールを全投入し訓練行を約 2 倍にする",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "train_eval_question_overlap_removal=remove_duplicate_question_rows_and_rebaseline",
-  "experiment_dir": "results/20260928_160921/",
-  "experiment_deadline": 1790590730,
-  "updated_at": 1790589376,
-  "last_slack_ts": "1790589080.664059",
-  "iteration_thread_ts": "1790578460.594699",
+  "current_lever": "classifier_training_volume_expansion=full_eval_disjoint_jmmlu_pool",
+  "experiment_dir": null,
+  "experiment_deadline": null,
+  "updated_at": 1790590750,
+  "last_slack_ts": "1790594760.594209",
+  "iteration_thread_ts": "1790590813.612889",
   "notion_toggle_created": true,
-  "last_commit": "6ea8fbd"
+  "last_commit": "b97fa5b"
 }
