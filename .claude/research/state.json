@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 93,
-  "iteration_name": "分類器のラベル粒度を JMMLU タスク単位へ細分化しドメインへ写像する",
-  "phase": "research",
+  "iteration": 94,
+  "iteration_name": "訓練集合と評価集合で重複する設問 64 行を除去し基準線を引き直す",
+  "phase": "evaluate",
   "status": "running",
-  "current_lever": "classifier_label_granularity=jmmlu_task_level_subclass_then_sum_to_domain（事前 CV +1.00pt < 足切り +2.3pt のため本走見送り・要人間判断）",
-  "experiment_dir": null,
-  "experiment_deadline": null,
-  "updated_at": 1790571954,
-  "last_slack_ts": "1790572079.417299",
-  "iteration_thread_ts": null,
-  "notion_toggle_created": false,
-  "last_commit": "84b98b0"
+  "current_lever": "train_eval_question_overlap_removal=remove_duplicate_question_rows_and_rebaseline",
+  "experiment_dir": "results/20260928_160921/",
+  "experiment_deadline": 1790590730,
+  "updated_at": 1790589376,
+  "last_slack_ts": "1790589080.664059",
+  "iteration_thread_ts": "1790578460.594699",
+  "notion_toggle_created": true,
+  "last_commit": "6ea8fbd"
 }

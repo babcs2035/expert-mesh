@@ -1166,3 +1166,35 @@ G0-a〜G0-d の実測（構成検証・特徴量同一性・変更の最小性�
 実施済み**: `mise run deploy` を実行し，wafl500〜509 全 10 台で `models/domain_classifier.joblib` の
 sha256 が `98da6f2d...` に一致すること（`ssh <host> sha256sum` で個別確認）と smoke_check PASS を確認した．
 本走は `results/20260928_111644/`（3,750 問）．
+
+**2026-09-28 更新（Iteration 94, `train_eval_question_overlap_removal=remove_duplicate_question_rows_and_rebaseline`）**:
+コードは無変更．訓練データのみ新規作成: `data/classifier_train_iter94_dedup.jsonl`
+（`data/classifier_train_iter92_civics_aligned.jsonl` 2,339 行から，評価集合 `data/dataset.jsonl`
+と `query` が完全一致する 64 行を削除．行の並び・残り 2,275 行の内容は完全一致，2,339→2,275 行．
+education 284→238，history_culture 228→210，他 8 ドメインは不変）．削除対象 id は
+`/tmp/iter94/iter94_dup_train_ids.json`（リポジトリ外，計画フェーズの重複同定スクリプト
+`/tmp/iter94/iter94_overlap.py` が出力，完全一致・正規化一致とも同一の 64 行）．
+
+再訓練は特徴量の新規計算 0 件で行った: 変更のない 2,275 行は Iter89 埋め込みキャッシュ
+`data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy` と Iter92 新規 20 行キャッシュ
+`data/embcache_train_iter92_qwen3-embedding_4b_new20{,__p1}.npy` から id 対応で再構成した
+（Ollama 呼び出し・wafl500〜509 とも不使用）．再訓練スクリプトは `/tmp/iter94/retrain.py`
+（リポジトリ外，`scripts/train_domain_classifier.py` の `_load_training_rows` /
+`_extract_sample_weights` / `train_classifier` をそのまま import して使用．モデル定義・
+`C`=1.0（既定）・`CalibratedClassifierCV(method="temperature", cv=5, ensemble=True)` は無変更）．
+出力 artifact は，計画フェーズの事前 replay `/tmp/iter94/predict_replay.py` が生成した
+`/tmp/iter94/domain_classifier_dedup_preview.joblib` と sha256 が完全一致した
+（`2f801357...`，同一の特徴量・同一の学習規則であることの独立確認）．
+
+旧版（Iter92 基準線と同一，`C`=1.0）は `models/domain_classifier_pre_iter94_dedup.joblib` へ退避．
+
+| ファイル | sha256 |
+|---|---|
+| `data/classifier_train_iter94_dedup.jsonl`（2,275 行．新規） | `d6b237358aa5999e1c3101923ab07c805329001655883875bfcbe5aca5f1a6ec` |
+| `models/domain_classifier.joblib`（現行＝Iter94 候補，`n_features_in_`=5120） | `2f8013578b7352141aca7c6a830c8cbde6519a7978cde9b6937b335648c1c697` |
+| `models/domain_classifier_pre_iter94_dedup.joblib`（Iter92 と同一） | `98da6f2d0d446cca4c67ec9b6cc908881886dad5983ee007e4eedc2876dc9aa3` |
+
+C1（重複 0 行．完全一致・正規化一致とも 0）・C2（差分が 64 id の削除のみ．行の並び・内容は他 1 文字も
+不変）は実装フェーズで実測 PASS．G0-d replay（`/tmp/iter94/replay_actual_vs_pre94.py`）は計画フェーズの
+事前予測（Δtop1=-0.133pt）を discordant 34/29・p=0.6143 まで完全再現した（C4 PASS）．本走・デプロイ確認・
+C3/C5/C6 の集計は次の journal 追記（実装・実験フェーズ報告）を参照．
