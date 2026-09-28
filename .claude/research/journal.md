@@ -1,3 +1,476 @@
+## Iteration 91: 分類器 L2 正則化強度の再選定（訓練集合内 CV による）
+
+### 調査 (Iter91)
+
+B149 (d) が本反復のレバーを `classifier_regularization_strength` = `l2_C_selected_by_train_only_cv` と
+指定し，config.yml の `levers` 末尾に追記済みである．B149 が実測した訓練集合内 5-fold CV は
+**素の `LogisticRegression` 単体**で測ったものだったため，本フェーズでは 3 つの問いを立てた．
+**(Q1) 高次元・小標本（p=5120 ≫ n=2327）で，訓練集合内 CV で選んだ正則化強度は保持集合へ汎化するか．
+(Q2) `CalibratedClassifierCV(method="temperature", cv=5, ensemble=True)` という入れ子構造の下でも
+同じ CV 曲線になるか（本番の推論はこのラッパを通る）．(Q3) C=3.0 と C=10.0 のどちらを選ぶべきか．**
+
+**Q1: 「CV の推定値」は楽観バイアスを持つが，「CV で選ばれたハイパラ」は実務上ほぼ最適に近い**
+
+- Cawley & Talbot (2010), *On Over-fitting in Model Selection and Subsequent Selection Bias in
+  Performance Evaluation*, JMLR 11:2079-2107, <https://www.jmlr.org/papers/v11/cawley10a.html> ——
+  モデル選択に使った CV スコアをそのまま性能推定値として報告すると，**選択バイアスにより楽観側へ
+  ずれる**（しかもそのずれは「意外なほど大きい」と本文が述べている）．
+  **本反復への含意**: CV で得た +2.7pt という数字を「評価集合でも +2.7pt 出る」と読んではならない．
+  事前登録の期待効果は減衰を見込んで置き，判定は本走の McNemar で行う．
+- Wainer & Cawley (2018/2021), *Nested cross-validation when selecting classifiers is overzealous
+  for most practical applications*, arXiv:1809.09446, <https://arxiv.org/html/1809.09446v1> ——
+  ハイパラ選択にフラットな（入れ子でない）CV を使っても，**選ばれたハイパラの汎化性能は
+  入れ子 CV で選んだものとほとんど変わらない**（差が出るのは「性能推定値」の側）．
+  **本反復への含意**: 本反復の C 選定は，評価集合（`data/dataset.jsonl`）を一切見ずに
+  訓練集合内 CV だけで行う方式で問題ない．**バイアスが乗るのは推定値であって選択ではない**．
+- Hastie, Tibshirani & Friedman, *The Elements of Statistical Learning* 2nd ed. §7.10（one-standard-error
+  rule），<https://esl.hohoweiya.xyz/book/The%20Elements%20of%20Statistical%20Learning.pdf> ——
+  CV 曲線は最小値の近傍で平坦になることが多く，**最良値の 1 標準誤差以内にある中で最も倹約的な
+  （＝正則化が強い）モデルを選ぶ**ことが推奨される．**Q3 の判定規則としてこれを採用する**．
+- 参考（慣行の確認）: MTEB / C-MTEB の Classification タスクは凍結埋め込み上で
+  `LogisticRegression` を既定ハイパラで訓練する（<https://bge-model.com/tutorial/4_Evaluation/4.2.3.html>）．
+  つまり **`C=1.0` のまま使うのは分野の慣行ではあるが，n/p 比に合わせて調整されたものではない**．
+  本リポジトリの現行設定（`train_domain_classifier.py:210` が `C` を書いていない＝既定の 1.0）は
+  この慣行をそのまま引き継いだだけで，Iter89 で p が 2048 → 5120 になった後も見直されていない．
+  （断定を避ける: これは「C=1.0 が悪い」ことの証拠ではなく，「調整された形跡が無い」ことの記録である．）
+
+**Q2: 本番パイプライン（較正ラッパ込み）でも CV 曲線の形は変わらない — 本フェーズで実測**
+
+B149 の測定は素の `LogisticRegression` で行われたが，本番の推論は
+`CalibratedClassifierCV(method="temperature", cv=5, ensemble=True)` を通る．ensemble=True は
+**内側 5 fold それぞれで訓練した 5 つの基底推定器の確率を平均する**ため，単体モデルと argmax が
+一致する保証は無い（temperature scaling 自体は共有 softmax の単調変換なので，単体なら argmax を
+変えないが，5 モデルの平均は変えうる）．そこで本フェーズで，**外側 5-fold の各 fold で本番と同一の
+パイプラインを丸ごと組み立て直す入れ子 CV**を実行した（スクリプト `/tmp/iter91/cv_pipeline.py`・
+`/tmp/iter91/cv_seeds.py`．入力は `data/classifier_train_iter87_hybrid.jsonl` 2,327 行 ＋
+`data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy` を連結した (2327, 5120)，
+重みは本番 `_extract_sample_weights()` と同一のドメイン均衡重み．
+**`data/dataset.jsonl`（評価集合）には一切触れていない**．CPU のみで実行し wafl500〜509 は使っていない）．
+
+| C | 素の LR（seed 0） | **本番パイプライン** seed 0 | seed 1 | seed 2 | **3 seed 平均** | C=1.0 比 |
+|---|---|---|---|---|---|---|
+| 1.0（現行＝sklearn 既定） | 0.8096 | 0.8036 | 0.8049 | 0.8040 | **0.8042** | — |
+| 3.0 | 0.8307 | 0.8251 | 0.8255 | 0.8251 | **0.8252** | +2.10pt |
+| 10.0 | 0.8367 | 0.8354 | 0.8290 | 0.8298 | **0.8314** | **+2.72pt** |
+| 30.0 | 0.8341 | 0.8354 | 0.8315 | 0.8324 | **0.8331** | +2.89pt |
+
+- **順位は 3 つの seed すべてで `1.0 < 3.0 < 10.0 ≤ 30.0` と完全に一致した**．較正ラッパは水準を
+  0.1〜0.6pt 押し下げるが，**C に対する曲線の形は変えない**．したがって B149 の素の LR による
+  曲線を根拠に使ってよい（本フェーズはそれを本番パイプラインで追試したことになる）．
+- B149 の実測値（C=1.0: 0.8144 / 3.0: 0.8328 / 10.0: 0.8354 / 100.0: 0.8333）と本フェーズの素の LR の
+  値が 0.3〜0.5pt ずれるのは外側 fold の分割乱数が違うためで，**順位と差の大きさは一致している**．
+- C=30.0 が C=10.0 をわずかに上回ったが，差は **+0.17pt** で fold 間 SD（0.011〜0.017）より小さい．
+
+**Q3: one-standard-error rule により C = 10.0 を選ぶ**
+
+Q2 の本番パイプライン 3 seed × 5 fold = 15 fold の結果に §7.10 の規則を当てはめる．
+最良は C=30.0 の 0.8331．fold 間 SD ≈ 0.0134．
+
+- 15 fold を独立とみなした SE = 0.0134/√15 = 0.00346 → 1-SE 下限 = **0.8296**．
+- seed をまたいだ fold は同一データの再分割なので独立ではない．保守側に **1 seed 分の
+  SE = 0.0134/√5 = 0.00599** を使っても 1-SE 下限 = **0.8271**．
+- **どちらの見積りでも C=10.0（0.8314）は下限を超え，C=3.0（0.8252）は超えない．**
+  よって「最良の 1SE 以内で最も正則化が強い C」は **C = 10.0** に決まる．
+
+**C=3.0 を採らない理由**（委譲元の指摘「差が 0.26pt しかない／C を上げるほど過学習リスクが増す」への回答）:
+B149 の素の LR 曲線では C=3.0 と C=10.0 の差は 0.26pt だったが，**本番パイプラインで測り直すと差は
+0.62pt（3 seed 平均）に広がり，3 つの seed すべてで C=10.0 が上回った**．1-SE 規則は
+「差が誤差に埋もれるなら弱い方（強い正則化）を採る」規則であり，本件では**埋もれていない**．
+逆に C=30.0 を採らないのは，C=10.0 との差 0.17pt が誤差に埋もれており，1-SE 規則が
+**より強い正則化（＝小さい C）**を選ぶよう指示するためである．したがって C=10.0 は
+「CV の argmax だから」ではなく「事前に決めた規則の適用結果」として選ばれている．
+**結論は B149 (d) が示唆した C=10.0 と一致する（乖離なし）．**
+
+**過学習リスクについての注記（断定しない）**: p=5120 ≫ n=2327 なので L2 罰則を弱めるほど係数ノルムは
+増え，訓練データ特有の方向へ載りやすくなる．ただし上表の保持 fold 精度は C=1→30 で単調増加しており，
+**この範囲では過学習による劣化はまだ観測されていない**（B149 の C=100.0 で 0.8333 と頭打ちになる
+ことから，転回点は C=30〜100 付近にあると推測される．確証はない）．C=10.0 はその転回点より
+手前かつ 1-SE 下限を満たす位置にある．
+
+### 計画 (Iter91)
+
+**単一レバー**: `classifier_regularization_strength` = **`l2_C_selected_by_train_only_cv`**，
+**具体値 C = 10.0**（`sklearn.linear_model.LogisticRegression` の逆正則化強度．
+C=10.0 は既定 1.0 に対し L2 罰則を 1/10 に弱めることを意味する）．
+他は Iter90 の最良構成に固定する（埋め込み `qwen3-embedding:4b` 2 ビュー連結，
+訓練データ `data/classifier_train_iter87_hybrid.jsonl` 2,327 行，評価集合 `data/dataset.jsonl`
+3,750 行，`method="temperature"`・`cv=5`・`ensemble=True`，`class_weight=None` ＋
+`_extract_sample_weights()` のドメイン均衡重み，`confidence_threshold=0.0`，`dispatch_top_k=1`）．
+
+**仮説**: Iter89 で特徴次元が 2048 → 5120 へ 2.5 倍になったのに `C` が sklearn 既定の 1.0 のままで，
+p=5120 ≫ n=2327 の領域では正則化が強すぎる側に外れている．C を 10.0 へ上げれば分類器の
+top1 が上がり，それが実行時のルーティング精度（`top1_accuracy`）へ +1.0pt 以上の形で現れる．
+
+**変更点（最小差分．コード 2 行 ＋ 定数定義）**
+
+1. `scripts/train_domain_classifier.py` のファイル冒頭（`_MAX_ITER` の近く）に定数を定義する．
+   マジックナンバー禁止規約に従い，値の根拠（訓練集合内 CV ＋ 1-SE rule）をコメントに残す．
+2. 同ファイル **`:210`** を
+   `base_estimator = LogisticRegression(max_iter=_MAX_ITER, class_weight=None)` から
+   `base_estimator = LogisticRegression(max_iter=_MAX_ITER, class_weight=None, C=_L2_INVERSE_REGULARIZATION)`
+   へ変更する．**これ以外のコード変更・config 変更は一切行わない**（`config.yaml` は 1 バイトも触らない）．
+3. `models/domain_classifier.joblib` を再訓練する．**埋め込み計算を伴うので wafl-ctrl5 上で行う**
+   （2026-09-23 絶対条件 (B)．wafl500〜509 は絶対に使わない）．
+4. `data/MANIFEST.md` に新 artifact の sha256 と訓練コマンドを追記する．
+
+**レバーを読むコード行と，そこへ到達する条件**
+（config.yml 冒頭「最重要の注意 — 同じ失敗を 6 回繰り返している」への対応）
+
+| # | コード行 | 何をするか |
+|---|---|---|
+| 1 | `scripts/train_domain_classifier.py:210` `LogisticRegression(max_iter=_MAX_ITER, class_weight=None)` | **ここに `C=` を足す．レバーの唯一の入口** |
+| 2 | 同 `:211-213` `CalibratedClassifierCV(base_estimator, method="temperature", cv=5, ensemble=True)` | sklearn の `clone()` は `get_params()` 経由なので **内側 5 fold すべてに C が伝播する** |
+| 3 | 同 `:214` `.fit(embeddings, labels, sample_weight=...)` → `:231` `train_classifier(...)` → `:235` `joblib.dump(model, output_path)` | artifact を書き出す |
+| 4 | `mise.toml:71-78` deploy | `sudo rm -rf $REMOTE_DIR/models` の後に `models/` を全ノードへ rsync する（古い artifact は残らない） |
+| 5 | `config.yaml:50` `routing_method: supervised_classifier` ／ `config.yaml:131` `classifier_model_path: models/domain_classifier.joblib` | 到達の前提条件．**両方とも現行構成で既に満たされている**（変更不要） |
+| 6 | `http_server.py:406-411`（FastAPI `lifespan`）`state.domain_classifier = load_domain_classifier(...)` | **artifact は起動時に 1 回だけ読む** |
+| 7 | `http_server.py:364-368` supervised_classifier 分岐 → `classifier.py:69` `classifier.predict_proba([query_embedding])[0]` | 1 問ごとに新 artifact の確率が出る |
+
+**到達条件（すべて現行構成で満たされることを確認済み）**
+- (a) `config.yaml:50` は実際に `supervised_classifier`．`http_server.py:365` のコメントどおりこの分岐は
+  LLM を呼ばず，`light_model` を使う分岐は先行分岐で到達しない．fallback は `confidence_threshold=0.0` で
+  Iter28 以降 0 件（Iter90 実測 `fallback_rate` = 0.0）．**したがって分類器は全 3,750 問で必ず通る．**
+- (b) **唯一の落とし穴は #6 である**．artifact は `lifespan` で 1 回だけ読まれるので，
+  **rsync しただけではプロセス内の古いモデルが使われ続ける**．Iter16/20/21/22/27/B35 と同型の
+  「config は正しいのにコードへ到達しない」失敗はここで起きうる．
+  **`mise run deploy` によるコンテナ再作成を必ず行い，再作成されたことを確認すること．**
+- (c) #2 の伝播は仮定ではなく確認済みである（本フェーズの `/tmp/iter91/cv_pipeline.py` が
+  同じ構成で C を変えて CV 精度が動いたこと自体が，C が内側 fold へ届いている証拠になっている）．
+
+**レバー固有の直接証拠（B149 恒久申し送り 2: 「基準線との完全一致」で兼ねない）**
+
+| # | 証拠 | 確認方法 |
+|---|---|---|
+| E1 | artifact が差し替わった | `sha256sum models/domain_classifier.joblib` が基準線の `ff8aad9c...` と**異なる** |
+| E2 | 実際に使われた C が 10.0 である | 新 artifact を `joblib.load` し，`m.calibrated_classifiers_[0].estimator.C == 10.0`，`len(m.calibrated_classifiers_) == 5`，`m.calibrated_classifiers_[0].estimator.n_features_in_ == 5120`，`sorted(m.classes_)` が 10 ドメイン |
+| E3 | 全ノードが新 artifact を**ロードしている** | deploy 後・本走前に wafl500〜509 の 10 台すべてで，コンテナ内 `/app/models/domain_classifier.joblib` の sha256 が E1 の新値と一致し，かつ**コンテナの起動時刻が deploy 後である**こと |
+| E4 | 実行時の出力が変わった | 予備 20 問の `probe_candidates` が Iter90 予備実行（`results/20260928_032455/`）の同じ 20 行と**相違すること** |
+| E5 | 同一セッション内の決定論性 | 予備 20 問と本走の同じ 20 行が **200/200 スロットでビット単位一致**（B149 恒久申し送り 3．同一セッション内はデプロイを挟まないので一致を要求してよい） |
+
+**事前ゲート G0（結果を見る前に判定規則を固定する）**
+- **G0-a（訓練の実行場所）**: 再訓練の埋め込み計算は **wafl-ctrl5 の Ollama（127.0.0.1:11499）でのみ**行う．
+  `--ollama-host` に wafl500〜509 を指定していないことをコマンドログで確認する（絶対条件 (B)）．
+- **G0-b（埋め込みの再現性の確認）**: 再訓練時に計算した 2,327 行 × 2 ビューの埋め込みを
+  `data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy` と突き合わせ，**最大絶対差を記録する**．
+  B149 (d) は `qwen3-embedding:4b` でセッション跨ぎの再現性が失われている疑いを残しており，
+  差が大きければ「C の効果」と「埋め込みの揺らぎ」が交絡する．**この値は報告必須**．
+- **G0-c（交絡を切り分ける対照 artifact．オフライン replay のみ）**: G0-b と同じ新しい埋め込みから
+  **C=1.0 の artifact も 1 つ作り**，キャッシュ済み評価埋め込みによる replay で top1 を求める．
+  これが Iter90 本走の 0.829867 と **±0.25pt 以内**（B149 恒久申し送り 1 の再現性の床）に収まれば，
+  以降の差は C に帰属できる．**この C=1.0 artifact は絶対にデプロイしない**
+  （「複数の C を本走して良い方を採る」禁止条項に抵触させないため．デプロイするのは C=10.0 のみ）．
+- **G0-d（事前 replay 予測）**: C=10.0 artifact で同じ replay を行い，**本走前に** top1 と
+  per-domain を journal へ記録する（Iter87〜89 で 3 反復連続 0.12pt 以内の一致が実証済み）．
+  **これは予測の記録であってゲートではない．予測値がどうであれ本走は必ず実施する**（絶対条件 (A)）．
+- **G0-e（予備 20 問）**: `data/dataset.jsonl` の先頭 20 問で予備実行し，HTTP 500 が 0 件，
+  E4 が満たされること．
+- **G0-f（時間予算）**: G0-e の実測から 3,750 問の総所要を外挿する．**175 分を超える見込みなら，
+  `experiment.timeout_min` を 180 → 210 へ引き上げる**（これは watchdog の設定であって実験条件ではない．
+  B137 と同じ扱い）．**本走を縮小・省略する分岐は作らない**（絶対条件 (A)．Iter90 本走は 158 分だった）．
+
+**検出力の確認（判定可能であることを本フェーズで再計算した）**
+基準線 Iter90 本走の n = 3,750．基準線と新 artifact の discordant 率は，同型の artifact 差し替えである
+Iter89（旧 0.6b → 新 4b）の実測 347/3,435 = **π̂_d = 0.10102** を用いる．
+
+- McNemar 有意境界 `1.96·√(π̂_d/n)` = 1.96·√(0.10102/3750) = **1.017pt**
+- 80% 検出力の最小効果 `2.802·√(π̂_d/n)` = **1.454pt**
+- 期待効果 +1.8pt で検出力 **0.934**，+2.1pt で **0.982**，+2.7pt（CV の生の差）で **0.999**．
+  仮に減衰して +1.4pt でも **0.770**，+1.0pt だと **0.487**．
+- **セッション跨ぎの再現性の床（top1 ±0.25pt）は有意境界 1.017pt の約 1/4 であり，
+  主基準 ≥ +1.0pt はノイズ床を 4 倍上回る．判定可能である．**
+- 注意（Cawley & Talbot 2010 の含意）: CV の +2.72pt をそのまま期待してはならない．
+  訓練集合（hard negative 混成 2,327 行）と評価集合（JMMLU 由来 3,020 行 ＋ 複合 730 行）は
+  分布が違うため，**+1.0pt を下回る減衰が起きれば判定不能になりうる**．その場合の扱いは
+  下の判定語 `no_effect` / `partial` で事前に定義してある．
+
+**成功条件（事前登録．結果を見た後に書き換えない）**
+
+| 区分 | 指標 | 基準線（Iter90 本走 `results/20260928_032909/`，n=3,750） | 判定基準 |
+|---|---|---|---|
+| **主基準 (i)** | `top1_accuracy` の McNemar 検定 | 0.829867 | **p < 0.05（有意改善方向）** |
+| **主基準 (ii)** | Δ`top1_accuracy` | 0.829867 | **≥ +1.0pt**（= 有意境界 1.017pt とほぼ同値．Wilson 95%CI を併記） |
+| **到達確認** | E1〜E5 | — | **全件充足**（1 つでも欠ければ `invalid`） |
+
+**非退行条件**（基準線は同じく `results/20260928_032909/`．全 3,750 行で評価する．
+B149 恒久申し送り 1 に従い「ビット単位一致」条項は**置かない**）
+
+| # | 指標 | 基準線 | 判定基準 |
+|---|---|---|---|
+| ① | per-domain 20 指標（precision/recall × 10） | Iter90 本走 | BH 補正（q=0.05）後の**有意退行 0 件** |
+| ② | `fallback_rate` | 0.0 | **= 0.0** |
+| ③ | `dispatch_failure_rate` | 0.000533 | **≤ 0.005**（絶対値．Iter86〜90 と同一） |
+| ④ | `compound_domain_set_recall`（複合 730 行） | 0.570548 | **≥ 0.544048**（基準線 −2.65pt．Iter86〜90 と同じ幅） |
+| ⑤ | `compound_mean_dispatched_count`（複合 730 行） | 1.964384 | **≤ 2.10**（絶対値．Iter86〜90 と同一） |
+| ⑥ | `mean_duration_ms`（全 3,750 行） | 2531.538 | **≤ 3037.8**（基準線 +20%）．**B149 恒久申し送り 5 に従い部分集合では評価しない** |
+| ⑦ | `ece` | 0.029892 | **≤ 0.05**（絶対値）．C を上げると logit のスケールが変わるため，temperature が吸収しきれない可能性への保険 |
+| ⑧ | `tie_rate` | 0.0 | **= 0.0** |
+
+**定義語と数値アンカーの突き合わせ**（B149 恒久申し送り 4．Iter90 の ③ 誤判定の再発防止）
+上の表のアンカーは**すべて `/tmp/iter90/metrics_full3750.json`（= `results/20260928_032909/` の
+全 3,750 行に対する `metrics.py` 出力）から本フェーズで直接読み出した値**であり，
+本文の定義語と同じ量である．具体的に突き合わせた対応は次のとおり:
+④ 本文「複合 730 行の set recall」= `compound_coverage.compound_domain_set_recall` = 0.5705479...（730 行基準．
+**Iter86〜89 で使っていた 0.566265 は 415 行基準なので使わない**），
+⑤ = `compound_coverage.compound_mean_dispatched_count` = 1.9643835...（同じく 730 行基準．
+**Iter90 の条文にあった 1.879518 は 415 行基準**），⑥ = `mean_duration_ms` = 2531.5384（全 3,750 行．
+**Iter90 が使った 1643.249 は 3,435 行サブセット基準なので使わない**），
+③ = `dispatch_failure_rate` = 0.0005333...（全 3,750 行．Iter90 計画節の 0.001165 は 3,435 行基準），
+⑦ = `ece.ece` = 0.0298918（n_rows=3748），主基準 = `top1_accuracy` = 0.8298666...（全 3,750 行）．
+**基準が 415/3,435 行のものと 730/3,750 行のものが混在していた点を，本反復ですべて後者へ統一した．**
+
+**判定語の定義**
+- **adopted**: 主基準 (i)(ii) の **AND** ＋ 到達確認 E1〜E5 ＋ 非退行①〜⑧をすべて満たす．
+- **partial**: (i) 有意だが (ii) が +1.0pt 未満，または非退行①〜⑧のいずれかが未達．
+- **no_effect**: |Δtop1| < 0.5pt **または** McNemar が非有意（Iter86〜88 と同一条文）．
+- **rejected**: Δtop1 ≤ −1.0pt かつ McNemar 有意（悪化方向）．
+- **invalid（実験不成立）**: E1〜E5 のいずれかが欠ける（= 新 artifact が実際にはロードされていない）．
+  **top1 が基準線と近いことは invalid の根拠にしない**（B149 恒久申し送り 1・2）．
+
+**本走（2026-09-23 絶対条件 (A)）**: 変更適用後に **wafl500〜509 を用いた 3,750 問のフルスペック本走を
+必ず 1 回実施する**．`mise run start -- --dataset data/dataset.jsonl --output results.jsonl` ののち
+`mise run analyze -- <timestamp>` を **timestamp 明示指定**で実行する（B118 落とし穴 1 の再発防止）．
+想定所要は Iter90 実績から **150〜165 分**（分類器の差し替えは推論コストを変えない）．
+**C を複数値で本走して良い方を採ることは禁止する**（config.yml 当該レバーの note．
+デプロイするのは C=10.0 のただ 1 つ）．
+
+**恒久ルールへの適合確認**
+- B115 (1)（ドメイン固有の後付け補正の禁止）: `C` は 10 クラス共通の単一スカラーであり，
+  ドメインごとに値を変えない．
+- 2026-09-23 絶対条件 (A): 本走を必ず実施する．G0 のどの分岐にも本走省略の経路を作っていない．
+- 2026-09-23 絶対条件 (B): 再訓練の埋め込み計算・replay・CV はすべて wafl-ctrl5 または
+  ローカル CPU で行い，wafl500〜509 は本走にのみ使う．
+- 単一レバー原則: 変えるのは `C` の 1 つだけ．`method`・`cv`・`ensemble`・`max_iter`・
+  `class_weight`・sample_weight・埋め込み・訓練データ・評価集合・`config.yaml` は一切変えない．
+
+### 実験結果（Iter91，フェーズ 2 実測．判定はフェーズ 3）
+
+**変更した差分**: `scripts/train_domain_classifier.py` の 1 ファイルのみ．冒頭 `_MAX_ITER = 1000` の直後に
+定数 `_L2_INVERSE_REGULARIZATION = 10.0` を選定根拠のコメント付きで新規定義し，`train_classifier()` 内の
+`LogisticRegression(max_iter=_MAX_ITER, class_weight=None)` へ `C=_L2_INVERSE_REGULARIZATION` を追加した．
+`config.yaml` は 1 バイトも変更していない．`ruff check` の新規エラー 0 件．
+`pytest tests/test_train_domain_classifier.py tests/test_classifier.py` は 11 PASS・1 FAIL
+（`test_build_training_features_embeds_each_row_in_order` の `ModuleNotFoundError: sentence_transformers`）だが，
+この失敗は `git stash` で変更前にも再現する環境依存の既知失敗であり本変更起因ではない．
+`ruff format --check` の reformat 推奨も同様に変更前から存在するドリフトで，今回触った 2 箇所とは無関係．
+
+**事前ゲート G0 の結果**
+
+| ゲート | 結果 |
+|---|---|
+| G0-a 実行場所 | 再訓練・埋め込み計算はすべて `--ollama-host 127.0.0.1 --ollama-port 11499`（wafl-ctrl5 トンネル）のみ．wafl500〜509 への指定 0 件（絶対条件 (B) 充足） |
+| G0-b 埋め込み再現性 | 既存キャッシュとの最大絶対差 **0.011406**（plain view）／0.009027（instructed view）．B149 (d) の非決定性の範囲内 |
+| G0-c C=1.0 対照 replay | 全 3,750 行で **top1 = 0.831200**．基準線 0.829867 との差 **+0.1333pt**（床 ±0.25pt 以内）→ 埋め込み差による交絡なしと確認．対照 artifact は `/tmp/iter91/` に置きデプロイしていない |
+| G0-d C=10.0 replay 予測 | **top1 = 0.833067**（ゲートではない．本走は予測値によらず実施した） |
+| G0-e 予備 20 問 | HTTP 500 = 0 件 |
+| G0-f 時間予算 | 外挿 約 130 分（< 175 分）につき `timeout_min` は 180 のまま変更せず．実測 158.1 分で完走し判断は妥当だった |
+
+**レバー到達の直接証拠 E1〜E5（すべて充足）**
+- **E1**: 新 artifact sha256 = `6a5905f025d6dae91ab333968e71c944d77ba286f4f3e3891c1b3a1fe5ca3b30`（基準線 `ff8aad9c...` と相違）．
+- **E2**: `calibrated_classifiers_[0].estimator.C == 10.0`，`len(calibrated_classifiers_) == 5`，
+  `n_features_in_ == 5120`，`classes_` が 10 ドメイン．
+- **E3**: wafl500〜509 の 10 台すべてでコンテナ内 artifact の sha256 が E1 と一致し，
+  コンテナ起動時刻 2026-09-27T22:41 UTC が deploy 起動 22:35:26 UTC より後（lifespan 再読込みを確認）．
+- **E4**: **計画が参照先とした `results/20260928_032455/` は，実際には `data/dataset.jsonl` 先頭 20 行ではなく
+  `compound-416`〜`435`（Iter90 の複合評価集合検証用の別サブセット）だった．**同じ head-20
+  （`business_economics-001`〜`020`）の予備実行が実在する `results/20260927_232858/preview20.jsonl` を
+  id 完全一致を確認したうえで代替の比較対象に採用した（可逆な代替）．`probe_candidates` は 20/20 行すべて相違．
+- **E5**: 予備 20 問 `results/20260928_074531/` と本走先頭 20 行が **200/200 スロット完全一致**，
+  `selected_domain` も全行一致（同一セッション内の決定論性を再確認）．
+
+**本走**: `results/20260928_074903/`．3,750/3,750 行完走，**158.1 分**（1790549318→1790558802）．
+HTTP 500 系エラー・GPU OOM なし．`mise run analyze -- 20260928_074903` を timestamp 明示で実行済み．
+
+**主基準の実測値**
+- `top1_accuracy` = **0.831467**（Wilson 95%CI [0.819148, 0.843107]）．基準線 0.829867 に対し **Δtop1 = +0.1600pt**．
+- McNemar: discordant_a_only = 109，discordant_b_only = 115，discordant_pairs = 224，chi2 = 0.1116，**p = 0.7383**．
+- 事前登録の有意境界 1.017pt・80% 検出力の最小効果 1.454pt のいずれも下回る．
+
+**非退行 8 条件の実測値**
+
+| 条件 | 実測 | 事前登録の閾値 | 可否 |
+|---|---|---|---|
+| ① per-domain 20 指標 BH 補正（q=0.05）後の有意退行 | **1 件**（`legal_recall`） | 0 件 | **未達** |
+| ② `fallback_rate` | 0.0 | = 0.0 | 充足 |
+| ③ `dispatch_failure_rate` | 0.0016 | ≤ 0.005 | 充足 |
+| ④ `compound_domain_set_recall` | 0.567808 | ≥ 0.544048 | 充足 |
+| ⑤ `compound_mean_dispatched_count` | 2.046575 | ≤ 2.10 | 充足 |
+| ⑥ `mean_duration_ms` | 2512.330 | ≤ 3037.8 | 充足 |
+| ⑦ `ece` | 0.025464 | ≤ 0.05 | 充足 |
+| ⑧ `tie_rate` | 0.0 | = 0.0 | 充足 |
+
+① の BH 補正後に有意だった 4 件の内訳: `education_recall`（p=0.00501，正味改善 a_only 17 / b_only 39），
+**`legal_recall`（p=0.00511，正味退行 a_only 20 / b_only 5，net −15/150 行）**，
+`legal_precision`（p=0.00126，正味改善 0.822→0.936），
+`social_science_recall`（p=0.00131，正味改善 a_only 5 / b_only 23）．**退行方向は `legal_recall` の 1 件のみ．**
+
+統計量はすべて `metrics.py` の既存関数（`compute_mcnemar_test`，`compute_domain_recall_mcnemar_test`，
+`compute_domain_precision_fisher_test`，`apply_benjamini_hochberg`，`compute_top1_accuracy_wilson_ci`）を
+そのまま呼び出しており，フェーズ 2 で自前の再導出は行っていない．
+
+**artifact の扱い**: `models/domain_classifier.joblib` を新 artifact（`6a5905f0...`）へ差し替え，
+旧 artifact は `models/domain_classifier_pre_iter91_c1.joblib` へ退避（`models/`・`data/` は `.gitignore` 対象）．
+`data/MANIFEST.md` に artifact の sha256 と再現コマンドを追記した．
+
+### Iteration 91 実行済み（分析・考察）
+
+**変更**: `scripts/train_domain_classifier.py` の `LogisticRegression` へ `C=10.0` を明示（定数
+`_L2_INVERSE_REGULARIZATION`）し，同一の訓練データ・埋め込み・較正設定で再訓練した artifact
+（sha256 `6a5905f0...`）を全 10 ノードへデプロイして 3,750 問を本走した．`config.yaml` は無変更．
+
+**判定: `no_effect`**
+
+- 主基準 (i) McNemar **p = 0.7383**（非有意），(ii) Δtop1 = **+0.1600pt**（< +1.0pt）．**AND 条件は不成立**．
+- 事前登録の判定語を literal に当てると **2 つの条文が同時に発火する**:
+  - `no_effect` の条文「|Δtop1| < 0.5pt **または** McNemar が非有意」→ 0.160pt < 0.5pt かつ p = 0.7383 で，
+    **両方の節が成立**する．
+  - `partial` の条文「(i) 有意だが (ii) が +1.0pt 未満，**または**非退行①〜⑧のいずれかが未達」→
+    非退行① が未達（`legal_recall`）なので**第 2 節が成立**する．
+  - **条文の前提が実測でどうだったか**: `partial` の第 2 節は「主基準に効果が出た実験の副作用を記述する」
+    意図で書かれた条文であり，主基準が非有意の場合を想定していない（第 1 節が「(i) 有意だが」と
+    始まることがその証拠）．本反復は主基準に検出可能な効果が無いので，`no_effect` を主たる判定語とする．
+    **ただし条文の literal な帰結として `partial` も成立することをここに明記し，条文を読み替えて
+    `partial` を消したのではない**ことを記録に残す（B149 (a) と同種の論点．**要レビュー**）．
+  - `invalid` は当たらない．E1〜E5 が全件充足で，レバーは確実にコードパスへ到達している
+    （artifact sha256 相違・`estimator.C == 10.0`・10 台の sha256 一致とコンテナ再作成・
+    予備 20 問と本走の 200/200 ビット一致）．**「top1 が基準線と近いこと」を invalid の根拠にしない**
+    という B149 恒久申し送り 1・2 をそのまま適用した．
+- **判定語定義の欠陥（B149 (c) の再発）**: 「主基準が非有意」かつ「非退行に有意退行がある」場合を
+  一意に指す語が無い．次の計画フェーズは判定語を排他的な決定木として書き直すこと．
+
+**分析 1: CV の +2.72pt が end-to-end で +0.16pt になった機序**
+
+まず**測定系の事実を 1 つ確定させた**。`metrics.py:32 compute_top1_accuracy` は
+`selected_domain in expected_domains` を数えるだけで，**専門ノードの回答内容を一切見ていない**．
+すなわち **`top1_accuracy` は「分類器の argmax がルーティング先として正しかった割合」そのもの**であり，
+「分類器が当てても専門ノードが誤答すれば top1 に現れない」という機序は本リポジトリには存在しない
+（回答品質は `answer_quality_accuracy` / `end_to_end_accuracy` という別軸である）．
+`probe_candidates` の argmax と `selected_domain` の相違は基準線 2 行・本走 6 行のみで，
+いずれも `dispatch_failed=true`（送出先ノードの実行時失敗で `selected_domain=null`）の行だった．
+
+したがって**分類器精度 → top1 の伝達率は定義上 1.0 であり，両者の差は送出失敗行の分だけ**である:
+
+| 量 | 基準線 `20260928_032909` | 本走 `20260928_074903` | Δ |
+|---|---|---|---|
+| 分類器 argmax 精度（`probe_candidates` から再計算，3,750 行） | 0.830400 | **0.833067** | **+0.2667pt** |
+| `top1_accuracy`（＝上から `dispatch_failed` 行を落としたもの） | 0.829867 | 0.831467 | +0.1600pt |
+| 差（= `dispatch_failed` 行数 / 3750） | 2 行 = 0.0533pt | 6 行 = 0.1600pt | — |
+
+- 分類器 argmax 精度での McNemar も **a_only 104 / b_only 114，chi2 = 0.3716，p = 0.5422** で非有意．
+  **送出失敗を除いても判定は変わらない**（本走の送出失敗 6 行のうち 5 行は argmax が正解ドメインで，
+  実行時失敗が無ければ拾えていた．これは実行時ノイズであってレバーの効果ではない）．
+- **G0-d の replay 予測 0.833067 は，本走の分類器 argmax 精度 0.833067 と小数 6 桁まで完全一致した．**
+  すなわち replay は「分類器が何を選ぶか」を**誤差 0 で**予測しており，replay と本走 top1 の
+  −0.16pt の差は**送出失敗 6 行だけで完全に説明される**．再現性の床 ±0.25pt の範囲内であるどころか，
+  **replay の予測誤差は 0 であった**（`data/embcache_eval_*` が固定されている限り，分類器の出力は
+  デプロイを跨いでも決定論的である．B149 (d) で観測されたセッション跨ぎのゆらぎは，
+  埋め込みを実行時に計算し直す経路に由来する．**本走の埋め込みも実質同一だったことになる**）．
+
+**では +2.72pt はどこへ消えたか．評価集合の部分集合ごとに符号が逆だった**（事前登録外の事後分割．
+探索的な分析であり，これを根拠に採用判定を変えてはならない）:
+
+| 部分集合 | n | 分類器 argmax 精度 基準線 → 本走 | Δ | McNemar |
+|---|---|---|---|---|
+| 単一ドメイン行（JMMLU 由来） | 3,020 | 0.835762 → 0.847351 | **+1.1589pt** | a_only 59 / b_only 94，p = **0.0060** |
+| 複合ドメイン行（Iter90 拡充分） | 730 | 0.808219 → 0.773973 | **−3.4247pt** | a_only 45 / b_only 20，p = **0.0029** |
+| 全体 | 3,750 | 0.830400 → 0.833067 | +0.2667pt | p = 0.5422 |
+
+- **(a) Cawley & Talbot (2010) の選択バイアス＋分布シフト**は，単一ドメイン行で確かに効いている．
+  訓練集合内 CV の +2.72pt に対し，訓練集合と同じ「単一ラベル 1 問 1 ドメイン」の構造を持つ
+  評価部分集合では **+1.16pt（伝達率 43%）**しか出なかった．CV の値をそのまま期待してはならない
+  という事前の注意（計画節）は正しかった．
+- **(b) 「測っている量が違う」は成立する．ただし想定した機序（ルーティング後の回答正誤）ではなく，
+  評価集合の構成の違いによる**．CV は単一ラベル行だけで測っており，**複合 730 行（評価集合の 19.5%）に
+  相当するものを訓練集合も CV も一切含んでいない**．複合行では正則化を弱めたことで
+  **−3.42pt（有意）**の逆効果が出て，単一行の +1.16pt をほぼ打ち消した．
+  0.195 × (−3.42) + 0.805 × (+1.16) = **+0.27pt** で全体の実測と一致する．
+- argmax の反転は 293/3,750 行（7.81%）で，うち正解化 114・誤答化 104・どちらも不正解 75．
+  **分類器の決定は大きく動いているが，正味では釣り合っている．**
+- **今後のレバー選定への含意（定量）**: 分類器側のレバーは伝達率 1.0 で top1 へ効くので
+  「分類器をいじる価値」は構造的にはある．しかし**訓練集合内 CV で測れる利得は，
+  単一行へは 43%・複合行へは負の符号で伝わる**．end-to-end で +1.0pt（有意境界）を出すには，
+  この混合比（80.5% / 19.5%）の下で **訓練集合内 CV で最低でも +2.3pt 以上**の改善が必要であり，
+  かつ複合行を悪化させない性質を持つ必要がある．C の掃引は C=1.0 → 30.0 の全域で CV +2.9pt が上限
+  （B149 の C=100 で頭打ち）なので，**正則化強度というレバーはこの要求水準をほぼ使い切っている**．
+
+**分析 2: `legal_recall` の有意退行（BH 補正 q=0.05 後の唯一の退行）**
+
+`legal` を expected に含む 306 行のうち `selected_domain == "legal"` だった行が **162 → 147**
+（a_only 20 / b_only 5，p = 0.00511）．probabilities から見た機序は**「legal 全体の確率質量が縮んだ」**である:
+
+| 量 | 基準線 | 本走 |
+|---|---|---|
+| `legal` を予測した行数（3,750 行中） | 197 | **157**（−40） |
+| `legal_precision` | 0.8223 | **0.9363**（+11.4pt） |
+| `legal` 確率の平均（legal 行 306 行上） | 0.4760 | 0.4439 |
+| `legal` 確率の平均（非 legal 行 3,444 行上） | 0.0163 | **0.0099**（−39%） |
+
+- **これはドメイン固有の異常ではなく，正則化を弱めたときの精度/再現率のトレードオフである．**
+  C を上げると係数ノルムが伸び，**訓練行数の多いクラスの決定領域が広がり，少ないクラスの領域が縮む**．
+  実際 `legal` の訓練行は **77 行しかなく，他 9 ドメインは各 250 行**（`classifier_train_iter87_hybrid.jsonl`）．
+  hard negative mining のプール（`pool_hash=221e45e8...`，3,127 行）に **legal は 0 行**しか無く，
+  Iter84/86/87 のいずれでも legal だけ 77 行のままである．`_extract_sample_weights()` の
+  ドメイン均衡重みは**行の重みを 3.25 倍にできても行の多様性を作れない**．
+- 失われた 20 行の移動先は `history_culture` 12 / `medical` 3 / `social_science` 3 / `education` 2 で，
+  **12 行が history_culture**（訓練 250 行・recall 0.917 の強いクラス）へ流れた．
+  20 行中 **11 行は複合行**であり，分析 1 の複合行の退行と同じ現象の一部である．
+- 予測分布全体でも同じ向きが見える: `legal` −40 / `business_economics` −33 / `computer_science` −15 に対し
+  `history_culture` +25 / `social_science` +20 / `education` +18 / `medical` +13．
+- **対処**: B115 (1) により legal だけ閾値・intercept・重みをいじることは禁止である．本反復では
+  **何も後付け補正しない**．退行の原因は「legal の訓練行が 77 行しかない」というデータ側の構造問題であり，
+  解くなら 10 ドメイン共通の規則（＝全ドメインの訓練行数を揃える）で解く必要がある．
+  現行プールには legal の在庫が 0 なので，**新しいデータ源の調査が要る**（次の一手へ引き継ぐ）．
+
+**分析 3: E4 の参照先の食い違いと，予備実行ディレクトリの記録方法**
+
+計画が E4 の比較対象に指定した `results/20260928_032455/` は，実際には `data/dataset.jsonl` の
+head-20 ではなく `compound-416`〜`435` の 20 行だった．executor は同じ head-20
+（`business_economics-001`〜`020`）を持つ `results/20260927_232858/preview20.jsonl` を，
+**id の完全一致を確認したうえで**代替に採用した．
+**この代替は妥当である**: E4 の目的は「同一入力に対する出力が artifact 差し替えで変わったこと」の確認であり，
+入力 id 集合が一致していれば比較対象として等価だからである（実際 20/20 行すべてで `probe_candidates` が相違）．
+根本原因は**予備実行の結果ディレクトリがタイムスタンプ名だけで，どのサブセットを流したかを保持していない**
+ことにある．`data/dataset_iter{89,90}_preview20.jsonl` という入力側のファイルは残っているのに，
+出力側とは結び付いていない．**是正案は backlog B151 へ記録した**（`results/<ts>/` へ実行時の
+`--dataset` パスと行数・id レンジを書いた `run_meta.json` を残す．これは測定系の改善であって
+レバーではないので，次の実験と同時にオフラインで実施してよい）．
+
+**artifact の扱いとロールバック（次イテレーションの基準線）**
+
+- **`models/domain_classifier.joblib` を `C`=1.0 の `ff8aad9c...` へ戻した**（`C`=10.0 版は
+  `models/domain_classifier_iter91_c10.joblib` に保存，再採用は可逆）．
+  `scripts/train_domain_classifier.py` の `C=_L2_INVERSE_REGULARIZATION` も revert した．
+- **理由**: 事前登録の主基準を満たさず（+0.16pt・p=0.74），非退行① に有意退行が 1 件あり，
+  全体の Δ は再現性の床 ±0.25pt の内側にある．**「効果が測れなかった変更は入れない」**という
+  倹約側の既定に従った．単一行 +1.16pt は事後分割の探索的知見にすぎず，採用の根拠にしない．
+- **次イテレーションの基準線は Iter90 本走 `results/20260928_032909/`（3,750 行，top1 = 0.829867，
+  分類器 sha256 `ff8aad9c...`）のまま据え置く**（ロールバックにより，基準線はその artifact の
+  実測値として今も有効である）．
+- **落とし穴**: wafl500〜509 上には Iter91 本走時点の `C`=10.0 artifact が載ったままである．
+  **次に実験を行う際は必ず `mise run deploy` を先に実行すること**（`data/MANIFEST.md` にも明記した）．
+
+**学び**
+
+1. **`top1_accuracy` は分類器の argmax 精度そのものである**（`metrics.py:32`．回答内容を見ていない）．
+   したがって**分類器側のレバーはオフライン replay で誤差 0 で予測できる**——本反復で G0-d の
+   replay 予測と本走の argmax 精度が小数 6 桁まで一致した．**本走の 158 分は「送出失敗率」と
+   「実行時の健全性」を測るためにだけ必要で，分類器の効果量そのものは replay で事前に分かる**．
+   ただし**選定に評価集合の replay を使えばリークになる**ので，用途は「事前登録した予測の記録」に限る．
+2. **訓練集合内 CV → 評価集合の伝達率を本反復で初めて定量した: 単一ドメイン行へ 43%，複合行へは負**．
+   今後，分類器側のレバーは **訓練集合内 CV で +2.3pt 以上**を見込めなければ end-to-end の
+   有意境界 1.0pt に届かない．Iter89 学び（判定不能と事前に分かるレバーには着手しない）の
+   具体的な換算式がこれで得られた．
+3. **評価集合に複合行を 19.5% 混ぜたことで，単一ラベル訓練に最適化するレバーの効果が構造的に薄まる**．
+   Iter90 の拡充は測定分解能のために正しかったが，副作用として
+   「単一行で得た利得が複合行の損で相殺される」経路が生まれた．今後は**主基準の内訳
+   （単一 / 複合）を必ず併記する**こと（事前登録に加えるべき．ただし**部分集合ごとに
+   判定基準を分けるのは多重比較になる**ので，主基準は全体のままとする）．
+4. **クラス間の訓練行数の不均衡（legal 77 行 vs 他 250 行）が，正則化を弱めたときに
+   最初に壊れる場所を決めている**．sample_weight による均衡化は重みを増やせても多様性を増やせない．
+   `legal` は hard negative プールにも在庫が 0 で，**既存データ源だけでは是正できない**．
+5. 訓練集合内 CV を「本番と同じ入れ子パイプラインで」測り直した手順（計画節 Q2）は正しく機能した
+   （較正ラッパは水準を下げるが曲線の形を変えない，という予測が本走でも破綻しなかった）．
+   **失敗したのは CV の測り方ではなく，CV と評価集合の分布の違いの見積り**である．
+
 ## Iteration 90: 複合設問評価集合の拡充（既存公開データセットの調査と追加）
 
 ### 調査 (Iter90)
@@ -853,472 +1326,4 @@ precision:general +11.01pt p=6.71e-03／precision:mathematics +5.38pt p=5.75e-03
   今回の判定成立を実際に支えた**（旧 1,915 行だけなら +0.888pt < 境界 1.377pt で判定不能だった）という
   実証が得られたこと．評価集合の拡充は「top1 を上げないから後回し」ではなく，
   **判定可能なレバーの範囲を広げる投資であることが本反復で数値的に裏づけられた．**
-
-## Iteration 88: hard negative 混合比の用量反応（25/75）と乱数種ばらつきの計測
-
-### 調査 (Iter88)
-
-本反復のレバーは backlog B143 (d) で `cross_domain_training_data_augmentation` =
-`hard_random_hybrid_ratio_25_75_all_domains` に確定済みで，選定の裁量は無い．各ドメインの追加 100 行を
-「最難 25 ＋ 残プールから無作為 75」へ変え，追加総数 900 行・ドメイン別内訳（legal 0，他 9 ドメイン各 100）・
-出力書式・id 規則・乱数種 87 は Iter87 と同一に保つ．したがって調査の問いは 5 つである．
-**(Q1) 実装差分は本当に CLI 引数だけで済むか．(Q2) 採掘スコアに使う artifact をどれにするか．
-(Q3) 25/75 のプール実測（入れ替わり行数・難易度プロファイル）．(Q4) 定量的な事前投影と検出力．(Q5) 関連研究．**
-
-**Q1: コード変更は 0 行．`--random-count 50` を `75` に替えるだけで足りる（実コードを Read して確認）**
-
-`scripts/mine_hard_negatives.py:select_hard_negatives()`（L253-300）は Iter87 で既に
-`random_count` / `seed` を受け取る実装になっており，`hard_count = max(per_domain - random_count, 0)`，
-残プールを `(p_true, task, query)` の全順序へ整列してから `numpy.random.default_rng(seed).permutation` で
-添字を引く．CLI にも `--random-count`（既定 0）・`--random-seed`（既定 0）が既にある（L371-381）．
-**したがって Iter88 の変更は `data/MANIFEST.md` の Iter87 生成コマンドの `--random-count 50` を `75` に，
-`--output` を `data/classifier_train_iter88_hybrid2575.jsonl` に替えるだけであり，リポジトリのソース差分は 0 行になる**
-（`mine_hard_negatives.py` を含め，`scripts/` 配下の `git diff` は 0 行であることを F1 ゲートで要求する）．
-`rng` はドメイン名の昇順に 1 回ずつ消費されるため，同じ seed でも `random_count` が変われば引かれる行は変わる（意図どおり）．
-
-**Q2: 採掘のスコア artifact は基準線 `models/domain_classifier_pre_iter84_baseline.joblib`（`1cfcd3d8...`）を
-CLI で明示指定する．実機に配布済みの Iter87 artifact（`f6c33edb...`）は触らない**
-
-用量反応（hard 100% / 50% / 25%）を比較するには，**3 点すべてで p_true のランキングが同一**でなければならない．
-Iter86（100/0）・Iter87（50/50）はいずれも `1cfcd3d8...` でスコアリングしている（Iter87 は実装フェーズの冒頭で
-`models/domain_classifier.joblib` をこれへ復元してから採掘した）．Iter88 も同じ artifact を使う必要がある．
-一方 B143 (c) は「`models/domain_classifier.joblib` = `f6c33edb...` を全 10 ノードへ配布済みの状態を維持する」と
-定めており，これが本反復の**基準線側の実行時 artifact** である．
-**この 2 つは `--classifier-model models/domain_classifier_pre_iter84_baseline.joblib` を明示指定することで両立する**
-（Iter87 のように `models/domain_classifier.joblib` を上書き復元する必要はなく，復元→再配布→再復元の往復も不要になる）．
-`_run()`（L347）は `joblib.load(args.classifier_model)` を読むだけで，他の経路からは参照しない．
-
-**この選択の妥当性は本フェーズで実測検証した**（下記 Q3 のプローブ）．`1cfcd3d8...` で p_true を再計算し
-`--random-count 0` で選定すると `data/classifier_train_iter86_hardneg.jsonl` の追加 900 行と**差分 0 行**，
-`--random-count 50 --random-seed 87` で選定すると `data/classifier_train_iter87_hybrid.jsonl` の追加 900 行と
-**差分 0 行**で再現した．採掘系が決定論的であること，および本フェーズのプローブが実装と一致していることが裏付けられた．
-
-**Q3: プール実測（CPU のみ，実機ノード不使用）— 入れ替わりは Iter87 比 309 行，ただし 3 ドメインは今回も厳密に no-op**
-
-`determine_used_tasks` / `build_pool` / `select_hard_negatives` を直接呼び，JMMLU.zip
-（sha256 `3ba7d912943ede44fb7ec06aa1df067ac6bee157e65c5588736b9b983f0e684d`，**MANIFEST 記録値と一致＝ G0 は現時点で PASS**）と
-プール埋め込みキャッシュ（`pool_hash=221e45e8...`，3,127 行，一致）から実測した．
-`data/dataset.jsonl`（3,435 行）・`data/classifier_train.jsonl`（1,427 行）は Iter86/87 から 1 バイトも変わっていないため，
-**プールは Iter86/87 と完全に同一（計 3,127 行）**である．
-
-| ドメイン | プール M | 最難 25 の平均 p_true | 無作為 75 の平均 p_true | 追加 100 行の平均 p_true（Iter87 → **Iter88**） | Iter86 比 入れ替わり | 期待値 `75(M−100)/(M−25)` | **Iter87 比 入れ替わり** |
-|---|---|---|---|---|---|---|---|
-| medical | 910 | 0.0101 | 0.7038 | 0.3616 → **0.5304** | 70 | 68.6 | **71** |
-| history_culture | 579 | 0.0407 | 0.7618 | 0.4279 → **0.5815** | 67 | 64.8 | **68** |
-| natural_science | 576 | 0.0531 | 0.8102 | 0.4790 → **0.6209** | 67 | 64.8 | **65** |
-| business_economics | 505 | 0.0268 | 0.7608 | 0.4450 → **0.5773** | 64 | 63.3 | **66** |
-| mathematics | 148 | 0.4581 | 0.9453 | 0.8141 → **0.8235** | 25 | 29.3 | **31** |
-| education | 109 | 0.1171 | 0.6028 | 0.4783 → **0.4814** | 7 | 8.0 | **8** |
-| computer_science | 100 | 0.4684 | 0.9295 | 0.8142 → **0.8142（不変）** | **0** | **0.0** | **0** |
-| social_science | 100 | 0.1826 | 0.7216 | 0.5869 → **0.5869（不変）** | **0** | **0.0** | **0** |
-| general | 100 | 0.1202 | 0.8674 | 0.6806 → **0.6806（不変）** | **0** | **0.0** | **0** |
-| legal | 0 | ― | ― | ―（追加 0 件） | 0 | ― | 0 |
-| **合計** | **3,127** | | | **0.5606 → 0.6330** | **300** | **298.9** | **309** |
-
-- **computer_science・social_science・general は M = 100 = N のため，今回も自由度がゼロで厳密に no-op である**．
-  最難 25 を除いた残り 75 行が必要数ちょうどなので `draw = min(75, 75) = 75` となり，選ばれる 100 行は
-  Iter86・Iter87 と**集合として完全に一致する**（実測の入れ替わり 0 行）．
-  **比をどう振ってもこの 3 ドメイン（900 行中 300 行，33.3%）は今後一切動かない**．
-  education も M=109 で入れ替わりは 8 行にとどまる．Iter87 の申し送り「プールの構造的上限」がそのまま該当する．
-- 入れ替わり期待値は超幾何分布による．Iter88 の選定 100 行のうち，残プール（M−25 行）から引く 75 行に対し，
-  Iter86 の top-100 のうち残プールに属するのは 75 行（ランク 26〜100）なので，
-  期待重複 = 25 + 75·75/(M−25)，期待入れ替わり = 75(M−100)/(M−25)．**Iter87 の選定 100 行も残プール内に
-  ちょうど 75 行（ランク 26〜50 の 25 行 ＋ 無作為 50 行）を持つため，Iter87 比の期待入れ替わりも同じ式になる**．
-  実測（300 / 309 行）はいずれも期待値 298.9 の近傍にあり，整合する．
-- **難易度の「用量」は追加 900 行の平均 p_true で測ると 0.4491（100/0）→ 0.5606（50/50）→ 0.6330（25/75）で，
-  刻みは +11.15pt → +7.24pt と劣線形になる**（残プールを深く引くほど中央値に近づくため）．
-  つまり 50→25 への移動は，100→50 への移動より**用量の増分が 0.65 倍しかない**．これは Q4 の投影の前提になる．
-
-**Q4: 事前投影 — Δtop1（Iter87 基準線比）は −0.6 〜 +0.5pt，点推定 +0.2〜+0.3pt．主基準到達確率は 5% 程度**
-
-基準線は Iter87 本走 `results/20260927_174150/`（top1 = 0.801456）だが，層別 Δ の実測は Iter86・Iter87 とも
-**pre_iter84 基準線（0.786317）比**で記録されているので，まず pre_iter84 比で投影し，最後に 1.514pt を引いて
-Iter87 比へ変換する．五分位は基準線 p_true で切った Iter86 の境界値（Q1 ≤0.3542 / Q2 ≤0.7209 / Q3 ≤0.9022 /
-Q4 ≤0.9697），各 n=687．
-
-| 層 | Iter86（hard 100%） | Iter87（hard 50%） | **A: 飽和（下振れ）** | **B: 用量線形（点推定）** | **C: 退行消失（上振れ）** |
-|---|---|---|---|---|---|
-| Q1 | +14.85 | +11.79 | +8.73 | +9.8 〜 +10.3 | +10.26 |
-| Q2 | −6.84 | −2.91 | −2.91 | −0.4 〜 −0.9 | 0.00 |
-| Q3 | −2.33 | −1.02 | −1.02 | −0.2 〜 −0.4 | −0.20 |
-| Q4 | −1.02 | −0.58 | −0.58 | −0.3 〜 −0.4 | −0.20 |
-| Q5 | +0.44 | +0.29 | +0.29 | +0.2 | +0.22 |
-| **Δtop1（pre_iter84 比）** | **+1.019** | **+1.514** | **+0.90** | **+1.76 〜 +1.84** | **+2.02** |
-| **Δtop1（Iter87 基準線比）** | ― | 0（基準線） | **−0.61pt** | **+0.25 〜 +0.32pt** | **+0.50pt** |
-
-- モデル A は「Q1 の改善は hard 行数の対数に比例して減衰する（14.85 → 11.79 の減り方を h の対数で外挿）が，
-  Q2〜Q4 の退行はこれ以上は縮まない（Iter87 で床に達した）」とする保守側の端点．
-- モデル B は 2 実測点の線形外挿で，hard 比 h で外挿した場合（+1.76）と Q3 の平均 p_true 用量で外挿した場合（+1.84）の
-  両方を併記した．両者が近い値に収束することが点推定の根拠である．
-- モデル C は Q2〜Q4 の退行が 25/75 でほぼ消えるとする楽観側の端点．
-- **どのモデルでも主基準 (ii)（Iter87 基準線比 +1.0pt 以上，すなわち top1 ≥ 0.811456）には届かない．**
-  用量反応が 50/50 で頭打ちに近いこと自体が本反復の測る対象であり，投影が届かないからといって
-  **判定規則は緩めない**（B131 以来の運用．Iter86→87 でも同じ条文を据え置いた）．
-
-**検出力**: Iter87 vs 基準線の discordant は 226/3,435 だった．Iter88 vs Iter87 は入れ替わり行数こそ多い（309 行）が
-用量差は小さいので，discordant を **n_d ≈ 200〜280（中心 240）** と見積もる．
-SE = √n_d/3435 = **0.451pt**，有意境界 1.96·SE = **0.884pt**．
-
-| 真の Δ | z = Δ/SE | **McNemar 有意（主基準 i）の検出力** | **(i) AND (ii) の到達確率** |
-|---|---|---|---|
-| A: −0.61pt | −1.35 | 約 27%（退行方向） | 0% |
-| B: +0.28pt | +0.62 | **約 10%** | **約 5%** |
-| C: +0.50pt | +1.11 | 約 20% | 約 6% |
-
-- **したがって最も確からしい着地は `no_effect`（|Δtop1| < 0.5pt または McNemar 非有意）である．**
-  これは Iter86 の事前登録に既に定義済みの帯であり，新しい条文を要しない．
-  `no_effect` に着地した場合の研究上の意味は明確で，**「hard/random 混合比の用量反応は 50/50 付近で頭打ちであり，
-  これ以上ランダム側へ振っても top1 は伸びない」**と記録でき，B143 (根拠) が予告した次の一手
-  （純無作為 0/100 の対照実験）へ進む判断材料になる．
-- **本反復の主たる情報価値は「比の差を検出すること」ではなく，(a) 用量反応曲線の 3 点目を測ること，
-  (b) 下記 5b で種由来の Δ の散らばりを数値化し，そもそも 0.3〜0.5pt 規模の比の差が測定可能かを確定することにある．**
-- 非退行①の投影: education の追加行は 8 行しか変わらず平均 p_true も 0.4783 → 0.4814 でほぼ不変なので，
-  education 側から新たな退行が生じる理由は無い．medical の追加行の平均 p_true は 0.3616 → 0.5304 へさらに上がるため，
-  Iter86 で観測された「medical の押し出しが education を削り natural_science の FP を増やす」経路はさらに弱まる方向である．
-  **education_recall は 0.35〜0.38（Iter87 基準線 0.3626），natural_science_precision は 0.83〜0.86（同 0.8424）と投影する．**
-  ただし追加行の平均 p_true が 0.63 まで上がると，今度は**訓練集合がプールの典型分布に寄って境界情報が薄まる**方向の
-  リスクがあり，Q1 層（最難層）の取りこぼしが増えれば全ドメインで薄く recall が下がりうる．非退行①の合否はそこで決まる．
-
-**Q5: 関連研究 — 混合比の用量反応は「p>0 でさえあれば比の値には鈍感」というのが実測報告の一致した所見**
-
-- **Understanding Hard Negatives in Noise Contrastive Estimation**（Wenzheng Zhang, Karl Stratos, NAACL 2021．
-  <https://arxiv.org/abs/2104.06245> / <https://karlstratos.com/papers/naacl21hard.pdf>，2026-09-27 確認）．
-  Appendix A に**まさに本反復と同じ形の用量反応表**がある．負例のうち hard の割合 p を 0/25/50/75/100% と振ったときの
-  top-64 validation recall は，DUAL 91.08/92.18/91.75/92.24/92.05，MULTI-8 91.13/92.74/92.76/93.41/93.27，
-  SOM 92.51/94.13/94.66/94.37/94.54．**p=0（純無作為）からの改善は明確（+1.0〜+2.0pt）だが，p=25 と p=50 の差は
-  3 設定で +0.43 / −0.02 / −0.53pt と符号が揃わず，平均は −0.04pt でほぼゼロ**である．
-  著者自身が「the exact choice of p > 0 is not as important」「performance is not sensitive to the value of p」と述べ，
-  p=50 を選んだ理由も「無作為を少し混ぜると小さいが一貫した改善が出るから」という程度の根拠に留めている．
-  **本研究の hard 50% → 25% は，この表の p=50 → p=25 に対応する．文献側の実測も差はノイズ規模であり，Q4 の投影
-  （+0.2〜+0.3pt，検出力 10%）と整合する．** 同時に，この非単調性（p=25 が p=50 を上回る設定と下回る設定が混在する）は
-  **比の差が実行ごとのばらつきに埋もれる規模であることの直接の証拠**であり，5b の種ばらつき計測を必須手順に置く根拠になる．
-- **false negative / 過度に難しい負例による劣化**: RocketQA（Qu et al., NAACL 2021）が MSMARCO の
-  top-retrieved 未ラベル passage を人手確認して 70% が実は正例だったと報告して以来，
-  「hard negative を無選別に採ると mislabeled 行を優先的に拾って劣化する」という知見が定着している
-  （Mitigating the Impact of False Negatives in Dense Retrieval with Contrastive Confidence Regularization,
-  AAAI 2024, <https://arxiv.org/html/2401.00165v2>；SyNeg: LLM-Driven Synthetic Hard-Negatives for Dense Retrieval,
-  Li et al. 2024, <https://arxiv.org/abs/2412.17250>「existing hard negative sampling methods are prone to false
-  negatives, resulting in performance degradation and training instability」．いずれも 2026-09-27 確認）．
-  本研究の文脈では，最難 25 行の平均 p_true が medical 0.0101・history_culture 0.0407 と極端に低く，
-  **ドメイン帰属自体が曖昧な行（本研究における false negative 相当）**である．25/75 はこの領域を 100 行から 25 行へ
-  絞るので，劣化要因を減らす方向ではある．ただし上記 NAACL 2021 の表が示すとおり，**減らしすぎると今度は
-  情報量のある境界行を失う**ので，一方向に良くなり続けるとは想定しない（Q4 のモデル A が対応する）．
-- SimANS（Zhou et al., EMNLP 2022）・WSDM'22 ALOE・Tripp (2025) は Iter86/87 の調査節で既に引用済みで，
-  「両極（最難のみ・純無作為のみ）を避けた方が堅い」という主張は本反復でも変わらず有効である．
-  **いずれの文献も「25/75 が 50/50 より良い」とは言っていない．**
-
-### 計画 (Iter88)
-
-**単一レバー**
-
-`cross_domain_training_data_augmentation` = **`hard_random_hybrid_ratio_25_75_all_domains`**．
-**採掘コマンドの `--random-count` を `50` から `75` へ変えることだけを行う**（`--per-domain 100`・`--random-seed 87` は据え置き）．
-評価集合・`config.yaml`・埋め込みモデル・instruction・連結仕様・送出閾値・集約方式・訓練スクリプト・プール定義・
-除外集合・出力書式・id 規則・ドメイン別内訳（legal 0，他 9 ドメイン各 100）はすべて不変．**ソースコードの差分は 0 行**．
-
-**レバーを読むコード行と，そこへ到達する条件（d0004 §4 の再発防止．省略不可）**
-
-| 経路 | レバーが効く箇所 | 到達条件 | 到達確認 |
-|---|---|---|---|
-| 採掘・選定（オフライン） | `scripts/mine_hard_negatives.py:select_hard_negatives()` L281-289（`hard_count = max(per_domain - random_count, 0)` と `rng.permutation`） | CLI に **`--random-count 75 --random-seed 87`** を渡す．`--per-domain 100` 据え置き | **F2** |
-| 採掘・スコア（不変） | 同 `_run()` L347 `joblib.load(args.classifier_model)` → `predict_proba` | **`--classifier-model models/domain_classifier_pre_iter84_baseline.joblib`**（`1cfcd3d8...`）を明示指定 | **F0** |
-| 採掘・プール（不変） | 同 `build_pool()` の `exclude_queries` | `--eval-data data/dataset.jsonl`（3,435 行）・`--train-data data/classifier_train.jsonl`（1,427 行）据え置き | **F2** |
-| 訓練（オフライン） | `scripts/train_domain_classifier.py` の `--train-data` | 新 JSONL を渡すこと（スクリプト自体の diff は 0 行） | **F3** |
-| 実行時（本体） | `classifier.py:load_domain_classifier()` → `estimate_confidence_classifier()` が `config.yaml` の `classifier_model_path`（=`models/domain_classifier.joblib`）を読む | 各ノードのコンテナが**配布後の**新 artifact を読むこと（`mise.toml` の rsync） | **F4** |
-| 記録側 | `run_experiment.py:98` の `dispatched_domains` 再計算（gap_threshold=0.36，不変） | 同上 | **F5** |
-| 到達しない経路（変更しない） | 埋め込み・`aggregator.py`・`config.yaml`・`build_dataset.py`・`data/dataset.jsonl`・`data/classifier_train.jsonl`・`train_domain_classifier.py`・`mine_hard_negatives.py` | 一切触らない | **F1** |
-
-**事前ゲート（実装フェーズで判定）**
-
-| ゲート | 内容 | 不合格時 |
-|---|---|---|
-| **F0（スコア artifact）** | 採掘の直前に `sha256sum models/domain_classifier_pre_iter84_baseline.joblib` = `1cfcd3d836c5b5b421b8a47a487c3fb3ba996dd54aadcebae688cdfc8bcd0a48` を確認．**同時に `models/domain_classifier.joblib` が `f6c33edb1b80a43dbd4d7153b9088b97d220d4557958d0149fe043f0c47594d2`（Iter87 artifact＝本反復の基準線）であり，全 10 ノードにも同値が配布済みであることを確認する**．Iter87 と違い，採掘のために `models/domain_classifier.joblib` を上書き復元してはならない | 以降へ進まない |
-| **G0（調達元の同一性．B139）** | `sha256sum /tmp/expert-mesh-cache/JMMLU.zip` = `3ba7d912943ede44fb7ec06aa1df067ac6bee157e65c5588736b9b983f0e684d`（本フェーズの実測では一致） | **FAIL の場合，F2 の「件数・入れ替わり行数が計画表と完全一致」条項は適用しない**（実測値を記録し非遮断の観察事項とする）．重複 0 件条項は G0 に関わらず絶対条件 |
-| **F1（変更の最小性）** | `git diff` が `data/classifier_train_iter88_hybrid2575.jsonl`（新規）・`models/`・`data/MANIFEST.md`・`.claude/research/*` のみ．**`scripts/` 配下の diff は 0 行**（`mine_hard_negatives.py` を含む）．`config.yaml`・`node.py`・`classifier.py`・`aggregator.py` も 0 行．`data/dataset.jsonl`（3435 行）・`data/classifier_train.jsonl`（sha256 `eb89bf7b...`，1427 行）不変 | invalid |
-| **F2（データ）** | 出力 `data/classifier_train_iter88_hybrid2575.jsonl` が **2,327 行**．先頭 1,427 行が `data/classifier_train.jsonl` と**バイト一致**．**追加 900 行と `data/dataset.jsonl` 3,435 行の設問文重複 0 件（絶対条件）**，既存 1,427 行との重複 0 件，追加行同士の重複 0 件，id 重複 0 件．ドメイン別追加数が **{legal: 0, 他 9 ドメイン各 100}**．プール実測が Q3 の表（計 3,127，medical 910 / history_culture 579 / natural_science 576 / business_economics 505 / mathematics 148 / education 109 / computer_science 100 / social_science 100 / general 100 / legal 0）と一致．**cs・social_science・general の追加 100 行が Iter86・Iter87 の同ドメイン 100 行と集合として完全一致（no-op の確認）**．**Iter87 の追加 900 行との入れ替わり実測が 309 行，Iter86 の追加 900 行との入れ替わり実測が 300 行と完全一致**（決定論的な予測値なので ±0 で一致すること．不一致なら seed 消費順か artifact 指定の誤り） | invalid |
-| **F3（artifact）** | 新 `models/domain_classifier.joblib` の sha256 が `1cfcd3d8...`・`fd1ccd7d...`（Iter86）・`f6c33edb...`（Iter87）の**いずれとも異なる**．`n_features_in_`=2048，`classes_` が 10 ドメイン．`models/domain_classifier_iter87_hybrid.joblib` が `f6c33edb...` のまま残っている（復元元）．**新 artifact を `models/domain_classifier_iter88_hybrid2575.joblib` へ複製** | invalid |
-| **F4（配布）** | `mise run deploy` 後，全 10 ノードで artifact sha256 が新値で一致，`dispatch_gap_threshold: 0.36` 一致，`docker compose exec app wc -l /app/data/dataset.jsonl` = **3435**（10/10） | invalid |
-| **F5（実行時経路）** | 予備 20 問（`data/dataset_20.jsonl`）の `confidence`・`dispatched_domains` が，新 artifact ＋ キャッシュ埋め込みのオフライン予測と **20/20 一致** | 本走中止 |
-
-**固定する構成（基準線 = Iter87 本走 `results/20260927_174150/`）**
-
-`config.yaml` は 1 行も変更しない（`embedding_model=qwen3-embedding:0.6b`，`embedding_instruction`（Iter81 の P1 文言），
-`embedding_view_concat=true`，`routing_method=supervised_classifier`，`confidence_threshold=0.0`，
-`dispatch_candidate_threshold=0.0`，`dispatch_top_k=2`，`dispatch_gap_max_k=4`，`dispatch_gap_threshold=0.36`，
-`aggregation_method=max_confidence`）．`data/dataset.jsonl`（3,435 行，バイト不変），
-`data/classifier_train.jsonl`（1,427 行，バイト不変．追加分は別ファイルへ書く）．
-**ドメイン固有の後付け補正は追加しない．棄権・人間エスカレーションは扱わない（2026-09-23 恒久運用ルール (1)(2)）．
-本体実験（wafl500〜509 の 3,435 問本走）以外の処理（採掘・埋め込み・再訓練・replay）はすべて wafl-ctrl5 で行う（同ルール (B)）．
-N・混合比・乱数種・プール定義は 10 ドメイン共通である．**
-
-**仮説（事前登録）**
-
-「Iter86（hard 100%）→ Iter87（hard 50%）で観測された『Q1 の改善は入れ替わり行数に比例してしか減らない（+14.85→+11.79pt，−21%）
-のに，Q2〜Q4 の退行は比例以上に消える（−43〜−58%）』という非対称が，hard 25% でも同じ向きに続くなら，
-Δtop1 は Iter87 基準線比で +0.2〜+0.5pt 伸びる．逆に，Q2〜Q4 の退行が Iter87 で既に床に達していて
-Q1 の改善だけが減衰するなら Δtop1 は −0.6pt 程度になる．**どちらであっても効果量は McNemar の有意境界 0.88pt を下回る見込みで，
-最も確からしい着地は `no_effect` である．**本反復の目的は，用量反応曲線の 3 点目を測ることと，
-下記 5b で種由来の Δ の散らばりを数値化して『比の差を測定できる分解能が本測定系にあるか』を確定することにある．
-なお追加 900 行のうち 300 行（computer_science・social_science・general）はプール M=100=N のため比をどう振っても動かず，
-education も 8 行しか動かないので，実際に効くのは medical・history_culture・natural_science・business_economics・mathematics の 5 ドメインである．」
-
-**着地点予測（事前登録．事後に書き換えない）**
-
-| 指標 | 基準線 `results/20260927_174150/`（Iter87） | 参考: Iter86 / pre_iter84 | **Iter88 予測** |
-|---|---|---|---|
-| `top1_accuracy`（3,435 行） | 0.801456 | 0.796507 / 0.786317 | **0.795〜0.807．点推定 0.8043（+0.28pt）．モデル A〜C の幅は −0.61 〜 +0.50pt** |
-| `single_domain_top1_accuracy`（3,020 行） | 0.799007 | 0.797020 | −0.7 〜 +0.6pt |
-| `compound_domain_top1_accuracy`（415 行） | 0.819277 | 0.792771 | 0.80〜0.83 |
-| **`education` recall** | **0.3626** | 0.3441 / 0.3880 | **0.35〜0.38．非退行①の個別監視項目（B143 (b)）** |
-| **`natural_science` precision** | **0.8424** | 0.8029 / 0.8729 | **0.83〜0.86．非退行①の個別監視項目（B143 (b)）** |
-| `history_culture` recall | 0.8701 | 0.8840 / 0.8237 | 0.85〜0.88 |
-| `medical` recall / precision | 0.7710 / 0.8000 | ― | 追加行の平均 p_true が最も大きく動くドメイン（0.362→0.530）．監視 |
-| `legal` recall / precision | 0.6831 / 0.8137 | 0.6420 / ― | 追加行 0 件の唯一のドメイン．監視対象 |
-| `compound_domain_set_recall` / `compound_mean_dispatched_count` | 0.566265 / 1.879518 | ― | 非退行②③の枠内で報告 |
-| `mean_duration_ms` | 1544.912 | 1534.531 | 非退行⑥ 1853.9 以内 |
-| ECE | 0.045717 | 0.040154 | 0.02〜0.08 |
-| rank1 以外が選ばれた行数 | 5 | 1 | ≤ 15 |
-| `answer_quality_accuracy` / `end_to_end_accuracy` | 0.587417 / 0.411063 | ― | ノイズ床 3SD=2.6pt の範囲でのみ判定 |
-| Random / BestSingle / Oracle | 0.112082 / 0.128384 / 1.0 | 不変 | success_criteria (3) により毎回併記 |
-
-**成功条件・非退行条件（事前登録．Iter86/87 の事前登録を一字も変えずに据え置く．結果を見る前に固定し，事後に緩めない）**
-
-| 区分 | 指標 | 基準線（Iter87） | 合格条件 |
-|---|---|---|---|
-| **主基準（効果）** | 全 3,435 行 `top1_accuracy` | 0.801456 | **(i) McNemar 対比較（α=0.05）で有意，かつ (ii) +1.0pt 以上（≥ 0.811456）**．AND 条件．Wilson 95%CI と検出限界 `1.96·√(n_d)/3435` を併記 |
-| **非退行①** | per-domain recall / precision 計 20 指標（BH 補正 q=0.05） | 上表（Iter87 実測値） | **有意退行 0 件**．**`education` recall（0.3626）・`natural_science` precision（0.8424）は個別に明記する（B143 (b)）**．`legal`（追加 0 件）も明記 |
-| **非退行②（複合被覆）** | `compound_domain_set_recall` | 0.566265 | **≥ 0.539759**（Iter82 水準を下回らない．絶対値の床であり Iter86/87 と同一） |
-| **非退行③（複合予算）** | `compound_mean_dispatched_count` | 1.879518 | **≤ 2.10**（絶対値．Iter86/87 と同一） |
-| **非退行④** | `fallback_rate` / `dispatch_failure_rate` | 0.0 / 0.001456 | fallback = 0.0，dispatch_failure ≤ 0.005（絶対値．Iter86/87 と同一） |
-| **非退行⑤** | rank1 以外が選ばれた行数 | 5 | **≤ 15**（絶対値．Iter86/87 と同一） |
-| **非退行⑥** | `mean_duration_ms` | 1544.912 | **≤ 1853.9**（規則は Iter86/87 と同一の「基準線 +20% 以内」．基準線が 1574.096→1544.912 へ更新されたので閾値は 1888.9→1853.9 と**わずかに厳しく**なる．緩めていない） |
-| **非退行⑦** | ECE | 0.045717 | **≤ 0.08**（絶対値．Iter86/87 と同一） |
-| 報告のみ | 層別 Δ（基準線 p_true の五分位） | Iter86/87 の五分位表（境界値は同一） | **必ず併記**．モデル A / B / C のどれに近いかを解釈に使う．**pre_iter84 基準線比の値も併記して 100/50/25 の用量反応曲線 3 点を 1 表にまとめること** |
-| 報告のみ | Iter87 の 900 行との入れ替わり実測行数 | 予測 309（Iter86 比は 300） | 選択規則が効いた証拠 |
-| 報告のみ | **種 87/88/89 × 比 50/50・25/75 の replay Δ の散らばり** | 未測定 | **下記 5b．必須手順** |
-| 報告のみ | 1,915 行サブセット top1 | 0.809922 | 過去基準線との接続用 |
-| 報告のみ | `education` recall の pre_iter84 基準線（0.387991）からの累積ドリフト | −2.54pt（Iter87 時点） | B143 (b) の申し送り．有意性ではなく点推定の符号と大きさを記録する |
-| 報告のみ | `answer_quality_accuracy` / `end_to_end_accuracy` | 0.587417 / 0.411063 | 3SD=2.6pt のノイズ床の範囲でのみ有意と判定 |
-
-**判定規則（事前登録．Iter86/87 と同一．一字も変えていない）**
-
-- **adopted**: 主基準 (i)(ii) を満たし，非退行①〜⑦をすべて満たす．
-- **partial**: McNemar が有意で Δtop1 が +0.5〜+1.0pt，かつ非退行①〜⑦を満たす．
-- **no_effect**: |Δtop1| < 0.5pt または McNemar が非有意．結論前に F0〜F5 を再確認し実験不成立でないことを示すこと．
-  **Q4 の投影ではこれが最も確からしい着地である．この場合「hard/random 混合比の用量反応は 50/50 付近で頭打ちで，
-  25/75 へ振っても top1 は動かない」と記録し，B143 が予告した純無作為 0/100 の対照実験へ進むか，
-  `cross_domain_training_data_augmentation` を打ち止めにして config.yml の levers の次候補へ移るかを分析フェーズで決める．**
-- **rejected**: Δtop1 ≤ −0.5pt，または非退行①〜⑦のいずれかに違反．
-  **`education_recall` の有意退行が再現した場合はここに該当する．** その場合，「hard negative を含む訓練データ拡充は
-  混合比を変えても頭打ちで，ランダム側へ振りすぎると境界情報が薄まって退行する」と記録し，
-  ドメイン固有の手当てへは進まない（2026-09-23 恒久運用ルール (1)）．
-- **invalid（実験不成立）**: F0〜F5 のいずれか不合格，`total_questions != 3435`，`compound_domain_question_count != 415`，
-  新 artifact の sha256 が `1cfcd3d8...` / `fd1ccd7d...` / `f6c33edb...` のいずれかと一致，
-  **追加 900 行と評価集合の重複が 1 件でもある**，cs/social_science/general の追加行が Iter86・Iter87 と不一致，
-  Iter87 比の入れ替わり実測が 309 行と不一致（G0 PASS 時），または本走 top1 がオフライン replay 予測から 1.0pt 以上乖離．
-- **復元手順（adopted 以外すべて）**: `cp models/domain_classifier_iter87_hybrid.joblib models/domain_classifier.joblib`
-  （sha256 が **`f6c33edb...`**（Iter87＝現基準線）に戻ることを確認）→ `mise run deploy` → 全 10 ノードで smoke_check．
-  **`1cfcd3d8...`（pre_iter84）へは戻さない**（基準線は B143 (c) で Iter87 へ更新済みのため）．
-  **この復元は分析フェーズ内で必ず完了させ，未実施のまま次反復へ送らない**（Iter86 でこれを積み残した前例がある）．
-  `config.yaml`・`data/dataset.jsonl`・`data/classifier_train.jsonl` は本反復で触らないので復元不要．
-  `data/classifier_train_iter88_hybrid2575.jsonl` と `models/domain_classifier_iter88_hybrid2575.joblib` は記録として残す．
-
-**実験手順（この順で行うこと）**
-
-1. **前提確認（F0・G0）**: `sha256sum models/domain_classifier_pre_iter84_baseline.joblib` = `1cfcd3d8...`，
-   `sha256sum models/domain_classifier.joblib` = `f6c33edb...`，全 10 ノードでも `f6c33edb...`（smoke_check），
-   `wc -l data/dataset.jsonl` = 3435，`wc -l data/classifier_train.jsonl` = 1427，
-   `sha256sum /tmp/expert-mesh-cache/JMMLU.zip` = `3ba7d912...`，
-   `config.yaml` の `embedding_view_concat: true` / `embedding_instruction` / `dispatch_gap_threshold: 0.36`．
-   **`models/domain_classifier.joblib` を上書きする操作はこの段階では行わない．**
-2. **採掘**（**wafl-ctrl5 限定**．プール埋め込みキャッシュ `pool_hash=221e45e8...` が一致するため再埋め込みは発生せず，実質 CPU のみ）:
-   `data/MANIFEST.md` の Iter87 生成コマンドから **`--random-count 50` → `75`**，
-   **`--classifier-model models/domain_classifier.joblib` → `models/domain_classifier_pre_iter84_baseline.joblib`**，
-   **`--output` → `data/classifier_train_iter88_hybrid2575.jsonl`** の 3 箇所だけを替えて実行する（他は 1 文字も変えない）．→ **F2**
-3. **F2 の決定論的検証**: 同じコマンドの `--random-count` を `0` / `50` に替えて一時ファイルへ出力し，
-   それぞれ `data/classifier_train_iter86_hardneg.jsonl` / `data/classifier_train_iter87_hybrid.jsonl` と
-   **バイト一致**することを確認する（採掘系の決定論性と artifact 指定の正しさを同時に担保する．本フェーズで実測確認済み）．
-   確認後は一時ファイルを削除する．
-4. **再訓練**（**wafl-ctrl5 限定**）: `data/MANIFEST.md` の `train_domain_classifier` コマンドの `--train-data` だけを
-   `data/classifier_train_iter88_hybrid2575.jsonl` に替えて実行 →
-   `cp models/domain_classifier.joblib models/domain_classifier_iter88_hybrid2575.joblib` → **F3**．
-   `train_domain_classifier.py` は埋め込みキャッシュを持たないため 2,327 行 ×2 view を毎回埋め込み直す点に注意（時間見積りの根拠）．
-5. **【必須】5b: 乱数種ばらつきの report-only 計測（B143 が必須と定めた手順．「余力があれば」ではない）**
-   （**wafl-ctrl5 限定**）．Iter87 ではこれを余力条件に置いた結果，実施されず未測定のまま残った．本反復では必須とする．
-   - **対象は 6 構成**: 比 {50/50, 25/75} × 種 {87, 88, 89}．うち 2 構成（50/50 種 87 = `models/domain_classifier_iter87_hybrid.joblib`，
-     25/75 種 87 = 手順 4 の新 artifact）は既に存在するので，**追加で採掘・再訓練するのは 4 構成**（50/50 種 88・89，25/75 種 88・89）．
-   - 各構成について，`data/embcache_eval_qwen3-embedding_0.6b{,__p1}.npy`（**1,915 行**，本フェーズで shape 実測確認済み）を
-     特徴量として `predict_proba` し，`aggregator.select_dispatch_targets()` を再利用して
-     `gap_threshold=0.36` / `gap_max_k=4` / 閾値 0.0 の下で `dispatched_domains` を再現する
-     （Iter87 と同一手法．基準線 artifact に適用すると Iter83 の G1 記録値 0.793211 と完全一致することで忠実度確認済み．
-     Iter87 実測では replay 予測 0.810966 対 本走実測 0.809922 で乖離 0.104pt）．
-   - **記録するもの**: 6 構成の replay top1（1,915 行），比ごとの 3 種の平均・標準偏差・レンジ，
-     **および「同一比・異種間の Δ の絶対値の最大値」**．これが**比の差（投影 0.3〜0.5pt）と同程度かそれ以上であれば，
-     本測定系では比の差を 1 回の本走で判定できないと結論し，その旨を分析フェーズの結論に明記する**．
-   - **種の選び直しには絶対に使わない．** 本走に使う種は 87 で事前固定済みであり，
-     5b の結果がどうであろうと手順 4 の artifact を差し替えてはならない（garden of forking paths の回避）．
-     この計測は「Δ の不確実性の大きさを知る」ためだけのものである．
-6. **本走前の着地点記録（B136）**: 手順 4 の新 artifact ＋ 既存 1,915 行キャッシュ埋め込みで replay を走らせ，
-   予測 top1 / per-domain / 複合指標を**本走前に** journal へ追記する．
-7. **配布**: `mise run deploy` → **F4**（ここで初めて `models/domain_classifier.joblib` が新 artifact になる）．
-8. **予備 20 問**（`data/dataset_20.jsonl`）→ **F5**．不一致なら本走に進まない．
-9. **本走**: wafl500〜509 で **3,435 問フルスペック 1 回**（config.yml 絶対条件 (A)．事前 replay で経路指標が予測できても省略しない）．
-   想定所要は Iter85/86/87 実績から **約 90 分**（timeout 180 分以内）．
-10. `mise run analyze -- <YYYYMMDD_HHMMSS>`（**B135: 引数を省略すると `results/iter45_preliminary/` を誤選択する**）．
-    層別 Δ（基準線 p_true 五分位．**pre_iter84 比も併記して 100/50/25 の 3 点曲線を作る**）・Iter87/Iter86 との入れ替わり行数・
-    1,915 行サブセット top1 も併せて算出する．統計は `metrics.py` の既存関数
-    （`compute_mcnemar_test` / `compute_domain_recall_mcnemar_test` / `compute_domain_precision_fisher_test` /
-    `apply_benjamini_hochberg` / `compute_top1_accuracy_wilson_ci`）をそのまま再利用し，自前の統計式は書かない．
-11. `data/MANIFEST.md` に新訓練ファイル・新 artifact の sha256 と行数・**乱数種 87・`--random-count 75`**・生成コマンド・
-    採掘に用いたスコア artifact（`1cfcd3d8...`）・ゲート結果・5b の 6 構成の replay 値を追記する．
-
-**次イテレーションへの申し送り**
-
-- `no_effect`（最も確からしい着地）なら，用量反応は 50/50 付近で頭打ちと確定する．次の選択肢は
-  (α) 純無作為 0/100 の対照（B143 が予告済み．「hard negative mining が無作為に勝つか」の決着がつく）か，
-  (β) `cross_domain_training_data_augmentation` を打ち止めにして config.yml の levers の次候補へ移るか．
-  **5b で測った種ばらつきが比の差と同程度だった場合は (α) も 1 回の本走では判定できないので，(β) を推す．**
-- `rejected`（退行方向）なら，50/50 が用量反応の最適点であると記録し，本レバーは打ち止めにする．
-- `adopted` / `partial` なら，さらにランダム側（例: 10/90）へ振る余地があるが，
-  **cs・social_science・general の 300 行と education の 92 行は比をどう振っても動かない**という構造的上限は変わらない．
-  この上限を外すには追加行数 N か評価集合の構成を変えるしかなく，どちらも別レバーになる．
-
-### Iteration 88 実行済み
-
-**変更（実施したこと）**
-
-採掘コマンドの `--random-count` を `50` → `75` に替えただけである（`--per-domain 100`・`--random-seed 87` 据え置き）．
-`--classifier-model` は B144 (A) の判断どおり `models/domain_classifier_pre_iter84_baseline.joblib`（`1cfcd3d8...`）を
-明示指定し，基準線側の実行時 artifact `f6c33edb...` は採掘のために上書きしていない．**`scripts/` 配下を含めソース差分は 0 行**で，
-実質の差分は `data/MANIFEST.md`・`.claude/research/*`・新規データ/artifact のみ．新訓練データ
-`data/classifier_train_iter88_hybrid2575.jsonl`（2,327 行，sha256 `c341baef...`），新 artifact
-`models/domain_classifier_iter88_hybrid2575.joblib`（sha256 `51b9ced5...`）を全 10 ノードへ配布．
-F0〜F5・G0 すべて PASS．入れ替わり行数は Iter87 比 **309 行**・Iter86 比 **300 行**で事前登録の決定論的予測値に ±0 で一致．
-cs・social_science・general の追加 100 行は Iter86/87 と集合として完全一致（no-op）．
-採掘の決定論性は `--random-count 0` / `50` の再現出力が Iter86/87 の訓練ファイルとバイト一致することで確認済み．
-本走は `results/20260927_202256/`（3,435 問，約 91 分）．
-
-**結果（事前登録の表に対応させる）**
-
-| 指標 | 基準線 Iter87 `results/20260927_174150/` | **Iter88 実測** | 合否 |
-|---|---|---|---|
-| `top1_accuracy`（3,435 行） | 0.801456 | **0.801164（Δ = −0.03pt）** Wilson 95%CI [0.787484, 0.814172] | 主基準 (i)(ii) **不成立** |
-| McNemar | ― | **chi2 = 0.0，p = 1.0（非有意）**，discordant 127（a_only 64 / b_only 63），検出限界 0.612pt | ― |
-| `single_domain_top1` / `compound_top1` | 0.799007 / 0.819277 | 0.798344 / 0.821687 | 予測帯内 |
-| 非退行①（per-domain 20 指標，BH q=0.05） | ― | **有意退行 0 件**．`education_recall` 0.3626→**0.3811**（+1.85pt，生 p=0.098960，非有意），`natural_science_precision` 0.8424→**0.8541**（+1.17pt，生 p=0.687276，非有意）．legal_recall 0.6337（生 p=0.003283）・mathematics_recall（生 p=0.013328）も BH 閾値を上回らず非有意 | **PASS** |
-| 非退行② `compound_domain_set_recall` | 0.566265 | 0.553012（≥ 0.539759） | **PASS** |
-| 非退行③ `compound_mean_dispatched_count` | 1.879518 | 1.783133（≤ 2.10） | **PASS** |
-| 非退行④ fallback / dispatch_failure | 0.0 / 0.001456 | 0.0 / 0.000291（1 行） | **PASS** |
-| 非退行⑤ rank1 以外が選ばれた行数 | 5 | **1**（≤ 15） | **PASS** |
-| 非退行⑥ `mean_duration_ms` | 1544.912 | 1546.784（≤ 1853.9） | **PASS** |
-| 非退行⑦ ECE | 0.045717 | **0.022189**（≤ 0.08） | **PASS** |
-| 報告のみ | `answer_quality` / `end_to_end` 0.587417 / 0.411063 | 0.585762 / 0.407860（3SD=2.6pt 以内） | ― |
-| 報告のみ | 1,915 行サブセット | 0.805222（本走前 replay 予測 0.806266 から乖離 0.104pt，行一致 1913/1915） | ― |
-
-invalid 条件（`total_questions`=3435・`compound_domain_question_count`=415・sha256 の非一致・
-追加 900 行と評価集合の重複 0 件・入れ替わり 309 行一致・replay 乖離 < 1.0pt）はいずれにも該当しない．
-**すなわち実験は成立しており，「効果が無かった」を素直に読んでよい**（d0004 §4 の「基準線と完全一致＝実験不成立」型とは異なる．
-今回は本走の行単位の結果が 127 行入れ替わっており，レバーが発火した証拠は十分にある）．
-
-**判定: `no_effect`（事前登録の条文をそのまま適用）**
-
-事前登録は `no_effect` を「|Δtop1| < 0.5pt **または** McNemar が非有意」と定義している．
-実測は |Δ| = 0.03pt < 0.5pt（第 1 項）かつ p = 1.0（第 2 項）で，**両方を独立に満たす**．
-`adopted`（主基準 (i)(ii) の AND）・`partial`（有意かつ +0.5〜+1.0pt）は (i) が不成立のため該当しない．
-`rejected`（Δ ≤ −0.5pt または非退行違反）も，Δ = −0.03pt > −0.5pt かつ非退行①〜⑦全 PASS のため該当しない．
-判定語は事前登録どおり **`no_effect`** で確定する．規則は結果に合わせて緩めても厳しくもしていない（B131 以来の運用）．
-
-**学び 1: 相殺の構造 — Q1 の改善減衰と Q2〜Q4 の退行消失が，ちょうど打ち消し合った**
-
-| 層（各 n=687） | pre_iter84 比 Iter86（100/0） | Iter87（50/50） | **Iter88（25/75）** | Iter87→88 の寄与（×0.2） |
-|---|---|---|---|---|
-| Q1（最難） | +14.85 | +11.79 | **+9.02** | **−0.554pt** |
-| Q2 | −6.84 | −2.91 | **−1.75** | +0.232pt |
-| Q3 | −2.33 | −1.02 | **−0.15** | +0.174pt |
-| Q4 | −1.02 | −0.58 | **−0.15** | +0.086pt |
-| Q5（最易） | +0.44 | +0.29 | **+0.44** | +0.030pt |
-| **全体 Δtop1（pre_iter84 比）** | **+1.019** | **+1.514** | **+1.485** | **−0.03pt** |
-
-- **仮説の両半分がどちらも当たった上で，合計だけがゼロになった．** 事前登録の仮説は
-  「Q2〜Q4 の退行消失が続くなら +0.2〜+0.5pt，Q1 の減衰だけが進むなら −0.6pt」という二者択一だったが，
-  実測は**両方が同時に単調に進行**した．Q1 は −2.77pt（寄与 −0.554pt），Q2〜Q5 は合計 +2.62pt（寄与 +0.524pt）で，
-  差し引き −0.03pt．モデル A（−0.61pt）とモデル C（+0.50pt）の**ほぼ中点**であり，
-  投影の点推定 +0.28pt（モデル B）とも 0.31pt しか違わない．投影の幅取り自体は妥当だった．
-- **Q1 の減衰は hard 行数の対数にほぼ線形**（100→50 で −3.06pt，50→25 で −2.77pt）．
-  一方 Q2〜Q4 の退行は減衰が急で，Q3・Q4 は −0.15pt まで来てほぼ床に達した．
-  **つまり「ランダム側へ振ると悪い方が先に直り切り，そのあとは良い方の減衰だけが残る」**構造である．
-  Q2〜Q4 の回復余地がもう 0.5pt 分しか残っていない以上，さらにランダム側（10/90 等）へ振れば
-  Q1 の減衰が露出して **Δ は必ず負に転じる**．用量反応の向きは 25/75 で決着した．
-- **50/50 は「交差点」か**: 3 点を log2(hard 比) の二次で近似すると頂点は **hard 比 36.7%・peak +1.566pt**．
-  ただし **頂点と 50/50（+1.514pt）の差はわずか 0.05pt** であり，これは下記の種ばらつき 0.31pt の 1/6 である．
-  **3 点では「50/50 と 25/75 の間のどこかに幅の広い平坦な頂上がある」までしか言えず，
-  頂点位置を種ばらつきより細かく特定することはできない．** 過剰に「36.7% が最適」と読んではならない．
-- **構造的制約**: cs・social_science・general は M=100=N で追加 900 行のうち 300 行（33.3%）が今回も厳密に no-op，
-  education も 8 行しか動かない．**比の刻みで動かせるのは実質 5 ドメインの 600 行弱**であり，
-  比を振り続けても効果量の上限がここで頭打ちになる．この上限を外すには N か評価集合の構成を変えるしかなく，別レバーになる．
-
-**学び 2（本反復の最大の成果）: 5b の実測により，「比の差は本測定系の分解能を下回る」ことが確定した**
-
-| 構成 | replay top1（1,915 行） | 比ごとの平均 / 標本 SD / レンジ |
-|---|---|---|
-| 50/50 種 87 / 88 / 89 | 0.810966 / 0.813055 / 0.809922 | 0.811314 / 0.001595 / **0.003133（0.31pt）** |
-| 25/75 種 87 / 88 / 89 | 0.806266 / 0.809399 / 0.807833 | 0.807833 / 0.001567 / **0.003133（0.31pt）** |
-
-- **同一比・異種間の Δ の絶対値の最大値は両比とも 0.31pt．** 一方，比の効果は
-  事前投影で +0.28pt，replay の種対応差で −0.35pt（種別 −0.47 / −0.37 / −0.21pt）である．
-  **比の効果と種由来のノイズは完全に同オーダーであり，前者が後者に埋もれている．**
-- **本走 1 回の分解能を数値で確定する**: discordant n_d = 127 のとき McNemar の有意境界は
-  `1.96·√127/3435` = **0.612pt**，80% 検出力に必要な Δ は `2.8·√127/3435` ≈ **0.92pt**．
-  **したがって，0.3〜0.5pt 規模の比の差は本走 1 回では原理的に判定できない．**
-  これは本反復の事後解釈ではなく，事前登録（検出力表：真の Δ = +0.28pt での検出力 10%）が予告していたとおりである．
-- **さらに決定的な証拠（分割半信頼性）**: 同じ 1 回の本走を 2 つに割ると，
-  **1,915 行の旧サブセットでは Δ = −0.47pt，残る 1,520 行（Iter85 拡充分）では Δ = +0.53pt** と
-  **符号が逆で大きさが同程度**になり，合計してはじめて −0.03pt になる．
-  **同一実行の中でさえ ±0.5pt の系統的な揺れが部分集合ごとに生じる**以上，
-  0.3〜0.5pt の差を根拠に比の優劣を論じることはできない．
-- **結論（今後の実験設計を規定する）**: **本測定系（3,435 問・1 本走・種 1 個）で判定できるのは
-  おおむね 0.9pt 以上の効果量に限られる．これを下回る効果量のレバーは，同系列で刻み続けても結論が出ない．**
-  今後のレバー選定は「効果量が 0.9pt を明確に上回る見込みがあるか」を事前に見積もってから行う．
-  0.3pt 級を測りたければ (a) 評価集合をさらに数倍にする，(b) 種を複数（≥3）平均する，のいずれかが必須で，
-  どちらも本走コスト（1 回 90 分）を数倍にする．**現時点でそのコストを払う価値のある問いは無い．**
-
-**学び 3: 副次的に観測された挙動**
-
-- **education_recall は +1.85pt（0.3626→0.3811）で初めて明確に改善方向**．pre_iter84（0.387991）からの累積ドリフトは
-  −2.54pt → **−0.69pt** まで縮んだ．`natural_science_precision` も +1.17pt（0.8541）で pre_iter84（0.8729）に接近した．
-  B143 (b) が監視対象としていた「medical の押し出しが education を削り natural_science の FP を増やす」経路は，
-  追加行の平均 p_true が上がるにつれ**単調に弱まっており，25/75 でほぼ解消した**．ただし両指標とも生 p は
-  0.098960 / 0.687276 で**非有意であり「直った」とは記録しない**（B143 (b) と同じ読み方を維持する）．
-- **ECE が 0.045717 → 0.022189 へ半減した**．追加 900 行の平均 p_true が 0.5606 → 0.6330 と
-  プールの典型分布に寄ったことで，訓練分布と評価分布の乖離が縮み確信度較正が改善したと解釈できる．
-  非退行⑦は絶対値 0.08 以下の条文なので判定には影響しないが，**「難しい行ばかり足すと過信が増える」という
-  副作用が比で制御できる**ことを示す観測である．
-- **rank1 以外が選ばれた行数が 5 → 1 へ**，dispatch_failure も 5 行相当 → 1 行へ減った（いずれも絶対値の床は満たす）．
-- 想定外の挙動（言語崩れ・発散・OOM・タイムアウト）は無い．本走は約 91 分で完走した．
-
-**判定に伴う処置（事前登録の復元手順を条文どおり実行済み）**
-
-判定が `adopted` 以外のため復元条項に該当する．本分析フェーズ内で以下を完了した（次反復へ積み残さない）．
-`cp models/domain_classifier_iter87_hybrid.joblib models/domain_classifier.joblib` →
-sha256 が **`f6c33edb1b80a43dbd4d7153b9088b97d220d4557958d0149fe043f0c47594d2`** に戻ることを確認 →
-`mise run deploy` → **全 10 ノード（wafl500〜509）で `models/domain_classifier.joblib` の sha256 = `f6c33edb...` を実機確認**，
-`smoke_check` の git-status / hashes / probe すべて PASS（probe latency 5ms，LLM 呼び出し無し）．
-`1cfcd3d8...`（pre_iter84）へは戻していない（基準線は B143 (c) で Iter87 へ更新済み）．
-`config.yaml`・`data/dataset.jsonl`・`data/classifier_train.jsonl` は本反復で触っていないため復元不要．
-`data/classifier_train_iter88_hybrid2575.jsonl` と `models/domain_classifier_iter88_hybrid2575.joblib` は記録として残す．
-**次反復の基準線は引き続き Iter87 本走 `results/20260927_174150/`（top1 = 0.801456，artifact `f6c33edb...`）である．**
-
-**次の一手（B145 で記録．詳細は backlog 参照）**
-
-- **`cross_domain_training_data_augmentation` は打ち止め（closed）**．事前登録の申し送りは
-  「5b で測った種ばらつきが比の差と同程度だった場合は (α) 純無作為 0/100 の対照も 1 回の本走では判定できないので (β) を推す」
-  と定めており，実測（種間 Δ 最大 0.31pt ＝ 比の効果と同オーダー）はこの条件に該当する．
-  **よって (α) は実施せず，(β)＝ config.yml の levers の次候補へ移る．** 最終構成は Iter87 の 50/50 のままとする．
-- **次レバーは `embedding_model_replacement` = `qwen3_embedding_4b`**（Iteration 89）．
-  選定理由は学び 2 の帰結そのもので，**効果量が測定分解能 0.9pt を明確に上回る見込みがある唯一の近接候補**だからである
-  （MTEB multilingual は 0.6b の 64.33 に対し 4b が 69.45 で +5.12pt．0.6b への差し替え自体が Iter79 系列で
-  複数 pt の変化を生んだ実績がある）．B116 (3) によりユーザー事前承認済みで，着手前の追加確認は不要．
-  `research_frontier` 最上位の複合評価集合拡充（`compound_eval_set_expansion`）を先に採らない理由は，
-  それが top1 を上げるレバーではなく測定系の整備であり，全基準線の再取得（1 回 90〜150 分 × 複数）を伴うためである
-  （ただし学び 2 により，将来この拡充の優先度は上がった．B145 に申し送る）．
 

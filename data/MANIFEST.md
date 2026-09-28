@@ -1089,3 +1089,49 @@ ollama ollama list`）で確認済み．
 
 2026-07-29．`git rev-parse HEAD` = `30e3627020c986dfd24a3b0a4c0cdd26d1136b85`（本ファイル作成時点）．
 以降にこれらのファイルを再生成した場合は，このセクションと各ハッシュを更新すること．
+
+**2026-09-28 更新（Iteration 91, `classifier_regularization_strength=l2_C_selected_by_train_only_cv`,
+C=10.0）**: `scripts/train_domain_classifier.py` に定数 `_L2_INVERSE_REGULARIZATION = 10.0` を追加し，
+`train_classifier()` の `base_estimator` へ `C=_L2_INVERSE_REGULARIZATION` を渡すよう変更した（コード
+2 行＋定数定義のみ．他の設定・コードは無変更）．埋め込みは `data/classifier_train_iter87_hybrid.jsonl`
+2,327 行から wafl-ctrl5 の Ollama（127.0.0.1:11499 トンネル経由，wafl500〜509 は不使用）で再計算した．
+
+訓練コマンド（Iter89 節から `--output`／内部 `C` のみ差し替え，他は同一構成）:
+```
+uv run python -m scripts.train_domain_classifier \
+    --train-data data/classifier_train_iter87_hybrid.jsonl \
+    --embedding-model qwen3-embedding:4b \
+    --embedding-instruction "Given a user question, identify the single academic or professional domain it belongs to" \
+    --embedding-view-concat \
+    --ollama-host 127.0.0.1 --ollama-port 11499 \
+    --output models/domain_classifier.joblib
+```
+
+旧版は `models/domain_classifier_pre_iter91_c1.joblib`（sha256 `ff8aad9c...`，Iter89 と同一）へ退避．
+新 artifact は `models/domain_classifier_iter91_c10.joblib` にも複製．オフライン replay 専用の
+C=1.0 対照 artifact（**絶対にデプロイしない**）は `/tmp/iter91/domain_classifier_iter91_c1_control.joblib`
+（リポジトリ外，再現用コマンドは journal.md Iteration 91 参照）．
+
+再訓練時に新規計算した 2,327 行×2ビューの埋め込みと `data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy`
+の最大絶対差は **0.011406**（qwen3-embedding:4b のセッション跨ぎ非決定性，journal.md B149 (d) 参照）．
+
+| ファイル | sha256 |
+|---|---|
+| `models/domain_classifier_iter91_c10.joblib`（Iter91 本走で使った `C`=10.0 版．**現行ではない**） | `6a5905f025d6dae91ab333968e71c944d77ba286f4f3e3891c1b3a1fe5ca3b30` |
+| `models/domain_classifier_pre_iter91_c1.joblib`（Iter89 と同一．`C`=1.0） | `ff8aad9cf824992f0a99d07d5506ea9ebdbc3491914a165959c3496df7f2cfd6` |
+| `data/classifier_train_iter87_hybrid.jsonl`（無変更） | `63e73c201a8bf46a47c9933b33cc53ab28ada6033d0d6f33d63c71cf0359aa7d` |
+
+到達確認 E1〜E5・G0 の実測は journal.md Iteration 91「実行済み」節を参照．
+
+**[2026-09-28 Iter91 分析フェーズ．artifact をロールバックした]**
+Iter91 の判定は `no_effect`（Δtop1 +0.160pt，McNemar p=0.7383，事前登録の +1.0pt・p<0.05 をいずれも未達）
+であり，さらに非退行① で `legal_recall` の有意退行が 1 件出たため，**`models/domain_classifier.joblib` を
+`C`=1.0 の `ff8aad9c...`（Iter89 = Iter90 基準線と同一）へ戻した**．`scripts/train_domain_classifier.py` の
+`C=_L2_INVERSE_REGULARIZATION` も revert 済み（再訓練すれば sklearn 既定の `C`=1.0 に戻る）．
+`C`=10.0 の artifact は `models/domain_classifier_iter91_c10.joblib` に保存してあるので再採用は可逆である．
+**次に実験を行う前に `mise run deploy` を必ず実行すること**（wafl500〜509 上には Iter91 本走時点の
+`C`=10.0 artifact が載ったままであり，リポジトリ側の現行 artifact と一致していない）．
+
+| ファイル | sha256（ロールバック後の現行） |
+|---|---|
+| `models/domain_classifier.joblib`（現行＝`C`=1.0，`n_features_in_`=5120） | `ff8aad9cf824992f0a99d07d5506ea9ebdbc3491914a165959c3496df7f2cfd6` |

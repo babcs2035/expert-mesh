@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 90,
-  "iteration_name": "複合設問評価集合の拡充（既存公開データセットの調査と追加）",
-  "phase": "evaluate",
+  "iteration": 91,
+  "iteration_name": null,
+  "phase": "research",
   "status": "running",
-  "current_lever": "compound_eval_set_expansion=llm_generated_separate_generator_scaleup_730",
-  "experiment_dir": "results/20260928_032909",
-  "experiment_deadline": 1790545169,
-  "updated_at": 1790544835,
-  "last_slack_ts": "1790544013.609369",
-  "iteration_thread_ts": "1790527046.624519",
+  "current_lever": null,
+  "experiment_dir": "results/20260928_074903",
+  "experiment_deadline": 1790561018,
+  "updated_at": 1790559789,
+  "last_slack_ts": "1790558965.888589",
+  "iteration_thread_ts": "1790546192.808839",
   "notion_toggle_created": true,
-  "last_commit": "79e032e"
+  "last_commit": "3e46052"
 }
