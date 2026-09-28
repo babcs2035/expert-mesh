@@ -27,6 +27,30 @@ async def test_build_training_features_embeds_each_row_in_order() -> None:
     assert ollama_client.embed.call_args_list[0].args == ("nomic-embed-text", "headache")
 
 
+async def test_build_training_features_forwards_fusion_models_to_embed_query_views() -> None:
+    """Iter100 (embedding_space_fusion): fusion_models is forwarded unchanged to
+    embed_query_views(), so training features append the same additional model views (in
+    the same order) as node.py's runtime query embedding.
+    """
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.embed.side_effect = [
+        [1.0, 1.0],  # row 1 primary plain
+        [2.0, 2.0],  # row 1 primary instructed
+        [3.0, 3.0],  # row 1 fusion plain
+        [4.0, 4.0],  # row 1 fusion instructed
+    ]
+    rows = [{"id": "medical-train-001", "query": "headache", "domain": "medical"}]
+    fusion_models = [{"model": "ruri-model", "prompt_template": "トピック: {text}"}]
+
+    embeddings, labels = await build_training_features(
+        ollama_client, "qwen-model", rows, instruction="task", concat_views=True,
+        fusion_models=fusion_models,
+    )
+
+    assert embeddings == [[1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0]]
+    assert labels == ["medical"]
+
+
 def test_train_classifier_fits_a_model_that_predicts_seen_labels() -> None:
     """A classifier trained on separable data predicts the correct class for its own training points.
 

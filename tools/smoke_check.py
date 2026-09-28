@@ -174,6 +174,7 @@ async def run_probe_smoke_test(config: dict) -> bool:
         instruction=config.get("embedding_instruction"),
         concat_views=config.get("embedding_view_concat", False),
         prompt_template=config.get("embedding_prompt_template", DEFAULT_PROMPT_TEMPLATE),
+        fusion_models=config.get("embedding_fusion_models"),
     )
 
     request_body = {

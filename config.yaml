@@ -16,6 +16,20 @@ embedding_model: qwen3-embedding:4b
 # ValueError otherwise).
 embedding_instruction: "Given a user question, identify the single academic or professional domain it belongs to"
 embedding_view_concat: true
+# Iter100 (embedding_space_fusion=qwen3_4b_plus_ruri_v3_310m_concat): each
+# entry's [plain, instructed] view pair (expert_backend.embed_query_views())
+# is appended, in this list's order, after embedding_model's own two views,
+# forming a single concatenated feature vector consumed by the domain
+# classifier: [qwen plain, qwen instructed, ruri plain, ruri instructed].
+# `embedding_instruction` above is shared across all models; ruri-v3-310m's
+# prompt_template below ignores the {instruction} placeholder, but its
+# instructed view is still triggered by instruction being non-None (same
+# mechanism as embedding_model's own instructed view). Requires
+# embedding_view_concat: true. Omitting this key, or leaving it an empty
+# list, is bit-identical to pre-Iter100 behavior (journal.md "Iteration 100").
+embedding_fusion_models:
+  - model: hf.co/Targoyle/ruri-v3-310m-GGUF:Q8_0
+    prompt_template: "トピック: {text}"
 confidence_threshold: 0.0
 # Threshold for rank 2+ candidates when dispatching to multiple nodes.
 # Defaults to the same value as confidence_threshold for backward

@@ -102,6 +102,7 @@ async def build_training_features(
     instruction: str | None = None,
     concat_views: bool = False,
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
+    fusion_models: list[dict] | None = None,
 ) -> tuple[list[list[float]], list[str]]:
     """Embed every row's query text; return (embeddings, domain labels) in matching order.
 
@@ -129,6 +130,11 @@ async def build_training_features(
     instructed view's prompt is built; must match config.yaml's
     embedding_prompt_template for the same train/eval-input-distribution
     reason as `instruction` and `concat_views` above.
+
+    `fusion_models` (Iter100, embedding_space_fusion), if given, is forwarded
+    to `embed_query_views()` unchanged; must match config.yaml's
+    embedding_fusion_models for the same train/runtime consistency reason.
+    Only used on the Ollama path.
     """
     from sentence_transformers import SentenceTransformer
 
@@ -164,7 +170,7 @@ async def build_training_features(
                 await embed_query_views(
                     ollama_client, embedding_model, row["query"],
                     instruction=instruction, concat_views=concat_views,
-                    prompt_template=prompt_template,
+                    prompt_template=prompt_template, fusion_models=fusion_models,
                 )
             )
             labels.append(row["domain"])
@@ -228,6 +234,7 @@ async def _train_and_save(
     instruction: str | None = None,
     concat_views: bool = False,
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
+    fusion_models: list[dict] | None = None,
 ) -> None:
     rows = _load_training_rows(train_data_path)
     sample_weight = _extract_sample_weights(rows)
@@ -235,9 +242,11 @@ async def _train_and_save(
     embeddings, labels = await build_training_features(
         ollama_client, embedding_model, rows, fine_tuned_embed_model=fine_tuned_embed_model,
         instruction=instruction, concat_views=concat_views, prompt_template=prompt_template,
+        fusion_models=fusion_models,
     )
     print(
-        f"[train_domain_classifier] embedding_prompt_template={prompt_template!r}",
+        f"[train_domain_classifier] embedding_prompt_template={prompt_template!r} "
+        f"fusion_models={fusion_models!r} feature_dim={len(embeddings[0]) if embeddings else 0}",
         file=sys.stderr,
     )
     model = train_classifier(embeddings, labels, sample_weight=sample_weight)
@@ -300,7 +309,23 @@ def main() -> None:
              "training features use the same input distribution. Defaults to the "
              "pre-Iter99 Qwen3-Embedding instruct format.",
     )
+    parser.add_argument(
+        "--embedding-fusion-models-json",
+        default=None,
+        help="Iter100 (embedding_space_fusion): JSON list of "
+             "{\"model\": ..., \"prompt_template\": ...} objects, matching "
+             "config.yaml's embedding_fusion_models exactly (same list, same "
+             "order), so runtime (node.py) and training features append the "
+             "same additional model views in the same order. Omit for the "
+             "pre-Iter100 default (no fusion).",
+    )
     args = parser.parse_args()
+
+    fusion_models = (
+        json.loads(args.embedding_fusion_models_json)
+        if args.embedding_fusion_models_json is not None
+        else None
+    )
 
     asyncio.run(
         _train_and_save(
@@ -309,6 +334,7 @@ def main() -> None:
             instruction=args.embedding_instruction,
             concat_views=args.embedding_view_concat,
             prompt_template=args.embedding_prompt_template,
+            fusion_models=fusion_models,
         )
     )
 

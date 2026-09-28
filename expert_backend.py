@@ -196,6 +196,7 @@ async def embed_query_views(
     instruction: str | None = None,
     concat_views: bool = False,
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
+    fusion_models: list[dict] | None = None,
 ) -> list[float]:
     """Return the query embedding, optionally as a concatenation of two views.
 
@@ -210,6 +211,17 @@ async def embed_query_views(
     `OllamaClient.embed`'s docstring. It has no effect on the plain view,
     which is always sent as raw text.
 
+    Iter100 (embedding_space_fusion): `fusion_models`, if given, is a list of
+    `{"model": ..., "prompt_template": ...}` dicts (config.yaml's
+    `embedding_fusion_models`). Each entry's own [plain, instructed] view pair
+    is embedded the same way as the primary model above (same shared
+    `instruction`, but the entry's own `prompt_template` for its instructed
+    view) and appended, in list order, after the primary model's two views —
+    giving the fixed block order [primary plain, primary instructed,
+    fusion[0] plain, fusion[0] instructed, fusion[1] plain, fusion[1]
+    instructed, ...]. `fusion_models` being None or an empty list (the
+    pre-Iter100 default) returns exactly the pre-Iter100 vector, unchanged.
+
     The order is intentionally not a parameter: both the training path
     (scripts/train_domain_classifier.py) and the runtime path (node.py) call
     this same function, so hard-coding the order here is what guarantees they
@@ -218,9 +230,18 @@ async def embed_query_views(
 
     Raises ValueError if `concat_views` is True but `instruction` is None,
     since that combination indicates a config mistake (concatenating a view
-    with itself) rather than a valid feature-view spec.
+    with itself) rather than a valid feature-view spec. Also raises
+    ValueError if `fusion_models` is given while `concat_views` is False,
+    since fusion appends [plain, instructed] block pairs and has no matching
+    structure to attach to a single-view primary embedding.
     """
     if not concat_views:
+        if fusion_models:
+            raise ValueError(
+                "embed_query_views: fusion_models requires concat_views=True "
+                "(fusion appends [plain, instructed] block pairs onto the "
+                "primary model's own two views)"
+            )
         return await client.embed(
             model, text, timeout_s=timeout_s, instruction=instruction, prompt_template=prompt_template
         )
@@ -233,4 +254,15 @@ async def embed_query_views(
     instructed_view = await client.embed(
         model, text, timeout_s=timeout_s, instruction=instruction, prompt_template=prompt_template
     )
-    return [*plain_view, *instructed_view]
+    views = [*plain_view, *instructed_view]
+    for fusion_spec in fusion_models or []:
+        fusion_model = fusion_spec["model"]
+        fusion_prompt_template = fusion_spec["prompt_template"]
+        fusion_plain_view = await client.embed(fusion_model, text, timeout_s=timeout_s, instruction=None)
+        fusion_instructed_view = await client.embed(
+            fusion_model, text, timeout_s=timeout_s, instruction=instruction,
+            prompt_template=fusion_prompt_template,
+        )
+        views.extend(fusion_plain_view)
+        views.extend(fusion_instructed_view)
+    return views

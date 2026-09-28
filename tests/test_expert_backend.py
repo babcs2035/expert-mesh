@@ -207,3 +207,61 @@ async def test_embed_query_views_concat_without_instruction_raises() -> None:
 
     with pytest.raises(ValueError):
         await embed_query_views(client, "model", "query", instruction=None, concat_views=True)
+
+
+async def test_embed_query_views_without_fusion_models_is_unchanged() -> None:
+    """Iter100: omitting fusion_models (the pre-Iter100 default) is bit-identical to the
+    pre-Iter100 two-view concatenation -- no extra embed() calls, no extra blocks.
+    """
+    client = AsyncMock(spec=OllamaClient)
+    client.embed.side_effect = [[0.1, 0.2], [0.9, 0.8]]
+
+    result = await embed_query_views(client, "model", "query", instruction="task", concat_views=True)
+
+    assert result == [0.1, 0.2, 0.9, 0.8]
+    assert client.embed.await_count == 2
+
+
+async def test_embed_query_views_appends_fusion_model_blocks_in_list_order() -> None:
+    """Iter100 (embedding_space_fusion): each fusion_models entry's [plain, instructed] view
+    pair is appended, in list order, after the primary model's own two views, giving the
+    fixed block order [primary plain, primary instructed, fusion plain, fusion instructed].
+    """
+    client = AsyncMock(spec=OllamaClient)
+    client.embed.side_effect = [
+        [1.0, 1.0],  # primary plain
+        [2.0, 2.0],  # primary instructed
+        [3.0, 3.0],  # fusion plain
+        [4.0, 4.0],  # fusion instructed
+    ]
+
+    result = await embed_query_views(
+        client, "qwen-model", "query", instruction="task", concat_views=True,
+        fusion_models=[{"model": "ruri-model", "prompt_template": "トピック: {text}"}],
+    )
+
+    assert result == [1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0]
+    calls = client.embed.call_args_list
+    assert calls[0].args == ("qwen-model", "query")
+    assert calls[0].kwargs["instruction"] is None
+    assert calls[1].args == ("qwen-model", "query")
+    assert calls[1].kwargs["instruction"] == "task"
+    assert calls[2].args == ("ruri-model", "query")
+    assert calls[2].kwargs["instruction"] is None
+    assert calls[3].args == ("ruri-model", "query")
+    assert calls[3].kwargs["instruction"] == "task"
+    assert calls[3].kwargs["prompt_template"] == "トピック: {text}"
+
+
+async def test_embed_query_views_fusion_models_requires_concat_views() -> None:
+    """fusion_models appends block pairs onto the primary model's [plain, instructed] pair,
+    which does not exist when concat_views=False, so this combination must raise rather than
+    silently drop the fusion models.
+    """
+    client = AsyncMock(spec=OllamaClient)
+
+    with pytest.raises(ValueError):
+        await embed_query_views(
+            client, "model", "query", instruction="task", concat_views=False,
+            fusion_models=[{"model": "ruri-model", "prompt_template": "トピック: {text}"}],
+        )

@@ -21,6 +21,15 @@ services:
       # which defeats the lab's requirement to keep model weights resident
       # across experiments. -1 disables the idle unload entirely.
       - OLLAMA_KEEP_ALIVE=-1
+      # Iter100 (embedding_space_fusion): Ollama's default max loaded models
+      # is 3 per GPU (docs.ollama.com/faq), and the entry node already loads
+      # exactly 3 (light_model + expert_model + embedding_model). Adding
+      # embedding_fusion_models' ruri-v3-310m makes a 4th; without raising
+      # this, Ollama silently queues the 4th model's requests instead of
+      # erroring (journal.md "Iteration 100" Q3), which would show up only as
+      # a latency regression. Pre-Iter100 configs (embedding_fusion_models
+      # unset/empty) still request only 3 models, so this is a no-op for them.
+      - OLLAMA_MAX_LOADED_MODELS=4
     restart: unless-stopped
 
   app:
