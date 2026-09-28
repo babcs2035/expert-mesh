@@ -6,7 +6,7 @@ import httpx
 import pytest
 from unittest.mock import AsyncMock
 
-from expert_backend import OllamaClient, embed_query_views
+from expert_backend import DEFAULT_PROMPT_TEMPLATE, OllamaClient, embed_query_views
 
 
 def _client_with_transport(monkeypatch, handler) -> OllamaClient:
@@ -95,6 +95,78 @@ async def test_generate_parses_top_logprobs_alternatives_per_position(monkeypatc
     result = await client.generate("model", "prompt", logprobs=1, top_logprobs=5)
 
     assert result["token_logprobs"][0]["top_logprobs"] == {"A": -0.05, "B": -3.0}
+
+
+async def test_embed_uses_default_prompt_template_when_none_given(monkeypatch) -> None:
+    """Iter99: omitting prompt_template keeps the pre-Iter99 Qwen3-Embedding instruct format."""
+    captured_request: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_request["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"embedding": [0.1, 0.2]})
+
+    client = _client_with_transport(monkeypatch, handler)
+    await client.embed("model", "text", instruction="task")
+
+    assert captured_request["body"]["prompt"] == "Instruct: task\nQuery: text"
+
+
+async def test_embed_applies_a_model_specific_prompt_template(monkeypatch) -> None:
+    """Iter99 (embedding_model_replacement): a custom prompt_template (e.g. ruri-v3-310m's
+    'トピック: {text}') is used verbatim instead of the Qwen3-Embedding instruct format.
+    """
+    captured_request: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_request["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"embedding": [0.1, 0.2]})
+
+    client = _client_with_transport(monkeypatch, handler)
+    await client.embed("model", "text", instruction="task", prompt_template="トピック: {text}")
+
+    assert captured_request["body"]["prompt"] == "トピック: text"
+
+
+async def test_embed_without_instruction_ignores_prompt_template(monkeypatch) -> None:
+    """No instruction means no prefix at all, regardless of prompt_template (plain view)."""
+    captured_request: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_request["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"embedding": [0.1, 0.2]})
+
+    client = _client_with_transport(monkeypatch, handler)
+    await client.embed("model", "text", instruction=None, prompt_template="トピック: {text}")
+
+    assert captured_request["body"]["prompt"] == "text"
+
+
+async def test_embed_query_views_concat_forwards_prompt_template_to_instructed_view_only() -> None:
+    """Iter99: prompt_template is passed through to the instructed-view embed() call; the
+    plain view is unaffected since it never receives an instruction.
+    """
+    client = AsyncMock(spec=OllamaClient)
+    client.embed.side_effect = [[0.1, 0.2], [0.9, 0.8]]  # plain, then instructed
+
+    result = await embed_query_views(
+        client, "model", "query", instruction="task", concat_views=True, prompt_template="トピック: {text}"
+    )
+
+    assert result == [0.1, 0.2, 0.9, 0.8]
+    plain_call, instructed_call = client.embed.call_args_list
+    assert "prompt_template" not in plain_call.kwargs
+    assert instructed_call.kwargs["prompt_template"] == "トピック: {text}"
+
+
+async def test_embed_query_views_without_concat_forwards_default_prompt_template() -> None:
+    """concat_views=False forwards the default prompt_template unchanged (single embed() call)."""
+    client = AsyncMock(spec=OllamaClient)
+    client.embed.return_value = [1.0, 2.0]
+
+    await embed_query_views(client, "model", "query", instruction="task")
+
+    call = client.embed.await_args
+    assert call.kwargs["prompt_template"] == DEFAULT_PROMPT_TEMPLATE
 
 
 async def test_embed_query_views_without_concat_delegates_to_a_single_embed_call() -> None:

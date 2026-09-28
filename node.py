@@ -18,7 +18,7 @@ from aggregator import (
     select_dispatch_targets,
     validate_aggregation_method,
 )
-from expert_backend import OllamaClient, embed_query_views
+from expert_backend import DEFAULT_PROMPT_TEMPLATE, OllamaClient, embed_query_views
 from http_client import PeerClient
 from http_server import (
     CONFIDENCE_ELICITATION_NUMERIC_SCALAR,
@@ -205,6 +205,7 @@ async def run_ask_flow(
         query,
         instruction=config.get("embedding_instruction"),
         concat_views=config.get("embedding_view_concat", False),
+        prompt_template=config.get("embedding_prompt_template", DEFAULT_PROMPT_TEMPLATE),
     )
 
     probe_request = ProbeRequest(

@@ -47,7 +47,7 @@ import yaml
 # sys.path).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from expert_backend import OllamaClient, embed_query_views  # noqa: E402
+from expert_backend import DEFAULT_PROMPT_TEMPLATE, OllamaClient, embed_query_views  # noqa: E402
 
 SMOKE_QUERY = "スモークテスト用のダミー質問です。"
 SMOKE_PROBE_TIMEOUT_S = 130.0
@@ -173,6 +173,7 @@ async def run_probe_smoke_test(config: dict) -> bool:
         SMOKE_QUERY,
         instruction=config.get("embedding_instruction"),
         concat_views=config.get("embedding_view_concat", False),
+        prompt_template=config.get("embedding_prompt_template", DEFAULT_PROMPT_TEMPLATE),
     )
 
     request_body = {

@@ -2003,7 +2003,29 @@ levers:
             - `multilingual_e5_large`（**G0 不合格時の事前登録済み代替**）: JMTEB Classification 72.89．
               `query: ` prefix が必須だが prefix 機構は既存なので追加レバーにはならない．
             次元が変われば `embedding_view_concat` の連結次元も変わるため，分類器の再訓練は
-            差し替えに構造的に付随する作業であり別レバーではない（Iter79/89 で確立した型）．"}
+            差し替えに構造的に付随する作業であり別レバーではない（Iter79/89 で確立した型）．
+            ---
+            **[2026-09-29 Iter99 分析フェーズ・backlog B167 で判定を追記]**
+            - `japanese_specialized_ruri_v3_310m` は **`closed`（本走なし）・単独差し替えとしては
+              反証済み・再試行しない**．G0（実現性）は全項目 PASS（Ollama 0.34.4 で動作，次元 768，
+              参照実装 `cl-nagoya/ruri-v3-310m` とのコサイン中央値 0.99604・最小 0.97278）だが，
+              G1 の CV top1 が **0.729670**（基準 0.802637，**Δ = −7.297pt**）で事前登録の安全弁
+              （Δ ≤ −5.0pt）が発火し本走を実施していない．
+              **対抗仮説 H2（768×2=1536 次元では容量不足）は分析フェーズが反証した**:
+              各 fold の訓練部分だけで PCA を学習して次元を揃えると，**qwen は 1536 次元でも 0.804396 で
+              5120 次元と同値**，**128 次元でも 0.775824 で ruri の 1536 次元 0.721319 を +5.45pt 上回る**．
+              有効次元（participation ratio）は ruri 111.5 > qwen 76.5 で空間も潰れていない．
+              H3（GGUF 変換の不忠実）も G0-d で反証済み．悪化は 10 ドメイン中 9 つに一様
+              （Spearman(qwen recall, Δ) = +0.285, p=0.425 で難層集中ではない）．
+              **腕間 AGREE は 87.6%（qwen 誤答 445 のうち 390 を ruri も誤る）で，Iter98 の決定則間
+              AGREE 87.6% と一致**．誤答の硬い核は決定則にも表現モデルにも依存しない．
+            - `multilingual_e5_large` は**値として残すが第 1 候補にしない**．G0 不合格という発動条件を
+              満たしておらず，H2 反証により『連結 2048 次元だから有利』という期待が消えた．
+              JMTEB Classification は E5 72.89 < ruri 78.66 で，その ruri が 8.3pt 負けた以上
+              **公称ベンチは本データで予測力を持たない**（Iter79 学び 2 の 3 例目）．
+            - **単独性能での足切りは相補性を見落とす**: 同じ CV で qwen 5120 ⊕ ruri 1536（6,656 次元）は
+              **0.812308（+0.79pt，McNemar 正確検定 p=0.0153，救済 34 対損失 16）**だった．
+              この観測は新レバー `embedding_space_fusion`（levers 末尾）へ切り出した．"}
   - {name: cross_domain_training_data_augmentation,
      values: [hard_negative_mining_all_domains, hard_negative_mining_all_domains_retry_expanded_set,
               hard_random_hybrid_all_domains, hard_random_hybrid_ratio_25_75_all_domains],
@@ -2766,6 +2788,39 @@ levers:
             したがって符号長・復号方式を変えた再試行に見込みは無く，**`classifier_multiclass_decomposition`
             レバー全体を closed とし，決定層の軸は打ち止め**にする．次は入力表現の軸
             （`embedding_model_replacement` の新値）へ移る．"}
+
+  # --- 【2026-09-29 Iter99 分析フェーズで考案・backlog B167 (e)】単一モデルの差し替えではなく
+  #     異種の埋め込み空間を連結して使う．停止条件 (1) の適用 ---
+  - {name: embedding_space_fusion, values: [qwen3_4b_plus_ruri_v3_310m_concat],
+     note: "[2026-09-29 Iter99 分析フェーズ・backlog B167 (e)]
+            **考案の根拠は Iter99 の副産物の実測である**．ruri-v3-310m は単独では現行 qwen3-embedding:4b に
+            CV で 8.3pt 劣る（0.721319 vs 0.804396）にもかかわらず，**両者を単純連結した 6,656 次元
+            （qwen 2 ビュー 5,120 ＋ ruri 2 ビュー 1,536）は CV top1 0.812308 で qwen 単独を +0.79pt 上回り，
+            対応のある比較では 救済 34 / 損失 16・McNemar 正確検定 p = 0.0153**だった
+            （開発ホスト CPU，5-fold StratifiedKFold `random_state=42`，モデル定義は本番と同一）．
+            **単独性能で足切りすると見落とす相補性がある**というのが本レバーの仮説である．
+            **単一レバー**: `config.yaml` の埋め込み指定を 1 モデルから 2 モデルの連結へ拡張する
+            （キー名は計画フェーズで確定．既存の `embedding_view_concat` と `embedding_prompt_template`
+            の機構はそのまま使う．後者は Iter99 で実装済みで既定値が旧挙動とビット同一）．
+            **付随作業（別レバーではない．Iter79/89/99 で確立した型）**: 次元が 5,120 → 6,656 に変わるため
+            `models/domain_classifier.joblib` の再訓練が必須．モデルごとの prompt template は
+            それぞれの model card の規定値に固定する（qwen = 現行の instruct 書式，ruri = `トピック: `）．
+            文言の掃引は禁止（Iter81 のレバーの再開にしない）．
+            **実現性（Iter99 で確認済み．G0 はごく軽くてよい）**: ruri の GGUF は
+            `hf.co/Targoyle/ruri-v3-310m-GGUF:Q8_0`（337MB）で Ollama 0.34.4 上で動作し，参照実装との
+            コサイン中央値 0.99604．訓練 2,275 行・評価 3,750 行の ruri キャッシュ
+            （`data/embcache_{train,eval}_iter99_ruri-v3-310m.npy`）は作成済み．
+            **新規の実現性リスクは『全 10 ノードに埋め込みモデルを 2 つ常駐させる』点だけ**
+            （+337MB/ノード．backlog B167 要レビュー (C) で人間判断待ち．G0 で `ollama ps` の 100% GPU を確認）．
+            **固定する構成**: `dispatch_gap_threshold=0.36`・訓練集合・評価集合・分類器のモデル定義は
+            1 つも動かさない．
+            **成功条件**: 3,750 問本走で Δtop1 ≥ +0.5pt（基準 0.833067 → 0.838067）かつ McNemar p < 0.05．
+            非退行は Iter99 の C1〜C7 を踏襲（ただし C6 の `mean_duration_ms` は埋め込みが 2 回になるので
+            計画フェーズで上限を見直すこと．ruri は 310M と小さいが呼び出しは直列になりうる）．
+            **留意**: CV の +0.79pt は CV の SE 0.83pt と同程度で，**点推定としては本走の Δ を保証しない**．
+            Iter89 の実績（CV +5.29pt → 本走 +2.94pt）から，本走では CV より縮む向きを既定で見込むこと．
+            したがって**事前投影は Δtop1 ≒ +0.3pt，80% 区間 −0.5 〜 +1.2pt** とし，符号の確信は
+            『中程度』と明記する．CV を足切りに使わない（2026-09-23 絶対条件 (A)）方針は維持する．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

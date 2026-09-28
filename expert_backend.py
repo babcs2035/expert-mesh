@@ -9,6 +9,11 @@ DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_TIMEOUT_S = 30.0
 DEFAULT_RETRIES = 3
 RETRY_DELAY_S = 15.0
+# Iter99 (embedding_model_replacement): default embedding_prompt_template value,
+# byte-for-byte identical to the pre-Iter99 hardcoded Qwen3-Embedding instruct
+# format, so callers that omit config["embedding_prompt_template"] keep the
+# exact pre-Iter99 prompt. See config.yaml's embedding_prompt_template comment.
+DEFAULT_PROMPT_TEMPLATE = "Instruct: {instruction}\nQuery: {text}"
 
 
 class OllamaClient:
@@ -143,18 +148,25 @@ class OllamaClient:
         text: str,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         instruction: str | None = None,
+        prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
     ) -> list[float]:
         """Return the embedding vector for a text string.
 
         Retries up to DEFAULT_RETRIES times on transient connection errors.
 
-        If `instruction` is given, the prompt is prefixed in the Qwen3-Embedding
-        instruct format (`Instruct: {instruction}\\nQuery: {text}`) before being
-        sent to Ollama, which does not add such prefixes on its own (see
-        journal.md Iteration 81 Q3). Defaults to None so existing callers that
-        do not pass this argument keep the current unprefixed behavior.
+        If `instruction` is given, the prompt is built from `prompt_template`
+        (formatted with `instruction` and `text`) before being sent to Ollama,
+        which does not add such prefixes on its own (see journal.md Iteration
+        81 Q3). `prompt_template` defaults to the pre-Iter99 Qwen3-Embedding
+        instruct format (`Instruct: {instruction}\\nQuery: {text}`); Iter99
+        (embedding_model_replacement) made this a parameter so a model-specific
+        prefix scheme (e.g. ruri-v3-310m's "トピック: {text}", which ignores the
+        {instruction} placeholder) can be supplied via
+        config["embedding_prompt_template"] without touching this hardcoded
+        default. `instruction` defaults to None so existing callers that do
+        not pass this argument keep the current unprefixed behavior.
         """
-        prompt = f"Instruct: {instruction}\nQuery: {text}" if instruction else text
+        prompt = prompt_template.format(instruction=instruction, text=text) if instruction else text
         for attempt in range(DEFAULT_RETRIES):
             try:
                 async with httpx.AsyncClient(timeout=timeout_s) as client:
@@ -183,6 +195,7 @@ async def embed_query_views(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     instruction: str | None = None,
     concat_views: bool = False,
+    prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
 ) -> list[float]:
     """Return the query embedding, optionally as a concatenation of two views.
 
@@ -191,8 +204,11 @@ async def embed_query_views(
     call, preserving the pre-Iter82 behavior exactly. When `concat_views` is
     True, this embeds `text` twice — once without any instruction (the
     "prefix なし" view) and once with `instruction` (the "prefix あり" view,
-    Iter81's selected P1 wording) — and concatenates the two 1024-dim vectors
-    into a single 2048-dim vector, ORDER FIXED as [plain, instructed].
+    Iter81's selected P1 wording) — and concatenates the two vectors into a
+    single vector, ORDER FIXED as [plain, instructed]. `prompt_template`
+    (Iter99) governs how the instructed view's prompt is built; see
+    `OllamaClient.embed`'s docstring. It has no effect on the plain view,
+    which is always sent as raw text.
 
     The order is intentionally not a parameter: both the training path
     (scripts/train_domain_classifier.py) and the runtime path (node.py) call
@@ -205,12 +221,16 @@ async def embed_query_views(
     with itself) rather than a valid feature-view spec.
     """
     if not concat_views:
-        return await client.embed(model, text, timeout_s=timeout_s, instruction=instruction)
+        return await client.embed(
+            model, text, timeout_s=timeout_s, instruction=instruction, prompt_template=prompt_template
+        )
     if instruction is None:
         raise ValueError(
             "embed_query_views: concat_views=True requires a non-None instruction "
             "(embedding_view_concat and embedding_instruction must both be set)"
         )
     plain_view = await client.embed(model, text, timeout_s=timeout_s, instruction=None)
-    instructed_view = await client.embed(model, text, timeout_s=timeout_s, instruction=instruction)
+    instructed_view = await client.embed(
+        model, text, timeout_s=timeout_s, instruction=instruction, prompt_template=prompt_template
+    )
     return [*plain_view, *instructed_view]

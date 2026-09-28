@@ -34,7 +34,7 @@ import joblib
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 
-from expert_backend import OllamaClient, embed_query_views
+from expert_backend import DEFAULT_PROMPT_TEMPLATE, OllamaClient, embed_query_views
 
 # scikit-learn >=1.5 always fits a single softmax (multinomial-equivalent)
 # over all classes for multi-class LogisticRegression with the default
@@ -101,6 +101,7 @@ async def build_training_features(
     fine_tuned_embed_model: str | None = None,
     instruction: str | None = None,
     concat_views: bool = False,
+    prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
 ) -> tuple[list[list[float]], list[str]]:
     """Embed every row's query text; return (embeddings, domain labels) in matching order.
 
@@ -111,18 +112,23 @@ async def build_training_features(
 
     `instruction`, if given, is forwarded to OllamaClient.embed() (via
     embed_query_views()) so training features are computed from the same
-    Qwen3-Embedding instruct-prefixed input as node.py's runtime query
-    embedding (Iter81, embedding_input_instruction_prefix). Only used on the
-    Ollama path; fine_tuned_embed_model callers ignore it (out of scope for
-    this lever, see journal.md Iteration 81 change table #4).
+    instruction-prefixed input as node.py's runtime query embedding (Iter81,
+    embedding_input_instruction_prefix). Only used on the Ollama path;
+    fine_tuned_embed_model callers ignore it (out of scope for this lever,
+    see journal.md Iteration 81 change table #4).
 
     `concat_views`, if True, produces the Iter82 (embedding_view_concatenation)
-    2048-dim feature: `embed_query_views()` embeds each query twice (once
-    without `instruction`, once with it) and concatenates the two 1024-dim
+    concatenated feature: `embed_query_views()` embeds each query twice (once
+    without `instruction`, once with it) and concatenates the two per-view
     vectors in the fixed order [plain, instructed]. This must match node.py's
     runtime call exactly, since both call the same `embed_query_views()`
     (see journal.md Iteration 82 Q3 — an Iter36-style train/eval mismatch
     would otherwise occur silently). Only used on the Ollama path.
+
+    `prompt_template` (Iter99, embedding_model_replacement) governs how the
+    instructed view's prompt is built; must match config.yaml's
+    embedding_prompt_template for the same train/eval-input-distribution
+    reason as `instruction` and `concat_views` above.
     """
     from sentence_transformers import SentenceTransformer
 
@@ -158,6 +164,7 @@ async def build_training_features(
                 await embed_query_views(
                     ollama_client, embedding_model, row["query"],
                     instruction=instruction, concat_views=concat_views,
+                    prompt_template=prompt_template,
                 )
             )
             labels.append(row["domain"])
@@ -220,13 +227,18 @@ async def _train_and_save(
     output_path: str, fine_tuned_embed_model: str | None = None,
     instruction: str | None = None,
     concat_views: bool = False,
+    prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
 ) -> None:
     rows = _load_training_rows(train_data_path)
     sample_weight = _extract_sample_weights(rows)
     ollama_client = OllamaClient(host=f"http://{ollama_host}:{ollama_port}")
     embeddings, labels = await build_training_features(
         ollama_client, embedding_model, rows, fine_tuned_embed_model=fine_tuned_embed_model,
-        instruction=instruction, concat_views=concat_views,
+        instruction=instruction, concat_views=concat_views, prompt_template=prompt_template,
+    )
+    print(
+        f"[train_domain_classifier] embedding_prompt_template={prompt_template!r}",
+        file=sys.stderr,
     )
     model = train_classifier(embeddings, labels, sample_weight=sample_weight)
     output_dir = os.path.dirname(output_path)
@@ -279,6 +291,15 @@ def main() -> None:
              "also be set; must match config.yaml's embedding_view_concat so runtime "
              "(node.py) and training features use the same feature-view spec.",
     )
+    parser.add_argument(
+        "--embedding-prompt-template",
+        default=DEFAULT_PROMPT_TEMPLATE,
+        help="Iter99 (embedding_model_replacement): template string formatted with "
+             "{instruction} and {text} to build the instructed view's prompt. Must "
+             "match config.yaml's embedding_prompt_template so runtime (node.py) and "
+             "training features use the same input distribution. Defaults to the "
+             "pre-Iter99 Qwen3-Embedding instruct format.",
+    )
     args = parser.parse_args()
 
     asyncio.run(
@@ -287,6 +308,7 @@ def main() -> None:
             args.output, fine_tuned_embed_model=args.fine_tuned_embed_model,
             instruction=args.embedding_instruction,
             concat_views=args.embedding_view_concat,
+            prompt_template=args.embedding_prompt_template,
         )
     )
 

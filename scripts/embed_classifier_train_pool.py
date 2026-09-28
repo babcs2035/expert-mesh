@@ -26,15 +26,21 @@ import sys
 
 import numpy as np
 
-from expert_backend import OllamaClient, embed_query_views
+from expert_backend import DEFAULT_PROMPT_TEMPLATE, OllamaClient, embed_query_views
 
 
 async def _embed_all(
     rows: list[dict], embedding_model: str, ollama_host: str, ollama_port: int,
     instruction: str | None, concat_views: bool,
+    prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
 ) -> list[list[float]]:
     """Sequentially embed every row's query (matches train_domain_classifier.py's
-    build_training_features, which is itself sequential to mirror run_experiment.py)."""
+    build_training_features, which is itself sequential to mirror run_experiment.py).
+
+    `prompt_template` (Iter99, embedding_model_replacement) must match
+    config.yaml's embedding_prompt_template so this cache reflects the same
+    input distribution as the production training/runtime path.
+    """
     client = OllamaClient(host=f"http://{ollama_host}:{ollama_port}")
     embeddings = []
     for i, row in enumerate(rows):
@@ -42,6 +48,7 @@ async def _embed_all(
             await embed_query_views(
                 client, embedding_model, row["query"],
                 instruction=instruction, concat_views=concat_views,
+                prompt_template=prompt_template,
             )
         )
         if (i + 1) % 200 == 0:
@@ -58,6 +65,7 @@ def main() -> None:
     parser.add_argument("--ollama-port", type=int, default=11434)
     parser.add_argument("--embedding-instruction", default=None)
     parser.add_argument("--embedding-view-concat", action="store_true")
+    parser.add_argument("--embedding-prompt-template", default=DEFAULT_PROMPT_TEMPLATE)
     parser.add_argument("--output", required=True, help="Output .npy path")
     args = parser.parse_args()
 
@@ -68,6 +76,7 @@ def main() -> None:
         _embed_all(
             rows, args.embedding_model, args.ollama_host, args.ollama_port,
             args.embedding_instruction, args.embedding_view_concat,
+            prompt_template=args.embedding_prompt_template,
         )
     )
     np.save(args.output, np.array(embeddings, dtype=np.float64))
