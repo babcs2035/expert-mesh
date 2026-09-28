@@ -1955,7 +1955,9 @@ levers:
             (a)(b) 両方をまとめて撤去し，1 回の実機比較で完了させる（個別に撤去すると
             『どちらの撤去が top1 に効いたか』を切り分ける意味がなく，むしろ実機コストが
             倍になるため）．"}
-  - {name: embedding_model_replacement, values: [qwen3_embedding_0.6b, qwen3_embedding_4b, bge_m3],
+  - {name: embedding_model_replacement,
+     values: [qwen3_embedding_0.6b, qwen3_embedding_4b, bge_m3,
+              japanese_specialized_ruri_v3_310m, multilingual_e5_large],
      note: "[2026-09-23 backlog B115 / docs/d0008] 現行 `nomic-embed-text`（768次元，MTEB
             multilingual 62.28）を，Ollama で配布されている既製の多言語埋め込みモデルへ
             丸ごと差し替える．fine-tuning ではなくモデル差し替えのため，Iter39〜43
@@ -1983,7 +1985,25 @@ levers:
             退行 0 件．
             **コスト**: 中．埋め込み再計算・分類器再訓練はオフラインで完結するが，最終確認は
             1600 問の実機本走（約 90〜150 分）を要する（2026-09-23 ユーザー指示により省略しない）．
-            出典: docs/d0008（Ollama embedding モデル比較，2026年）．"}
+            出典: docs/d0008（Ollama embedding モデル比較，2026年）．
+            ---
+            **[2026-09-28 Iter98 分析フェーズ・backlog B165 で 2 値を追加．レバー再開]**
+            本レバーは Iter89 時点で 3 値を試し切って closed としていたが，Iter98 の機序 M6
+            （誤りは決定則ではなく**入力表現**の性質．腕間の誤答行の重なり 87.6%/93.9%）により
+            入力表現の軸が唯一残る説明変数になったため，新値 2 つを追加して再開する．
+            - `japanese_specialized_ruri_v3_310m`（**Iter99 の第 1 候補**）: `cl-nagoya/ruri-v3-310m`．
+              JMTEB Classification **78.66**（出典 hotchpotch 2025-06-11，
+              https://secon.dev/entry/2025/06/11/100000-qwen3-embedding-jmteb ）で，
+              同記事の `Qwen3-Embedding-0.6B` 66.09 を大きく上回る日本語特化モデル．
+              Iter79 では『instruction prefix が必須で 2 レバー目になる』ため候補外としたが，
+              **Iter81 で prefix 機構・Iter82 で 2 ビュー連結が既に本番に入った**ので除外理由は消滅した．
+              **未確認のリスク**: 現行の埋め込みは各ノードの Ollama `/api/embeddings` 経由
+              （`config.yaml:4`）であり，Ollama で取得可能かは未検証．Iter79/89 と同型の
+              **G0（実現性ゲート．取得可否・VRAM・次元数）を計画段階に必ず置くこと**．
+            - `multilingual_e5_large`（**G0 不合格時の事前登録済み代替**）: JMTEB Classification 72.89．
+              `query: ` prefix が必須だが prefix 機構は既存なので追加レバーにはならない．
+            次元が変われば `embedding_view_concat` の連結次元も変わるため，分類器の再訓練は
+            差し替えに構造的に付随する作業であり別レバーではない（Iter79/89 で確立した型）．"}
   - {name: cross_domain_training_data_augmentation,
      values: [hard_negative_mining_all_domains, hard_negative_mining_all_domains_retry_expanded_set,
               hard_random_hybrid_all_domains, hard_random_hybrid_ratio_25_75_all_domains],
@@ -2713,7 +2733,39 @@ levers:
             Spearman は +0.018, p=0.96 で Iter96 の −0.717 が消えた）．
             **次は第 2 値 `error_correcting_output_codes` を，決定層の軸を閉じるための確認実験として
             引く**（B163）．符号長は掃引せず計画フェーズで単一値を事前登録すること．
-            ここも通らなければ決定層の軸は打ち止めとし，入力表現／ラベルの軸へ移る．"}
+            ここも通らなければ決定層の軸は打ち止めとし，入力表現／ラベルの軸へ移る．
+            **【2026-09-28 Iter98 調査・計画フェーズ・backlog B164】value
+            `error_correcting_output_codes` の事前登録値（掃引禁止）**:
+            符号は **dense random code，長さ L = 34 = ⌈10·log₂(10)⌉**（Allwein, Schapire & Singer
+            (2000) JMLR 1:113-141 の既定．候補 10,000 本から行間最小 Hamming 距離が最大のものを選ぶ．
+            実測で最小距離 14・重複列 0），**復号は log 損失の loss-based decoding（＝最尤復号）**，
+            `random_state = 98`．**実装上の必須注意（2026-09-28 に実測で確認済み．sklearn 1.9.0）**:
+            `sklearn.multiclass.OutputCodeClassifier` は **`predict` しか持たず**
+            （`predict_proba`・`decision_function` が無い），`CalibratedClassifierCV` に渡すと
+            `InvalidParameterError` で fit できない．したがって Iter97 のような base estimator の
+            差し替えだけでは実装できず，`decision_function` を返す薄いラッパ
+            `EcocLogLossClassifier`（リポジトリ直下の新モジュール `ecoc_head.py`．joblib が
+            モジュールパス参照で直列化するため `scripts/` 内や `__main__` で定義してはならない．
+            `Dockerfile` の COPY 行への追加が要る）を自前で書く．`fit(self, X, y, sample_weight=None)`
+            と明示引数を持たせれば **`enable_metadata_routing` なしで警告 0 件で重みが届く**
+            （等重みとの `max|Δcoef| = 0.0935` で到達を実証済み）．`predict_proba` の行和は 1.0，
+            復号スコアは連続量で Iter97 の P4（得票の離散性による gap 収縮）は起こらない．
+            **【2026-09-28 Iter98 分析フェーズ・backlog B165】value
+            `error_correcting_output_codes` は `closed`（本走なし）かつ**反証済み（再試行しない）**．
+            実測（`results/iter98_screening/screening_result.json`，3 seed × 固定 5-fold，n=6,825）:
+            腕 A 0.802637 / 腕 C（ECOC, L=34, 最尤復号）0.788425，**Δ = −1.421pt**（足切り ① に
+            符号ごと不通過），全体 McNemar 併合 p=2.81e-9・保守 p=0.00060，BH 後の有意退行
+            併合 3 件（education −7.00pt，social_science −6.40pt，general −2.67pt）で足切り ② も不通過．
+            P3・P4・P5 は当選（行和 1.0，gap<0.36 割合 Δ=+0.40pt，ECE 0.01650≤0.01971，
+            34 列の二値 CV 正解率 中央値 0.893）で，**実装・較正・部分問題の学習はいずれも健全**である．
+            **機序 M6（Iter97 の M5 系統の読みを差し替え）**: 誤りは決定則ではなく**入力表現（行）**の
+            性質である．(1) 列誤りが独立なら Monte Carlo で top1=0.9997 のはずが実測 0.788，
+            (2) 恒等式『列誤り率 ≒ 行誤り率 × 平均行間 Hamming 距離 / L』が 0.1081 vs 実測 0.1097 で
+            成立＝ビット誤りは誤答行に全量集中し符号語ごと置換されている（訂正能力 6 ビットは名目値），
+            (3) 腕 A と腕 C の誤答行の重なりは 87.6% / 93.9%（Rifkin & Klautau 2004 の AGREE の再現）．
+            したがって符号長・復号方式を変えた再試行に見込みは無く，**`classifier_multiclass_decomposition`
+            レバー全体を closed とし，決定層の軸は打ち止め**にする．次は入力表現の軸
+            （`embedding_model_replacement` の新値）へ移る．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

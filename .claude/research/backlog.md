@@ -15,6 +15,131 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B165 [auto-decided 2026-09-28] Iter98 の判定（`closed`・反証済み）・機序 M6 への差し替え・決定層の軸の打ち止め・次レバーに `embedding_model_replacement` の新値を追加
+
+- **状況**: Iter98 の事前スクリーニングが足切り 2 条件をいずれも通過せず（Δ = **−1.421pt**，
+  全体 McNemar 併合 p=2.81e-9・保守 p=0.00060，BH 後の有意退行 併合 3 件／保守 2 件），
+  rc-executor は本走を行わず本番コード変更 0 件でフェーズ 3 へ引き渡した．
+  事前登録の予測は **P1 落選・P2 落選・P3/P4/P5 当選**で，とくに **P5 当選（34 列の二値 CV 正解率
+  中央値 0.893）**が「部分問題は解けているのに束ねると下がる」という解釈上の論点を生んだ．
+- **自動選択**:
+  - **(a) 判定は `closed`（本走なし）．`rejected` ではない．** B163 (a) と同一の理由
+    （`rejected` は本走の 2 軸表に基づく判定語で，本走が無い以上どのセルにも到達していない．
+    判定語集合の拡張は記録スキーマの破壊的変更なので自動決定しない）．
+  - **(b) value `error_correcting_output_codes` は「未通過」ではなく「反証済み・再試行しない」．**
+    Iter97 と同じく符号ごと逆（−1.42pt ≒ 6.5 SE）で保守側 McNemar でも有意．加えて今回は
+    下記 (c) により**失敗の機序まで説明が付いている**ので，符号長 L や復号方式を変えた再試行にも
+    見込みが無い．
+  - **(c) 機序を M6 へ差し替えた（B163 (d) の「標本分割＋非適格分類器」は P2 落選により棄却）．**
+    M6 =「**分解の失敗ではなく，分解しても新しい情報が増えない**」．既存の診断出力だけで 3 手順を
+    検証済み（開発ホスト CPU 数秒．実機不使用）．
+    1. 列間のビット誤りが**独立**なら Monte Carlo（20 万行，同一符号行列）で top1 = **0.9997**，
+       1 行あたり平均誤り 3.73 ビット（訂正能力 6 ビット内）．**実測 0.7884** → 独立性は棄却．
+    2. 恒等式「列誤り率 ≒ 行誤り率 × 平均行間 Hamming 距離 / L」= 0.21158×17.378/34 = **0.1081** が
+       実測の平均列誤り率 **0.1097** と 1.5% 相対で一致 → **ビット誤りは誤答行に全量集中し，
+       符号語が丸ごと競合クラスへ置換されている**（典型 17 ビット誤り＝訂正不能）．
+    3. 腕 A と腕 C の**誤答行の重なりは 87.6% / 93.9%**（共通 1,265 行）．
+       Rifkin & Klautau (2004) の AGREE 現象がそのまま再現．
+    系として，損失は事後分布が平坦なクラスに集中（腕 A recall と Δ の Spearman **+0.596, p=0.069**），
+    失った質量の行き先は意味的隣接でなく拡散（social_science → computer_science +8 等）．
+  - **(d) 決定層の軸は打ち止め（`classifier_multiclass_decomposition` を closed）．**
+    事前登録の分岐は「P2 通過かつ P1 不通過なら打ち止め」だったが P2 も落選した．
+    その分岐は「軸を閉じる唯一の経路は『退行が OvO 固有』と示すこと」という前提で書かれており，
+    その前提が誤っていた．**実測はより強い経路（分解方式に依らず同じ行で誤る）で軸を閉じる**．
+    Rifkin & Klautau (2004) との整合: 本データは 2 反復連続で同論文の側に落ちたが，厳密には
+    「等価」ではなく softmax が 0.8〜1.4pt 優る．同論文の主張は「OvA が他の分解に劣らない」で
+    あって「分解が単一多項モデルに劣らない」ではないので矛盾しない．
+  - **(e) 次イテレーション（Iter99）のレバーは `embedding_model_replacement` =
+    `japanese_specialized_ruri_v3_310m`．** `iteration_name` =
+    **「埋め込みを日本語特化モデル ruri-v3-310m へ差し替える」**．
+    - config.yml の既存 levers に未試行 value は無かったため，停止条件 (1)（学びから新レバー／新値を
+      考案して継続）を適用し，`embedding_model_replacement` の `values` へ
+      `japanese_specialized_ruri_v3_310m` と `multilingual_e5_large` の 2 値を追記した．
+    - 根拠 1: M6 により**残る説明変数は入力表現だけ**である．
+    - 根拠 2: B115(3) のユーザー指示の優先順位（複合評価集合の拡充＝Iter78 で完了し 730 行へ拡大済み
+      ＞ **埋め込みモデルの差し替え** ＞ 全ドメイン共通ルールでの訓練データ拡充）と一致する．
+      ドメイン固有の後付け補正・棄権/エスカレーション系には該当しない．
+    - 根拠 3: Iter79 の調査で記録済みの JMTEB Classification（ruri-v3-310m **78.66** vs
+      Qwen3-Embedding-0.6B 66.09）．当時の除外理由（prefix 必須＝2 レバー目）は，Iter81 の prefix 機構と
+      Iter82 の 2 ビュー連結が本番に入った現在では成立しない．
+    - **計画フェーズへの必須の申し送り**: (1) Ollama で ruri-v3-310m を取得できるかは**未確認**．
+      Iter79/89 と同型の **G0（実現性ゲート: 取得可否・VRAM・次元数）を必ず置く**こと．
+      (2) G0 不合格時は事前登録済みの代替 `multilingual_e5_large` へ値を切り替える（`iteration_name` は
+      追跡性のため変更せず journal に明記．Iter89 で確立した型）．
+      (3) 次元変更に伴う分類器再訓練は付随作業であり別レバーではない．
+      (4) 公称ベンチは候補を絞る道具であって採否の根拠にはならない（Iter79 学び 2）．本走前に
+      wafl-ctrl5 の CV で必ず数値化する．
+      (5) 埋め込みを変えると `dispatch_gap_threshold=0.36` に対する gap 分布が動くが，
+      閾値の再較正は別レバーであり**同時に動かさない**．
+  - **(f) `status = running` を維持（`converged` にしない）．** 停止条件 (3) の要件は
+    「新しい実行可能なレバーが見つからない場合」だが，(e) で実行可能な新値を特定できているため該当しない．
+- **要レビュー（人間の確認が要る点）**:
+  - (A) **B163 (A)（判定語の設計）・(B)（保守側 McNemar を主基準にするか）・B154 (A2)(A3)・B161 (C) は
+    依然未回答**である．とくに判定語は，本走なしで足切りを逆方向に外した反復が Iter97・Iter98 と
+    2 件になった．`refuted` を正式な判定語にするかの判断を仰ぎたい．
+  - (B) **closed としたレバーへの値追加（`embedding_model_replacement` の再開）**の是非．
+    同レバーは Iter89 で「試し切って closed」と記録済みで，今回それを再開する判断をした．
+    再開の根拠は M6（新しい機序の知見）であって，単なる再試行ではない．
+  - (C) **ruri-v3-310m の調達**．Ollama での配布が無ければ GGUF 変換や sentence-transformers 経路の
+    導入が要り，10 ノードの実行基盤の構成変更になる（不可逆寄りの判断）．G0 の結果次第で
+    人間判断を仰ぐ可能性がある．B154 (A2)（外部データ源／モデルの調達）と同じ束．
+  - (D) 本反復の Monte Carlo・恒等式・AGREE の 3 検証は**分析フェーズが開発ホスト上で追加計算**した
+    ものである（実機不使用・CPU 数秒）．再現したい場合は `results/iter98_screening/screening_result.json`
+    の `p5_column_diagnostics` と `overall_mcnemar_seed_merged` だけで足りる．
+- **副作用（本フェーズで変更したファイル）**: `journal.md`（`### Iteration 98 実行済み` を追記），
+  `config.yml`（`classifier_multiclass_decomposition` の note に Iter98 の判定と M6 を追記，
+  `embedding_model_replacement` に 2 値追加と note 追記），本ファイル，`state.json`．
+  **コード・`models/`・`data/`・`config.yaml`・実機ノードは一切変更していない．**
+
+## B164 [auto-decided 2026-09-28] Iter98 の ECOC 実装方式（`OutputCodeClassifier` 不採用・自前の最尤復号ラッパ）と符号長 34 の事前登録
+
+- **状況**: B163 (f) により Iter98 は既存レバーの未試行 value
+  `classifier_multiclass_decomposition = error_correcting_output_codes` を引く（新レバーの追加は不要）．
+  計画にあたり 2 つの自律判断が要った．(1) sklearn の標準実装で足りるか，(2) 符号長をどう決めるか．
+- **自動選択**:
+  - **(a) `sklearn.multiclass.OutputCodeClassifier` を使わず，自前の薄いラッパ
+    `EcocLogLossClassifier`（新モジュール `ecoc_head.py`）を書く．**
+    実測（sklearn 1.9.0）で `OutputCodeClassifier` は **`predict` しか持たない**ことを確認した
+    （`predict_proba`・`decision_function` ともに無し）．そのため
+    `CalibratedClassifierCV(OutputCodeClassifier(...))` は `InvalidParameterError` で fit できず，
+    `classifier.py:estimate_confidence_classifier()` の「`predict_proba` が 10 ドメインで和 1」という
+    前提も満たせない．**Iter97 のような「base estimator を差し替えるだけ」の変更は物理的に不可能**である．
+    ラッパは `decision_function(X)[i,d] = Σ_j log σ(M[d,j]·f_j(x_i))`（log 損失の loss-based decoding
+    ＝最尤復号）を返すだけの約 60 行で，較正・重み・訓練行・評価集合は一切触らない．
+    合成データで (i) `predict_proba` の行和 1.0，(ii) `sample_weight` が 34 本の二値 LR へ到達
+    （等重みとの `max|Δcoef|=0.0935`，警告 0 件），(iii) one-vs-rest 符号を与えると
+    `OneVsRestClassifier` と予測が 100% 一致（復号の健全性検査），を確認済み．
+  - **(b) 符号長 L = 34，dense random code，候補 10,000 本から行間最小 Hamming 距離最大を選択，
+    `random_state=98`．掃引しない．**
+    Allwein, Schapire & Singer (2000) JMLR 1:113–141 の dense random code の既定
+    **⌈10·log₂(k)⌉**（k=10 で 34）と，その符号選択手続き（10,000 候補から最小距離最大・重複列なし）を
+    そのまま採る．**恣意的なハイパラ選択ではなく文献由来の既定値**である点が，B163 (f)(1) の
+    「符号長を掃引せず単一値を事前登録せよ」という要件への回答になる．実測で最小行間距離 14
+    （6 ビットまで訂正可能）・重複列 0 を得た．
+  - **(c) 復号は log 損失の loss-based decoding（最尤復号）とし，Hamming 復号は使わない．**
+    同論文の「These bounds indicate that loss-based decoding is superior to Hamming decoding」
+    という理論結果に従う．副次的な利点として，復号スコアが**連続量**になるため，Iter97 の P4
+    （OvO の整数得票を temperature 較正して `gap<0.36` が 20.1%→8.3% に収縮した過信）が原理的に起きない．
+  - **(d) デプロイ側の到達条件を計画に明記した．** joblib はクラスをモジュールパス参照で直列化するため，
+    ラッパを `scripts/train_domain_classifier.py` 内で定義するとノード側で復元できない．
+    **リポジトリ直下に `ecoc_head.py` を新設し `Dockerfile` の COPY 行（現行 L14）へ追加する**．
+    これはレバーではなく配線であり，単一レバー原則には抵触しない．足切り不通過なら不要な作業である．
+  - **(e) 代替レバーは提案しない．** 委譲元から「ECOC が明らかに不適なら代替レバーを提案してよい」と
+    許可を得ていたが，ECOC は Iter97 の機序（標本分割・非適格分類器・スコアの離散性）を
+    **3 つとも構造的に回避する**ので，B163 (d) の読みの対照実験として適格だと判断した．
+    実装コストも既存スクリプトへの第 3 腕追加＋約 60 行で済む．
+- **要レビュー（人間の確認が要る点）**:
+  - (A) **自前実装の是非**: 標準実装が使えないため約 60 行の分類器を自作する．
+    健全性検査（one-vs-rest 符号での `OneVsRestClassifier` との一致，行和 1.0，重み到達）を
+    事前登録したが，自作コードのバグが結果に混入する余地は残る．
+  - (B) **`ecoc_head.py` の新設と `Dockerfile` の変更**は足切り通過時のみ発生する．
+    本番イメージの構成変更にあたるため，通過した時点で報告を要する．
+  - (C) B163 (A)（判定語の設計）・(B)（保守側 McNemar を主基準にするか）・
+    B154 (A2)(A3)・B161 (C) は**依然未回答**である．
+- **副作用（本フェーズで変更したファイル）**: `journal.md`（Iteration 98 ブロックを先頭へ追記），
+  `config.yml`（当該レバー note に Iter98 の事前登録値を追記），本ファイル，`state.json`．
+  **コード・`models/`・`data/`・`config.yaml`・`results/` は一切変更していない．実機ノードも不使用．**
+
 ## B163 [auto-decided 2026-09-28] Iter97 の判定（`closed`・ただし反証済み）・M5 の構造的解釈の取り下げ・次レバーに `error_correcting_output_codes` を引く判断
 
 - **状況**: Iter97 の事前スクリーニングが足切り 2 条件をいずれも通過せず，rc-executor は本走を行わず
