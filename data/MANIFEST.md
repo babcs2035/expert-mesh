@@ -1135,3 +1135,34 @@ Iter91 の判定は `no_effect`（Δtop1 +0.160pt，McNemar p=0.7383，事前登
 | ファイル | sha256（ロールバック後の現行） |
 |---|---|
 | `models/domain_classifier.joblib`（現行＝`C`=1.0，`n_features_in_`=5120） | `ff8aad9cf824992f0a99d07d5506ea9ebdbc3491914a165959c3496df7f2cfd6` |
+
+**2026-09-28 更新（Iteration 92, `classifier_train_label_map_consistency=japanese_civics_realignment_to_eval_map`）**:
+コードは無変更．訓練データのみ新規作成: `data/classifier_train_iter92_civics_aligned.jsonl`
+（`data/classifier_train_iter87_hybrid.jsonl` 2,327 行から，history_culture ラベルの japanese_civics
+訓練行 14 行を education へ付け替え，評価集合と重複する japanese_civics 8 行を削除し，訓練・評価の
+どちらにも未使用の japanese_civics 20 問を education 行として追加．合計 2,327→2,339 行，
+education 250→284，history_culture 250→228）．追加 20 行の設問整形は `build_dataset.py` の
+`_parse_jmmlu_task_csv()` / `_format_jmmlu_query()` をそのまま import して生成した（id 採番:
+`education-civics-001`〜`020`，既存 `education-train-*` / `education-hardneg-*` と衝突しない新規プレフィックス）．
+
+再訓練は wafl-ctrl5 の Ollama（127.0.0.1:11499 トンネル経由，wafl500〜509 は不使用）で行い，
+**変更のない 2,319 行は `data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy` の該当行をそのまま
+再利用（インデックス参照でビット一致，スクリプト内でアサーション検証済み）し，新規に埋め込んだのは
+追加 20 行のみ**（`data/embcache_train_iter92_qwen3-embedding_4b_new20{,__p1}.npy` に保存）．
+再訓練スクリプトは `/tmp/iter92/retrain.py`（リポジトリ外，`scripts/train_domain_classifier.py` の
+`_load_training_rows` / `_extract_sample_weights` / `train_classifier` をそのまま import して使用．
+モデル定義・`C`=1.0（既定）・`CalibratedClassifierCV(method="temperature", cv=5, ensemble=True)` は無変更）．
+
+旧版（Iter89/90 基準線と同一，`C`=1.0）は `models/domain_classifier_pre_iter92_civics.joblib` へ退避．
+
+| ファイル | sha256 |
+|---|---|
+| `data/classifier_train_iter92_civics_aligned.jsonl`（2,339 行．新規） | `39c4ca5252011372ed89375981fa2b1ce3c66150106d9fe4048764976599e3ca` |
+| `models/domain_classifier.joblib`（現行＝Iter92 候補，`n_features_in_`=5120） | `98da6f2d0d446cca4c67ec9b6cc908881886dad5983ee007e4eedc2876dc9aa3` |
+| `models/domain_classifier_pre_iter92_civics.joblib`（Iter89/90/91 ロールバック後と同一，`C`=1.0） | `ff8aad9cf824992f0a99d07d5506ea9ebdbc3491914a165959c3496df7f2cfd6` |
+
+G0-a〜G0-d の実測（構成検証・特徴量同一性・変更の最小性・オフライン replay）は本イテレーションの
+実装・実験フェーズ報告（次の journal 追記，分析フェーズ担当）を参照．**G0-e（デプロイ）は本走前に
+実施済み**: `mise run deploy` を実行し，wafl500〜509 全 10 台で `models/domain_classifier.joblib` の
+sha256 が `98da6f2d...` に一致すること（`ssh <host> sha256sum` で個別確認）と smoke_check PASS を確認した．
+本走は `results/20260928_111644/`（3,750 問）．

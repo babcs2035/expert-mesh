@@ -2384,6 +2384,100 @@ levers:
             precision 0.822→0.936 と再現率とのトレードオフ）．詳細は journal.md
             「Iteration 91 実行済み（分析・考察）」．"}
 
+  - {name: classifier_train_label_map_consistency,
+     values: [japanese_civics_realignment_to_eval_map],
+     note: "[2026-09-28 Iter92 調査フェーズで新設・backlog B152．`levers` 使い切り後の
+            停止条件 (2)（tavily-search による代替アプローチの重点調査）から考案した]
+            **起点となる実測（本フェーズで実施．新規の実験は行わず，既存の基準線
+            `results/20260928_032909/` と既存データファイルのみを突き合わせた）**:
+            評価集合 `data/dataset.jsonl` の `education` 単一ドメイン 350 行は
+            `jmmlu_task` 別に japanese_civics 116 / sociology 85 / moral_disputes 76 /
+            high_school_psychology 73 に分かれる．このうち **japanese_civics の recall は
+            1/116 = 0.0086**（誤送先は history_culture 59・business_economics 36・legal 15）で，
+            他 3 タスクは 0.645〜0.685 ある．**すなわち education_recall 0.4457 の不足分の
+            ほぼ全量（115 行 = 全 3,750 行の 3.07pt）が japanese_civics 1 タスクに集中している．**
+            原因は分類器の能力ではなく**訓練側とラベル定義がずれていること**である:
+            `build_dataset.py:_DOMAIN_TASK_MAP` は japanese_civics を `education` に割り当てており
+            評価集合はその通りに作られているが，本番の訓練ファイル
+            `data/classifier_train_iter87_hybrid.jsonl`（2,327 行）には
+            **`education` ラベルの japanese_civics 行が 1 行も無く**（実測: education 250 行の内訳は
+            high_school_psychology 87 / moral_disputes 87 / sociology 76），
+            代わりに **japanese_civics 22 行が `history_culture` ラベルで入っている**（旧タスク写像の
+            名残．Iter84 の hard negative 採掘がプールを『現行訓練集合に既出のタスク』へ限定した
+            際に旧写像のまま持ち込まれた）．訓練集合全体で現行写像と食い違う行は 24 行のみで，
+            うち 22 行がこの japanese_civics である．
+            **Iter36/37/38 の失敗とは前提が逆であることに注意**: Iter38 は
+            『評価集合の education に japanese_civics を 0 件にした上で訓練へ 150 行入れる』構成で
+            rejected になった（訓練だけに存在する希釈）．Iter85/90 の評価集合再構築で
+            **評価側に japanese_civics 116 行が入った結果，現在は符号が反転して訓練側だけが 0 件**
+            という状態にある．過去 3 回の否定的所見はこの状態を否定しない．
+            **内容（単一レバー）**: 訓練ファイルの japanese_civics 行の扱いを
+            `_DOMAIN_TASK_MAP` と一致させるのみ．具体的には
+            (1) 評価集合に出現しない japanese_civics 訓練行 14 行を `history_culture` →
+            `education` へ付け替える，(2) 評価集合と設問文が重複する japanese_civics 訓練行 8 行を
+            削除する，(3) 訓練にも評価にも未使用の japanese_civics 20 問を `education` 行として
+            追加する（JMMLU 150 問 ＝ 評価 116 ＋ 訓練 22（うち 8 は評価と重複）＋ 未使用 20．
+            リークせずに訓練へ回せる上限が 34 行であることは実測済み）．
+            結果は education 250→284 行・history_culture 250→228 行・合計 2,327→2,339 行．
+            **埋め込み・分類器ハイパラ（`C` は sklearn 既定 1.0 のまま）・較正手法・評価集合・
+            `config.yaml`・`classifier.py` は一切変更しない．**
+            **10 ドメイン均一性（2026-09-23 恒久運用ルール (1) への適合）**: 変更規則は
+            『訓練行のタスク→ドメイン写像を評価集合の写像に一致させる』という 10 ドメイン共通の
+            規則であり，education の閾値や intercept を触るドメイン固有の後付け補正ではない．
+            食い違いが education にだけ現れるのは，実測で食い違う行が japanese_civics しか
+            無いためである（backlog B152 で人間レビュー対象として明示）．
+            **ライセンス**: japanese_civics は JMMLU の『日本問題』で著作権は New Style（VIST 学習塾），
+            CC BY-NC-ND 4.0（<https://huggingface.co/datasets/nlp-waseda/JMMLU>，
+            <https://github.com/nlp-waseda/JMMLU>）．本変更は設問文を改変せず，既にリポジトリ内で
+            評価用に使用している範囲を出ない（`data/` は gitignore 対象で再配布しない）．
+            **主基準（事前登録）**: (i) top1_accuracy が基準線 `results/20260928_032909/`
+            （3,750 行，0.829867）に対し **Δ ≥ +1.0pt** かつ McNemar 両側 p < 0.05，
+            (ii) education 単一 350 行の recall **≥ 0.55**（基準線 0.4457）かつ
+            japanese_civics 部分集合 116 行の recall **≥ 0.30**（基準線 0.0086）．
+            **非退行**: per-domain 20 指標の BH 補正後の有意退行 0 件（history_culture が
+            22 行減るため最も危ない），複合 730 行の正解率 ≥ 0.7932（基準線 0.8082 − 1.5pt），
+            `fallback_rate` = 0.0，`dispatch_failure_rate` ≤ 0.005．
+            **測定上の注記**: (2) で削除する 8 行は評価集合にも含まれる行なので，削除によって
+            汎化と無関係に最大 0.21pt（8/3,750）だけ top1 が上振れしうる．
+            分析フェーズでは**この 8 行を除いた 3,742 行での top1 も併記すること**．"}
+
+  - {name: classifier_label_granularity,
+     values: [jmmlu_task_level_subclass_then_argmax_map_to_domain],
+     note: "[2026-09-28 Iter92 考察フェーズで追記・backlog B153 (e)．Iter92 の残差から考案した]
+            **起点となる実測（Iter92 本走 `results/20260928_111644/` と基準線の突き合わせ）**:
+            訓練ラベルの写像ずれを直して japanese_civics へ 34 行の正しいラベルを与えても
+            recall は 0.0086→0.2328 にしか上がらず（事前予測 0.45 の約半分），
+            `education` の他 3 代理タスクも 76〜87 行ずつあって recall 0.645〜0.685 で頭打ちである．
+            **行数不足だけでは残差を説明できず，`education` が 4 タスク（japanese_civics /
+            sociology / moral_disputes / high_school_psychology）にまたがる多峰クラスで，
+            単一の線形境界に収まっていないという仮説が残る．**同型の構造は `general` にもある
+            （miscellaneous 0.391 に対し formal_logic 0.98・logical_fallacies 0.964）．
+            さらに Iter92 は **civics を除く 3,634 行で 28 改善 / 33 悪化（p = 0.609，正味 −5 行）**
+            であり，訓練データの局所修正は他タスクへ波及しないことも実測された．
+            **内容（単一レバー）**: 分類器の学習ラベルをドメイン（10 クラス）から
+            **JMMLU タスク（サブクラス）** へ細分化して学習し，推論時は argmax タスクを
+            `build_dataset.py:_DOMAIN_TASK_MAP` でドメインへ写像する．
+            評価集合・埋め込み・較正手法・`config.yaml`・`classifier.py` の推論経路の形
+            （10 次元の確率を返すこと）は変えない（タスク確率をドメインへ合算するか
+            argmax 写像のみとするかは計画フェーズで 1 つに決め，事前登録すること）．
+            **10 ドメイン均一性（2026-09-23 恒久運用ルール (1) への適合）**: 全ドメインへ同一規則で
+            適用する変更であり，特定ドメインの閾値・intercept を触る後付け補正ではない．
+            **着手条件（B151 (d)4 の足切りを適用する）**: 本レバーは訓練集合内 CV で事前に測れる．
+            **訓練集合内 CV でドメイン精度が現行比 +2.3pt 以上を見込めない場合は着手しない**
+            （伝達率の実測 43%，end-to-end の有意境界 1.0pt）．足切りに届かない場合は
+            停止条件 (2) に従い調査フェーズへ戻ること（Iter89 の学び『判定不能と事前に分かる
+            レバーには着手しない』）．
+            **既知のリスク**: (a) タスクあたりの行数が 76〜87 と少なく，クラス数が 10→30 前後へ
+            増えるため過学習・較正の不安定化が起きうる（`CalibratedClassifierCV(cv=5)` の
+            各 fold に十分な行が残るかを事前に確認すること）．(b) hard negative 行
+            （`*-hardneg-*`）や合成行は JMMLU タスクを持たないため，サブクラスの割り当て規則を
+            事前に決めて記録する必要がある．
+            **基準線**: `results/20260928_111644/`（3,750 行，top1 = 0.835467．B153 (c)）．
+            **主基準は計画フェーズで事前登録すること．その際 B153 要レビュー (B) に従い，
+            効果量条件と有意性条件を分けた 2 軸の表として判定語を定義し，
+            『部分集合の期待改善 × 部分集合の母集団比』で効果量閾値の実現可能性を検算すること**
+            （Iter92 の学び 4: +1.0pt という閾値は機序が事前予測どおり発火しても際どい水準だった）．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #
