@@ -193,11 +193,22 @@ class NodeState:
         semantic_sample_temperature: float = SEMANTIC_SAMPLE_TEMPERATURE,
         classifier_model_path: str | None = None,
         domain_classifier: CalibratedClassifierCV | None = None,
+        warmup_light_model: bool = True,
     ) -> None:
         self.node_id = node_id
         self.domain = domain
         self.light_model = light_model
         self.expert_model = expert_model
+        # Iter101 (vram_budget_reallocation=drop_unused_light_model_to_enable_fusion):
+        # light_model is never called on the runtime execution path when
+        # routing_method=supervised_classifier (see _estimate_probe_confidence's
+        # "No LLM call" branch) and fallback_rate has measured 0.0 in the
+        # current configuration (journal.md "Iteration 101"). Keeping it
+        # warmed up regardless left too little VRAM headroom once ruri-v3
+        # was added to the embedding fusion (Iter100), causing silent
+        # eviction/reload thrash. Defaults to True so omitting the config
+        # key stays bit-identical to pre-Iter101 behavior.
+        self.warmup_light_model = warmup_light_model
         self.confidence_threshold = confidence_threshold
         self.probe_timeout_s = probe_timeout_s
         self.dispatch_timeout_s = dispatch_timeout_s
@@ -394,10 +405,16 @@ def create_app(state: NodeState) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         """Warm up models, then start the advertise heartbeat, before serving."""
-        await warmup_model(state.ollama_client, state.light_model)
+        if state.warmup_light_model:
+            await warmup_model(state.ollama_client, state.light_model)
+        else:
+            log_event(state.node_id, LOG_LEVEL_INFO, "light_model_warmup_skipped", model=state.light_model)
         if state.expert_model != state.light_model:
             await warmup_model(state.ollama_client, state.expert_model)
-        warmed_models = sorted({state.light_model, state.expert_model})
+        warmed_models = {state.expert_model}
+        if state.warmup_light_model:
+            warmed_models.add(state.light_model)
+        warmed_models = sorted(warmed_models)
         await log_gpu_status(state.node_id, state.ollama_client, warmed_models)
         if state.embedding_model is not None:
             state.domain_embedding = await state.ollama_client.embed(

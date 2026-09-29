@@ -438,6 +438,42 @@ def test_lifespan_continues_when_gpu_status_check_fails(capsys) -> None:
     assert len(records) == 1
 
 
+def test_lifespan_warms_up_light_and_expert_models_by_default() -> None:
+    """warmup_light_model defaults to True: both light_model and expert_model are warmed up."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = "ok"
+    ollama_client.get_running_models.return_value = []
+    client = _build_client(ollama_client, light_model="qwen3.5:4b-q4_K_M", expert_model="qwen3.5:9b")
+
+    with client:
+        pass
+
+    warmed_models = {call.args[0] for call in ollama_client.generate.await_args_list}
+    assert warmed_models == {"qwen3.5:4b-q4_K_M", "qwen3.5:9b"}
+
+
+def test_lifespan_skips_light_model_warmup_when_disabled(capsys) -> None:
+    """warmup_light_model=False (Iter101) skips warming up light_model and logs the skip."""
+    ollama_client = AsyncMock(spec=OllamaClient)
+    ollama_client.generate.return_value = "ok"
+    ollama_client.get_running_models.return_value = []
+    client = _build_client(
+        ollama_client,
+        light_model="qwen3.5:4b-q4_K_M",
+        expert_model="qwen3.5:9b",
+        warmup_light_model=False,
+    )
+
+    with client:
+        pass
+
+    warmed_models = {call.args[0] for call in ollama_client.generate.await_args_list}
+    assert warmed_models == {"qwen3.5:9b"}
+    records = _parse_log_events(capsys.readouterr().out, "light_model_warmup_skipped")
+    assert len(records) == 1
+    assert records[0]["model"] == "qwen3.5:4b-q4_K_M"
+
+
 def test_node_state_rejects_embedding_postprocess_without_whitening_path() -> None:
     """embedding_postprocess=whiten with no embedding_whitening_path fails at construction, not silently."""
     with pytest.raises(ValueError, match="embedding_whitening_path"):

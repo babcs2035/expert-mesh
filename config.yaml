@@ -46,6 +46,17 @@ dispatch_candidate_threshold: 0.0
 # probe_timeout_s/dispatch_timeout_s below are still calibrated to the old
 # 9B model's measured latency; they should be re-measured against 4b
 # before being treated as accurate for the new light_model.
+# Iter101 (vram_budget_reallocation=drop_unused_light_model_to_enable_fusion):
+# with routing_method=supervised_classifier, light_model is never called on
+# the runtime execution path (see http_server.py's _estimate_probe_confidence
+# "No LLM call" branch), so warming it up at startup only consumed VRAM
+# headroom needed for Iter100's embedding_fusion_models. Set to false to
+# skip startup warmup and keep light_model out of GPU-resident memory.
+# Omitting this key, or leaving it true, is bit-identical to pre-Iter101
+# behavior (journal.md "Iteration 101"). light_model itself is still kept in
+# each node's config below (used by the fallback path and
+# scripts/run_central_experiment.py); only its warmup is skipped.
+warmup_light_model: false
 probe_timeout_s: 120.0
 # dispatch_timeout_s is based on qwen3.5:9b expert model generation time
 # for DISPATCH_MAX_TOKENS=512. The original estimate (170s + margin = 200s)

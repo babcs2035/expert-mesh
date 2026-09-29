@@ -96,6 +96,7 @@ def build_node_state(config: dict, node_id: str) -> NodeState:
         semantic_sample_count=config.get("semantic_sample_count", 5),
         semantic_sample_temperature=config.get("semantic_sample_temperature", 0.7),
         classifier_model_path=config.get("classifier_model_path"),
+        warmup_light_model=config.get("warmup_light_model", True),
     )
 
 
