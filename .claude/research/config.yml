@@ -2820,7 +2820,61 @@ levers:
             **留意**: CV の +0.79pt は CV の SE 0.83pt と同程度で，**点推定としては本走の Δ を保証しない**．
             Iter89 の実績（CV +5.29pt → 本走 +2.94pt）から，本走では CV より縮む向きを既定で見込むこと．
             したがって**事前投影は Δtop1 ≒ +0.3pt，80% 区間 −0.5 〜 +1.2pt** とし，符号の確信は
-            『中程度』と明記する．CV を足切りに使わない（2026-09-23 絶対条件 (A)）方針は維持する．"}
+            『中程度』と明記する．CV を足切りに使わない（2026-09-23 絶対条件 (A)）方針は維持する．
+            **【2026-09-29 Iter100 追記】本走の結果，精度側は成功条件を満たした
+            （Δtop1 = +0.640pt，McNemar p = 0.029758）が，C6（mean_duration_ms ≤ 3041.7）が
+            9733.350 で FAIL し，判定は `rejected`（理由は『運用コストでの不採用』）となった．
+            **効果の不在ではない**（G1 CV +1.011pt・G2 replay +0.507pt・本走 +0.640pt の 3 経路が
+            互いに 1 SE 以内で一致）．C6 違反の原因は VRAM 容量超過による light_model の追い出しで，
+            これは配置の問題であって表現の問題ではない．後続レバー
+            `vram_budget_reallocation` で同じ表現のまま再挑戦する．"}
+
+  - {name: vram_budget_reallocation, values: [drop_unused_light_model_to_enable_fusion],
+     note: "[2026-09-29 Iter100 分析フェーズ・backlog B172 (d)]
+            **目的**: Iter100 で確立した融合表現（qwen3-embedding:4b 2 ビュー ⊕ ruri-v3-310m 2 ビュー
+            = 6,656 次元，Δtop1 = +0.640pt / McNemar p = 0.029758）を**表現を 1 ビットも変えずに**
+            C6（mean_duration_ms ≤ 3041.7）の内側へ持ち込む．Iter100 の C6 違反は
+            物理 VRAM 12,288 MiB に 4 モデルが収まらず light_model（qwen3.5:4b-q4_K_M，
+            実測 2,400〜2,500 MiB）が常駐から追い出されてロード／退避を繰り返したことに起因する
+            （B171 の実測: 5,186 + 4,308 + 484 = 9,978 MiB，残り 2,310 MiB）．
+            **単一レバー**: ノードの実行時モデル常駐から light_model を外す．
+            **根拠（Iter100 分析フェーズの発見）**: `http_server.py:364-374` の
+            `_estimate_probe_confidence()` は，現行の `routing_method: supervised_classifier` ＋
+            `confidence_signal_method: self_report` の組み合わせでは
+            `estimate_confidence_classifier()` を呼ぶだけで **LLM 呼び出しを行わない**
+            （コード中のコメントも 'No LLM call' と明言）．light_model を参照するのは
+            `http_server.py:397` の**起動時 warmup** と，`fallback_policy=disabled` で既に無効化済みの
+            退避経路と，mesh を使わない `scripts/run_central_experiment.py` だけである．
+            すなわち light_model は**実行時経路で一度も使われないまま各ノードの VRAM を
+            約 2,400〜2,500 MiB 占有している疑いが濃い**．外せば B171 の『336 MiB 対 484 MiB』の
+            不足は約 10 倍の余裕をもって解消する．**light_model の出力はどの決定にも入らないので
+            精度指標はビット同一に近いはず**であり，融合の +0.640pt を保ったまま C6 だけを
+            改善できる可能性が容量削減系の候補の中で最も高い．
+            **固定する構成**: Iter100 の `embedding_fusion_models`（ruri 追加）と 6,656 次元の
+            `models/domain_classifier.joblib` を**そのまま据え置く**．融合は掃引対象ではなく
+            固定された構成要素として扱い，**分類器は再訓練しない**（Iter100 の artifact を再利用）．
+            訓練集合・評価集合・`dispatch_gap_threshold=0.36`・`embedding_instruction`・
+            `LogisticRegression` の定義もすべて不変．
+            **計画フェーズの最初の仕事（ここが偽なら本レバーは成立しない）**: 『light_model は
+            実行時に呼ばれない』をコード読解で終わらせず，**予備 20 問で light_model への
+            `/api/generate` が 0 件であることをログで実証する**こと．偽だった場合は本レバーを取り下げ，
+            次善案（`qwen3-embedding:4b` をより小さい量子化にする。ただし埋め込みが変わるため
+            精度の保存は期待できない）へ切り替える．
+            **G0 に必須で含める検査（B172 (e)．Iter100 の検査設計の穴の恒久対策）**:
+            (G0-vram-1) 実行時に同時に必要な全モデルの VRAM **実測値**
+            （`nvidia-smi --query-compute-apps`．モデルファイルの公称サイズではない）の総和 ≤ 12,288 MiB，
+            (G0-vram-2) 本走の**後**に入口ノードと dispatch 先ノードで `ollama ps` の行数が
+            期待本数と一致すること．`OLLAMA_MAX_LOADED_MODELS` は**スロット数**の上限であって
+            **容量**の上限ではないので，これを上げても検査の代わりにはならない．
+            **成功条件（2 つとも満たすこと）**: (1) 精度が Iter100 の水準を再現する
+            ＝製品基準線 `results/20260928_160921`（top1 0.833067）に対し top1 ≥ 0.838067，
+            (2) **C6 を満たす ＝ mean_duration_ms ≤ 3041.7**（上限は据え置く）．
+            非退行は Iter100 の C1〜C7 を踏襲する．
+            **C6 系には平均だけでなく中央値・p95 を併記すること**（B172 (e)．Iter100 では
+            単一層の中央値の増分は +299ms と予測どおりで，平均だけを見ると内在コストと
+            基盤の副作用を分離できなかった）．
+            **留意**: 本レバーが成功した場合，採否の対象は『融合 ＋ 常駐削減』の組であり，
+            Iter100 の融合単体が C6 を満たすようになったわけではない点を判定理由に明記すること．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 99,
-  "iteration_name": "埋め込みを日本語特化モデル ruri-v3-310m へ差し替える",
+  "iteration": 100,
+  "iteration_name": "異種埋め込み（qwen3-4b と ruri-v3-310m）を連結して融合する",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "embedding_model_replacement=japanese_specialized_ruri_v3_310m",
-  "experiment_dir": null,
+  "current_lever": "embedding_space_fusion=qwen3_4b_plus_ruri_v3_310m_concat",
+  "experiment_dir": "results/20260929_081612",
   "experiment_deadline": null,
-  "updated_at": 1790652000,
-  "last_slack_ts": "1790607605.280239",
-  "iteration_thread_ts": "1790608310.097369",
+  "updated_at": 1790674732,
+  "last_slack_ts": "1790674159.156719",
+  "iteration_thread_ts": "1790611878.637849",
   "notion_toggle_created": true,
-  "last_commit": "eb49a79"
+  "last_commit": "9faf8fe"
 }
