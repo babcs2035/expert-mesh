@@ -2290,7 +2290,8 @@ levers:
             （`n_features_in_`=2048）．学びは journal.md「Iteration 82 実行済み（分析・考察）」参照．"}
 
   - {name: dispatch_gap_threshold_recalibration,
-     values: [matched_budget_sweep_for_concat_distribution],
+     values: [matched_budget_sweep_for_concat_distribution,
+              matched_budget_sweep_for_fusion_6656_distribution],
      note: "[2026-09-27 backlog B130（Iter82 分析フェーズ）で追加]
             **起点となる実測**: Iter82 で採用した連結埋め込み（2048 次元）により probe の確信度
             分布が鋭くなった．複合 415 行での実測は rank1 confidence 平均 0.6510→0.7084，
@@ -2320,7 +2321,49 @@ levers:
             `dispatch_failure_rate` が binding になりうる．`end_to_end_accuracy` は
             送出候補が増えることで改善しうるが 3SD=2.6pt のノイズ床を適用する．
             **禁止事項**: ドメインごとに閾値を変えることは 2026-09-23 恒久運用ルールにより不可．
-            閾値は 10 ドメイン共通の単一スカラーに限る．"}
+            閾値は 10 ドメイン共通の単一スカラーに限る．
+            ---
+            **[2026-09-29 Iter101 分析フェーズ・backlog B174 で値 `matched_budget_sweep_for_fusion_6656_distribution`
+            を追加．レバー再開]**
+            Iter83 で較正した `dispatch_gap_threshold=0.36` は **2,048 次元の連結埋め込み**の確信度分布に
+            合わせた値である．その後 Iter99（ruri 単独差し替え，closed）を挟み **Iter100/101 で表現が
+            6,656 次元の異種融合（qwen3-embedding:4b 5,120 ⊕ ruri-v3-310m 1,536）へ変わった**にもかかわらず，
+            両反復とも gap 閾値を「固定する構成」として凍結したまま本走した．
+            **したがって較正の負債が 2 反復ぶん溜まっている．** Iter81/82/83 で 3 度観測し
+            「特徴量を変えるレバーの後には必ず閾値較正の反復を 1 回挟む」を**本研究の標準工程に組み込む**と
+            宣言した恒常規則（journal_archive「Iteration 83」学び 1）の 4 例目である．
+            **実測済みの余地（Iter101 分析フェーズ．`scripts/replay_dispatch_gap_policy.py` による
+            決定論的 replay．`results/20260929_192157/results.jsonl` の `probe_candidates` 由来）**:
+            gt=0.36（現行）で set_recall = 0.578767 を**完全再現**し忠実性を確認した上で——
+            | gt | compound set_recall | compound mean_k | overall mean_k |
+            | 0.36 | 0.578767（現行） | 1.974 | 1.533 |
+            | 0.44 | 0.612329 | 2.218 | 1.713 |
+            | 0.48 | 0.623288 | 2.303 | 1.773 |
+            | 0.52 | 0.639041 | 2.401 | 1.849 |
+            | 0.60 | 0.674658 | 2.615 | 1.982 |
+            **単調増加で頭打ちが見えず，最大 +9.6pt の余地がある．**
+            **計画フェーズが必ず行うこと**:
+            (1) 上表を `results/20260929_192157/results.jsonl` から**再生成して**候補を **1 値に絞り**，
+                予測 set_recall / mean_k を本走前に journal へ事前登録する（B130 の事前ゲートを踏襲）．
+            (2) **送出予算の上限を，本レバー用に改めて事前登録し直すこと．**
+                Iter101 の非退行条件 C5 の `compound_mean_dispatched_count ≤ 2.10` は
+                『送出数を動かさないはずのレバー』に対する見張りであり，**本レバーではこれをそのまま
+                流用してはならない**（gt=0.40 で既に 2.110 に達し，レバーの存在意義を消してしまう）．
+                送出予算は本レバー固有のコスト軸として，独立に上限を宣言すること．
+            (3) **binding になるのは `mean_duration_ms` 側である．** Iter101 実測から線形外挿すると
+                （生成 mean 1,783.2ms / overall mean_k 1.533 ≒ 1,163ms per dispatch，
+                オーバーヘッド mean 414.6ms は k に依らない），
+                gt=0.52 で約 2,565ms・gt=0.60 で約 2,720ms と見積もられ，
+                Iter101 の C6 枠 3,041.7ms には収まる見込みだが余裕は 10〜16% しかない．
+                **並列化（asyncio.gather 化）は本レバーの範囲外であり行わない．**
+            (4) 主基準は B130 のとおり `compound_domain_set_recall`．**top1_accuracy は構造的に不変**
+                （rank 1 のみに依存）なので非退行条件として扱い，変動したら実装漏れを疑う．
+            **基準線**: `results/20260929_192157/`（3,750 問，top1 = 0.840000，set_recall = 0.578767，
+            `compound_mean_dispatched_count` = 1.973973，`mean_duration_ms` = 2197.842，ECE = 0.039551）．
+            **固定する構成**: 融合表現（6,656 次元）・`models/domain_classifier.joblib`・
+            `warmup_light_model: false`（Iter101 で adopted）・`dispatch_top_k=2`・`dispatch_gap_max_k=4`・
+            `confidence_threshold=0.0`・評価集合 3,750 問．変更は `config.yaml` の
+            `dispatch_gap_threshold` の **1 行のみ**．"}
 
   - {name: single_domain_eval_set_expansion,
      values: [jmmlu_unused_rows_power_targeted],

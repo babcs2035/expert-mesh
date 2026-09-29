@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 100,
-  "iteration_name": "異種埋め込み（qwen3-4b と ruri-v3-310m）を連結して融合する",
-  "phase": "evaluate",
+  "iteration": 101,
+  "iteration_name": "未使用の light_model を常駐から外して VRAM を空け，融合構成を運用可能にする",
+  "phase": "analyze",
   "status": "running",
-  "current_lever": "embedding_space_fusion=qwen3_4b_plus_ruri_v3_310m_concat",
-  "experiment_dir": "results/20260929_081612",
-  "experiment_deadline": null,
-  "updated_at": 1790674732,
-  "last_slack_ts": "1790674159.156719",
-  "iteration_thread_ts": "1790611878.637849",
+  "current_lever": "vram_budget_reallocation=drop_unused_light_model_to_enable_fusion",
+  "experiment_dir": "results/20260929_192157",
+  "experiment_deadline": 1790688706,
+  "updated_at": 1790686697,
+  "last_slack_ts": "1790685981.256919",
+  "iteration_thread_ts": "1790675929.051259",
   "notion_toggle_created": true,
-  "last_commit": "9faf8fe"
+  "last_commit": "759b373"
 }

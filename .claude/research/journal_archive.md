@@ -1,3 +1,462 @@
+## Iteration 98: 分類器の多クラス分解を誤り訂正出力符号へ変える
+
+### 調査 (Iter98)
+
+本フェーズでも**実験ノード wafl500〜509 には一切触れていない**（2026-09-23 絶対条件 (B)）．
+開発ホスト上で行ったのは，リポジトリのコード読み取りと，**合成データによる sklearn の API 実現性の
+確認（CPU のみ・数十秒）**だけである．`models/`・`data/`・`config.yaml`・`results/` への書き込みは 0 件．
+
+**(1) 問い**（B163 (f) の申し送りを受けて設定した）
+
+- Q1: ECOC は Iter97 で退行の機序と読んだ 2 点，すなわち **(a) 対ごと分解の標本分割（p≫n の悪化）**と
+  **(b) 非適格分類器の票**を，構造的に回避するか．回避するなら OvO の反証は「決定層の分解一般」ではなく
+  「OvO 固有の弱点」に帰属でき，軸を閉じる根拠になる．
+- Q2: ECOC 固有の落とし穴（符号長というハイパラ，復号方式，離散性）は何か．Iter97 の P4（gap 分布の
+  収縮）と同型の問題を持ち込まないか．
+- Q3: 現行の較正済みパイプライン（`CalibratedClassifierCV(method="temperature")` ＋
+  `sample_weight = n/(K*n_d)`）と，`classifier.py:estimate_confidence_classifier()` の
+  「`predict_proba` が 10 ドメインで和 1」という前提を壊さずに実装できるか．
+
+**(2) 文献調査（tvly search / extract）**
+
+- **Dietterich & Bakiri (1995), *Solving Multiclass Learning Problems via Error-Correcting Output
+  Codes*, JAIR 2:263–286** —— ECOC の原典．k クラスに長さ L の符号語を割り当て，各列が
+  **クラスを 2 つのメタクラスに分ける二値問題**になる．行間の Hamming 距離が d なら
+  ⌊(d−1)/2⌋ ビットまでの二値分類器の誤りを復号で訂正できる．
+- **Allwein, Schapire & Singer (2000), *Reducing Multiclass to Binary: A Unifying Approach for
+  Margin Classifiers*, JMLR 1:113–141**,
+  <https://www.jmlr.org/papers/volume1/allwein00a/allwein00a.pdf> ——
+  本反復の設計はこの論文に従う．PDF から直接引用して確認した事実は 3 点．
+  (i) **dense random code の長さは ⌈10·log₂(k)⌉**（sparse は ⌈15·log₂(k)⌉）で，
+  **10,000 本の候補からから行間最小 Hamming 距離が最大のものを選ぶ**（「examining 10,000 random codes
+  and choosing the code that had the largest ... and did not have any identical columns」）．
+  **k=10 なら L = ⌈33.22⌉ = 34**．符号長を掃引せず単一値を事前登録せよという B163 (f)(1) の要件に，
+  **文献由来の既定値**で答えられる．
+  (ii) **loss-based decoding は Hamming decoding より優れる**（「These bounds indicate that
+  **loss-based decoding is superior to Hamming decoding**」）．さらに
+  「the loss-based decoding method for **log-loss is the well known and widely used
+  maximum-likelihood decoding**」とあり，log 損失での復号＝最尤復号である．
+  (iii) 基底学習器が SVM のとき「it is clear that **the widely used one-against-all code is inferior
+  to all the other codes we tested**」．ただし「there is **no clear winner** among the four other
+  output codes」であり，AdaBoost では「none of the codes is persistently better than the other」．
+  すなわち**符号の種類による差は保証されていない**．
+- **反証側: Rifkin & Klautau (2004), *In Defense of One-Vs-All Classification*, JMLR 5:101–141**,
+  <https://www.jmlr.org/papers/volume5/rifkin04a/rifkin04a.pdf> ——
+  「a simple one-vs-all scheme is **as accurate as any other approach**, assuming that the underlying
+  binary classifiers are **well-tuned regularized classifiers**」．同論文は，異なる分解方式が
+  同じ点で同じ誤りを犯す（AGREE 列が誤り率より大きい）ことを示し，
+  「points become errors **not because of deficiencies in the method of combining binary
+  classifiers**」と述べる．**Iter97 の実測はこの側と整合した**ので，Iter98 も同じ側に落ちる確率は高い．
+  本反復を「改良案」ではなく**軸を閉じるための確認実験**と位置づける根拠である（B163 (f)）．
+- **Ghani (2000), *Using Error-Correcting Codes for Text Classification*, ICML** および
+  Berger (1999), *Error-correcting output coding for text classification*, IJCAI ——
+  テキスト分類（高次元疎特徴・多クラス）で ECOC が有効だった先行例．ただし両者の基底学習器は
+  Naive Bayes であり，**弱い基底学習器のとき ECOC の利得が大きい**という Rifkin らの説明と矛盾しない．
+  本研究の基底学習器は正則化つき線形 LR であり，条件は Ghani らより Rifkin ら側に近い．
+- **Escalera, Pujol & Radeva (2010), *On the Decoding Process in Ternary ECOC*, IEEE TPAMI
+  32(1):120–134** —— 復号方式の比較（Hamming / Euclidean / loss-based）．本反復は 3 値符号を使わないので
+  0 要素の扱いは論点にならない．
+
+**(3) ECOC は Iter97 の 2 つの機序を構造的に回避するか（Q1 への回答）**
+
+| Iter97 で読んだ退行の機序 | OvO | ECOC（dense random, L=34） |
+|---|---|---|
+| (a) 標本分割（各二値問題が約 500 行しか見ない） | 該当．2,275 → 約 500 行（1/4.5） | **非該当**．各列が**全 2,275 行**を使う |
+| (b) 非適格分類器の票（真クラス d を知らない 36/45 本が投票） | 該当 | **非該当**．全列が 10 クラス全部を ±1 に割り当てる |
+| P4 のスコア離散性（得票数 0〜9 の階段） | 該当（`gap<0.36` が 20.1%→8.3%） | **非該当**．log 尤度の和は連続量（合成データで 600 行すべて相異なる値を実測） |
+
+したがって ECOC は (d) の読み（B163 (d)）の**直接の対照実験**として機能する．
+**ただし ECOC 固有のリスクがある**: 各列は「5 クラス対 5 クラス」のようなメタクラス分割であり，
+意味的にまとまらない多峰なクラス塊を 1 本の線形境界で分けることになる．
+n=2,275・p=5,120（p≫n）では**任意のラベル付けが訓練データ上ほぼ必ず線形分離可能**なので，
+訓練誤差は 0 に近づく一方で汎化しない恐れがある（Dietterich & Bakiri が要求する「基底学習器が
+任意の二分割を学習できること」は満たすが，「汎化できること」は別問題である）．
+この懸念は**列ごとの二値 CV 正解率**として直接測れるので，診断出力に含める（下記 P5）．
+
+**(4) 実現性の実測（開発ホスト，CPU のみ，合成データ．Iter97 の落とし穴に相当するものを事前に潰した）**
+
+- **最大の落とし穴（実測）**: **`sklearn.multiclass.OutputCodeClassifier`（sklearn 1.9.0）は
+  `predict` しか持たない**（`predict_proba` も `decision_function` も無い）．そのため
+  `CalibratedClassifierCV(OutputCodeClassifier(...))` は
+  `InvalidParameterError: The 'estimator' parameter of CalibratedClassifierCV must be an object
+  implementing 'fit' and 'predict_proba', an object implementing 'fit' and 'decision_function' or
+  None` で**そもそも fit できない**．すなわち Iter97 のような「base estimator を差し替えるだけ」の
+  変更は**不可能**である．`classifier.py` が要求する「`predict_proba` が 10 ドメインで和 1」を
+  満たすには，**復号スコアを返す薄いラッパを自前で書く**必要がある．
+- そこで **`EcocLogLossClassifier`**（dense random code ＋ **log 損失による loss-based decoding
+  ＝最尤復号**）を約 60 行で試作した．`decision_function(X)[i, d] = Σ_j log σ(M[d,j]·f_j(x_i))`．
+  これを既存の `CalibratedClassifierCV(method="temperature", cv=5, ensemble=True)` にそのまま渡せる．
+  実測（合成データ）:
+  - `CalibratedClassifierCV(EcocLogLossClassifier(...), method="temperature", cv=5, ensemble=True)`
+    は fit でき，**`predict_proba` の行和は全行 1.0**（`classifier.py` の前提を満たす）．
+  - **`sample_weight` は警告 0 件で 34 本すべての二値 LR へ到達する**．`fit(self, X, y, sample_weight=None)`
+    と明示的な引数を持たせたので，sklearn の `has_fit_parameter` 判定が通り，
+    Iter97 で必要だった `enable_metadata_routing` は**不要**である．到達の実証として，
+    クラス 0 の重みを 20 倍にした場合と等重みの場合で二値 LR の係数が
+    `max|Δcoef| = 0.0935`（較正ラッパ経由でも 0.0738）と**有意に動く**ことを確認した
+    （0 なら未到達．Iter97 の学び 2 に対応する機械的な検査）．
+  - 符号行列は L=34，**行間最小 Hamming 距離 14**（⌊13/2⌋=6 ビットまで訂正可能），重複列 0．
+  - **スコアは連続**（合成 600 行で上位 2 位差の相異なる値が 600/600）．Iter97 の P4（離散性による
+    gap 収縮）は原理的に起こらない．
+  - 計算量（n=1,820 × p=5,120 の合成データ）: 単一 softmax 0.20 秒，5 対 5 の二値 1 本 0.07 秒，
+    ECOC 34 本 **1.01 秒**，temperature 較正込み（cv=5）**5.1 秒**．
+    3 seed × 5-fold でも **wafl-ctrl5 の CPU で数分〜十数分**に収まる（再埋め込み 0 回・GPU 不要）．
+- **デプロイ側の到達条件（足切り通過時のみ問題になる）**: joblib はクラスを**モジュールパス参照**で
+  直列化するため，`EcocLogLossClassifier` を `scripts/train_domain_classifier.py` の中で定義して
+  スクリプト実行すると `__module__` が `__main__` になり，ノード側で**復元できない**．
+  そのため実装時は**リポジトリ直下に `ecoc_head.py` を新設**して同クラスを置き，
+  `scripts/train_domain_classifier.py` から import し，`Dockerfile` の `COPY` 行（現行 L14）へ
+  `ecoc_head.py` を追加する．スクリーニング段階では直列化しないのでこの作業は不要である．
+
+### 仮説 (Iter98)
+
+**Iter97 の OvO の退行（Δ=−0.806pt）は「決定層を分解したこと」自体ではなく，OvO 固有の 2 点
+（各二値問題が全体の約 1/4.5 の行しか見ない標本分割，および真クラスを知らない 36/45 本の票）に
+由来する．** 全行を使い非適格分類器を持たない ECOC（dense random code, L=34, 最尤復号）に替えれば，
+少なくとも**近傍クラス（social_science・history_culture）の有意退行は再現しない**はずである．
+そのうえで CV top1 が上がるかどうかは両論あり（Allwein et al. は OvA 劣位を報告，
+Rifkin & Klautau は同等と主張），**Iter97 と同じく両論のまま検定する**．
+対抗仮説は「5,120 次元・2,275 行で任意の 5 対 5 分割を線形に学習させても汎化しない」であり，
+これが正しければ列ごとの二値 CV 正解率が低く（偶然水準に近く），ECOC も退行する．
+
+### 単一レバー (Iter98)
+
+- **レバー**: `classifier_multiclass_decomposition` = **`error_correcting_output_codes`**
+  （config.yml に事前登録済みの未試行 value．新レバーの追加は不要）
+- **何を何から何へ**: `scripts/train_domain_classifier.py:train_classifier()` の **L210**
+  `base_estimator = LogisticRegression(max_iter=_MAX_ITER, class_weight=None)` を，
+  **`EcocLogLossClassifier(estimator=LogisticRegression(max_iter=_MAX_ITER, class_weight=None),
+  code_length=34, random_state=98)`**（新モジュール `ecoc_head.py`）へ差し替える．
+  L211-214 の `CalibratedClassifierCV(base_estimator, method=_CALIBRATION_METHOD, cv=cv,
+  ensemble=True)` と `fit(..., sample_weight=sample_weight)` は**一字も変えない**．
+- **事前登録する設計値（掃引しない．B163 (f)(1)）**:
+  - **符号長 L = 34 = ⌈10·log₂(10)⌉**（Allwein et al. 2000 の dense random code の既定）．
+  - **符号行列**: 候補 10,000 本から**行間最小 Hamming 距離が最大**のものを選ぶ（同論文の手続き）．
+    定数列・重複行は排除する．`random_state = 98`（イテレーション番号．固定）．
+  - **復号**: log 損失の loss-based decoding（＝最尤復号）．Hamming 復号は使わない（同論文の
+    理論的優位に従う）．**代替値の比較は一切行わない**（行えば単一レバー原則が濁る）．
+- **レバーを読むコード行と到達条件（d0004 §4 の恒久対策）**:
+  - スクリーニング段階: `scripts/screen_classifier_multiclass_decomposition.py` に**腕 C** を追加する
+    （`_train_ecoc_classifier()`）．腕 A は既存の `train_classifier()` を無変更で import して呼び，
+    **CV top1 = 0.802637 の再現**をもって測定系の健全性を確認する（Iter97 と同じ手順）．
+  - 発火の証拠（1 つでも欠けたら実験不成立として中断）:
+    (a) 学習済み腕 C の `code_book_.shape == (10, 34)`，(b) 行間最小 Hamming 距離 ≥ 10 を記録，
+    (c) `sample_weight` 到達の実証（等重み版との `max|Δcoef| > 0`），
+    (d) `fit` 中の警告 0 件（`warnings.catch_warnings(record=True)` ガード．Iter97 の実装を流用），
+    (e) `predict_proba` の行和が 1.0 ± 1e-6．
+  - 本走段階（足切り通過時のみ）: `models/domain_classifier.joblib` の差し替えとデプロイが唯一の
+    到達条件である．旧 artifact を `models/domain_classifier_pre_iter98_ecoc.joblib` へ退避し，
+    新 artifact の sha256 が旧と異なること・`ecoc_head` がコンテナ内で import 可能なこと
+    （`docker compose exec ... python -c "import ecoc_head"`）・各ノードの joblib の sha256 一致・
+    `predict_proba` の行和 1.0 を確認する．
+- **固定する構成（1 つも動かさない）**: 訓練集合 `data/classifier_train_iter94_dedup.jsonl`（2,275 行）・
+  `sample_weight = n/(K*n_d)`・較正 `temperature`（`cv=5, ensemble=True`）・`C=1.0`・`max_iter=1000`・
+  埋め込みモデル `qwen3-embedding:4b`・`embedding_instruction`（Iter81 の P1 文言）・
+  `embedding_view_concat: true`（5,120 次元）・評価集合 `data/dataset.jsonl`（3,750 行，読むだけ）・
+  `dispatch_gap_threshold: 0.36`・`dispatch_gap_max_k: 4`・`dispatch_top_k: 2`・
+  `aggregation_method: max_confidence`・expert/light モデルとノード割り当て．
+
+### 事前スクリーニング設計（事前登録 / Iter98）
+
+Iter95〜97 の型をそのまま踏襲する．実施場所は **wafl-ctrl5**（絶対条件 (B)．`~/expert-mesh-iter95/` の
+uv 3.12 環境と `data/embcache_iter96_scaled.npy` の先頭 2,275 行を流用．**新規の埋め込み計算は 0 回**）．
+**足切りを通った場合は本走を省略しない**（2026-09-23 絶対条件 (A)）．
+
+- **主評価**: 既存 2,275 行の層化 5-fold（`StratifiedKFold`，seed = 96 / 196 / 296，併合 n = 6,825）．
+  テスト fold は両腕で完全に同一．**腕 A = 現行 softmax**（CV top1 = 0.802637 の再現を確認），
+  **腕 C = ECOC（L=34, 最尤復号）**．腕 B（OvO）は再実行しない（反証済み．B163 (a)）が，
+  Iter97 の実測値を表に併記して 3 方式を比較できるようにする．
+- **統計**: `metrics.py` の `compute_mcnemar_test` / `compute_domain_recall_mcnemar_test` /
+  `apply_benjamini_hochberg` を流用．**seed 併合値を主とし，discordant を seed 数で割った保守値を
+  必ず併記する**（B163 (b)・Iter97 学び 4）．
+- **最初から実装する診断出力（B163 (f)(4)．事後の再実行を避ける）**:
+  1. 両腕の **10×10 混同行列**．
+  2. **34 列それぞれの二値 CV 正解率**（メタクラス分割が学習できているかの直接の測定）と，
+     符号行列の行間最小／平均 Hamming 距離．
+  3. 較正後の **ECE・Brier**（両腕）と，**`gap ≥ 0.36` バケットの正解率**（Iter97 学び 5 への対応）．
+  4. **gap 分布**と `gap < 0.36` の行割合．
+  5. 腕 C の**復号スコアの上位 1 位と 2 位の差**の分布（OvO の票差に対応する量．離散性の確認）．
+
+### 反証可能な予測（事前登録 / Iter98）
+
+- **P1（足切りと同値・主予測）**: CV top1 Δ (C−A) **≥ +1.0pt**．
+- **P2（機序の切り分け．本反復の中心）**: Iter97 で BH 有意退行だった 2 クラスの recall Δ の合計が
+  **≥ −1.0pt**（Iter97 の OvO は social_science −4.53 ＋ history_culture −2.86 = **−7.39pt**）．
+  - P2 が通り P1 が外れる → 退行は **OvO 固有**だったが，分解方式では精度は動かない．
+    **決定層の軸は打ち止め**にしてよい（B163 (g)(h)）．
+  - P2 も外れる（ECOC でも同じ 2 クラスが大きく退行する） → 標本分割・非適格分類器という
+    Iter97 の機序の読み（B163 (d)）は**誤り**であり，「10 クラスを二値へ分解すること自体」が
+    この特徴空間で損をしている，という別の読みに差し替える必要がある．
+- **P3（確率の健全性）**: `predict_proba` の行和が全行 1.0 ± 1e-6 で，かつ `gap < 0.36` の行割合が
+  腕 A（20.1%）から **±5pt 以内**（Iter97 の OvO は −11.8pt 逸脱）．連続スコアなので通る見込み．
+- **P4（較正の健全性）**: 腕 C の ECE が腕 A の ECE を**上回らない**．
+  外れる場合は「鋭さの改善」を性能の証拠として読まない（Iter97 学び 5）．
+- **P5（対抗仮説の直接検定）**: 34 列の二値 CV 正解率の**中央値が 0.70 以上**．
+  0.6 を下回るなら「p≫n でメタクラス分割は分離できても汎化しない」が支持され，
+  ECOC の失敗はこれで説明される（この場合，符号長を伸ばしても救えない）．
+
+### 成功条件・非退行条件（事前登録 / Iter98）
+
+**基準線（本走）**: `results/20260928_160921/` の top1 = **0.833067**（3,750 問，
+Wilson 95%CI [0.8208, 0.8447]）．再現性の床は ±0.25pt．
+**基準線（CV）**: 腕 A = 0.802637．CV の Δ の SE ≒ **0.22pt**（Iter95/96 から見積り．
+足切り +1.0pt は約 4.5 SE）．
+
+- **スクリーニングの足切り（両方を満たさなければ本走せず `closed`．Iter97 と同一水準に据え置く）**:
+  1. **CV top1 Δ (C−A) ≥ +1.0pt**．
+  2. **per-domain recall の BH 補正後（q=0.05，10 指標）有意な退行が 0 件**
+     （seed 併合値を主，保守値を併記）．
+  - 外した場合は `models/`・`config.yaml`・`data/dataset.jsonl`・`scripts/train_domain_classifier.py` を
+    **1 バイトも変更せず**，スクリーニングスクリプトと結果 JSON だけを残してフェーズ 3 へ渡す．
+- **本走（足切り通過時のみ）**: `models/domain_classifier.joblib` を ECOC 版で再訓練し，
+  `mise run deploy` と sha256 確認のうえ **wafl500〜509 で 3,750 問フルスペック**を 1 回実行する．
+- **本走の判定**: Δ ≥ +0.5pt かつ McNemar p < 0.05 で `adopted`，Δ ≥ +0.5pt だが p ≥ 0.05 なら
+  `adopted_small`（要再現），|Δ| < 0.25pt なら `negligible`，Δ ≤ −0.5pt なら `rejected`．
+- **必須の非退行条件（1 つでも破れたら artifact をロールバック）**:
+  - C1: per-domain precision/recall 計 20 指標の BH 補正後の有意退行が **0 件**．
+  - C2: `used_fallback` 率・`dispatch_failed` 件数が基準線から増えない．
+  - C3: レバー発火の証拠（上記 (a)〜(e) と，ノード上の joblib の sha256 一致・`ecoc_head` の import 可否）．
+  - C4（参考値）: Random / BestSingle / Oracle を併記し BestSingle 超過を明示（success_criteria (3)）．
+  - C5: 複合設問 730 行の top1（基準 0.7904）が −1.0pt を超えて下がらないこと．
+  - C6: `mean_duration_ms` が基準線の +20% 以内（推論は `predict_proba` 1 回のままで実質不変のはず）．
+
+### 実行フェーズへの申し送り（Iter98）
+
+- **`OutputCodeClassifier` をそのまま使ってはならない**（`predict_proba` も `decision_function` も
+  持たず `CalibratedClassifierCV` に渡せない）．`ecoc_head.py` の `EcocLogLossClassifier` を使うこと．
+  試作は `/tmp/ecoc_probe.py` にあるが，本実装は責務コメント・docstring・型注釈を付けて書き直すこと．
+- **符号長 34・最尤復号・`random_state=98` は事前登録値であり掃引禁止**．
+  「符号長を変えたら上がるかもしれない」という誘惑に乗ると単一レバー原則が壊れる（B163 (f)(1)）．
+- **`sample_weight` 到達の機械的な検査を実装に埋め込むこと**（警告ガード＋`max|Δcoef| > 0` の実証）．
+  Iter97 の学び 2 の型を踏襲する．
+- 診断出力（混同行列・列ごと二値 CV 正解率・ECE/Brier・gap 分布・復号スコア差分布）は
+  **最初から**出すこと．足切りを外した場合でも機序が読めるようにするためである．
+- `dispatch_gap_threshold` の再較正は別レバーであり，本反復では**絶対に触らない**．
+- 実機ノード wafl500〜509 は**本走時のみ**．スクリーニングは wafl-ctrl5 で完結する．
+
+### 実装・実験 (Iter98)
+
+**結論: 事前スクリーニングの足切り 2 条件をいずれも不通過．本走は行っていない．**
+実機ノード wafl500〜509 には一切触れておらず，`models/`・`data/dataset.jsonl`・`config.yaml`・
+`scripts/train_domain_classifier.py`・`Dockerfile` は 1 バイトも変更していない
+（`git diff --stat` で実測確認済み）．
+
+**(1) 実装**
+
+- **`ecoc_head.py`（リポジトリ直下に新規）**: `EcocLogLossClassifier`．dense random code，
+  L = ⌈10·log₂(K)⌉ = 34，候補 10,000 本から行間最小 Hamming 距離最大を選択，
+  `decision_function` は log 損失の loss-based decoding（＝最尤復号）．リポジトリ直下に置いたのは
+  joblib がクラスをモジュールパス参照で直列化するためである（`scripts/` 配下や `__main__` で
+  定義するとノード側で復元できない）．**足切り不通過のため本番経路へは配線していない**．
+- **`scripts/screen_classifier_multiclass_decomposition.py`（既存 298 行を書き直し）**:
+  腕 A（既存 softmax，import は無変更）と腕 C（`_train_ecoc_classifier()`）の 3 seed × 固定 5-fold 比較．
+  腕 B（OvO）は再実行せず Iter97 実測値を `_ITER97_ARM_B_RECORDED` 定数として表に併記した．
+  診断出力（10×10 混同行列・34 列の二値 CV 正解率・符号行列の Hamming 距離・ECE/Brier・gap 分布・
+  較正前の生復号スコアの上位 1-2 位差分布）を最初から実装している（B163 (f)(4)）．
+  保守側 McNemar は discordant を seed 数 3 で割ったうえで `metrics._mcnemar_from_correctness` の
+  既存 χ²/p 式を再利用して算出した（χ² 式を自前で再導出していない点が重要．B163 (b)）．
+- **`results/iter98_screening/screening_result.json`（新規）**: 生の実行結果全件．
+- 検証: `ruff check` 全通過，`py_compile` OK，`pytest tests/test_metrics.py` 53 passed
+  （`metrics.py` は無変更で回帰なし）．`pytest tests/test_train_domain_classifier.py` は
+  4 passed / 1 failed だが，失敗は `ModuleNotFoundError: sentence_transformers` であり
+  開発ホストの venv に当該パッケージが無いという環境要因．`train_domain_classifier.py` の diff は 0 で
+  本反復の変更とは無関係である．
+- 合成データによる単体検証: `predict_proba` 行和 1.0，符号行列 (10, 34)・最小行間距離 14，
+  `sample_weight` 到達（等重み比 `max|Δcoef| = 0.123`，警告 0 件）．
+
+**(2) 事前スクリーニングの結果**（wafl-ctrl5，CPU のみ，n = 2,275，3 seed × 固定 5-fold，
+併合 n = 6,825，所要 約 48 分）
+
+| 腕 | 分解方式 | CV top1 |
+|---|---|---|
+| A | 単一 softmax（現行） | **0.802637** |
+| B | OvO（Iter97 実測の併記．本反復では再実行せず） | 0.794579 |
+| C | ECOC（L=34，最尤復号） | **0.788425** |
+
+- **CV Δ (C−A) = −1.421pt** → 足切り 1（≥ +1.0pt）に**不通過．符号も逆**である．
+- 全体 McNemar 併合値: discordant 179/82，χ² = 35.31，**p = 2.81e-9**．
+  保守値（discordant ÷ 3）: 60/27，χ² = 11.77，**p = 0.00060**．
+  **併合・保守のいずれでも有意に悪化**しており，B163 (b) で懸念した判定の反転は起きていない．
+- per-domain recall Δ（併合 p・BH 判定 / 保守 p・保守 BH 判定）:
+  - education: **−7.00pt**，p=1.23e-8 有意 / 保守 p=0.00137 有意
+  - social_science: **−6.40pt**，p=1.60e-10 有意 / 保守 p=4.07e-4 有意
+  - general: −2.67pt，p=5.10e-5 有意 / 保守 p=0.0233 非有意
+  - business_economics: **+1.87pt**，p=0.0108 有意（改善方向） / 保守 p=0.182 非有意
+  - history_culture: −0.16pt，p=1.0 非有意（**Iter97 で BH 有意退行だった域が今回は動いていない**）
+  - legal・medical・mathematics・computer_science・natural_science: |Δ| ≤ 1.3pt，いずれも非有意
+- **BH 後の有意退行 = 併合 3 件（education・general・social_science）／保守 2 件（education・
+  social_science）** → 足切り 2（0 件）に**不通過**．
+
+**(3) 事前登録した予測 P1〜P5 の当落**
+
+- **P1（CV Δ ≥ +1.0pt）: 落選**（−1.421pt）．
+- **P2（Iter97 で BH 有意退行だった 2 クラスの recall Δ 合計 ≥ −1.0pt）: 落選**（合計 −6.559pt）．
+  内訳が重要で，**history_culture は −0.16pt でほぼ不変＝Iter97 の当該退行は再現しなかった**一方，
+  **social_science は −6.40pt と Iter97 の −4.53pt よりさらに悪化**した．
+  事前登録どおり「P2 も外れる」ケースに該当し，B163 (d) の機序の読み（標本分割・非適格分類器）は
+  差し替えを要する．
+- **P3（`predict_proba` 行和 1.0 かつ gap<0.36 割合が腕 A ±5pt 以内）: 当選**
+  （行和 1.0±1e-6，gap<0.36 割合 Δ = +0.396pt）．Iter97 の P4（gap の人為的収縮）は ECOC では
+  予告どおり起きておらず，復号スコアの連続性という構造的差異は実測で確認された．
+- **P4（腕 C の ECE が腕 A を上回らない）: 当選**（ECE 0.01650 ≤ 0.01971）．
+  Brier は腕 C がわずかに悪い（0.12796 vs 0.12337）が，P4 の判定基準は事前登録どおり ECE のみ．
+- **P5（34 列の二値 CV 正解率の中央値 ≥ 0.70）: 当選＝対抗仮説は棄却**
+  （中央値 0.893，最小 0.845）．**「5 対 5 のメタクラス分割は p≫n で訓練上分離できても汎化しない」
+  という対抗仮説は成り立たない**．各列の二値問題は十分に汎化しているのに，それらを最尤復号で
+  束ねると全体の top1 が下がる．
+
+**(4) 判定**
+
+足切り 1・2 とも不通過のため**本走（wafl500〜509，3,750 問）は実施していない**．
+判定語の付与と機序の解釈は分析・考察フェーズの担当とする．
+なお wafl-ctrl5 の `~/expert-mesh-iter95/` に `ecoc_head.py` と更新版スクリーニングスクリプトを
+配置済みで，再現実行が必要ならそのまま使える．
+
+### Iteration 98 実行済み —— 判定 `closed`（足切り不通過・本走なし．value は「反証済み」）
+
+**変更（このイテレーションで実際に触ったもの）**
+
+- 新規: `ecoc_head.py`（`EcocLogLossClassifier`，本番経路へは**未配線**），
+  `scripts/screen_classifier_multiclass_decomposition.py`（書き直し．腕 A/腕 C の 3 seed × 固定 5-fold），
+  `results/iter98_screening/screening_result.json`（生データ全件）．
+- **無変更**: `models/`・`data/dataset.jsonl`・`config.yaml`・`scripts/train_domain_classifier.py`・
+  `Dockerfile`・実機ノード wafl500〜509（`git diff --stat` で実測確認済み）．
+
+**結果（要点のみ．詳細は上記「実装・実験 (Iter98)」）**
+
+- CV top1: 腕 A 0.802637（Iter95/96/97 と厳密一致＝測定系は健全）／腕 C 0.788425，**Δ = −1.421pt**．
+  Δ の SE ≒ 0.22pt に対し **6.5 SE 相当**で，符号も足切りと逆．全体 McNemar は併合 p=2.81e-9，
+  保守 p=0.00060 で**いずれも有意に悪化**．ノイズではない．
+- BH 後の有意退行は併合 3 件／保守 2 件（education −7.00pt，social_science −6.40pt，general −2.67pt）．
+- 予測の当落: P1 落選・P2 落選・P3 当選・P4 当選・**P5 当選（＝対抗仮説の棄却）**．
+
+**判定: `closed`（`rejected` ではない）．ただし value `error_correcting_output_codes` は「反証済み」**
+
+- `rejected` は本走の 2 軸表（Δtop1 × McNemar p）に基づく判定語であり，本走をしていない今回は
+  どのセルにも到達していない（B159 (A)・B161 (a)・B163 (a) と同一論点．判定語集合の拡張は
+  記録スキーマの破壊的変更なので自動決定しない）．
+- 一方で value の扱いは Iter95/96 型（「Δ は正だが足切りに届かない＝未通過・再試行の余地あり」）ではなく，
+  **Iter97 型（符号ごと逆・保守側でも有意＝反証済み，再試行しない）**とする．
+  さらに今回は下記 M6 により**失敗の機序まで説明が付いている**ので，符号長 L や復号方式を変えた
+  再試行にも見込みが無い（M6 の予測 (3)）．
+
+**機序の再定式化 M6: 「分解の失敗」ではなく「分解で新しい情報が増えない」**
+（B163 (d) の読み＝標本分割・非適格分類器は **P2 落選により棄却**．以下で差し替える）
+
+事前登録した診断出力だけで 3 手順の検証が完結した（開発ホスト，CPU 数秒．実機不使用）．
+
+1. **独立誤りの仮定を置いた場合の予測値と実測の乖離**．34 列の二値 CV 正解率（平均 0.8903）の誤り率で
+   **ビット誤りが列間で独立**に起きるとした Monte Carlo（20 万行，`random_state=98` の符号行列を
+   再生成．行間最小 Hamming 距離 14 を再現）では **top1 = 0.9997**，1 行あたり平均ビット誤り 3.73 で
+   訂正能力 6 ビットに十分収まる．**実測は 0.7884**．
+   → 予測どおりなら ECOC は圧勝するはずで，**列間のビット誤りは独立でない**．
+2. **ビット誤りは誤答行に全量集中している（恒等式による検証）**．
+   「誤答行では観測符号語が競合クラスの符号語へ**丸ごと**移り，正答行のビット誤りは 0」と仮定すると，
+   期待される列誤り率 = (ECOC の誤答率 0.21158) × (平均行間 Hamming 距離 17.378 / 34) = **0.1081**．
+   実測の平均列誤り率は **0.1097**（乖離 1.5% 相対，1 行あたり 0.055 ビット分）．
+   → 34 本の二値分類器は「独立にときどき間違える弱学習器」ではなく，**同じ行で足並みを揃えて
+   丸ごと隣のクラスへ倒れている**．符号の冗長性（6 ビットまで訂正）は名目値で，実際に起きる誤りは
+   7 ビット以上（典型 17 ビット）の符号語置換なのでこの符号長では原理的に訂正できない．
+3. **腕 A と腕 C の誤答行は 9 割方同じ行である（AGREE の実測）**．併合 n=6,825 で腕 A の誤答 1,347 行・
+   腕 C の誤答 1,444 行，共通 1,265 行．**腕 C の誤答の 87.6%・腕 A の誤答の 93.9% が共通**．
+   → Rifkin & Klautau (2004) の「points become errors **not because of deficiencies in the method of
+   combining binary classifiers**」（AGREE が誤り率を上回る）が本データで**そのまま再現**した．
+
+**M6 の言明**: 5,120 次元の埋め込み上では，誤りは**行（＝入力表現）の性質**であって決定則の性質ではない．
+どの分解方式も同じ行で同じ向きに倒れるため，**符号の冗長性に注入できる独立な情報が存在しない**．
+その状態で分解すると，softmax が学習していた**クラスごとの重み付き読み出し**が，34 列を等重みで足す
+**固定の読み出し**に置き換わる分だけ情報が減る．これが Δ = −1.42pt の中身である．
+
+**M6 の系（既存データでの裏づけ）**
+
+- 損失は**事後分布が平坦なクラス**に集中する．腕 A の recall と Δ の Spearman = **+0.596（p=0.069，n=10）**
+  で，高 recall 側（mathematics 0.948 → +0.40pt，computer_science 0.920 → +0.40pt）は動かず，
+  低 recall 側（education 0.535 → −7.00pt，social_science 0.788 → −6.40pt，general 0.799 → −2.67pt）が
+  落ちる．正側合計 +3.97pt に対し負側合計 −16.36pt で**正味の損失**（零和の再配分ではない）．
+- 失った質量の**行き先が意味的隣接クラスでない**．education −50 行の行き先は
+  business_economics +17・legal +17・history_culture +6・natural_science +6 と分散し，
+  social_science −48 行は legal +18・business_economics +17・general +9・**computer_science +8** と
+  分散する．意味的近傍への流出（Iter97 で読んだ像）ではなく，**平坦な事後分布を任意の固定読み出しで
+  割り振った結果の拡散**である．
+- P4（ECE 0.01650 ≤ 0.01971）が当選しているのに top1 が下がる点も M6 と整合する．復号スコアは連続で
+  較正も壊れていない（P3 も当選）．**壊れているのは確率の形ではなく，どの行をどのクラスへ割るかという
+  情報そのもの**である．
+
+**M6 が生む反証可能な予測（今後この軸を再訪するなら，これらを外した証拠が必要）**
+
+1. `random_state` を変えて別の dense random code を引くと，**退行するドメインの顔ぶれは入れ替わるが
+   全体 Δ は −1.4pt 前後のまま**（本反復で退行した education/social_science と，Iter97 の OvO で
+   退行した history_culture が入れ替わった事実の一般化）．
+2. 符号長を L=34 → 68 に伸ばしても **top1 の変化は ±0.3pt 以内**（ビット誤りが独立でない以上，
+   冗長性を足しても訂正できる誤りが増えないため）．
+3. OvA・OvO・ECOC のどれを使っても，softmax との誤答行の AGREE は **85% 以上**のまま．
+   （以上は**実行しない**．実行する価値が無いことを示すのが M6 の役割である．）
+
+**P2 の内訳の非対称性（history_culture 復帰・education/social_science 悪化）の読み**
+
+Iter97 と Iter98 で退行するドメインが入れ替わったこと自体が M6 の予測 1 の直接の観測である．
+OvO では 45 対の組み方，ECOC では 34 列の符号がそれぞれ「平坦な事後分布の行をどこへ倒すか」を決める
+**任意の固定読み出し**であり，どのクラスが割を食うかは分解の実装詳細に依存する．
+したがって「history_culture の退行が ECOC で解消した」ことを**改善の証拠として読んではならない**
+（同時に education が新規に −7.00pt 落ちている）．**共通しているのは「低 recall クラスが損をする」
+という一点だけ**であり，これは M6 の系そのものである．
+
+**決定層という軸の総括: 打ち止め（closed）**
+
+- 事前登録では「P2 通過かつ P1 不通過なら打ち止め」としていたが，実際は **P2 も落選**した．
+  事前登録の分岐は「軸を閉じる唯一の経路は『退行は OvO 固有だった』と示すこと」という前提で書かれており，
+  この前提が誤っていた．**実測はより強い経路で軸を閉じる**: 分解方式に依らず誤答行が共通（AGREE 87.6%）で，
+  ビット誤りに独立成分が無い（検証 1・2）以上，**どの分解方式を持ってきても softmax を上回れない**．
+  「OvO 固有か否か」は，軸を閉じる根拠として不要になった．
+- Rifkin & Klautau (2004) の主張（基底学習器が正則化されていれば分解方式は等価）との整合:
+  **本データは同論文の側に 2 反復連続で落ちた**．ただし厳密には「等価」ではなく **softmax が 0.8〜1.4pt
+  優る**（OvO −0.806pt，ECOC −1.421pt）．同論文の主張は「OvA が他に劣らない」であって「分解が単一
+  多項モデルに劣らない」ではないので，矛盾ではない．本研究の条件（p=5,120 ≫ n=2,275，L2 正則化 C=1.0）
+  では，単一の多項 softmax が持つ**クラス間で結合した正規化**が，分解では復元できない情報を担っている，
+  と読むのが実測に最も忠実である．
+- 以上より **`classifier_multiclass_decomposition` は closed**．同レバーの残 value は無く，再訪もしない．
+
+**学び**
+
+1. **「部分問題が解けている」ことは「分解が有効である」ことの証拠にならない**．P5（列ごと二値 CV 正解率
+   中央値 0.893）は事前には ECOC 成功の前提条件として登録したが，実際には**分解が無意味であることの
+   証拠**だった．二値精度 0.89 は，softmax の top1 0.803 から機械的に導かれる値（誤答 19.7% のうち
+   競合クラスが分割の反対側に来る確率が約半分 → 約 0.90）とほぼ一致する．つまり 34 本の二値分類器は
+   新しい識別面を 1 つも作っておらず，**同じ 10 値決定を 34 ビットに再符号化していただけ**である．
+   今後「分解して部分問題の精度を見る」型の診断では，**部分問題精度の期待値を基準線から先に計算して
+   おく**こと（これをやっていれば計画時点で ECOC の見込みの薄さを数値で示せた）．
+2. **誤り訂正符号の訂正能力は，誤りの独立性の仮定の上でしか意味を持たない**．最小 Hamming 距離 14・
+   6 ビット訂正という設計値は，本データでは一度も働いていない（実際の誤りは典型 17 ビットの符号語置換）．
+   ECOC を検討する場面では，**符号長や最小距離ではなく「列間の誤り相関」を先に測る**．測り方は本反復の
+   検証 2 の恒等式（列誤り率 ≒ 行誤り率 × 平均行間 Hamming 距離 / L）で，**追加実験なしに既存の
+   診断出力だけで判定できる**．この恒等式が成り立ってしまったら訂正能力は幻である．
+3. **AGREE（腕間の誤答行の重なり）は，軸を閉じる/開くの判断に直接使える指標である**．今回 87.6% /
+   93.9% という値が，「決定層をこれ以上いじっても無駄で，残る説明変数は入力表現である」という結論を
+   1 つの数字で支えた．**McNemar の discordant 数から追加計算 0 で求まる**（共通誤答 = 腕 C の誤答数
+   − discordant_a_only）ので，今後は腕比較のたびに既定で併記する．
+4. （運用）事前登録した分岐（「P2 通過かつ P1 不通過なら打ち止め」）が，実測が示した経路と食い違うことが
+   起こりうる．そのときは**事前登録の分岐に機械的に従うのではなく，前提が崩れた事実を明記したうえで
+   実測に即した結論を書く**．事前登録は結論を縛るためではなく，事後の都合の良い解釈を防ぐためにある．
+
+**次イテレーション（Iter99）の方針**
+
+`classifier_multiclass_decomposition` が closed となり，config.yml の既存 levers に未試行 value は無い．
+M6 の結論（誤りは決定則ではなく**入力表現**の性質）と，B115(3) のユーザー指示による優先順位
+（複合評価集合の拡充＝Iter78 で完了・730 行へ拡大済み ＞ **埋め込みモデルの差し替え** ＞ 全ドメイン共通
+ルールでの訓練データ拡充）が同じ方向を指す．そこで `embedding_model_replacement` に新 value
+**`japanese_specialized_ruri_v3_310m`** を追記し，Iter99 のレバーとする（B165）．
+`iteration_name` = **「埋め込みを日本語特化モデル ruri-v3-310m へ差し替える」**．
+根拠は Iter79 の調査で記録済みの JMTEB Classification（`cl-nagoya/ruri-v3-310m` **78.66** vs
+`Qwen3-Embedding-0.6B` 66.09，出典 hotchpotch 2025-06-11）．当時は「instruction prefix が必須で
+2 レバー目になる」ため候補外としたが，**Iter81 で prefix 機構が，Iter82 で 2 view 連結が既に本番に
+入っている**ので，その除外理由は現在では成立しない．
+**必須の申し送り**: (i) 現行の埋め込みは各ノードの Ollama `/api/embeddings` 経由（`config.yaml:4`）であり，
+ruri-v3-310m が Ollama で取得可能かは未確認である．Iter79/89 と同型の **G0（実現性ゲート）を計画段階に
+必ず置く**こと．(ii) G0 不合格なら事前登録した代替 `multilingual_e5_large`（JMTEB Classification 72.89，
+`query: ` prefix 必須だが prefix 機構は既存）へ値を切り替える（この 2 値のみ `values` へ追記済み）．
+(iii) 次元が変われば `embedding_view_concat` の連結次元も変わるため，`train_domain_classifier.py` の
+再訓練は差し替えに構造的に付随する作業であり別レバーではない（Iter79/89 で確立した型）．
+
 ## Iteration 97: 分類器の多クラス分解を softmax から一対一へ変える
 
 ### 調査 (Iter97)
