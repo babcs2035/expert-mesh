@@ -1,3 +1,430 @@
+## Iteration 99: 埋め込みを日本語特化モデル ruri-v3-310m へ差し替える
+
+### 調査 (Iter99)
+
+**実施場所の申告**: 本フェーズで実験ノード wafl500〜509 には一切触れていない（2026-09-23 絶対条件 (B)）．
+行ったのは (a) 開発ホストでのリポジトリ読み取りと既存 `results/20260928_160921/results.jsonl` の
+`metrics.py` 再計算（CPU のみ），(b) 公開 API（Hugging Face Hub・Ollama registry）への read-only な
+HTTP 問い合わせ，(c) **wafl-ctrl5 への read-only な状態確認**（`docker ps` / `/api/version` / `/api/ps`）
+だけである．`models/`・`data/`・`config.yaml` への書き込みは 0 件．モデルの pull・ロードは行っていない
+（G0 は実装フェーズの作業として下記に手順を明文化した）．
+
+**(1) 問い**（backlog B165 (e) の必須申し送り 5 点を問いに落としたもの）
+
+- Q1: `cl-nagoya/ruri-v3-310m` を**現行の実行経路（Ollama の `/api/embeddings`）でそのまま取得・実行できるか**．
+  できない場合の失敗の出方は「明示的なエラー」か「無言の劣化」か．
+- Q2: ruri-v3 の入力書式（prefix 規約）は現行のハードコードされた Qwen instruct 書式と両立するか．
+  両立しないなら，その差分は「モデル差し替えに構造的に付随する作業」か「2 本目のレバー」か．
+- Q3: 次元・p/n 比はどう変わり，それは仮説にどう効くか．
+- Q4: 公称ベンチ（JMTEB）から何をどこまで言えるか．事前投影はどうなるか．
+
+**(2) Q1: GGUF は存在するが「patched llama.cpp で変換」と明記されており，Ollama で動く保証は無い**
+
+- **取得元は 1 つだけ確認できた**: `Targoyle/ruri-v3-310m-GGUF`
+  （<https://huggingface.co/Targoyle/ruri-v3-310m-GGUF>，HF Hub API で 2026-09-29 に実測．
+  ファイルは `ruri-v3-310m-q8_0.gguf` の **1 本のみ**，`x-linked-size` = **336,949,248 バイト（337MB）**，
+  tags に `modernbert`・`base_model:cl-nagoya/ruri-v3-310m`，license `apache-2.0`）．
+  q8_0 以外の量子化は公開されていない．
+- **最大のリスクは同 README の次の 1 文である**（原文）: 「It was converted using a **patched version of
+  `llama.cpp`** to support the ModernBERT architecture with SentencePiece tokenizer」．
+  すなわち**上流の llama.cpp/Ollama でロードできるとは作者自身が書いていない**．
+  使用例も `llama-embedding` / `llama-server` であって Ollama ではない．
+- 上流側の状況: ModernBERT アーキテクチャの llama.cpp 本体への対応は **2025-12-22 にマージ**された
+  （llama-cpp-python issue #2144「ModernBERT architecture support was added to llama.cpp on Dec 22, 2025」
+  <https://github.com/abetlen/llama-cpp-python/issues/2144>）．ただし ruri-v3 のトークナイザは
+  **SentencePiece（`vocab_size` 102,400）**であり，上流対応が BPE 前提なら別問題として残る（未確認）．
+- **wafl-ctrl5 の Ollama は `0.34.4`**（2026-09-29 に `/api/version` で実測）．常駐は
+  `qwen3-embedding:4b` 3.26GB ＋ `qwen3-embedding:0.6b` 2.37GB ＋ swallow-8B 5.27GB ＝ **約 10.9 / 12GB**．
+  337MB の追加は算術上は収まるが，実測で確認する（G0-e）．
+- **失敗の出方は 2 種類あり，片方は無言である**．(a) 明示的エラー:
+  `unknown model architecture` / `model does not support embeddings`（Ollama issue #12757 が後者の実例．
+  <https://github.com/ollama/ollama/issues/12757>）．(b) **無言の劣化**: アーキテクチャが allowlist 外だと
+  pooling 種別や次元の指定が無視され，**エラーを出さずに誤ったベクトルが返る**
+  （LM Studio bug tracker issue #2177「Embedding GGUFs on non-allowlisted archs ... `/v1/embeddings` can then
+  return wrong-dimension vectors instead of erroring」<https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/2177>）．
+  本リポジトリは「config を正しく変えたのにコードへ到達せず基準線とビット単位一致」という同型事故を
+  6 回起こしている（d0004 §4）ので，**(b) を捕まえる数値検査を G0 に必ず含める**（G0-d）．
+- なお ruri-v3 は Ollama 公式 library には無い（`https://ollama.com/library/...` は 404）．
+  実運用例としては `hf.co/Targoyle/ruri-v3-310m-GGUF` を Ollama から直接引く記述が複数ある
+  （例: <https://github.com/haruneko/local-bot/blob/main/docs/DECISIONS.md>「ruri-v3（日本語特化・768 次元・
+  `hf.co/Targoyle/ruri-v3-310m-GGUF`）。`/api/embed`」）．これは**第三者の報告であって本環境での検証ではない**．
+- **代替（G0 不合格時）の実現性は確認済み**: `multilingual-e5-large` は Ollama registry に
+  `zylonai/multilingual-e5-large` として manifest が存在する（2026-09-29 に registry API で 200 応答を実測）．
+
+**(3) Q2: ruri-v3 の prefix 規約は現行のハードコードと非互換．分類用途の規定値は `トピック: ` である**
+
+- ruri-v3 の model card（<https://huggingface.co/cl-nagoya/ruri-v3-310m>，原文を取得して確認）は
+  **「1+3 prefix scheme」**を定め，用途別に次を規定する．
+  - **`トピック: ` — is used for classification, clustering, and encoding topical information**（＝本タスク）
+  - `検索クエリ: ` — retrieval のクエリ側，`検索文書: ` — retrieval の文書側，および prefix なし．
+- 一方，本リポジトリの `expert_backend.py:157` は
+  `prompt = f"Instruct: {instruction}\nQuery: {text}" if instruction else text` と
+  **Qwen3-Embedding の instruct 書式をハードコード**している．ruri にこの書式を与えるのは
+  モデルが規定する入力分布から外れ，「ruri へ差し替えた」ことにならない．
+- **判断（自律判断．backlog B166 (a) に記録）**: prefix の**組み立て方（テンプレート）はモデル固有の入力書式**で
+  あり，次元変更に伴う分類器再訓練と同じく**差し替えに構造的に付随する作業**と扱う．Iter81 のレバー
+  （instruction の**文言探索**）の再開ではない．したがって**文言は掃引せず model card の規定値 1 つに固定**する．
+- 他の候補（`検索クエリ: `）や，Iter81 の英文 instruction を ruri 用に流用する案は**一切比較しない**．
+  比較した時点で単一レバー原則が濁る．
+
+**(4) Q3: 次元は 5120 → 1536．p/n は 2.25 → 0.67 へ下がる**
+
+- 現行 artifact `models/domain_classifier.joblib`（sha256 `2f801357...`）は
+  `qwen3-embedding:4b` の 2 ビュー連結＝ **2560 × 2 = 5120 次元**，訓練集合は
+  `data/classifier_train_iter94_dedup.jsonl`（**2,275 行**）．p/n = 2.25．
+- ruri-v3-310m は `hidden_size` = **768**（`config.json` を実測）なので 2 ビュー連結で **1536 次元**．
+  p/n = 0.67 へ下がる．**方向としては過学習側のリスクが減り，表現容量側のリスクが増える**．
+  Iter89 の学び（特徴空間の入れ替えは Q1 層＝最難層を大きく動かす）が効くかどうかは事前には決まらない．
+- pooling は **mean**（`1_Pooling/config.json` の `pooling_mode_mean_tokens: true`．
+  なお `config.json` の `classifier_pooling: "cls"` は分類ヘッド用の別設定であり sentence-transformers の
+  埋め込み経路は mean pooling である）．**GGUF 側の pooling 種別がこれと食い違うと (2)(b) の無言の劣化になる**．
+  `max_position_embeddings` = 8192 で，本データの最長行（評価 1,811 文字・訓練 1,239 文字）は余裕で収まる．
+
+**(5) Q4: 公称ベンチは「候補を絞る道具」に留める（Iter79 学び 2）．事前投影は幅が広い**
+
+- JMTEB Classification（hotchpotch, 2025-06-11，
+  <https://secon.dev/entry/2025/06/11/100000-qwen3-embedding-jmteb>）: **ruri-v3-310m 78.66**，
+  **multilingual-e5-large 72.89**，Qwen3-Embedding-0.6B 66.09．
+- **ただし現行は `qwen3-embedding:4b` であり，4b の JMTEB 値は今回も見つからなかった**（Iter89 の調査時と同じ状態）．
+  したがって「ruri 78.66 > 現行」は **0.6b 比の外挿**にすぎない．Iter79 の学び 2（MTEB 差 +2.05pt に対し
+  実測 +16.34pt）と Iter89（MTEB +5.12pt に対し実測 +2.94pt）のいずれも公称差と実測差が一致しておらず，
+  **採否は本走でのみ決める**（B165 (4)）．
+- **事前投影**: 点推定 **Δtop1 ≒ +1.0pt**，80% 区間 **−2.0 〜 +4.0pt**．
+  上振れ根拠は日本語特化（JMTEB Classification で 0.6b 比 +12.57pt）と，Iter89 が示した
+  「特徴空間の入れ替えは訓練データ系列より交換比が良い」という構造．
+  下振れ根拠は (i) 現行が既に 4b で底上げ済み，(ii) 次元が 1/3.3 に減る，(iii) q8_0 量子化と
+  GGUF 変換経路の忠実性が未検証，の 3 点．**符号の不確実性が大きいことを事前に明記しておく**．
+
+### 仮説 (Iter99)
+
+**Iter98 の機序 M6（誤りは決定則ではなく入力表現の性質に由来する．腕間の誤答行の重なり 87.6%/93.9%）が
+正しいなら，改善は入力表現を替えたときにのみ起こる．**日本語の学術・専門ドメイン文を，多言語汎用モデル
+（`qwen3-embedding:4b`）ではなく日本語専用に事前学習・対照学習された `ruri-v3-310m` で，かつ
+**分類・クラスタリング用途として規定された `トピック: ` prefix** で符号化すれば，
+現行で誤っている行（とくに Iter89 が特定した最難層 Q1）の一部が線形分離可能な位置へ移り，top1 が上がる．
+
+**対抗仮説（同じ強さで想定する）**: (H2) 768×2 = 1536 次元は 10 ドメインを分けるには容量が足りず，
+5120 次元の現行に劣る．(H3) GGUF 変換（patched llama.cpp・q8_0）が参照実装を再現せず，
+公称性能が発現しない．H3 は**効果の不在ではなく実験の不成立**なので，G0-d で本走前に切り分ける．
+
+### 単一レバー (Iter99)
+
+- **レバー**: `embedding_model_replacement` = **`japanese_specialized_ruri_v3_310m`**
+  （config.yml に Iter98 分析フェーズが事前登録済みの値．新レバーの追加は不要）．
+- **何を何から何へ**: `config.yaml:4` の
+  `embedding_model: qwen3-embedding:4b` → **`hf.co/Targoyle/ruri-v3-310m-GGUF:Q8_0`**（G0 で確定する正式タグ名）．
+  これに構造的に付随する作業は次の 2 つで，**いずれも別レバーではない**（Iter79/89 で確立した型）．
+  1. **分類器の再訓練**（`models/domain_classifier.joblib` を同じ訓練集合・同じモデル定義で作り直す．
+     次元が 5120 → 1536 に変わるため必須．B165 (3)）．
+  2. **prefix テンプレートのモデル固有化**（上記 Q2．`config.yaml` に新キー
+     **`embedding_prompt_template`** を足し，既定値を現行と**ビット単位で同一**の
+     `"Instruct: {instruction}\nQuery: {text}"` にしたうえで，本反復では `"トピック: {text}"` に設定する）．
+     config.yaml のスキーマ変更は B116 (3) で本レバーに限り事前承認済み．
+- **固定する構成（1 つも動かさない）**:
+  `data/classifier_train_iter94_dedup.jsonl`（2,275 行）・`data/dataset.jsonl`（3,750 行，sha256 不変）・
+  `embedding_view_concat: true`（連結順 [prefix なし, prefix あり] も不変）・
+  `routing_method=supervised_classifier`・`confidence_threshold=0.0`・`dispatch_candidate_threshold=0.0`・
+  `dispatch_top_k=2`・**`dispatch_gap_threshold=0.36`（B165 (5)．埋め込み変更で gap 分布は必ず動くが，
+  閾値の再較正は別レバーであり本反復では絶対に触らない）**・`dispatch_gap_max_k=4`・
+  `aggregation_method=max_confidence`・`judge_model`・各ノードの `light_model`/`expert_model`・
+  `scripts/train_domain_classifier.py` のモデル定義（`LogisticRegression(max_iter=1000, class_weight=None)`
+  ＋ `_extract_sample_weights()` ＋ `CalibratedClassifierCV(method='temperature', ensemble=True)`）・
+  `classifier.py`・`aggregator.py`・`metrics.py`・`ecoc_head.py`（本走経路へは未配線のまま）．
+  **ドメイン固有の後付け補正は追加しない．棄権／エスカレーション系には触れない．**
+
+**レバーを読むコード行と，そこへ到達する条件（d0004 §4．6 回繰り返した同型事故の恒久対策）**
+
+| # | 経路 | 読むコード | 到達確認（1 つでも欠けたら実験不成立） |
+|---|---|---|---|
+| 1 | 設定 → 10 ノードへのモデル配布 | `tools/node_models.py:13` が `config["embedding_model"]` を返し `mise.toml` の deploy が `ollama pull` | 全 10 ノードの `ollama list` に ruri の行があること |
+| 2 | 設定 → 各ノードの config | `mise.toml` の `rsync config.yaml` | 全 10 ノードで `grep '^embedding_model:' $REMOTE_DIR/config.yaml` が新値 |
+| 3 | 設定 → 実行時のクエリ埋め込み | `node.py:202-207` の `embed_query_views(..., config["embedding_model"], ...)` | 予備 20 問が HTTP 500 を返さないこと（1536 次元を 5120 次元の旧 artifact に食わせれば `predict_proba` が必ず例外になるので，Iter36 型の無言の不一致はここで必ず落ちる） |
+| 4 | artifact → 10 ノード | `mise.toml` の `models/` rsync | 全ノードの `domain_classifier.joblib` の sha256 一致かつ **`n_features_in_ == 1536`** |
+| 5 | **新キー `embedding_prompt_template` の到達（本反復の最大の新規リスク）** | `expert_backend.py:157` のハードコードを置換．呼び出し側は `node.py:202`・`scripts/train_domain_classifier.py:158`・`tools/smoke_check.py:170` の **3 箇所すべて** | (a) 単体テストで template 適用を検証，(b) 訓練時に実際に使った template 文字列を標準出力へ印字し journal に転記，(c) **prefix ありビュー（後半 768 次元）が prefix なしビュー（前半 768 次元）とベクトルとして一致しないこと**を訓練特徴の先頭 1 行で実測（一致したら template 未適用） |
+| 6 | 実験 → 指標 | `metrics.py` 無変更 | `total_questions == 3750` かつ `compound_domain_question_count == 730` |
+
+### 事前ゲート G0（実現性．wafl-ctrl5 のみ．wafl500〜509 不使用）
+
+**判定規則は結果を見る前にここで固定する．G0 は「効果の有無」ではなく「そもそも実行可能か」だけを見る．**
+
+- **G0-a（取得）**: wafl-ctrl5 の Ollama（`0.34.4`）で `ollama pull hf.co/Targoyle/ruri-v3-310m-GGUF:Q8_0`
+  が成功する（337MB）．タグ名が異なる場合は registry の manifest を引いて正式タグを特定してよい
+  （これは調達手段の確定であって設計選択ではない）．失敗なら**不合格**．
+- **G0-b（ロードと応答）**: `/api/embeddings` に日本語 1 文を POST して 200 が返り `embedding` が得られる．
+  `unknown model architecture` / `model does not support embeddings` 等が出たら**不合格**．
+- **G0-c（次元）**: 返る次元が **768** であること（`config.json` の `hidden_size` と一致）．
+  768 以外なら**不合格**（LM Studio issue #2177 型の事故）．
+- **G0-d（数値忠実性．無言の劣化を捕まえる必須検査）**:
+  wafl-ctrl5 上で `sentence-transformers` の `cl-nagoya/ruri-v3-310m`（fp32．310M なので RTX 3060 で十分）を
+  **参照実装**とし，`data/classifier_train_iter94_dedup.jsonl` から無作為 **32 行（`random_state=99`）**について
+  `トピック: ` 付きの埋め込みを両経路で計算する．合格条件は
+  **行ごとコサイン類似度の中央値 ≥ 0.99 かつ最小 ≥ 0.97**．
+  下回る場合は pooling 種別・正規化・トークナイザの不一致が疑われるので**不合格**とする
+  （「精度が出なかった」ではなく「実験不成立」として扱う根拠になる）．
+- **G0-e（VRAM・常駐）**: `ollama ps` で ruri が **`100% GPU`** であること．deploy 後は全 10 ノードで
+  ruri と当該ノードの `expert-mesh-*-lora` がともに `100% GPU`（`light_model` の退避は合格を妨げない．
+  Iter89 で確立済みの読み）．
+- **G0 不合格時の分岐（B165 (2)．Iter89 で確立した型）**: 値を **`multilingual_e5_large`**
+  （`zylonai/multilingual-e5-large`．registry に存在することを本日確認．**1024 次元 → 連結 2048 次元**，
+  `embedding_prompt_template` は **`"query: {text}"`**，参照実装は `intfloat/multilingual-e5-large`）へ
+  切り替え，G0-a〜e を同じ基準で再適用する．**`iteration_name` は追跡性のため変更せず**，
+  切り替えた事実と理由を journal の実行節に明記する．
+  **E5 も不合格なら `invalid`（実現性）**として本走を行わず分析フェーズへ渡し，
+  backlog B165 要レビュー (C)（GGUF 変換や sentence-transformers 経路の導入は 10 ノードの実行基盤の
+  構成変更にあたる）として**人間判断を仰ぐ**．本反復内で第 3 の埋め込みモデルを探しに行くことはしない
+  （Iter80 が `bge-m3` へ差し替えて「イテレーション名と実際の値がずれる」状態を作った失敗を繰り返さない）．
+
+### 事前ゲート G1・G2（いずれも report-only．本走を省略する材料にはしない）
+
+- **G1（CV．B165 (4)「本走前に wafl-ctrl5 の CV で必ず数値化する」への回答）**:
+  wafl-ctrl5 で `data/classifier_train_iter94_dedup.jsonl`（2,275 行）**のみ**を使い，
+  ruri の 2 ビュー 1536 次元で 5-fold StratifiedKFold（`random_state=42`）の accuracy / macro-F1 を測り，
+  現行 `qwen3-embedding:4b` の同条件の値（**0.802637**）と並べて記録する．評価集合は一切見ない．
+  **値の選定には使わない**（レバーは確定済み）．p/n が 2.25 → 0.67 へ下がるため，CV と本走の乖離の向きは
+  Iter89（CV +5.29pt に対し本走 +2.94pt）とは変わりうる．**本走の予測値として扱わない．**
+- **G2（replay．検出力の事前確定）**: 評価 3,750 行について ruri の 2 ビュー埋め込みを wafl-ctrl5 で計算し
+  （`data/embcache_eval_ruri-v3-310m{,__p1}.npy` を新規作成），旧 artifact（`2f801357...`，5120 次元）と
+  新 artifact（1536 次元）の `predict_proba` argmax を replay する．
+  **discordant 行数 n_d を出し，McNemar の有意境界 `1.96·√n_d / 3750` を本走前に確定して記録する**
+  （Iter89 は n_d = 347 で境界 1.063pt．今回も特徴空間を丸ごと入れ替えるので n_d は数百規模になる見込み）．
+  **n_d ≥ 30 を最低条件**とし，一桁なら「効果なし」ではなく**設定未到達**を既定の解釈とする（d0004 §4）．
+  replay が予測した Δ も記録するが，**この値を見て成功条件を書き換えてはならない**（B131 以来の運用）．
+- **本走は G0 合格なら必ず実施する**（2026-09-23 絶対条件 (A)）．G1/G2 の数値が悪いことを理由に
+  本走を省略しない．**唯一の安全弁**として，G1 の CV Δ が **−5.0pt 以下**（CV の Δ の SE ≒ 0.22pt に対し
+  約 23 SE．施策の効果ではなく実装・書式の破綻としか解釈できない水準）の場合に限り，
+  本走前に原因究明へ戻る（効果判定のための足切りではなく**不具合検知**である．B166 (b)）．
+
+### 事前登録する予測 P1〜P6（Iter99）
+
+- **P1（主予測）**: 本走で **Δtop1 ≥ +0.5pt かつ McNemar p < 0.05**（＝ `adopted`）．
+  点推定 +1.0pt，80% 区間 −2.0 〜 +4.0pt．**符号の確信は低い**と明記しておく．
+- **P2**: G1 の CV top1 が現行 **0.802637** を上回る（Δ ≥ 0）．
+- **P3**: G2 replay の予測 Δ と本走実測 Δ の乖離が **≤ 0.5pt**（Iter89 は 0.12pt．測定系の再現性検査）．
+- **P4**: 新 artifact の `n_features_in_` == **1536**，全 10 ノードで sha256 一致．
+- **P5**: G0-d のコサイン類似度の**中央値 ≥ 0.99**（GGUF 経路が参照実装を再現している）．
+- **P6**: rank1−rank2 の confidence gap 分布が動き，`gap < 0.36` の行割合が基準線から **±3pt 以上**ずれる
+  （Iter82→83 で同種の移動を実測済み）．**これは報告のみで，`dispatch_gap_threshold` は 0.36 に固定する**（B165 (5)）．
+  P6 が当たった場合，閾値の再較正を**次反復のレバー候補**として backlog へ回す．
+
+### 成功条件・非退行条件（事前登録 / Iter99）
+
+**基準線（本走）**: `results/20260928_160921/`（3,750 問）．本日 `metrics.py` で再計算した実測値は
+top1 = **0.833067**（Wilson 95%CI [0.820791, 0.844660]），`fallback_rate` 0.0，
+`dispatch_failure_rate` 0.000267，`mean_duration_ms` **2534.762**，
+`compound_domain_top1_accuracy` **0.790411**，`compound_domain_set_recall` **0.567123**，
+`compound_mean_dispatched_count` **1.950685**，ECE **0.031774**，Brier 0.110943，
+`single_domain_top1_accuracy` 0.843377．**再現性の床は ±0.25pt．**
+
+- **判定**: Δ ≥ +0.5pt（top1 ≥ **0.838067**）かつ McNemar p < 0.05 → **`adopted`**．
+  Δ ≥ +0.5pt だが p ≥ 0.05 → `adopted_small`（要再現）．|Δ| < 0.25pt → `negligible`．
+  Δ ≤ −0.5pt または下記 C1〜C7 のいずれか違反 → `rejected`（artifact と `config.yaml` をロールバック）．
+  G0 不合格で本走に至らなかった場合 → `invalid`（実現性）．
+- **必須の非退行条件**（1 つでも破れたら `rejected` としてロールバック）:
+  - **C1**: per-domain precision/recall 計 20 指標の BH 補正後（q=0.05）の有意退行が **0 件**．
+  - **C2**: `fallback_rate` が 0.0 のまま，`dispatch_failure_rate` ≤ **0.005**．
+  - **C3**: レバー発火の証拠（上表 #1〜#6 と G0-a〜e）がすべて記録されていること．
+  - **C4**: 複合設問 730 行の top1 が **≥ 0.780411**（基準 0.790411 から −1.0pt 以内）．
+  - **C5**: `compound_domain_set_recall` **≥ 0.5400**，`compound_mean_dispatched_count` **≤ 2.10**．
+  - **C6**: `mean_duration_ms` ≤ **3041.7**（基準 2534.762 の +20%．ruri は 310M と現行 4B より小さいので
+    短縮方向を見込むが，条件は退行側にのみ置く）．
+  - **C7**: ECE ≤ **0.08**（基準 0.031774）．
+- **参考値として併記**: Random 0.119467 / BestSingle / Oracle 1.0（success_criteria (3)）と
+  `answer_quality` / `end_to_end`．
+
+### 実行フェーズへの申し送り（Iter99）
+
+- **使うホスト**: 埋め込み計算・分類器訓練・G0〜G2 はすべて **wafl-ctrl5**（絶対条件 (B)）．
+  **wafl500〜509 は deploy と本走（および予備 20 問）でのみ触れる**．
+- **触ってよいファイル**: `config.yaml`（`embedding_model` と新キー `embedding_prompt_template` の 2 行のみ）・
+  `expert_backend.py`（`embed()` の prefix 組み立てのテンプレート化．既定値は現行と同一挙動）・
+  `node.py` / `scripts/train_domain_classifier.py` / `tools/smoke_check.py`（新キーの受け渡し 3 箇所）・
+  `models/domain_classifier.joblib`（再訓練．旧 artifact は
+  `models/domain_classifier_pre_iter99_qwen3_4b.joblib` へ退避）・
+  `data/embcache_*`（新規キャッシュ）・`tests/`（template の単体テスト）．
+  **`data/dataset.jsonl`・`data/classifier_train_iter94_dedup.jsonl`・`metrics.py`・`classifier.py`・
+  `aggregator.py`・`ecoc_head.py` は 1 バイトも変更しない．**
+- **prefix は `トピック: {text}` 一択**．`検索クエリ: ` 等との比較・文言の掃引は**禁止**（単一レバー原則）．
+- **`dispatch_gap_threshold` は 0.36 のまま**．gap 分布が動いても再較正しない（B165 (5)）．
+- キャッシュ名は**モデル名とビュー ID を必ず含める**こと（Iter81 の教訓．旧キャッシュを無言で読む事故の防止）．
+- G0-d の参照実装導入（`sentence-transformers` + `cl-nagoya/ruri-v3-310m`）は wafl-ctrl5 のローカル環境
+  （`~/expert-mesh-iter95/` の uv 3.12 環境）に閉じること．本番イメージ（`Dockerfile`）には入れない．
+
+### 実装・実験 (Iter99)
+
+オーケストレータによる記録（rc-executor が journal へ未記入のまま引き渡したため，フェーズ 3 で記録が
+失われないようフェーズ境界で補記した）．**実験ノード wafl500〜509 は一切未使用**である．
+
+**G0（実現性ゲート，wafl-ctrl5）: 全項目 PASS．** (a) `ollama pull` 成功（337MB），(b) `/api/embeddings`
+200 応答，(c) 次元 **768**，(d) 数値忠実性は sentence-transformers `cl-nagoya/ruri-v3-310m` 参照実装に対し
+コサイン**中央値 0.99604・最小 0.97278**（基準 0.99 / 0.97 をいずれも充足），(e) `ollama ps` が 100% GPU．
+代替 `multilingual_e5_large` へのフォールバックは不要だった．G0 最大のリスクとしていた
+「patched llama.cpp 由来の GGUF が Ollama 0.34.4 で動くか」は，(d) の忠実性をもって解消した．
+
+**G1（CV，wafl-ctrl5）で安全弁が発火し，本走を実施していない．** ruri 2 ビュー 1536 次元の CV top1 =
+**0.729670** に対し基準 0.802637，**Δ = −7.297pt**．事前登録した安全弁「CV Δ ≤ −5.0pt は効果ではなく
+実装破綻としか解釈できない水準」（B166 (b)）を超過したため，wafl500〜509 での 3,750 問本走（約 2 時間）は
+起動していない．**CV を足切りに使わないという絶対条件 (A) との関係**: これは効果量による足切りではなく，
+事前登録済みの実装破綻検知としての停止であり，(A) の禁じる「CV による採否判定」には当たらない．
+
+**実装バグの切り分け（バグの兆候は見つかっていない）**:
+
+| 確認項目 | 実測 | 読み |
+|---|---|---|
+| p0 単体ビュー | 0.702857 | 両ビューが同程度に低い |
+| p1 単体ビュー | 0.707253 | 同上 |
+| 2 ビュー連結 | 0.729670 | 連結で改善＝ビュー結合は正しく効いている |
+| G0-d コサイン忠実性 | 中央値 0.99604 | 埋め込み値そのものは参照実装と一致 |
+
+内部整合性（単体 < 連結）と数値忠実性の双方が成立しており，**実装バグの兆候は特定できなかった**．
+rc-executor の所見は H2（768×2 = 1536 次元では 5120 次元に対し容量が不足）寄りだが，
+Δ = −7.297pt という大きさが H2 だけで説明できるかは**分析フェーズの判断事項**として引き継ぐ．
+
+**変更したファイル**: `expert_backend.py`（`embed()` に `prompt_template` 引数を追加．既定値は旧 Qwen
+instruct 書式で**ビット同一**），`node.py` / `scripts/train_domain_classifier.py` /
+`tools/smoke_check.py` / `scripts/embed_classifier_train_pool.py`（`config["embedding_prompt_template"]`
+の受け渡し 3 箇所＋診断補助 1 箇所），`tests/test_expert_backend.py`（新規 6 テスト．既定値温存・
+template 適用・plain view 不変を検証）．ruff / pytest は新規失敗 0（既存 9 件の FAIL は環境要因の
+再現済み既知不具合）．
+
+**本番状態は変更していない**: `config.yaml` は diff 0（元値 `qwen3-embedding:4b` のまま），
+`models/domain_classifier.joblib` は旧 5120 次元のままで未再訓練．両者が整合しているため production は
+一貫している．埋め込みキャッシュ
+`data/embcache_{train,eval}_iter99_ruri-v3-310m.npy`（train 2275×1536，eval 3750×1536）は作成済みで，
+分析フェーズが追加計算に再利用できる．G2（replay）は旧 qwen4b の評価キャッシュが 3,435 行で
+現行 3,750 行と不一致のため未実施．
+
+**事前登録した予測の当落**: P1・P3〜P6 は本走がないため**未判定**．**P2（CV ≥ 0.802637）は落選**
+（0.729670）．
+
+### Iteration 99 実行済み
+
+**判定: `closed`（本走なし）．value `japanese_specialized_ruri_v3_310m` は「単独差し替え」としては
+反証済み・再試行しない．ただし対抗仮説 H2（次元容量の不足）は本フェーズの追加計算で反証された．**
+
+#### 変更（本フェーズで production 状態は 1 バイトも変えていない）
+
+実装フェーズの変更は `expert_backend.py`（`embed()` の `prompt_template` 引数．既定値は旧 Qwen instruct
+書式とビット同一）・`node.py`・`scripts/train_domain_classifier.py`・`tools/smoke_check.py`・
+`scripts/embed_classifier_train_pool.py`・`tests/test_expert_backend.py`（新規 6 テスト）のみ．
+`config.yaml` は diff 0，`models/domain_classifier.joblib` は旧 5120 次元のままで production は自己整合．
+**この分岐は後方互換で既定値が旧挙動と一致するため，`closed` 判定でもロールバックせず残す**
+（次反復の異種埋め込み融合がこの `prompt_template` 機構を必要とするため，撤去はむしろ手戻りになる）．
+
+#### 追加計算（すべて開発ホストの CPU．wafl500〜509 も wafl-ctrl5 も不使用）
+
+既存キャッシュだけで完結させた．`data/embcache_train_iter89_qwen3-embedding_4b{,__p1}.npy` と
+`data/embcache_train_iter92_qwen3-embedding_4b_new20{,__p1}.npy` を id 対応で再構成して
+`classifier_train_iter94_dedup.jsonl`（2,275 行）に揃えた 5120 次元行列を作り（欠損 0 件），
+`data/embcache_train_iter99_ruri-v3-310m.npy`（2,275×1,536，id 順は dedup と完全一致を検証済み）と
+**同一の 5-fold StratifiedKFold（`random_state=42`）・同一のモデル定義**（`train_classifier()` と
+`_extract_sample_weights()` をそのまま import）で比較した．再実装のため rc-executor の値とは
+0.2〜0.8pt ずれるが（qwen 0.804396 対 報告 0.802637，ruri 0.721319 対 報告 0.729670），
+**Δ の符号と桁は完全に再現している**（本再実装で Δ = −8.31pt，報告 −7.30pt）．
+CV accuracy の SE は n=2,275 で **0.83pt**．
+
+#### 結果 1: H2（1536 次元では容量が足りない）は**反証された**
+
+各 fold の訓練部分だけで PCA を学習し（漏れなし），ビューごとに次元を落として同じ CV を回した容量曲線:
+
+| 特徴空間 | 次元 | CV top1 |
+|---|---|---|
+| qwen3-4b 2 ビュー（現行） | 5120 | **0.804396** |
+| qwen3-4b を PCA | 1536 | **0.804396** |
+| qwen3-4b を PCA | 768 | 0.799121 |
+| qwen3-4b を PCA | 512 | 0.795165 |
+| qwen3-4b を PCA | 256 | 0.788571 |
+| qwen3-4b を PCA | 128 | 0.775824 |
+| **ruri-v3-310m 2 ビュー** | **1536** | **0.721319** |
+| ruri-v3-310m を PCA | 768 | 0.719121 |
+| ruri-v3-310m を PCA | 512 | 0.716484 |
+
+**ruri と次元を完全に揃えた qwen（PCA 1536）は，5120 次元と小数点以下まで同値の 0.804396 である．**
+それどころか **128 次元まで落とした qwen（0.775824）ですら ruri の 1536 次元（0.721319）を +5.45pt
+上回る**．ruri 側も 768→1536 で +0.22pt しか動かず（SE 0.83pt 内＝飽和）．
+すなわち **Δ = −8.31pt のうち次元容量で説明できる分は 0pt** であり，
+rc-executor の所見（H2 寄り）は棄却される．損失は表現そのものの性質に帰属する．
+
+分散の形も容量不足とは逆を指す．participation ratio による有効次元は **ruri 111.5 > qwen 76.5**，
+分散 90% に要する主成分数は **ruri 220 < qwen 481**，第 1 主成分の寄与は ruri 0.0458 < qwen 0.0721．
+ruri の空間は潰れていない（むしろ等方的）．**分散はあるがドメイン弁別に効かない向きに使われている．**
+
+#### 結果 2: AGREE（Iter98 の学びに従い既定で併記．追加計算ほぼ 0）
+
+| 量 | 値 |
+|---|---|
+| qwen の CV 誤答 | 445 / 2,275 |
+| ruri の CV 誤答 | 634 / 2,275 |
+| 共通の誤答 | **390** |
+| 共通 / qwen 誤答 | **0.8764** |
+| 共通 / ruri 誤答 | 0.6151 |
+| ruri のみ誤り b / qwen のみ誤り c | **244 / 55**（McNemar χ² = 118.2） |
+
+**qwen の誤答の 87.6% を ruri も誤る．**この 87.6% は Iter98 で softmax 対 ECOC を比べたときの
+AGREE（87.6%）と一致する．決定則を替えても，**埋め込みモデル系統を丸ごと替えても，同じ行が落ちる．**
+しかも ruri が新たに救った行は 55 行しかなく，新たに落とした行が 244 行ある．
+**Iter99 の仮説（表現を替えれば最難層 Q1 の一部が分離可能な位置へ移る）は，救済 55 行に対し
+新規損失 244 行という形で明確に否定された．**
+
+ドメイン別でも**10 ドメイン中 9 つが悪化**し（legal のみ +1.30pt，n=77 で SE 4.2pt ＝ ノイズ内），
+悪化幅は business_economics −12.40pt / social_science −11.20pt / computer_science −9.20pt …と広く分布する．
+qwen 側 recall と Δ の Spearman は **+0.285（p=0.425）**で有意でない．
+**特定の難層への集中ではなく，全ドメイン一律の地盤沈下である．**
+
+#### 結果 3（次の一手の根拠）: ruri は単独では劣るが，qwen と**相補的**である
+
+同じ CV で qwen 5120 次元と ruri 1536 次元を単純連結（6,656 次元）した:
+
+| 特徴空間 | CV top1 | qwen 単独との discordant |
+|---|---|---|
+| qwen 5120（現行） | 0.804396 | — |
+| **qwen 5120 ⊕ ruri 1536** | **0.812308（+0.79pt）** | 融合のみ誤り 16 / qwen のみ誤り 34，**McNemar 正確検定 p = 0.0153** |
+
++0.79pt は CV の SE 0.83pt と同程度だが，**対応のある比較（McNemar）では p=0.0153 で有意**であり，
+方向も救済 34 対損失 16 と一貫している．**単独では 8pt 劣る表現が，連結すると現行を上回る向きに効く**
+＝ ruri は qwen が捉えていない弁別情報を少量持っている．結果 2 の「共通 390 行」は依然として硬いが，
+「ruri のみが救える 55 行」のうち一部が融合で回収されている読みと整合する．
+
+#### 判定と根拠
+
+- **`closed`（`rejected` ではない）**．B163 (a)・B165 (a) と同一の理由: `rejected` は本走の 2 軸表
+  （Δ と非退行 C1〜C7）に基づく判定語であり，本走が無い以上どのセルにも到達していない．
+  **判定語集合の拡張（`refuted` の新設等）は記録スキーマの破壊的変更なので自動決定せず，
+  backlog B165 要レビュー (A) の継続として人間判断に委ねる**（これで 3 反復連続の同型事例）．
+- **value `japanese_specialized_ruri_v3_310m` は「単独差し替え」としては反証済み・再試行しない．**
+  根拠は (i) 次元を揃えても qwen が 8.3pt 勝つ（H2 反証＝次元を増やす方向の再試行に見込みが無い），
+  (ii) 実装忠実性は G0-d のコサイン中央値 0.99604 で担保済み（H3 も反証），
+  (iii) 悪化が 9/10 ドメインに一様で，prefix 文言や訓練構成の微調整で埋まる幅ではない．
+  **停止したのは「効果が小さかったから」ではなく「機序まで説明が付いたから」である．**
+- **`multilingual_e5_large`（事前登録済みの代替）は優先度を下げる．** G0 は不合格でなかったので
+  そもそも発動条件を満たしておらず，かつ (a) H2 反証により「連結 2048 次元だから有利」という
+  当初の期待が消え，(b) JMTEB Classification は E5 72.89 < ruri 78.66 で，その ruri が 8.3pt 負けた以上
+  **公称ベンチは本データで予測力を持たない**（Iter79 学び 2 の 3 例目）．値は残すが次の第 1 候補にはしない．
+
+#### 学び（次の自分へ）
+
+1. **「次元が減ったから負けた」は，PCA で次元を揃えた対照を取るまで言ってはいけない．**
+   本件では qwen を 1536 次元へ落としても値が小数点以下まで不変で，容量説は完全に外れていた．
+   この対照は既存キャッシュだけで CPU 数分．**次に埋め込みを替えるときは必ず最初にこれを置く．**
+2. **AGREE は埋め込み系統をまたいでも 87.6% で，Iter98 の決定則間 AGREE と一致した．**
+   誤答の硬い核（約 390 行 / 2,275）は，決定則にも表現モデルにも依存しない．
+   単一モデルの差し替えで動かせる層ではない．機序 M6 は「入力表現の性質」から
+   **M7「誤答核はデータ側（設問の多ドメイン性・ラベルの一意性の破れ）に由来する可能性が高い」**へ
+   読み替えるべき段階に来ている（ただし本反復のデータだけでは M7 は未検証の仮説である）．
+3. **弱いモデルを「捨てる」判断と「混ぜる」判断は別である．** 単独 CV で 8.3pt 劣る表現が，
+   連結すると McNemar p=0.0153 で現行を上回った．単独性能でモデルを足切りすると，この相補性は見えない．
+4. **安全弁（CV Δ ≤ −5.0pt で本走前に停止）は今回正しく働いた．** 停止しなければ約 2 時間の実機本走を
+   −8pt の設定に費やしていた．一方で安全弁は「実装破綻の検知」として設計されたが，
+   実測は**実装破綻ではなく真の性能差**だった．**安全弁の発火は「バグがある」ことを意味しない**ので，
+   発火時は必ず次元を揃えた対照と AGREE を取って，破綻か実力差かを切り分けること．
+5. ruri の GGUF（patched llama.cpp 変換・q8_0）は Ollama 0.34.4 で**問題なく動いた**
+   （参照実装とのコサイン中央値 0.99604・最小 0.97278）．調達経路そのものは今後も使える．
+
+#### 再現用（すべて開発ホスト CPU，リポジトリ外）
+
+`/tmp/iter99a/build.py`（特徴の id 対応再構成）・`cv.py`（基準 CV）・`sweep.py`（PCA 容量曲線）・
+`agree.py`（AGREE・ドメイン別・有効次元）・`fuse.py`（異種連結）．
+入力は `data/embcache_train_iter{89,92,99}_*` と `data/classifier_train_iter{87_hybrid,94_dedup}.jsonl` のみ．
+
 ## Iteration 98: 分類器の多クラス分解を誤り訂正出力符号へ変える
 
 ### 調査 (Iter98)
