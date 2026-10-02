@@ -242,6 +242,30 @@ def test_select_best_dispatch_response_majority_vote_picks_agreed_letter() -> No
     assert result.node_id == "C"  # the higher-confidence of the two B-agreeing candidates
 
 
+def test_select_best_dispatch_response_majority_vote_tie_goes_to_rank1_letter() -> None:
+    """A 2-2 tie is won by the letter of the first (rank 1) candidate."""
+    responses = [
+        _dispatch_response("n1", 0.9, "正解はAです．"),
+        _dispatch_response("n2", 0.8, "正解はBです．"),
+        _dispatch_response("n3", 0.7, "正解はAです．"),
+        _dispatch_response("n4", 0.6, "正解はBです．"),
+    ]
+    result = select_best_dispatch_response_majority_vote(responses)
+    assert result.node_id == "n1"
+
+
+def test_select_best_dispatch_response_majority_vote_overrides_lone_rank1_with_four_candidates() -> None:
+    """With k=4 split A,B,B,C, the B pair beats a lone rank 1 A; the higher-confidence B wins."""
+    responses = [
+        _dispatch_response("n1", 0.9, "正解はAです．"),
+        _dispatch_response("n2", 0.7, "正解はBです．"),
+        _dispatch_response("n3", 0.85, "正解はBです．"),
+        _dispatch_response("n4", 0.6, "正解はCです．"),
+    ]
+    result = select_best_dispatch_response_majority_vote(responses)
+    assert result.node_id == "n3"
+
+
 def test_select_best_dispatch_response_majority_vote_falls_back_when_no_majority() -> None:
     """With no letter shared by 2+ candidates, fall back to max_confidence."""
     responses = [

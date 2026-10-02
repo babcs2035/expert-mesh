@@ -108,6 +108,20 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         }
         for r in result.probe_responses
     ]
+    # Every successful /dispatch answer in targets order (rank 1 first) so the
+    # aggregation policy can be re-applied offline — Iter103 compares
+    # majority_vote against a max_confidence counterfactual within one run.
+    # Empty for fallback and dispatch_failed rows.
+    dispatch_candidates = [
+        {
+            "node_id": r.node_id,
+            "domain": config["nodes"][r.node_id]["domain"],
+            "confidence": r.confidence,
+            "answer_text": r.answer_text,
+            "gen_time_ms": r.gen_time_ms,
+        }
+        for r in result.dispatch_responses
+    ]
 
     # Extract STP logprobs signal from the selected node's probe response.
     stp_logprobs: float | None = None
@@ -139,6 +153,7 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         "dispatch_gen_time_ms": dispatch_gen_time_ms,
         "dispatched_domains": dispatched_domains,
         "probe_candidates": probe_candidates,
+        "dispatch_candidates": dispatch_candidates,
     }
 
 

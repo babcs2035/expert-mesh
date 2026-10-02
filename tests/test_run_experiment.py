@@ -73,6 +73,15 @@ async def test_run_experiment_records_dispatch_outcome(monkeypatch) -> None:
     assert record["used_fallback"] is False
     assert record["dispatch_failed"] is False
     assert record["answer_text"] == "specialist answer"
+    assert record["dispatch_candidates"] == [
+        {
+            "node_id": "expert",
+            "domain": "medical",
+            "confidence": 0.9,
+            "answer_text": "specialist answer",
+            "gen_time_ms": 50,
+        }
+    ]
 
 
 async def test_run_experiment_records_fallback_outcome(monkeypatch) -> None:
@@ -101,6 +110,7 @@ async def test_run_experiment_records_fallback_outcome(monkeypatch) -> None:
     assert record["selected_domain"] == "general"
     assert record["selected_node_id"] == "requester"
     assert record["confidence"] is None
+    assert record["dispatch_candidates"] == []
 
 
 async def test_run_experiment_records_dispatch_failure_outcome(monkeypatch) -> None:
@@ -133,6 +143,7 @@ async def test_run_experiment_records_dispatch_failure_outcome(monkeypatch) -> N
     assert record["selected_domain"] is None
     assert record["selected_node_id"] is None
     assert record["answer_text"] is None
+    assert record["dispatch_candidates"] == []
 
 
 def test_main_touches_done_marker_only_after_output_is_written(monkeypatch, tmp_path) -> None:

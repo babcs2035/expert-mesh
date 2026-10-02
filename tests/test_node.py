@@ -47,7 +47,7 @@ async def test_dispatch_to_targets_single_target_passthrough() -> None:
     )
     peer_client.dispatch.return_value = expected
 
-    result = await _dispatch_to_targets(
+    result, _ = await _dispatch_to_targets(
         peer_client,
         peers,
         targets,
@@ -80,7 +80,7 @@ async def test_dispatch_to_targets_picks_highest_confidence_among_top_k() -> Non
 
     peer_client.dispatch.side_effect = _dispatch_side_effect
 
-    result = await _dispatch_to_targets(
+    result, _ = await _dispatch_to_targets(
         peer_client,
         peers,
         targets,
@@ -116,7 +116,7 @@ async def test_dispatch_to_targets_llm_judge_picks_judge_choice() -> None:
     ollama_client = AsyncMock(spec=OllamaClient)
     ollama_client.generate.return_value = '{"best": 2}'
 
-    result = await _dispatch_to_targets(
+    result, _ = await _dispatch_to_targets(
         peer_client,
         peers,
         targets,
@@ -137,7 +137,7 @@ async def test_dispatch_to_targets_returns_none_when_all_fail() -> None:
     peer_client = AsyncMock(spec=PeerClient)
     peer_client.dispatch.return_value = None
 
-    result = await _dispatch_to_targets(
+    result, _ = await _dispatch_to_targets(
         peer_client,
         peers,
         targets,
@@ -148,6 +148,42 @@ async def test_dispatch_to_targets_returns_none_when_all_fail() -> None:
         None,
     )
     assert result is None
+
+
+async def test_dispatch_to_targets_returns_successful_responses_in_target_order() -> None:
+    """All successful answers come back in targets order; failed peers are omitted."""
+    peers = [
+        {"node_id": "node-a", "host": "localhost", "port": 8080, "domain": "general"},
+        {"node_id": "node-b", "host": "localhost", "port": 8081, "domain": "medical"},
+        {"node_id": "node-c", "host": "localhost", "port": 8082, "domain": "legal"},
+    ]
+    targets = [
+        _probe_response("node-c", 0.9),
+        _probe_response("node-a", 0.7),
+        _probe_response("node-b", 0.5),
+    ]
+    peer_client = AsyncMock(spec=PeerClient)
+
+    async def _dispatch_side_effect(peer: dict, request: DispatchRequest, timeout_s: float):
+        if peer["node_id"] == "node-a":
+            return None
+        return DispatchResponse(
+            request_id="r1", node_id=peer["node_id"], answer_text="x", confidence=0.5, gen_time_ms=100
+        )
+
+    peer_client.dispatch.side_effect = _dispatch_side_effect
+
+    _, responses = await _dispatch_to_targets(
+        peer_client,
+        peers,
+        targets,
+        DispatchRequest(request_id="r1", full_query="q"),
+        30.0,
+        AGGREGATION_METHOD_MAX_CONFIDENCE,
+        AsyncMock(spec=OllamaClient),
+        None,
+    )
+    assert [r.node_id for r in responses] == ["node-c", "node-b"]
 
 
 async def test_fallback_answer_uses_light_model_and_includes_query() -> None:

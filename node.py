@@ -117,7 +117,7 @@ async def _dispatch_to_targets(
     aggregation_method: str,
     ollama_client: OllamaClient,
     judge_model: str | None,
-) -> DispatchResponse | None:
+) -> tuple[DispatchResponse | None, list[DispatchResponse]]:
     """Send /dispatch to every selected target concurrently and pick the best answer.
 
     With top_k == 1 (the Phase 0 default) every aggregation_method degrades
@@ -127,6 +127,11 @@ async def _dispatch_to_targets(
     item 5, 2026-07-30): max_confidence (Phase 0 default, no extra LLM
     calls), majority_vote (agreement among extracted JMMLU answer letters),
     or llm_judge (an extra LLM call to pick the best candidate).
+
+    Also returns every successful response in targets order (rank 1 first,
+    failed peers omitted) so callers can record all candidates and re-apply
+    an aggregation policy offline; the order matters because majority_vote
+    breaks ties by first appearance.
     """
     target_peers = [next(p for p in peers if p["node_id"] == t.node_id) for t in targets]
     dispatch_responses = [
@@ -140,16 +145,17 @@ async def _dispatch_to_targets(
         if r is not None
     ]
     if aggregation_method == AGGREGATION_METHOD_MAJORITY_VOTE:
-        return select_best_dispatch_response_majority_vote(dispatch_responses)
+        return select_best_dispatch_response_majority_vote(dispatch_responses), dispatch_responses
     if aggregation_method == AGGREGATION_METHOD_LLM_JUDGE:
-        return await select_best_dispatch_response_llm_judge(
+        selected = await select_best_dispatch_response_llm_judge(
             dispatch_responses,
             dispatch_request.full_query,
             ollama_client,
             judge_model,
             timeout_s=dispatch_timeout_s,
         )
-    return select_best_dispatch_response(dispatch_responses)
+        return selected, dispatch_responses
+    return select_best_dispatch_response(dispatch_responses), dispatch_responses
 
 
 async def _fallback_answer(ollama_client: OllamaClient, light_model: str, query: str) -> str:
@@ -179,6 +185,9 @@ class AskResult:
     probe_responses: list[ProbeResponse]
     dispatch_response: DispatchResponse | None
     fallback_answer: str | None
+    # Every successful /dispatch answer in targets order (empty for fallback
+    # and when every dispatch failed); recorded by run_experiment.py.
+    dispatch_responses: list[DispatchResponse] = dataclasses.field(default_factory=list)
 
 
 async def run_ask_flow(
@@ -240,7 +249,7 @@ async def run_ask_flow(
         )
 
     dispatch_request = DispatchRequest(request_id=request_id, full_query=query)
-    dispatch_response = await _dispatch_to_targets(
+    dispatch_response, dispatch_responses = await _dispatch_to_targets(
         peer_client,
         peers,
         targets,
@@ -255,6 +264,7 @@ async def run_ask_flow(
         probe_responses=probe_responses,
         dispatch_response=dispatch_response,
         fallback_answer=None,
+        dispatch_responses=dispatch_responses,
     )
 
 
