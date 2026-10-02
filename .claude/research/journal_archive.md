@@ -1,3 +1,509 @@
+## Iteration 100: 異種埋め込み（qwen3-4b と ruri-v3-310m）を連結して融合する
+
+### 調査 (Iter100)
+
+**実施場所の申告**: 本フェーズで**実験ノード wafl500〜509 には一切触れていない**．**wafl-ctrl5 にも触れていない**．
+行ったのは (a) 開発ホストでのリポジトリ読み取り，(b) 開発ホスト CPU での既存埋め込みキャッシュの
+`numpy` によるノルム計測（読み取りのみ），(c) 公開 Web への read-only な検索・取得 だけである．
+モデルの pull・ロード・埋め込み計算・ファイル書き込みは 0 件（`models/`・`data/`・`config.yaml` は無変更）．
+
+**(1) 問い**
+
+- Q1: 異種の埋め込みモデルを**単純連結**して下流分類器に食わせる手法は，先行研究でどう位置づけられるか．
+  「単独で劣るモデルが連結では効く」という Iter99 副産物の観測は既知の現象か．
+- Q2: 連結時に**スケール調整（正規化・重み付け・PCA）が必須か**．必須なら，それは本レバーに付随する作業か，
+  それとも第 2 のレバーか．
+- Q3: 埋め込みモデルを 2 本同時に常駐させたとき，**10 ノードの実行基盤に何が起こるか**（B167 要レビュー (C)）．
+  失敗の出方は「明示的エラー」か「無言の劣化」か．
+
+**(2) Q1: 連結融合は確立した手法であり，「単独性能では見えない相補性」は先行研究の主張と一致する**
+
+- Akl et al., "Fusion Strategies for Embedding Models: Enhancing Text Representations Across MTEB Tasks
+  Through Lightweight and Trainable Ensembles", IEEE, 2025（<https://ieeexplore.ieee.org/document/11167556>）は
+  「個々の埋め込みモデルの性能は**タスクによって変動する**ため，複数モデルの融合でより頑健な表現が得られるか」を
+  正面から調べた研究である．**融合が有効な条件はモデル間の変動＝相補性**であり，単独スコアの順位ではない．
+- Frisoni 系の実務ガイド（Zilliz AI FAQ「How can you combine or ensemble multiple Sentence Transformer
+  models or embeddings...」<https://zilliz.com/ai-faq/how-can-you-combine-or-ensemble-multiple-sentence-transformer-models-or-embeddings-to-potentially-improve-performance-on-a-task>）は，
+  最も単純な融合として (i) 要素ごと平均，(ii) **連結**を挙げ，
+  「**連結は各モデル固有の特徴を保存する**（averaging はしない）が次元が増える」と整理している．
+  本件は次元が異なる（2560 vs 768）ので**平均は構造的に取れず，連結が唯一の素朴な選択肢**である．
+- "Compressed Concatenation of Small Embedding Models", arXiv:2510.04626, 2025
+  （<https://arxiv.org/abs/2510.04626>）は小型埋め込みモデル**複数本の連結**を出発点に据え，
+  連結表現を圧縮しても MTEB retrieval の性能の 89% を 48 倍圧縮で保てると報告している．
+  同論文は「**連結するモデルを増やすと利得は逓減する**」とも述べており，
+  **本反復で 3 本目を足さない**（2 本に留める）判断の根拠になる．
+- **ただし，これらはいずれも英語中心の retrieval/MTEB での知見であり，本タスク（日本語 10 ドメインの
+  単一ラベル分類，訓練 2,275 行）での外挿は保証されない**．Iter79 の学び 2（公称ベンチは予測力を持たない）を
+  ここでも適用し，**採否は本走でのみ決める**．本反復の根拠として一次的に重いのは，
+  先行研究ではなく **Iter99 分析フェーズが同一データ・同一モデル定義で実測した CV 0.812308（qwen 単独比
+  +0.79pt，McNemar 正確検定 p = 0.0153）**の方である（backlog B167 (e)）．
+
+**(3) Q2: スケール調整は不要．両モデルのビューは既に L2 正規化されていることを実測した**
+
+- 開発ホスト CPU で既存キャッシュの行ノルム中央値を計測した（読み取りのみ）:
+  - `data/embcache_train_iter89_qwen3-embedding_4b.npy` (2327, **2560**) → 中央値 **1.0000**（1 ビュー）
+  - `data/embcache_train_iter99_ruri-v3-310m.npy` (2275, **1536**) → 中央値 **1.4142 = √2**（2 ビュー連結）
+  - `data/embcache_eval_iter99_ruri-v3-310m.npy` (3750, 1536) → 同じく **1.4142**
+  - すなわち**両モデルとも 1 ビューあたり L2 ノルム 1.0** に揃っている．連結ブロックの「エネルギー」は
+    qwen 側 2.0 / ruri 側 2.0 で**同一**である．StandardScaler も per-block 重みも入れる理由が無い．
+- 残る非対称は**次元数**である（qwen 5120 次元にエネルギー 2.0，ruri 1536 次元にエネルギー 2.0．
+  1 次元あたりでは ruri が約 3.3 倍濃い）．L2 正則化ロジスティック回帰はブロックの実効的な寄与を
+  この比に依存させる（Ng, "Feature selection, L1 vs. L2 regularization, and rotational invariance",
+  ICML 2004，<https://icml.cc/Conferences/2004/proceedings/papers/354.pdf> が示すとおり L2 は
+  座標のスケールに敏感である）．**しかし Iter99 分析フェーズの CV +0.79pt は，まさにこの素の幾何のままで
+  実測された値**である．ここに重み係数を入れて掃引すれば，それは「連結」ではなく「融合重みの探索」という
+  **第 2 のレバー**になる．**本反復では一切の再重み付け・PCA・スケーリングを行わない**（B168 (e) に記録）．
+  重み付け融合（Zilliz の "Weighted Fusion"）は本反復が `adopted` になった場合の**次反復候補**として
+  backlog へ回す．
+
+**(4) Q3: 最大の新規リスクは VRAM ではなく Ollama のモデル常駐上限である（本フェーズで新たに特定）**
+
+- **ノードは既に上限 3 本ぴったりで動いている**．`docker-compose.yml:23` は `OLLAMA_KEEP_ALIVE=-1`
+  （アイドル退避の無効化）を設定しているが，`OLLAMA_MAX_LOADED_MODELS` は**設定していない**．
+  Ollama 公式 FAQ（<https://docs.ollama.com/faq>）は同変数の既定値を
+  「**3 × GPU 数，CPU 推論では 3**」と明記する．各ノードは GPU 1 枚なので**既定 3 本**である．
+- `node.py:202` の `embed_query_views()` を呼ぶのは**問い合わせの入口ノードだけ**であり，
+  そのノードは現在 `light_model`（/probe ごとに必ず呼ばれる）＋ `expert_model`（自ノードへ送出された場合）
+  ＋ `embedding_model` の**ちょうど 3 本**を要求している．**ruri を足すと 4 本目になり，既定上限を超える．**
+- **失敗の出方は無言である**．Ollama FAQ は「収まらない場合は**ロードできるまでリクエストを待たせる**
+  （queue する）」とし，エラーを返すとは書いていない．さらに `keep_alive=-1` で固定したモデルが
+  居座ると，別モデルの待ちが解けない事例が報告されている
+  （"Ollama keep_alive -1 hangs every other model: a silent deadlock on a 6 GB GPU", DEV Community,
+  <https://dev.to/c1-anderson/ollama-keepalive-1-hangs-every-other-model-a-silent-deadlock-on-a-6-gb-gpu-4ma5>．
+  **6GB GPU という条件が本クラスタと一致する**）．
+  第三者報告なので断定はしないが，**「精度が出ない」ではなく「タイムアウト／レイテンシ爆発」として出る**
+  可能性が高く，非退行条件 C2（`dispatch_failure_rate`）と C6（`mean_duration_ms`）で必ず捕まえる．
+- **対処（付随作業．B168 (b) に記録）**: `docker-compose.yml` の ollama サービスに
+  `OLLAMA_MAX_LOADED_MODELS=4` を追加する．**旧 config（埋め込み 1 本）では要求モデル数が 3 本のままなので
+  この変数は発火せず，挙動はビット同一**である（Iter99 の `embedding_prompt_template` 既定値と同じ型の
+  後方互換）．したがって第 2 のレバーではない．
+- **VRAM は算術上は収まる**: ruri は q8_0 で **337MB**（Iter99 G0-a で実測済み）．
+  ただし 6GB に light 2.4GB ＋ qwen3-embedding:4b 3.26GB ＋ expert-LoRA が既に載らず，
+  Iter89 の時点で `light_model` の退避が常態化している（Iter99 G0-e の読み）．
+  **337MB の追加は退避の頻度を上げる向きに働く**ので，効くのは C6 である．
+
+### 仮説 (Iter100)
+
+**qwen3-embedding:4b と ruri-v3-310m は，同じ設問に対して異なる誤り方をする（相補的である）．
+両者の埋め込みを連結した 6,656 次元空間では，片方だけでは線形分離できない設問の一部が分離可能になり，
+top1 が上がる．**根拠は Iter99 分析フェーズの実測で，ruri は**単独では qwen に CV で 8.3pt 劣る**
+（0.721319 vs 0.804396）にもかかわらず，**連結すると 0.812308 と qwen 単独を +0.79pt 上回り，
+対応のある比較で 救済 34 / 損失 16・McNemar 正確検定 p = 0.0153** だった．
+「単独性能で足切りすると見落とす相補性がある」というのが本レバーの主張である．
+
+**対抗仮説（同じ強さで想定する）**:
+
+- **(A1) 冗長性仮説**: CV の +0.79pt は CV の SE 0.83pt と同程度で，**訓練 2,275 行の 5-fold に固有の
+  揺らぎ**である．本走 3,750 問では 0 付近に縮む（`negligible`）．
+  `Compressed Concatenation of Small Embedding Models` (arXiv:2510.04626) の「連結の利得は逓減する」も
+  この向きの示唆である．
+- **(A2) 次元増による過学習**: p/n が 2.25 → **2.93** へ上がる．CV は訓練集合内の話なので，
+  評価集合 3,750 行への外挿で利得が消える．
+- **(A3) 実行基盤仮説**: 精度は上がるが (4) の常駐上限・退避によりレイテンシが退行し，C6 で `rejected` になる．
+  これは**効果の不在ではなく運用上の不採用**なので，判定時に区別して記録する．
+- **(A4) M7（誤答核はデータ側に由来する．共通誤答 390/2,275 行）が正しい**なら，表現をいくら足しても
+  共通誤答核は動かず，利得は核の外側の薄い層に限られる．**M7 は未検証の仮説であり本反復では断定しない**
+  （B167 (g)）．本反復は M7 の**間接的な検定**になる: 融合で救済される行が共通誤答 390 行の外側に
+  集中するなら M7 と整合する．
+
+### 単一レバー (Iter100)
+
+- **レバー**: `embedding_space_fusion` = **`qwen3_4b_plus_ruri_v3_310m_concat`**
+  （config.yml の levers 末尾に Iter99 分析フェーズが追加済み．**新レバーの追加は不要**）．
+- **何を何から何へ**: 分類器へ渡す特徴を，**qwen3-embedding:4b の 2 ビュー連結 5,120 次元**から，
+  **qwen3-embedding:4b の 2 ビュー（5,120）⊕ ruri-v3-310m の 2 ビュー（1,536）= 6,656 次元**へ変える．
+  `config.yaml` の実現方法は下記 B168 (a) の新キー 1 つで行う．
+- **連結順序を固定する（train/runtime 不一致の防止．Iter36 型事故の恒久対策）**:
+  **`[qwen plain, qwen instructed, ruri plain, ruri instructed]`**．
+  順序を引数化せず，`expert_backend.py` の 1 つのヘルパ内にハードコードする
+  （`embed_query_views()` が Iter82 以来この方式で train/runtime の一致を保証してきたのと同じ型）．
+- **各モデルの prompt template は model card の規定値に固定する（文言は掃引しない）**:
+  - qwen3-embedding:4b → 現行の instruct 書式 `"Instruct: {instruction}\nQuery: {text}"`（**変更なし**）．
+  - ruri-v3-310m → `"トピック: {text}"`（分類・クラスタリング用途の規定 prefix．
+    <https://huggingface.co/cl-nagoya/ruri-v3-310m> の 1+3 prefix scheme．Iter99 で採用済み）．
+  - `embedding_instruction`（Iter81 の英文 P1 wording）は**現行値のまま変更しない**．
+    ruri 側テンプレートは `{instruction}` を使わないが，`embed()` が instructed ビューを発火させる条件が
+    `instruction is not None` なので，キー自体は非 None のまま残す必要がある（Iter99 と同じ機構）．
+- **付随作業（いずれも別レバーではない．Iter79/89/99 で確立した型）**:
+  1. **分類器の再訓練**（5,120 → 6,656 次元に変わるため必須．訓練集合・モデル定義は 1 バイトも変えない）．
+     旧 artifact は `models/domain_classifier_pre_iter100_qwen3_4b.joblib` へ退避する．
+  2. **`OLLAMA_MAX_LOADED_MODELS=4`**（上記 (4)．旧 config では発火せずビット同一）．
+  3. **deploy 時の ruri の pull**（`tools/node_models.py` が融合モデルも返すよう拡張．
+     返さないと `ollama pull` が走らず，本走で入口ノードが 404 を踏む）．
+- **固定する構成（1 つも動かさない）**:
+  `data/classifier_train_iter94_dedup.jsonl`（2,275 行）・`data/dataset.jsonl`（3,750 行）・
+  `embedding_instruction`（Iter81 の P1 wording）・`embedding_view_concat: true`・
+  `routing_method=supervised_classifier`・`confidence_threshold=0.0`・`dispatch_candidate_threshold=0.0`・
+  `dispatch_top_k=2`・**`dispatch_gap_threshold=0.36`（埋め込み次元が増えれば gap 分布は必ず動くが，
+  閾値の再較正は別レバーであり本反復では絶対に触らない）**・`dispatch_gap_max_k=4`・
+  `aggregation_method=max_confidence`・`judge_model`・各ノードの `light_model`/`expert_model`・
+  `scripts/train_domain_classifier.py` のモデル定義（`LogisticRegression(max_iter=1000, class_weight=None)`
+  ＋ `_extract_sample_weights()` ＋ `CalibratedClassifierCV(method='temperature', ensemble=True)`）・
+  `classifier.py`・`aggregator.py`・`metrics.py`・`ecoc_head.py`．
+  **特徴のスケーリング・per-block 重み・PCA は一切入れない**（上記 Q2）．
+  **ドメイン固有の後付け補正は追加しない．棄権／エスカレーション系には触れない．**
+
+**レバーを読むコード行と，そこへ到達する条件（d0004 §4．同型事故 6 回の恒久対策）**
+
+| # | 経路 | 読むコード | 到達確認（1 つでも欠けたら実験不成立） |
+|---|---|---|---|
+| 1 | 設定 → 10 ノードへのモデル配布 | `tools/node_models.py:13`（融合モデルも返すよう拡張）→ `mise.toml:97-103` の `ollama pull` | 全 10 ノードの `ollama list` に **qwen3-embedding:4b と ruri の両方**の行があること |
+| 2 | 設定 → 各ノードの config | `mise.toml` の `rsync config.yaml` | 全 10 ノードで新キーが `grep` で読めること |
+| 3 | 設定 → 実行時のクエリ埋め込み | `node.py:202-207` の `embed_query_views(...)`（融合対応ヘルパへ差し替え） | 予備 20 問で `len(query_embedding) == 6656` をログに出して確認．**旧 5,120 次元 artifact に 6,656 次元を食わせれば `predict_proba` が必ず例外を投げる**ので，Iter36 型の無言の不一致はここで落ちる |
+| 4 | artifact → 10 ノード | `mise.toml` の `models/` rsync | 全ノードで `domain_classifier.joblib` の sha256 一致かつ **`n_features_in_ == 6656`** |
+| 5 | **ブロック順序と template の到達（本反復の最大の新規リスク）** | 融合ヘルパ（順序ハードコード）．呼び出し側は `node.py` ・`scripts/train_domain_classifier.py`・`tools/smoke_check.py` の **3 箇所すべて** | (a) 単体テストで 4 ブロックの順序と各 template を検証，(b) 訓練時に**実際に使ったモデル名と template 文字列を標準出力へ印字**し journal へ転記，(c) 訓練特徴の先頭 1 行で **4 ブロックが互いに一致しないこと**と **各ブロックの L2 ノルムが 4 本とも ≈1.0** であることを実測（一致＝template 未適用，ノルム逸脱＝別モデルを引いている） |
+| 6 | **Ollama の常駐上限（本フェーズで新規特定）** | `docker-compose.yml` の ollama `environment` | 入口ノードで `ollama ps` に **4 本すべてが並ぶ**こと．並ばない／`100% GPU` でない行がある場合は C6 の退行要因として明記する |
+| 7 | 実験 → 指標 | `metrics.py` 無変更 | `total_questions == 3750` かつ `compound_domain_question_count == 730` |
+
+### 事前ゲート G0〜G2（判定規則は結果を見る前にここで固定する）
+
+**すべて wafl-ctrl5 で行う．wafl500〜509 は deploy・予備 20 問・本走でのみ触れる（絶対条件 (B)）．**
+
+- **G0（実現性．Iter99 で大半が済んでいるので軽い）**
+  - **G0-a**: wafl-ctrl5 で qwen3-embedding:4b と `hf.co/Targoyle/ruri-v3-310m-GGUF:Q8_0` の**両方**が
+    `/api/embeddings` に 200 を返し，次元がそれぞれ **2560 / 768** であること．いずれか外れたら不合格．
+  - **G0-b（ブロック整合）**: 訓練集合の先頭 1 行で 4 ブロックを作り，**各ブロックの L2 ノルム ≈ 1.0
+    （許容 ±0.02）**，**連結後 6,656 次元**，**4 ブロックが相互に不一致**であること．
+  - **G0-c（常駐上限）**: wafl-ctrl5 で埋め込み 2 本を交互に呼んでも 2 本とも `ollama ps` に残り
+    `100% GPU` であること．deploy 後は入口ノードで #6 を確認する．
+  - **G0 不合格時**: 原因が (4) の常駐上限なら `OLLAMA_MAX_LOADED_MODELS` を上げて再試行してよい
+    （調達手段の確定であって設計選択ではない）．それ以外で不合格なら `invalid`（実現性）として
+    本走を行わず分析フェーズへ渡す．**本反復内で第 3 の埋め込みモデルを探しに行かない．**
+
+- **G1（CV．report-only．足切りには使わない）**
+  `wafl-ctrl5` で `data/classifier_train_iter94_dedup.jsonl`（2,275 行）**のみ**を使い，
+  **本番の `scripts/train_domain_classifier.py` の特徴生成経路**で 5-fold StratifiedKFold
+  （`random_state=42`）の accuracy / macro-F1 を，**融合 6,656 次元と qwen 単独 5,120 次元の 2 腕について
+  同一 run 内で**測る．評価集合は一切見ない．
+  - **G1 の第一の役割は効果量の推定ではなく，Iter99 分析フェーズのアドホック計算の再現検査である**．
+    **融合 0.812308・qwen 単独 0.804396 を ±0.002 で再現すること**を期待値として事前登録する．
+    再現しない場合，効果の有無ではなく**本番訓練経路とアドホック計算の乖離**を疑い，原因を特定してから進む．
+  - **キャッシュを再利用する場合は必ず `id` で join すること．**
+    `data/embcache_train_iter89_qwen3-embedding_4b.npy` は 2,327 行で訓練集合 2,275 行と**行数が違い，
+    かつ `.meta.json`（id 一覧）が存在しない**．行順の暗黙の一致を仮定してはならない（B168 (d)）．
+    安全側として**本番経路で両モデルとも埋め込みを取り直し，`.meta.json` に id を書く**ことを既定とする．
+
+- **G2（replay．検出力の事前確定．report-only）**
+  評価 3,750 行について**両モデルの 2 ビュー埋め込みを wafl-ctrl5 で計算**し
+  （`data/embcache_eval_iter100_{qwen3-embedding_4b,ruri-v3-310m}__{p0,p1}.npy` ＋ `.meta.json`），
+  旧 artifact（5,120 次元）と新 artifact（6,656 次元）の `predict_proba` argmax を replay する．
+  **discordant 行数 n_d と McNemar の有意境界 `1.96·√n_d / 3750` を本走前に確定して記録する．**
+  - 既存 `embcache_eval_qwen3-embedding_4b.npy` は **3,435 行**で現行評価集合 3,750 行と一致しない
+    （Iter99 で G2 が実施できなかった原因）．**今回は 3,750 行ぶんを取り直す**．
+  - **n_d ≥ 30 を最低条件**とし，一桁なら「効果なし」ではなく**設定未到達**を既定の解釈とする．
+  - replay の予測 Δ も記録するが，**この値を見て成功条件を書き換えてはならない**（B131 以来の運用）．
+
+- **本走は G0 合格なら必ず実施する**（2026-09-23 絶対条件 (A)）．G1/G2 の数値が悪いことを理由に省略しない．
+
+**唯一の安全弁（B167 要レビュー (B) への回答を兼ねる．B168 (c)）**:
+G1 の **融合 − qwen 単独の CV Δ が −2.0pt 以下**の場合に限り，本走前に原因究明へ戻る．
+**Iter99 の −5.0pt より厳しくした根拠**: 本反復の融合特徴は qwen 単独特徴の**真の上位集合**であり，
+L2 正則化下で特徴を足して精度が下がることはあっても，**2.0pt（CV の SE 0.83pt の 2.4 倍，
+事前期待 +0.79pt からは 3.4 SE）も下がるのは，ブロック順序の不一致・行 join の誤り・
+キャッシュの取り違えといった実装破綻としか解釈できない**．
+Iter99 の安全弁は「真の性能差」を拾ってしまったが（B167 (B)），上位集合という構造上，
+本反復では同じ取り違えが起こりにくい．
+**安全弁が発火した場合は，停止する前に必ず (i) ブロック単位の ablation（qwen のみ / ruri のみ / 融合）と
+(ii) 腕間 AGREE の算出を義務付ける**（B167 (B) で提案された既定運用の初適用）．
+
+### 事前登録する予測 P1〜P6（Iter100）
+
+- **P1（主予測）**: 本走で **Δtop1 ≥ +0.5pt かつ McNemar p < 0.05**（＝ `adopted`）．
+  **点推定 +0.3pt，80% 区間 −0.5 〜 +1.2pt，符号の確信は「中程度」**．
+  **点推定が採用閾値 +0.5pt を下回っていることを明示しておく．最頻の着地は `negligible` である**
+  （Iter89 の実績 CV +5.29pt → 本走 +2.94pt から，本走は CV より縮む向きを既定で見込む）．
+- **P2**: G1 の CV で **融合 0.812308 ± 0.002・qwen 単独 0.804396 ± 0.002 を再現**する（測定系の再現性検査）．
+- **P3**: G2 replay の予測 Δ と本走実測 Δ の乖離が **≤ 0.5pt**（Iter89 は 0.12pt）．
+- **P4**: 新 artifact の `n_features_in_` == **6656**，全 10 ノードで sha256 一致．
+- **P5**: `mean_duration_ms` が基準 2534.762 から **+50 〜 +400ms** の範囲に収まる
+  （ruri は 310M と小さく HTTP 往復 2 回の追加が主．Iter82 が 1 回追加で −84ms だった実績から上振れは
+  退避の増加に帰属させて読む）．**範囲外なら (4) の常駐上限・退避を第一の説明として調べる．**
+- **P6**: 本走で融合により救済された行のうち，**Iter99 の共通誤答 390 行（訓練側）に相当する構造の行**は
+  少数に留まる（A4 / M7 と整合する向き）．**これは report-only の観察であり，判定には使わない．**
+
+### 成功条件・非退行条件（事前登録 / Iter100）
+
+**基準線（本走）**: `results/20260928_160921/`（3,750 問）．
+top1 = **0.833067**（Wilson 95%CI [0.820791, 0.844660]），`fallback_rate` 0.0，
+`dispatch_failure_rate` 0.000267，`mean_duration_ms` **2534.762**，
+`compound_domain_top1_accuracy` **0.790411**，`compound_domain_set_recall` **0.567123**，
+`compound_mean_dispatched_count` **1.950685**，ECE **0.031774**，Brier 0.110943，
+`single_domain_top1_accuracy` 0.843377．**再現性の床は ±0.25pt．**
+
+- **判定**: Δ ≥ +0.5pt（top1 ≥ **0.838067**）かつ McNemar p < 0.05 → **`adopted`**．
+  Δ ≥ +0.5pt だが p ≥ 0.05 → `adopted_small`（要再現）．|Δ| < 0.25pt → `negligible`．
+  Δ ≤ −0.5pt または下記 C1〜C7 のいずれか違反 → `rejected`（artifact と `config.yaml` をロールバック）．
+  G0 不合格で本走に至らなかった場合 → `invalid`（実現性）．
+  **精度は基準内だが C6 のみ違反した場合も `rejected` だが，「表現としては中立以上／運用コストで不採用」と
+  判定理由に明記する**（A3 と効果の不在を混同しないため）．
+- **必須の非退行条件**（1 つでも破れたら `rejected` としてロールバック）:
+  - **C1**: per-domain precision/recall 計 20 指標の BH 補正後（q=0.05）の有意退行が **0 件**．
+  - **C2**: `fallback_rate` が 0.0 のまま，`dispatch_failure_rate` ≤ **0.005**．
+  - **C3**: レバー発火の証拠（上表 #1〜#7 と G0-a〜c）がすべて記録されていること．
+  - **C4**: 複合設問 730 行の top1 が **≥ 0.780411**（基準 0.790411 から −1.0pt 以内）．
+  - **C5**: `compound_domain_set_recall` **≥ 0.5400**，`compound_mean_dispatched_count` **≤ 2.10**．
+  - **C6**: `mean_duration_ms` ≤ **3041.7**（基準 2534.762 の +20%）．
+    **config.yml の note「埋め込みが 2 回になるので計画フェーズで上限を見直すこと」への回答**:
+    上限は**据え置く**．理由は (i) Iter82 で埋め込み呼び出しを 1 回増やしたとき実測は
+    2301.4 → 2217.1ms と**むしろ短縮**しており，埋め込みは所要時間の支配項ではない，
+    (ii) 追加分は 310M モデルの往復 2 回で，予測は +50〜+400ms（P5）＝上限まで 507ms の余裕がある，
+    (iii) 上限を緩めると (4) の常駐上限による退避スラッシングという**本反復固有の失敗モードを見逃す**．
+    **C6 は本反復では効果の検定ではなく実行基盤の健全性検査として機能する．**
+  - **C7**: ECE ≤ **0.08**（基準 0.031774）．
+- **参考値として併記**: Random 0.119467 / BestSingle / Oracle 1.0 と `answer_quality` / `end_to_end`．
+
+### 実行フェーズへの申し送り（Iter100）
+
+- **使うホスト**: 埋め込み計算・分類器訓練・G0〜G2 はすべて **wafl-ctrl5**（絶対条件 (B)）．
+  **wafl500〜509 は deploy と本走（および予備 20 問）でのみ触れる．**
+- **触ってよいファイル**:
+  - `config.yaml` — **新キー `embedding_fusion_models` の追加のみ**（既存行は 1 行も変えない．
+    とくに `embedding_model` / `embedding_instruction` / `embedding_view_concat` / `dispatch_gap_threshold`）．
+    ```yaml
+    # Iter100 (embedding_space_fusion): 省略時は空リストとして扱われ，挙動は pre-Iter100 とビット同一．
+    embedding_fusion_models:
+      - model: hf.co/Targoyle/ruri-v3-310m-GGUF:Q8_0
+        prompt_template: "トピック: {text}"
+    ```
+    config.yaml のスキーマ変更は B116 (3) の枠内（埋め込み系レバーに限る事前承認）で扱う．
+  - `expert_backend.py` — 融合対応ヘルパの追加（既存 `embed_query_views()` の**既定挙動は温存**．
+    融合リストが空なら現行と**ビット同一**の返り値になること）．
+  - `node.py` / `scripts/train_domain_classifier.py` / `tools/smoke_check.py` — 新キーの受け渡し 3 箇所．
+  - `tools/node_models.py` — 融合モデル名も返すよう拡張（これを忘れると #1 が落ちる）．
+  - `docker-compose.yml` — ollama の `environment` に `OLLAMA_MAX_LOADED_MODELS=4` を 1 行追加．
+  - `models/domain_classifier.joblib`（再訓練．旧 artifact は
+    `models/domain_classifier_pre_iter100_qwen3_4b.joblib` へ退避）．
+  - `data/embcache_*`（新規キャッシュ．**必ず `.meta.json` に id 一覧を書く**）・`tests/`．
+  - **`data/dataset.jsonl`・`data/classifier_train_iter94_dedup.jsonl`・`metrics.py`・`classifier.py`・
+    `aggregator.py`・`ecoc_head.py` は 1 バイトも変更しない．**
+- **禁止事項（単一レバー原則の境界）**:
+  - **prompt template の文言を掃引しない**（qwen は現行値，ruri は `トピック: ` の 1 通りだけ）．
+  - **per-block の重み・スケーリング・PCA・次元削減を入れない**（Q2．入れたら第 2 のレバーになる）．
+  - **3 本目の埋め込みモデルを足さない**（arXiv:2510.04626 の逓減の示唆．2 本に留める）．
+  - **`dispatch_gap_threshold` を再較正しない**（0.36 のまま．gap 分布は必ず動くが report-only）．
+  - **`LogisticRegression` の `C` を触らない**（p/n が 2.25 → 2.93 に上がるが，正則化強度の探索は別レバー）．
+- キャッシュ名には**モデル名とビュー ID を必ず含める**（Iter81 の教訓．旧キャッシュを無言で読む事故の防止）．
+- 埋め込み 2 本は `expert_backend` 内で**逐次 await**になる（`embed_query_views()` の現行実装と同じ）．
+  **`asyncio.gather` 化などの並列化はしないこと**．レイテンシ最適化は本レバーの検証対象を濁らせる．
+
+### 実装・実験 (Iter100)
+
+**変更したファイル（commit `9faf8fe`，実装フェーズで完了済み）**: `config.yaml`（新キー
+`embedding_fusion_models` 追加，既存行は無変更），`docker-compose.yml`（ollama `environment` へ
+`OLLAMA_MAX_LOADED_MODELS=4` を 1 行追加），`expert_backend.py`（`embed_query_views()` を拡張し
+固定順序 `[qwen plain, qwen instructed, ruri plain, ruri instructed]` で連結．
+`concat_views=False` との併用は `ValueError`），`node.py` / `scripts/train_domain_classifier.py` /
+`tools/smoke_check.py`（新キー配線 3 箇所），`tools/node_models.py`（融合モデルも `ollama pull` 対象に
+含めるよう拡張），`tests/test_expert_backend.py`（新規 6 テスト）．
+`uv run pytest tests/test_expert_backend.py` は **14 passed**（既存 8 + 新規 6）．
+分類器は `scripts/train_domain_classifier.py` で再訓練し，旧 artifact は
+`models/domain_classifier_pre_iter100_qwen3_4b.joblib` へ退避済み．
+
+**レバー発火の証拠（C3．上表 #1〜#7 の到達確認）**:
+- #1: 全 10 ノード（wafl500〜509）の `ollama list` に `qwen3-embedding:4b` と
+  `hf.co/Targoyle/ruri-v3-310m-GGUF:Q8_0` の両方が存在することを確認．
+- #4: `models/domain_classifier.joblib` の `n_features_in_` = **6656**（5120+1536 と一致）．
+  全 10 ノードの同ファイルの sha256 が `e02c641185c28cf1e4c5dde2e4197613ab5e67ae9c4b988a7fdb4c3a68e72bc1`
+  で完全一致（アプリコンテナ内 `/app/models/domain_classifier.joblib` を直接照合）．
+- #5: ブロック順序・template 適用は単体テスト 6 件で検証済み（上記 pytest 結果）．
+- #7: `metrics.py` 無変更のまま `total_questions == 3750` かつ
+  `compound_domain_question_count == 730` を実測（下記メトリクス参照）．
+- #6（Ollama 常駐上限）は **未充足**: 実行後の `docker exec expert-mesh-ollama-1 ollama ps`（wafl500，
+  入口ノード）は下記 3 本のみで，**`light_model`（`qwen3.5:4b-q4_K_M`）が常駐していない**．
+  ```
+  NAME                                     SIZE      PROCESSOR    UNTIL
+  expert-mesh-general-lora:latest          5.3 GB    100% GPU     Forever
+  qwen3-embedding:4b                       4.4 GB    100% GPU     Forever
+  hf.co/Targoyle/ruri-v3-310m-GGUF:Q8_0    355 MB    100% GPU     Forever
+  ```
+  事前調査 (4) で特定していた「物理 VRAM 12,288 MiB に 4 モデル（実測 5,186+4,308+484=9,978 MiB）が
+  収まらず，残り 2,310 MiB に対し `light_model` は約 2,400〜2,500 MiB 必要で常駐から追い出される」
+  という懸念が実機で実体化した．これは対抗仮説 **A3（実行基盤仮説）の的中**である．
+
+**実行後の GPU 占有記録（全 10 ノード，`nvidia-smi` / `docker ps`）**: 他ジョブの割り込みは**確認されず**
+（`namit` 等の外部プロセス 0 件，各ノードとも `expert-mesh-app-1` と `expert-mesh-ollama-1` の 2 コンテナ
+のみ稼働）．
+| ノード | VRAM使用 (MiB) / 12288 | GPU util |
+|---|---|---|
+| wafl500 | 10040 | 0% |
+| wafl501 | 2027 | 0% |
+| wafl502 | 5260 | 0% |
+| wafl503 | 2606 | 0% |
+| wafl504 | 3267 | 0% |
+| wafl505 | 3399 | 0% |
+| wafl506 | 3673 | 0% |
+| wafl507 | 3673 | 0% |
+| wafl508 | 4387 | 0% |
+| wafl509 | 2721 | 0% |
+
+**メトリクス（`results/20260929_081612/results.jsonl`，3,750 問，`metrics.py --json`）**:
+
+| 指標 | 基準線 (`20260928_160921`) | Iter100 実測 | Δ |
+|---|---|---|---|
+| top1_accuracy | 0.833067 | **0.839467** | **+0.640pt** |
+| single_domain_top1_accuracy (n=3020) | 0.843377 | 0.847682 | +0.431pt |
+| compound_domain_top1_accuracy (n=730) | 0.790411 | 0.805479 | +1.507pt |
+| compound_domain_set_recall | 0.567123 | 0.578767 | +1.164pt |
+| compound_mean_dispatched_count | 1.950685 | 1.973973 | +0.023 |
+| fallback_rate | 0.0 | 0.0 | 0 |
+| dispatch_failure_rate | 0.000267 | 0.0008 | +0.000533 |
+| ECE | 0.031774 | 0.039556 | +0.007782 |
+| mean_duration_ms（全体） | 2534.762 | **9733.350** | **+7198.588 (+284%)** |
+| mean_duration_ms（単一ドメイン, n=3020） | 1111.341 | 2190.824 | +1079.482 (+97%) |
+| mean_duration_ms（複合, n=730） | 8423.436 | 40936.679 | +32513.243 (+386%) |
+
+**McNemar 検定（対応のある比較，`metrics.compute_mcnemar_test`，id で完全一致する 3,750 行）**:
+discordant_a_only（基準線のみ正解）= 44，discordant_b_only（Iter100 のみ正解）= 68，
+discordant_pairs（n_d）= **112**，chi2（連続性補正）= 4.723214，**p = 0.029758**（p < 0.05）．
+McNemar は net で Iter100 が 24 問多く正解に転じたことを示す．
+
+**C1（per-domain 20 指標，BH q=0.05）**: `metrics.compute_domain_recall_mcnemar_test`（10 domain）＋
+`metrics.compute_domain_precision_fisher_test`（10 domain）の p 値 20 個に
+`metrics.apply_benjamini_hochberg(q=0.05)` を適用．**BH 補正後の有意退行は 0 件**（生 p 値最小は
+recall/business_economics の p=0.044171 と recall/education の p=0.030260 だが，いずれも BH 補正後は
+非有意）．→ **PASS**．
+
+**C1〜C7 合否一覧**:
+
+| 条件 | 基準 | 実測 | 合否 |
+|---|---|---|---|
+| C1 | per-domain 20指標 BH有意退行 0件 | 0件 | **PASS** |
+| C2 | fallback_rate=0.0 かつ dispatch_failure_rate≤0.005 | 0.0 / 0.0008 | **PASS** |
+| C3 | レバー発火の証拠（#1〜#7） | #1,#4,#5,#7 確認．#6 は不充足（light_model 非常駐） | **一部不充足（#6）** |
+| C4 | 複合730行 top1 ≥ 0.780411 | 0.805479 | **PASS** |
+| C5 | set_recall≥0.5400 かつ mean_dispatched≤2.10 | 0.578767 / 1.973973 | **PASS** |
+| C6 | mean_duration_ms ≤ 3041.7 | 9733.350 | **FAIL** |
+| C7 | ECE ≤ 0.08 | 0.039556 | **PASS** |
+
+**判定材料の要約（判定自体は分析フェーズの担当）**: top1 Δ=+0.640pt（≥+0.5pt 基準を充足）かつ
+McNemar p=0.029758（<0.05）．C1〜C5・C7 は PASS だが **C6 は基準の 3.2 倍で明確に FAIL**（事前登録の
+判定規則により，精度基準を満たしても C6 単独違反で `rejected` となる分岐が Iter100 の事前登録節に
+明記されている）．A3（実行基盤仮説）が的中したことを示す一次証拠として，`ollama ps` の
+`light_model` 非常駐を上記に記録した．
+
+**限界（明記）**: 基準線 `results/20260928_160921/` 実行時の GPU 占有状況（同時実行プロセスの有無）は
+本フェーズでは遡って確認できていない．基準線側で偶発的に外部競合が無かったことを前提に比較している．
+
+**`state.json`**: `status` を `"running"` に戻した．
+
+### Iteration 100 実行済み
+
+**変更**: 分類器へ渡す特徴を qwen3-embedding:4b の 2 ビュー連結 5,120 次元から，
+qwen3-embedding:4b 2 ビュー ⊕ ruri-v3-310m 2 ビュー = **6,656 次元**へ変更（固定順序
+`[qwen plain, qwen instructed, ruri plain, ruri instructed]`，スケーリング・重み付け・PCA なし）．
+付随作業は分類器の再訓練（`n_features_in_`=6656）・`OLLAMA_MAX_LOADED_MODELS=4`・ruri の pull 拡張のみ．
+実装は commit `9faf8fe`．本走は `results/20260929_081612`（3,750 問，外部競合なしを実行前後に確認済み）．
+
+**判定: `rejected`（理由は「運用コストでの不採用」．表現としての効果は肯定される）**
+
+事前登録した判定規則をそのまま機械的に適用した結果である．後知恵で閾値を緩めていない．
+
+- 精度側は **`adopted` の条件を満たしていた**: Δtop1 = **+0.640pt**（0.833067 → 0.839467，
+  閾値 +0.5pt 以上）かつ McNemar **p = 0.029758**（< 0.05）．
+- しかし **C6（`mean_duration_ms` ≤ 3041.7）が 9733.350 で明確に FAIL**（基準の 3.2 倍）．
+  事前登録節に「精度は基準内だが C6 のみ違反した場合も `rejected`．ただし『表現としては中立以上／
+  運用コストで不採用』と理由に明記する」と書いてあるので，そのとおり `rejected` とする．
+- C1・C2・C4・C5・C7 は PASS．C3 は #6（Ollama 常駐上限）が不充足だが，これは C6 違反と同一事象の
+  別表現（`light_model` の追い出し）であり，独立した 2 件目の違反として数えない．
+
+**1. 効果の実質性: 3 経路が同じ方向・同程度で一致しており，ノイズではない**
+
+- 本走 Δ の標準誤差は McNemar の discordant から `√n_d / n = √112 / 3750 = **0.282pt**`．
+  95%CI は **[+0.09, +1.19]pt** で，再現性の床 ±0.25pt を下回る部分をほぼ含まない．
+- 3 つの独立な推定値 — **G1 CV +1.011pt（p=0.001769，SE 0.83pt）／G2 replay 予測 +0.507pt／
+  本走実測 +0.640pt** — は互いに **1 SE 以内**に収まる（G1 は本走から +0.45 SE，G2 は −0.47 SE）．
+  真値がおよそ **+0.5 〜 +0.7pt** の共通効果であるという読みと矛盾しない．
+  事前登録 P3（replay と本走の乖離 ≤ 0.5pt）は **0.133pt で的中**，P1 の点推定 +0.3pt は
+  実測 +0.640pt をやや下振れして外したが 80% 区間 −0.5〜+1.2pt には収まる．
+- すなわち **対抗仮説 A1（CV 固有の揺らぎ）・A2（次元増による過学習）はいずれも支持されない**．
+  一方 **A3（実行基盤の退行）が的中**した．判定を決めたのは A3 だけである．
+
+**2. 伸びが複合に集中して見えることの機序: 「複合に効く」とは言えない（層別では有意差なし）**
+
+本走のデータで層別 McNemar を計算した（開発ホスト，読み取りのみ）．
+
+| 層 | n | a_only | b_only | n_d | net | 正味 Δ | 正確二項 p | discordant 率 |
+|---|---|---|---|---|---|---|---|---|
+| 単一 | 3020 | 34 | 47 | 81 | +13 | +0.430pt | 0.1821 | 2.68% |
+| 複合 | 730 | 10 | 21 | 31 | +11 | +1.507pt | 0.0708 | 4.25% |
+
+- **どちらの層も単独では p < 0.05 に届かない**（有意なのはプールした全体のみ）．複合の +1.507pt は
+  **discordant 31 行・net 11 行**に依存しており，1 行あたり 0.137pt 動く粒度である．
+- 「複合の方が効いている」かを直接検定すると，**discordant の向きの構成比の層間差は
+  Fisher p = 0.393 で有意でない**（単一 47/81 = 58.0% 対 複合 21/31 = 67.7%）．
+  一方 **discordant「率」自体は複合が有意に高い（4.25% 対 2.68%，Fisher p = 0.0293）**．
+- したがって **「相補的な 2 空間が複合設問で特に効く」という解釈は，本走のデータでは支持も反証も
+  できない**．観測されている複合の大きな Δ は，**複合行がもともと決定境界の近くに多く分布していて
+  表現をどう変えても振れ幅が大きい**（＝母数 730 と高い discordant 率の合成）という，機序に中立な
+  説明だけで足りてしまう．**この解釈を採らず，「複合で伸びた」と書かないこと**．
+  複合 argmax が変わった行は 50/730，dispatch 集合が変わった行は 125/730 で，
+  いずれも「振れやすさ」の側の数字と整合する．
+
+**3. ECE の悪化（0.031774 → 0.039556，相対 +24.5%）: C7 内だが申し送る**
+
+C7（≤ 0.08）に対してはまだ 2 倍の余裕があり，単独では何の判断も引き起こさない．
+ただし**方向は悪化で，かつ機序に説明がつく**: 特徴次元が 5,120 → 6,656 に増えて p/n が 2.25 → 2.93 に
+上がり，`CalibratedClassifierCV(method='temperature')` の温度 1 パラメータでは高次元側の
+過信を吸収しきれていない可能性がある．**融合の方向を今後も追う（＝次元をさらに増やす）なら
+この劣化は単調に積み上がる**ので，次反復以降は ECE を毎回併記し，**0.05 を超えたら C7 の 0.08 を
+待たずに校正側を単一レバーとして立てる**ことを申し送る．今回は判定に使わない．
+
+**4. C6 違反の帰属: レイテンシ退行は融合の内在コストではなく VRAM 常駐の副作用である**
+
+`duration_ms` の分位点を取ると，退行の性格がはっきり分かれる．
+
+| 層 | 統計量 | 基準線 | Iter100 |
+|---|---|---|---|
+| 単一 | 中央値 | 838 | **1137** |
+| 単一 | p95 / max | 3207 / 13097 | **9708 / 42530** |
+| 単一 | 平均 | 1111 | 2191 |
+| 複合 | p25 / 中央値 | 7888 / 9070 | **32029 / 43074** |
+| 複合 | 平均 | 8423 | 40937 |
+
+- **単一ドメインの中央値の増分は +299ms** で，これは事前登録 P5（+50 〜 +400ms ＝ 310M モデルへの
+  HTTP 往復 2 回ぶん）の**範囲内に収まっている**．つまり**融合そのものの内在コストは予測どおり
+  小さい**．平均を 2191ms へ押し上げているのは p95 以降の裾（9.7 秒・最大 42.5 秒）である．
+- 複合は裾ではなく **p25 = 32 秒**で分布全体が移動している．複合経路は入口ノードで
+  `light_model` を繰り返し呼ぶため，**embedding 2 本と `light_model` が VRAM を奪い合う
+  ロード／退避のスラッシングが毎問発生している**と読める（B171 の実測: 5,186+4,308+484 = 9,978 /
+  12,288 MiB，残り 2,310 MiB に対し `light_model` は 2,400〜2,500 MiB 必要）．
+- **この分解が次レバーの根拠になる**．C6 違反は ruri の**重みそのもの**ではなく**置き場所**の問題で
+  あり，容量を 200〜500 MiB 空けるか埋め込みを別ノードへ寄せれば，
+  **表現（＝精度 +0.640pt）を 1 ビットも変えずに C6 を満たせる可能性がある**．
+
+**限界（明記）**: 基準線 `results/20260928_160921/`（Sep 28 16:09 取得）実行時の GPU 占有状況は
+遡って確認できていない．C6 の比較は「基準線側に外部競合が無かった」という未検証の前提の上にある．
+ただし基準線の複合中央値 9,070ms は Iter89 以降の同構成の実績と整合しており，前提が崩れている兆候は無い．
+
+**学び**
+
+1. **`OLLAMA_MAX_LOADED_MODELS` は「スロット数」の上限であって「VRAM 容量」の上限ではない．**
+   4 に上げてもモデルが物理的に載らなければ Ollama は黙ってロードと退避を繰り返す．
+   計画フェーズは常駐**本数**の制約を正しく見つけたのに，**容量**の制約を検査しなかった．
+2. **G0（実現性ゲート）に穴があった．** G0-c は「埋め込み 2 本が `ollama ps` に `100% GPU` で残る」
+   までしか見ておらず，`light_model` と `expert_model` を含めた**実行時に同時に必要な全モデルの
+   VRAM 合計が物理容量に収まるか**を見ていない．**今後の G0 には
+   「実行時に必要な全モデルの VRAM 実測値の総和 ≤ 物理 VRAM，かつ本走後に `ollama ps` の行数が
+   期待本数と一致」を必須項目として入れる**（B172 に申し送り済み）．
+3. **無言の劣化は平均値ではなく分位点で診る．** 平均 `mean_duration_ms` だけを見ると「全体が 3.2 倍
+   遅い」に見えるが，単一層の中央値は予測どおり +299ms しか増えていない．
+   **中央値と p95 を分けて記録していなければ，レバーの内在コストと基盤の副作用を分離できなかった**．
+   今後 C6 系の条件には中央値も併記する．
+4. **層別の Δ の大小をそのまま機序の証拠に読まないこと．** 複合 +1.507pt は単一 +0.431pt の 3.5 倍
+   だが，層間の向きの差は有意でなく（p=0.393），複合の discordant 率が高いこと（p=0.029）だけで
+   説明がつく．**n の小さい層ほど Δ は大きく見える**という当たり前の罠に，今回あやうく
+   「相補的な空間は複合設問に効く」という物語を付けるところだった．
+5. **`rejected` の理由を 2 種類に分けて書くことには実務上の意味がある．** 今回の融合は
+   「効かなかった」のではなく「今の VRAM 予算では置けなかった」のであり，
+   **同じレバーの値を，置き場所を変えて再挑戦する価値がある**．理由を分けていなければ
+   `embedding_space_fusion` は反証済みとして閉じられていた．
+
+**ロールバック**: 事前登録どおり `models/domain_classifier.joblib`（6,656 次元）と `config.yaml` の
+`embedding_fusion_models` を pre-Iter100 構成へ戻す．ただし**次イテレーションが同じ融合構成を
+VRAM 配置だけ変えて再走する**ため，退避済み artifact
+`models/domain_classifier_pre_iter100_qwen3_4b.joblib` と融合 artifact の**両方を保持する**
+（実施はロールバック／次反復の実装フェーズが行う）．
+
 ## Iteration 99: 埋め込みを日本語特化モデル ruri-v3-310m へ差し替える
 
 ### 調査 (Iter99)

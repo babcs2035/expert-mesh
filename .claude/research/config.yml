@@ -2918,6 +2918,22 @@ levers:
             基盤の副作用を分離できなかった）．
             **留意**: 本レバーが成功した場合，採否の対象は『融合 ＋ 常駐削減』の組であり，
             Iter100 の融合単体が C6 を満たすようになったわけではない点を判定理由に明記すること．"}
+  - {name: aggregation_method_majority_vote_at_k4, values: [majority_vote],
+     note: "[2026-10-02 Iter103・backlog B188] levers を使い切ったので，B187 の申し送りにより追加した．
+            Iter46 は固定 k=2 で行った．k=2 の多数決は構造的に max_confidence と同じ選択になる
+            （aggregator.py:122-149．同票は確信度順で先頭の記号が勝ち，2 票以上の一致が無ければ max_confidence に戻る）．
+            現行の gap 方式で単一ドメインの k=4 は 407 行あり，正解ドメインが送出集合に入る割合は 97.8%，
+            rank 1 の top1 は 54.5% である（基準線 results/20260929_192157）．top1 を外したが集合に入る行は 176 行で，
+            top1 の改善の上限は全体の +4.69pt である．
+            単一レバー: config.yaml:143 の aggregation_method を max_confidence から majority_vote に変える．
+            付随作業（レバーではない）: results.jsonl に dispatch_candidates を追加する．既存のキーを変えない追加なので元に戻せる．
+            成功条件: 同じ本走の中で多数決と max_confidence の反実仮想を行ごとの対にして比べ，
+            単一ドメインの k=4 行で回答の正答の McNemar 正確検定が p<0.05 で多数決が上回る（P1），
+            全行で Δtop1 ≥ −0.25pt（P2），C1〜C7 を満たす．
+            [2026-10-02 Iter103 結果・backlog B190] rejected．本走 results/20261002_105743．rank 1 と異なる選択 44 行．
+            P1: n=407，多数決のみ正答 17／反実仮想のみ正答 13，p=0.584665（満たさない）．
+            P2: Δtop1 −0.3733pt（満たさない）．C1〜C7 は満たす．config.yaml:143 は max_confidence に戻した．
+            集約の方向（llm_judge・k=2 と k=4 の majority_vote）は打ち止め．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

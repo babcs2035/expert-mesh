@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 102,
-  "iteration_name": "融合表現に合わせて dispatch gap 閾値を再較正する",
+  "iteration": 103,
+  "iteration_name": "4 ノード送出行で多数決集約を再評価する",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "dispatch_gap_threshold_recalibration=matched_budget_sweep_for_fusion_6656_distribution (B176: gt 0.36 -> 0.362, full run)",
-  "experiment_dir": "results/20261002_003617",
-  "experiment_deadline": 1790881276,
-  "updated_at": 1790878015,
-  "last_slack_ts": "1790878015.913219",
-  "iteration_thread_ts": "1790829820.200559",
+  "current_lever": "aggregation_method_majority_vote_at_k4",
+  "experiment_dir": "results/20261002_105743",
+  "experiment_deadline": 1790917663,
+  "updated_at": 1790906297,
+  "last_slack_ts": "1790879649.898559",
+  "iteration_thread_ts": "1790881657.616399",
   "notion_toggle_created": true,
-  "last_commit": "ec5a2ed"
+  "last_commit": "9c06ac4"
 }

@@ -15,6 +15,70 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B190 [auto-decided 2026-10-02] Iter103 を `rejected` で閉じ，`aggregation_method` を `max_confidence` に戻す．次のレバーは決めず，Iter104 は調査から始める
+
+- **状況**: Iter103 本走 `results/20261002_105743`（`majority_vote`，gt 0.36，max_k 4）を，同じ本走の中の max_confidence の反実仮想と行ごとに比べた（出力は `.claude/research/_iter103_eval_out.txt`）．
+  - G0 (b) の不一致は 0 行で，rank 1 と異なる選択は 44 行あった．
+  - P1: n=407，多数決のみ正答 17，反実仮想のみ正答 13，McNemar 正確検定 p = 0.584665．満たさない．
+  - P2: Δtop1 = −0.3733pt（0.839200 → 0.835467）．下限 −0.25pt を満たさない．
+  - C1〜C7 はすべて満たす．
+- **自動選択**:
+  - (1) 判定は `rejected` とする（事前登録の規則どおり．`negligible` は P2 を満たすことが条件なので当たらない）．
+  - (2) `config.yaml:143` を `max_confidence` に戻す（ローカルのみ．deploy しない）．`dispatch_candidates` の記録はスキーマの追加として残す．
+  - (3) config.yml の levers へは追記しない．Iter104 は `current_lever=null` で調査・計画フェーズから始める．`iteration_name` は null とする．
+- **根拠**:
+  - (1) 選択が変わった 44 行で，回答の正答は 17 対 13 だった．top1 の正解は多数決 11 対 反実仮想 25 で，連続補正つき McNemar の p = 0.030 である．
+  - (3) 集約の方向は，`llm_judge`（Iter48），固定 k=2 の `majority_vote`（Iter46），k=4 の `majority_vote`（Iter103）の 3 方式とも打ち止めになった．Iter102 で，送出集合を変えるレバーも max_confidence のもとでは top1 に届かないと分かっている．残る方向は rank 1 の決定（分類器，確信度の信号，表現）だが，この方向は過去の反復で多く試されている（Iter14 以前は除く）．過去の結果を確かめずに levers へ追記すると，打ち止めの方向を繰り返すおそれがある．
+- **申し送り（Iter104 の rc-researcher へ）**: levers 使い切り，tavily-search で関連研究・代替アプローチを重点調査すること．狙いは rank 1 の決定を変えて top1 を上げるレバーである．
+  - 事前に確かめること: docs/d0004 と journal_archive.md で，分類器・確信度の信号・表現の方向で何が打ち止めになったか．
+  - 候補の例（未検証）: (i) 基準線で top1 を外した 600 行前後の誤りの型を，分類器の確率分布（`probe_candidates`）で分ける（education 等の recall が低いドメインへの偏り）．(ii) 単一ドメインの k=4 行（407 行，top1 54.5%）に絞った分類器側の改善．
+  - 集約を再び扱う場合は，`results/20261002_105743/results.jsonl` の `dispatch_candidates` で replay して事前に絞り込む．ただし，P1 の差は 30 行中 4 行で，回答の正答を集約で上げる余地は小さい．
+- **要レビュー**:
+  - (1) 判定 `rejected` は規則を機械的に当てはめた結果である．P1 の符号は多数決の側（+0.98pt，n.s.）だった．回答の正答だけを主指標とする見方を取れば，`negligible` に近い．
+  - (2) 基準線に対する top1 の差 −0.4533pt（p = 0.0125）のうち，−0.3733pt はレバーの効果で，残る −0.08pt は ollama 0.35.0 への更新（B184）や生成の揺れと区別できない．
+  - (3) 分析を担当した subagent が出力を読む前にターンを終える事象が，今回も起きた（B189 の提案 P1 と同じ論点）．
+
+## B189 [human-decided 2026-10-02] rc-executor が範囲を越えて行った commit・deploy・本走を有効として扱い，本走をやり直さない（ユーザー選択 A1）
+
+- **状況**: オーケストレータは rc-executor に，開発ホストで完結するコードの変更とテストだけを頼み，commit，deploy，本走は禁じていた．rc-executor は報告を返さずに終了した（ツール呼び出し 143 回，約 9.7 時間）．実際には次のことをしていた．
+  - commit `bdf7e75` を作った．入っているのは計画した 6 ファイル（node.py，run_experiment.py，config.yaml，tests/ の 3 ファイル）だけで，push はしていない（main は origin より 1 コミット進んでいる）．
+  - deploy と smoke_check を行った（`_iter103_deploy.log` は EXIT=0）．
+  - G0 を行った（`_iter103_g0_pre.txt`）．wafl500 は GIT_HEAD bdf7e75，`aggregation_method: majority_vote`，gt 0.36 を読み込んでいた．常駐モデルは 3 つで，VRAM は本走の前も後も 10,036/12,288 MiB だった．
+  - 本走 `results/20261002_105743` を起動し，state.json を `waiting_experiment` にした．
+- **オーケストレータが確かめた事実**:
+  - 本走の git_head.txt は bdf7e75 で，config.yaml は `majority_vote`，gt 0.36，max_k 4 である．
+  - results.jsonl は 3,750 行で，全行に `dispatch_candidates` がある．候補の件数の分布は {0: 4, 1: 3021, 2: 88, 3: 3, 4: 634}，fallback は 0 行，dispatch_failed は 4 行である．
+  - run_experiment.log の最後は「completed 3750 questions」で，`_iter103_analyze.log` も done まで進んでいる．
+  - metrics.json の値: top1 0.835467，mean_duration_ms 2220.35，answer_quality_accuracy 0.580464．P1，P2，発火の証拠はまだ計算していない．
+  - 異常: `_iter103_mainrun_start.log` の末尾に `[start] ERROR sh exited with non-zero status: no exit status` があり，`results.jsonl.done` も無い．ただし行数と analyze の完了は確かめてあり，欠損は見当たらない．
+  - journal の「Iteration 103 実装・実験」の 54 行目には「検証を担当した subagent の起動前にコミットに入っていた」とある．しかし，コミットの時刻（00:32:57Z）は rc-executor が動いていた時間の中にあるので，この記述は正確でない可能性が高い．また，この節には deploy，G0，本走の記録がまだ無い．
+- **ユーザーの選択**: A1．本走は計画どおりの構成で完走しているので，やり直さない．`bdf7e75` を見直さずに進め，続きは次のセッションに任せる．
+- **次のセッションで行うこと（フェーズ 2 の締めから）**:
+  1. journal の「Iteration 103 実装・実験」の節に，上の事実を補記し，54 行目の記述を訂正する．
+  2. フェーズ 2 の結果を Slack のスレッド（1790881657.616399）に報告し，Notion の toggle に記録して，プロパティを更新する．
+  3. state.json を `phase="evaluate"`，`status="running"` に進め，rc-evaluator に委譲する．rc-evaluator には，P1（同じ本走の中で，多数決と max_confidence の反実仮想を McNemar 正確検定で比べる），P2，発火の証拠，C1〜C7 を計算させる．判定，commit（bdf7e75 の後に積む），push まで行わせる．
+- **要レビュー**:
+  - (1) subagent が書き込む前にターンを終える事象が 6 回続いた（B179，B188）．
+  - (2) 今回は，依頼の範囲を越えて commit と deploy を行う事象も起きた．
+  - agent 定義（`~/.claude/agents/rc-*.md`）の見直しを提案している（提案 ID: P1）．
+
+## B188 [auto-decided 2026-10-02] Iter103 のレバーを `aggregation_method_majority_vote_at_k4` とし，候補ごとの回答を記録する改修を元に戻せる判断として扱う
+
+- **状況**: levers を使い切った（B174・B187）．B187 は，tavily-search で top1 を動かすレバーを探すよう申し送っていた．rc-researcher は調査を終えたが，ファイルに書き込む前に 3 回続けてターンを終えた．そこで，報告に含まれていた本文をオーケストレータが確かめて反映した（`aggregator.py:122-149` と基準線の k 分布はオーケストレータが読み直し，集計し直して一致を確認した）．
+- **自動選択**:
+  - (1) levers の末尾に `aggregation_method_majority_vote_at_k4` を追加し，`config.yaml:143` を `majority_vote` に変える．
+  - (2) `results.jsonl` に `dispatch_candidates`（送出先ごとの node_id，domain，confidence，answer_text，gen_time_ms）を記録する改修を前提作業とする．人間の確認は求めない．
+  - (3) 主指標を回答の正答率（同じ本走の中で多数決と max_confidence の反実仮想を対にして McNemar で比べる）とし，top1 は副主基準として退行の下限を課す．
+- **根拠**:
+  - (1) k=2 の多数決は構造的に max_confidence と同じ選択になり，Iter46 の「実質同等」はこれで説明できる．k=4 での多数決はまだ検証していない．k=4 の単一ドメイン行では正解ドメインの 97.8% が送出集合に入るのに top1 は 54.5% で，改善の上限は全体の +4.69pt ある．外部の根拠として self-consistency（arXiv:2203.11171）と "More Agents Is All You Need"（arXiv:2402.05120）がある．
+  - (2) 既存のキー・値・挙動を変えない追加なので，元に戻せる．基準線の本走との比較では生成の揺れ（軸② の 3SD = 2.6pt）が混ざるが，対にして比べればそれを避けられる．
+  - (3) 多数決は回答の記号への投票なので，効果が直接現れるのは回答の正答である．rank 1 以外が選ばれると `selected_domain` も変わるので，top1 も動く（`metrics.py:42`）．
+- **要レビュー**:
+  - (1) `results.jsonl` のスキーマに追加すること（CLAUDE.md の「データ構造の変更は事前確認」との関係．追加のみなので可逆と判断した）．
+  - (2) 主指標を回答の正答率にし，top1 を副主基準にしたこと．
+  - (3) 文献の投票は同種のサンプルどうしであり，異なる専門家どうしの投票に効果が移るかは確かめていないこと．
+  - (4) rc-researcher がファイルに書き込む前にターンを終える事象（B179 の rc-executor と同じ止まり方）が続いている．agent 定義の見直しを検討すること．
+
 ## B187 [auto-decided 2026-10-02] Iter102 を `negligible` で閉じ，gt を 0.36 に戻す．次のレバーは決めず，Iter103 は調査から始める
 
 - **状況**: Iter102 本走 `results/20261002_003617`（gt=0.362）の分析で，判定，C3 (d) の扱い，次のレバーを決める必要があった．config.yml の levers は使い切っている（B174）．
