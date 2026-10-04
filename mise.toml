@@ -147,6 +147,19 @@ echo "[deploy] running smoke check"
 uv run python tools/smoke_check.py --check git-status
 uv run python tools/smoke_check.py --check hashes --remote-dir "$REMOTE_DIR"
 ssh "$first_host" "cd $REMOTE_DIR && docker compose exec -T app .venv/bin/python tools/smoke_check.py --check probe"
+
+# Image prune (2026-10-04 user instruction). Placed after the smoke check so a
+# deploy that fails healthcheck/smoke exits via set -e before this point and
+# keeps the previous images around for debugging. Locally, no container
+# references expert-mesh images, so `-a` also removes the just-built
+# expert-mesh:latest; it stays pullable from the registry until the next push,
+# and older builds are only recoverable from the registry by digest.
+echo "[deploy] pruning images no container references, on all nodes and locally"
+for host in $(uv run python tools/list_peers.py); do
+  echo "[deploy] $host: docker image prune -a -f"
+  ssh "$host" "docker image prune -a -f"
+done
+docker image prune -a -f
 """
 
 [tasks.start]
@@ -299,6 +312,32 @@ uv run python -m scripts.evaluate_response_quality \\
 
 echo "[analyze] done. Results in $RESULTS_DIR/"
 echo "  Run 'uv run python tools/show_logs.py --node-id <node_id> --summary' for per-node metrics"
+"""
+
+[tasks.stop]
+description = "Stop (not remove) containers on all nodes after an experiment to release VRAM; images and logs are kept"
+# Separate task rather than the tail of [tasks.start] (2026-10-04 user
+# instruction): start runs twice back to back (G0-c preview, then the main
+# run), and its wait loop can be cut off by the caller's time limit (Iter104),
+# so a stop there would either break the main run or never execute. `stop`
+# rather than `down` because [tasks.analyze] reads `docker compose logs app`,
+# which needs the container to still exist. The next run must start from
+# `mise run deploy`, which brings both services back up.
+run = """
+set -e
+
+REMOTE_DIR=$(uv run python tools/remote_dir.py)
+
+for host in $(uv run python tools/list_peers.py); do
+  echo "=== $host ==="
+  if ssh "$host" "[ -d $REMOTE_DIR ]"; then
+    ssh "$host" "cd $REMOTE_DIR && docker compose stop"
+  else
+    echo "  (not deployed, skip)"
+  fi
+done
+
+echo "[stop] done"
 """
 
 [tasks.clean]

@@ -7,7 +7,11 @@ repo_name: expert-mesh
 # 実験の起動系（実機 3 ノード: wafl500/general(依頼者兼任)・wafl502/legal・wafl503/medical，
 # Docker + ローカル registry(5001番，WAFL-PEFTの5000番と衝突回避)，mise タスク）
 # 2026-07-20 ユーザー通達: 192.168.15.100〜109（最大10台，同一スペック）が実機として利用可能．
-# VRAMは常に確保（コンテナ常時起動．docker-compose.ymlにOLLAMA_KEEP_ALIVE=-1設定済み，commit 94d4b50）．
+# 【2026-10-04 ユーザー指示】VRAMの常時確保（コンテナ常時起動）は廃止．実験は `mise run deploy` から始め，
+# `mise run analyze` の後に `mise run stop` でコンテナを停止してVRAMを解放する（削除はしない）．
+# docker-compose.ymlのOLLAMA_KEEP_ALIVE=-1（commit 94d4b50）は，起動中にモデルを保持する設定として残す．
+# deploy末尾の `docker image prune -a -f`（全ノード＋操作端末）はユーザー承認済み．過去のビルドは
+# レジストリからdigestで取得できる．次の反復はモデルの再ロードから始まるため，mean_duration_msの比較に注意．
 # ノード拡張の活用方向はユーザー承認済み（新規専門ドメインの追加，research_frontier参照）．
 # Iteration 2（routing_method）は単一レバー原則を守るため現行3ノード構成のまま実施し，
 # ノード拡張は別イテレーションとして着手する．

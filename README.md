@@ -242,9 +242,10 @@ expert-mesh/
 | タスク                     | 実行場所          | 内容                                                                                                                      |
 | -------------------------- | ----------------- | ----------------------------------------------------------------------------------------------                            |
 | `mise run setup`           | 操作端末          | `uv sync`，ローカル Docker レジストリの起動，イメージ build/push，データセット生成，`results/` 作成                       |
-| `mise run deploy`          | 操作端末→各ノード | SSH リバーストンネルの確立，`docker-compose.yml`・`config.yaml` の配布，GPU 有無の自動検出，イメージ・モデルの取得，コンテナ起動，healthcheck |
+| `mise run deploy`          | 操作端末→各ノード | SSH リバーストンネルの確立，`docker-compose.yml`・`config.yaml` の配布，GPU 有無の自動検出，イメージ・モデルの取得，コンテナ起動，healthcheck，smoke check，未使用イメージの削除（各ノードと操作端末で `docker image prune -a -f`．過去のビルドはレジストリから digest で取得できる） |
 | `mise run start`           | 操作端末→各ノード | ベンチマーク実験の実行（結果は `results/<YYYYMMDD_HHMMSS>/` へ出力）                                                      |
 | `mise run analyze`         | 操作端末→各ノード | 各ノードのコンテナログを `results/<datetime>/logs/<node_id>/` へ回収                                                      |
+| `mise run stop`            | 操作端末→各ノード | 実験後にコンテナを停止して VRAM を解放する（削除はしない．イメージとコンテナログは残る）．次の実験は `mise run deploy` から始める |
 | `mise run clean`           | 操作端末→各ノード | コンテナの停止・削除（モデルデータは保持）                                                                                |
 | `mise run clean -- --full` | 操作端末→各ノード | コンテナ・モデルデータ（named volume）・イメージ・配布先ディレクトリを完全削除                                            |
 
@@ -255,6 +256,7 @@ mise run setup     # 初回のみ：ローカル環境・イメージ・デー�
 mise run deploy    # 各ノードへ配布し，イメージとモデルを取得してサービスを起動する
 mise run start     # ベンチマーク実験を実行する
 mise run analyze   # 実験ログを回収する
+mise run stop      # コンテナを停止して VRAM を解放する（analyze の後に実行する）
 mise run clean      # 後片付け（必要に応じて --full）
 ```
 
