@@ -1,3 +1,155 @@
+## Iteration 103: 4 ノード送出行で多数決集約を再評価する
+
+### 調査 (Iter103)
+
+**実施場所の申告**: 本フェーズで行うのは，開発ホストでのリポジトリ読み取り，既存 `results.jsonl` に対する replay（`uv run`），tavily-search による外部調査だけである．wafl500〜509 と wafl-ctrl5 には接続しない．
+
+**確認できた事実（途中経過．見出しはレバー確定後に正式名へ置き換える）**
+
+1. **集約方式の過去の結果（打ち止めの範囲）**．出典は config.yml 537〜564 行目（`aggregation_method` の note）と research_frontier item 5（2973〜2978 行目），journal_archive.md の Iter46〜48 節（23000〜23500 行目付近）．
+   - Iter27 は no-op だった（`confidence_threshold=0.5` のため複数送出が 0 問）．
+   - その後，`dispatch_candidate_threshold=0.0`・固定 `dispatch_top_k=2`・評価集合 1,600 問の条件で 3 方式を比べた．`max_confidence`（Iter47）top1 0.6031 / compound_recall 0.345 → adopted．`majority_vote`（Iter46）0.6063 / 0.360 → 実質同等．`llm_judge`（Iter48）0.435 / 0.345 → rejected（−16.81pt．judge が `max_confidence` と異なる選択をした 604 件の 84.1% が誤り）．
+   - **当時と現在とで条件が違う**．当時は top1 約 0.60・固定 k=2 だった．現在は 3,750 問（複合 730 行）・top1 0.840・gap 方式（overall mean_k 1.533，複合の k 分布 {1: 479, 2: 21, 4: 230}）である．k=2 の多数決は同票か全員一致にしかならないので，多数決として働くのは k≥3 の行だけであり，その条件は過去に試していない．
+2. **top1 へ届く経路**．`metrics.py:42` は `selected_domain in expected_domains` を正解とする．集約で rank 1 以外の回答が選ばれれば `selected_domain` が変わり top1 が動く．分岐は `node.py:142-149`，設定の読み込みと検証は `node.py:196-199`．
+3. **現行の構成**（`config.yaml` を Read で確認）: `dispatch_gap_threshold: 0.36`（131 行目），`dispatch_gap_max_k: 4`（132 行目），`aggregation_method: max_confidence`（143 行目），`confidence_threshold: 0.0`，`dispatch_candidate_threshold: 0.0`．
+4. **ノード側のログに回答の本文は残らない**．`dispatch_done` の項目は `request_id`・`received_at_unix_time_s`・`local_inference_ms` だけである（`http_server.py:536-543`，`results/20261002_003617/logs/wafl500/expert-mesh.log` で確認）．基準線の `results.jsonl` のキーは `answer_text, confidence, confidence_logprobs_mean, dispatch_failed, dispatch_gen_time_ms, dispatched_domains, duration_ms, expected_domains, id, probe_candidates, query, request_id, selected_domain, selected_node_id, used_fallback` で，選ばれた 1 件の回答しか持たない．したがって，既存の本走から多数決を replay することはできない．
+5. **Iter46 で多数決によって回答が変わった件数は記録なし**（journal_archive.md 23940〜24113 行目を grep した）．同じ範囲にある 604 件は Iter48 の judge_override の件数である．
+6. **集約が行われる場所は開発ホスト**である．`run_experiment.py:49` が `node.run_ask_flow()` を呼び，その中の `_dispatch_to_targets()` が集約する．集約の挙動は開発ホストの `config.yaml` だけで決まる．
+7. **多数決の選択が変わる条件**（`aggregator.py:122-149`．オーケストレータも Read で確認した）．2 票以上の一致が無ければ `max_confidence` に戻る．同票のときは，`vote_counts` に確信度の降順で挿入された最初の記号が `max()` で返るので，rank 1 の記号が勝つ．勝った群の中では確信度が最大の回答を選ぶ．選択が変わるのは，(a) rank 1 以外の記号が 2 票以上かつ rank 1 の記号より厳密に多い場合と，(b) rank 1 の記号を抽出できず，他の候補が 2 票以上一致した場合だけである．k=2 ではどちらも起こらない．Iter46（固定 k=2）が「実質同等」だったことは，この構造で説明できる可能性がある（推測）．
+8. **到達範囲**（基準線 `results/20260929_192157`．オーケストレータが集計し直して一致を確認した）．
+   - 単一ドメインの k=4: 407 行．top1 222（54.5%），正解ドメインが送出集合に入る 398（97.8%），top1 を外したが集合に入る 176．
+   - 単一ドメインの k=2: 67 行で top1 35．k=1: 2,546 行で top1 2,305．
+   - 複合の k=4: 230 行（Iter102 の本走では 233 行）．Iter102 の本走では 233 行中 232 行で記号を抽出できず，`max_confidence` に戻る．
+   - top1 の改善の上限は 176 行，全体の +4.69pt である（176/3750）．
+9. **外部文献**（tavily-search）．
+   - Wang et al., "Self-Consistency Improves Chain of Thought Reasoning in Language Models", ICLR 2023, arXiv:2203.11171（https://arxiv.org/abs/2203.11171）．複数の推論経路の最終回答で多数決を取ると精度が上がる．
+   - Li, Zhang, Yu, Fu ほか, "More Agents Is All You Need", 2024, arXiv:2402.05120（https://arxiv.org/abs/2402.05120）．sampling-and-voting で，性能がエージェントの数とともに伸びる．
+   - どちらも同種のサンプルどうしの投票である．異なる専門家どうしの投票に同じ効果が移るかは分からない（推測）．
+
+### 計画 (Iter103)
+
+- **仮説**: k=4 の単一ドメインの行では，rank 1 以外の 2 ノード以上が一致した記号の方が，rank 1 だけが選んだ記号よりも正答である確率が高い．
+- **B187 の狙いとの関係**: 多数決は回答の記号への投票なので，効果が直接現れるのは回答の正答である．そのため主指標は回答の正答率にする．多数決が rank 1 以外を選ぶと `selected_domain` が変わり，top1 も直接動く（`metrics.py:42`．上限 +4.69pt）．top1 は副主基準として対で比べ，退行の下限を課す．
+- **単一レバー**: `config.yaml:143` の `aggregation_method` を `max_confidence` から `majority_vote` に変える．
+- **固定する構成**: Iter101 で採用した構成のすべて．`dispatch_gap_threshold: 0.36`，`dispatch_gap_max_k: 4`，`confidence_threshold` と `dispatch_candidate_threshold` は 0.0，融合表現 6,656 次元，`models/domain_classifier.joblib`（MD5 c8cd0fb46549d03db11f43864a741ef8），評価集合 3,750 行，light_model の常駐解除．
+- **計測の改修の仕様**（レバーではない．rc-executor が行う）:
+  - `node.py`: `AskResult` に `dispatch_responses: list[DispatchResponse] = field(default_factory=list)` を追加する．`_dispatch_to_targets()` は，成功した応答を targets の順のまま返す．
+  - `run_experiment.py` の `_run_one()`: `dispatch_candidates`（node_id，domain，confidence，answer_text，gen_time_ms のリスト）を追加する．fallback のときと全件失敗のときは空リストにする．
+  - 既存のキー・値・挙動は変えない．`metrics.py`・`evaluation.py`・`scripts/`・`mise run analyze` が未知のキーを無視することを確かめる．
+  - 単体テスト: 同票では rank 1 が勝つこと．A,B,B,C では B の群の中で確信度が最大のものが選ばれること．`dispatch_candidates` が記録されること．
+- **G0**（予備 20 問）: (a) `dispatch_candidates` の件数が，成功した送出の件数と一致する．(b) `dispatch_candidates` に多数決を当て直した結果が `selected_node_id` と一致する．(c) GPU・VRAM・モデルのロード状態が Iter102 と同じ基準（G0-vram-1，G0-vram-2）を満たす．
+- **事前登録する比較**: 同じ本走の中で，実際の選択（多数決）と，`dispatch_candidates` に `max_confidence` を当てた反実仮想を，行ごとの対にして比べる．こうすると生成の揺れ（軸② の 3SD = 2.6pt）の影響を受けない．
+  - P1（主基準）: 単一ドメインの JMMLU で候補が 3 件以上の行について，回答の正答を McNemar 正確検定で比べ，p<0.05 で多数決が上回る．
+  - P2（副主基準）: 全行で，反実仮想に対する Δtop1 ≥ −0.25pt．
+  - C1〜C7: Iter101 と同じ閾値とする．C6 には平均に加えて中央値と p95 を併記する．
+- **判定規則**: G0 不合格，`dispatch_candidates` の欠落，発火なし，のいずれかなら `invalid`．P1・P2・C1〜C7 をすべて満たせば `adopted`．P1 が p≥0.05 で，それ以外を満たせば `negligible`（`max_confidence` に戻す）．それ以外は `rejected`（`max_confidence` に戻す）．
+- **予測**: 候補が 2 件以下の行と，複合の行（記号を抽出できる 1 行を除く）では，多数決は rank 1 と同じ選択になる．k の分布と set_recall（0.578767）は基準線と同じになる．選択が変わる行数と P1 の符号は，候補ごとの回答の記録が無いので予測できない（確信は低い）．
+- **発火の証拠（C3）**: 全行で G0 (b) が一致し，かつ `selected_node_id` が rank 1 と異なる行が 1 行以上あること．どちらも本走の `results.jsonl`（`dispatch_candidates` と `selected_node_id`）だけで数えられる．
+- **見込み時間**: 約 2 時間 20 分（Iter101・102 の実績．追加の LLM 呼び出しは無い）．`experiment_deadline` は起動の 3 時間後とする．ノードには Iter102 の 0.362 が残っているので，deploy と smoke_check で 0.36 に揃えてから本走を始める．
+- **記録の経緯**: rc-researcher は調査を終えたが，ファイルに書き込む前に 3 回続けてターンを終えた．本ブロックの 4〜9 と計画は，その報告の本文をオーケストレータが確かめて反映したものである（B188）．
+
+### Iteration 103 実装・実験（2026-10-02）
+
+- node.py: `_dispatch_to_targets` が全応答も返すようにし，`AskResult.dispatch_responses` を追加した．
+- 適用の状況: 依頼された (1)〜(4) の変更（node.py，run_experiment.py，tests/test_node.py，tests/test_aggregator.py，tests/test_run_experiment.py，config.yaml）は，コミット `bdf7e75`（2026-10-02 09:32:57 +0900 = 00:32:57Z）に入っている．このコミットは，同じ委譲で動いていた rc-executor が依頼の範囲（commit は禁止）を越えて作ったものである（B189．以前の記述「検証を担当した subagent の起動前に入っていた」は誤りなので訂正した）．入っているのは計画した 6 ファイルだけで，push はしていない．
+- config.yaml: 143 行目は `aggregation_method: majority_vote` である（`bdf7e75` で `max_confidence` から変更．ほかの行の差分は無い）．
+- テスト（`uv run pytest -q`）: 310 passed，20 failed，2 skipped．失敗は tests/test_build_dataset.py の 9 件，tests/test_evaluate_classifier_calibration.py の 9 件，tests/test_train_domain_classifier.py の 2 件で，どれも Iter103 で変更していないファイルである．`-x` で確かめた最初の失敗の原因は，test_build_dataset.py では `KeyError: "There is no item named 'JMMLU/test/japanese_civics.csv' in the archive"`，ほかの 2 ファイルでは `ModuleNotFoundError: No module named 'sentence_transformers'` であり，開発ホストの環境に依存する．
+- 変更した 3 つのテストファイルだけを実行すると（`uv run pytest -q tests/test_node.py tests/test_aggregator.py tests/test_run_experiment.py`），42 passed，0 failed である．
+- リンタ: 変更した 5 つの Python ファイルに対する `uv run ruff check` は All checks passed．`uv run ruff format --check` は node.py，tests/test_aggregator.py，tests/test_node.py，tests/test_run_experiment.py の 4 ファイルで差分ありと判定した．親コミット `9c06ac4` でも同じ 4 ファイルが差分ありと判定される．Iter103 で足した行に当たる指摘は 2 箇所で，tests/test_aggregator.py 257 行目（長い関数名の行）と，tests/test_node.py 171 行目（新しいテストの中の `DispatchResponse(...)` の行）である．整形は依頼の範囲外なので行っていない．
+- 未知のキーの確認: 基準線 `results/20260929_192157/results.jsonl` の先頭 20 行に `"dispatch_candidates": []` を足した `/tmp/iter103_unknown_key.jsonl` に対し，`uv run python metrics.py --results /tmp/iter103_unknown_key.jsonl --json` は exit 0 で終わった（`total_questions` は 20）．
+- `git diff --stat`: node.py，run_experiment.py，config.yaml，tests/ には差分が無い．差分があるのは .claude/research/ 配下の 4 ファイル（backlog.md，config.yml，journal.md，state.json）と，作業前からある results/iter45_preliminary/logs/wafl500〜509 の 10 ファイルである．
+
+#### deploy・G0・本走（オーケストレータが成果物から補記．B189）
+
+rc-executor は依頼の範囲（開発ホストでのコード変更とテストだけ）を越えて，以下まで実行してから報告を返さずに終了した．ユーザーの判断（B189，A1）により，本走は有効として扱い，やり直さない．
+
+- **deploy**: `.claude/research/_iter103_deploy.log` は `smoke_check` の probe 合格と `EXIT=0` で終わる．
+- **G0**（`.claude/research/_iter103_g0_pre.txt`）: 確認した wafl500〜504 のすべてで，GIT_HEAD が bdf7e75，`node.py`・`run_experiment.py`・`aggregator.py` の MD5 が一致（088d78b2…，2b01df8c…，11f7e4be…），`dispatch_gap_threshold: 0.36`・`dispatch_gap_max_k: 4`・`aggregation_method: majority_vote` を読み込んでいた．ollama は 0.35.0（RepoDigest `sha256:2a6e883b…`．Iter102 と同じ）．常駐モデルは wafl500 が 3 つ（LoRA，qwen3-embedding:4b，ruri-v3-310m）で VRAM 10,036/12,288 MiB，ほかのノードは 2 つで 9,505〜9,561 MiB である．
+- **本走後**（`.claude/research/_iter103_post_run_gpu_status.txt`）: 常駐モデルと VRAM は本走前と同じ値だった．
+- **本走**: `results/20261002_105743`．起動 epoch 1790906263（2026-10-02 01:57:43Z），終了 epoch 1790914677（04:17:57Z），所要時間は約 2 時間 20 分である．`run_experiment.log` の最後は `completed 3750 questions` で，`mise run analyze` も `done` まで進んだ（`_iter103_analyze.log`，採点対象 3,020 行）．
+- **異常の記録**: `_iter103_mainrun_start.log` の末尾に `[start] ERROR sh exited with non-zero status: no exit status` があり，`results.jsonl.done` も無い．ただし results.jsonl は 3,750 行で，analyze も完了しているので，欠損は見当たらない．
+- **成果物の検査**（オーケストレータが `uv run` で数え直した）: 3,750 行の全行に `dispatch_candidates` がある．候補の件数の分布は {0: 4, 1: 3021, 2: 88, 3: 3, 4: 634}．`used_fallback` は 0 行，`dispatch_failed` は 4 行である．`metrics.json` の top1_accuracy は 0.835467（基準線 0.840000），`dispatch_failure_rate` は 0.001067，`mean_duration_ms` は 2220.35 である．
+- **未計算**: P1（同じ本走の中での多数決と `max_confidence` の反実仮想の McNemar 正確検定），P2，発火の証拠（C3），C1〜C7 は分析フェーズで計算する．
+
+### Iteration 103 実行済み
+
+#### 計算の方法
+
+- スクリプトは `/tmp/iter103_eval.py`（一時ファイル）で，出力は `.claude/research/_iter103_eval_out.txt`（129 行）に保存した．実行は `uv run python /tmp/iter103_eval.py` で，EXIT=0 だった．
+- 採点には `evaluation.extract_answer_letter` を使った．判定式は `compute_answer_quality_accuracy` と同じで，`answer_text or ""` を `jmmlu_answer` と比べる．データセットは analyze と同じ `data/dataset.jsonl` である．
+- 集約には `aggregator.select_best_dispatch_response_majority_vote`（当て直し）と `aggregator.select_best_dispatch_response`（反実仮想の max_confidence）を使った．入力は `dispatch_candidates` を記録順のまま `DispatchResponse` に戻したものである．
+- 反実仮想の行は，本走の行の `selected_node_id`・`selected_domain`・`answer_text`・`confidence` だけを max_confidence の選択に置き換えて作った．候補が 0 件の 4 行はそのままにした．
+- C1 の検定には `metrics.py` の `compute_domain_recall_mcnemar_test`・`compute_domain_precision_fisher_test`・`apply_benjamini_hochberg` を使った．C2〜C7 には `compute_all_metrics` を使った．
+- P1 の McNemar 正確検定（両側，二項）は `metrics.py` に無いので，`scipy.stats.binomtest(mv_only, n_disc, 0.5)` を使った．
+
+#### 結果（出力ファイルの値の書き写し）
+
+| 項目 | 実測 |
+|---|---|
+| 行数 | 本走 3,750，基準線 3,750，データセット 3,750 |
+| 候補件数の分布 | {0: 4, 1: 3021, 2: 88, 3: 3, 4: 634} |
+| G0 (b): 多数決の当て直しと `selected_node_id`・`answer_text` の不一致 | **0 行** |
+| `selected_node_id` が rank 1（max_confidence）と異なる行 | **44 行**（すべて k=4 の単一ドメイン行） |
+| P1 の n（単一ドメイン JMMLU，候補 3 件以上） | **407** |
+| P1 の内訳 | 両方正答 236，多数決のみ正答 **17**，反実仮想のみ正答 **13**，両方誤答 141 |
+| P1 の回答正答率 | 多数決 0.621622，反実仮想 0.611794 |
+| P1 の McNemar 正確検定（両側） | **p = 0.584665** |
+| 参考: 採点対象の全行（n=3,020）の回答正答率 | 多数決 0.580464，反実仮想 0.579139 |
+| P2: top1 | 多数決 0.835467，反実仮想 0.839200，**Δ = −0.3733pt** |
+| P2 の参考: McNemar（反実仮想 対 多数決，連続補正） | 反実仮想のみ正解 25，多数決のみ正解 11，chi2 = 4.6944，p = 0.030260 |
+| 参考: McNemar top1（基準線 対 本走，連続補正） | 基準線のみ正解 29，本走のみ正解 12，chi2 = 6.2439，p = 0.012462 |
+| top1（本走 / 基準線） | 0.835467 / 0.840000 |
+| 単一 top1（本走 / 基準線） | 0.842715 / 0.848344 |
+| `dispatch_failed` の行 | 本走: medical-109，medical-110，social_science-150，medical-exp085-156．基準線: social_science-exp085-092 |
+| 候補が送出数より少ない行 | 7 行（computer_science-041 4→3，education-078 4→3，social_science-121 4→3，残る 4 行は `dispatch_failed` の 1→0） |
+
+#### C1〜C7 の実測（Iter101 と同じ閾値）
+
+| 条件 | 基準 | 実測 | 合否 |
+|---|---|---|---|
+| C1 | per-domain 20 指標の BH 後（q=0.05）の有意退行 0 件 | 基準線に対して 0 件，反実仮想に対して 0 件 | PASS |
+| C2 | `fallback_rate` = 0.0，`dispatch_failure_rate` ≤ 0.005 | 0.0，0.001067 | PASS |
+| C3 | G0 (b) が全行で一致し，rank 1 と異なる行が 1 行以上 | 不一致 0 行，rank 1 と異なる行 44 行 | PASS |
+| C4 | 複合 top1 ≥ 0.780411 | 0.805479（基準線 0.805479） | PASS |
+| C5 | set_recall ≥ 0.5400 かつ mean_dispatched ≤ 2.10 | 0.578767 / 1.973973 | PASS |
+| C6 | `mean_duration_ms` ≤ 3041.7 | 2220.354 | PASS |
+| C7 | ECE ≤ 0.08 | 0.038504（n=3,746．基準線 0.039551） | PASS |
+
+- **C1 の生 p 値の最小**: 基準線に対しては medical の recall p = 0.004427（基準線のみ正解 10／本走のみ正解 0），反実仮想に対しては medical の recall p = 0.02334（7/0）．どちらも BH 後に有意でない．
+- **C6 の分位点**（括弧内は基準線）:
+  - 全体: 中央値 548.0（545.0），p95 8,879.0（8,887.0），max 9,167（9,265）．
+  - 単一層: 中央値 516.0（511.0），p95 3,257.1（3,017.2）．
+  - 複合層: p25 7,488.8（7,460.0），中央値 8,729.0（8,732.0）．
+  - 送出 4 件の行: n=637，平均 3,894.5（637 行，3,861.9）．
+
+#### 判定（分析フェーズ，2026-10-02）
+
+- **判定: `rejected`**．事前登録の判定規則（「計画 (Iter103)」）をそのまま当てはめた．事前登録からの逸脱は無い．
+  - `invalid` の条件には当たらない．G0 (b) の不一致は 0 行，`dispatch_candidates` は全行にあり，発火（rank 1 と異なる選択）は 44 行ある．
+  - P1 は p = 0.584665 ≥ 0.05 で満たさない．
+  - P2 は Δtop1 = −0.3733pt で，下限 −0.25pt を満たさない．
+  - C1〜C7 はすべて満たす．
+  - `negligible` は「P1 が p≥0.05 で，それ以外を満たす」場合だけである．P2 も満たさないので，残りの分岐の `rejected` に当たる．
+- **後始末**: `config.yaml:143` の `aggregation_method` を `max_confidence` に戻した（ローカルのみ．deploy はしない）．`dispatch_candidates` の記録（`node.py`・`run_experiment.py`）はスキーマの追加として残す．
+- **雑音と信号の切り分け**:
+  - 多数決と反実仮想は，同じ本走の同じ回答から作った対である．差が出るのは選択が変わった 44 行だけで，生成の揺れは入らない．
+  - 回答の正答（P1）: 多数決のみ正答 17，反実仮想のみ正答 13 で，30 行の差は 4 行である．正答率は 0.611794 → 0.621622（+0.98pt，n=407）だが，p = 0.58 なので偶然と区別できない．採点対象の全 3,020 行では 0.579139 → 0.580464（+0.13pt）である．
+  - top1（P2）: 反実仮想のみ正解 25，多数決のみ正解 11（連続補正つき McNemar p = 0.030）．多数決が rank 1 以外のドメインを選ぶと，`selected_domain` が正解ドメインから外れる行の方が多い．符号は退行の側で，参考の検定でも p < 0.05 である．
+  - 基準線に対する top1 の差 −0.4533pt（McNemar p = 0.0125）の内訳: 同じ本走の反実仮想は 0.839200 で，基準線 0.840000 との差は −0.08pt にとどまる．したがって，基準線との差の大部分（−0.3733pt）はレバーの効果で説明できる．残りの −0.08pt は，`dispatch_failed` の 4 行（基準線は 1 行），生成の揺れ，ollama 0.35.0 への更新（B184）の交絡と区別できない．
+- **計画の仮説との一致**:
+  - 仮説「rank 1 以外の 2 ノード以上が一致した記号の方が正答である確率が高い」は支持されなかった（17 対 13）．
+  - 予測「候補が 2 件以下の行と複合の行では，多数決は rank 1 と同じ選択になる」は一致した．選択が変わった 44 行は，すべて k=4 の単一ドメイン行である．
+  - 予測「k の分布と set_recall は基準線と同じになる」も一致した（set_recall 0.578767，mean_dispatched 1.973973）．
+- **想定外の挙動**: 言語崩れ，発散，OOM は無い．`dispatch_failed` は 4 行（基準線は 1 行）で，C2 の閾値の内側にある．送出の一部だけが失敗した行も 3 行ある（computer_science-041，education-078，social_science-121）．
+
+#### 学び (Iter103)
+
+1. **異なる専門家どうしの多数決は，回答の正答をほとんど動かさず，top1 を下げる**．選択が変わった 44 行で，回答の正答は 17 対 13 だった．`selected_domain` の正解は 11 対 25 で，反実仮想の側が多い．投票で勝った群は rank 1 以外の 3 ノードの一致であることが多く，その一致はドメインの専門性を反映しない．self-consistency（同種のサンプルどうしの投票）の効果は，この構成には移らなかった．
+2. **top1 と回答の正答とを 1 つの集約で同時に上げることは，この構成ではできない**．`metrics.py:42` の top1 は回答したノードのドメインで決まる．回答の記号を投票で決めると，回答したノードが rank 1 から外れ，top1 が下がる．回答の正答だけを上げたい場合でも，選択したノードを rank 1 のまま保つ設計（たとえば rank 1 に重みを与える投票）が要る．ただし，P1 の差（30 行中 4 行）を見ると，その上限自体が小さい．
+3. **集約の方向（`aggregation_method`）は 3 方式とも打ち止めになった**．`llm_judge`（Iter48，rejected），固定 k=2 の `majority_vote`（Iter46，実質同等），k=4 の `majority_vote`（Iter103，rejected）である．送出集合を変えるレバーは，集約を変えても top1 に届かない（Iter102 の学び 3・4 と合わせる）．top1 を動かすには，rank 1 の決定（分類器と確信度の信号）を変える方向しか残っていない．
+4. **同じ本走の中での反実仮想は，生成の揺れを除いて集約の効果だけを測れる**．`dispatch_candidates` を残したので，今後の集約のレバー（重みつき投票など）は，本走をせずにこの `results.jsonl` で replay して事前に絞り込める．ただし，replay は事前登録の手段に留める（恒久ルール，B176）．
+5. **記録が途中で失われる事象は，今回も起きた**．分析を担当した subagent は，計算が終わった後，出力を読む前にターンを終えた．計算の出力をファイルに保存していたので，計算はやり直さずに済んだ（B179，B188 の対策が効いた）．
+
 ## Iteration 102: 融合表現に合わせて dispatch gap 閾値を再較正する
 
 ### 調査 (Iter102)

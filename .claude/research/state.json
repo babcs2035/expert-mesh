@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 105,
-  "iteration_name": "kNN 補間分布の温度を再較正する",
-  "phase": "evaluate",
+  "iteration": 106,
+  "iteration_name": "kNN 類似度の中心化と ABTT を replay で検証する",
+  "phase": "research",
   "status": "running",
-  "current_lever": "knn_interpolation_temperature",
-  "experiment_dir": "results/20261004_173104",
-  "experiment_deadline": 1791113464,
-  "updated_at": 1791112498,
+  "current_lever": null,
+  "experiment_dir": null,
+  "experiment_deadline": null,
+  "updated_at": 1791112815,
   "last_slack_ts": "1791097954.960449",
-  "iteration_thread_ts": "1791100589.267809",
+  "iteration_thread_ts": "1791115456.981259",
   "notion_toggle_created": true,
-  "last_commit": "c2ed154"
+  "last_commit": "e242518"
 }
