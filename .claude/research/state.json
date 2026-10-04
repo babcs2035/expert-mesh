@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 106,
-  "iteration_name": "kNN 類似度の中心化と ABTT を replay で検証する",
-  "phase": "research",
+  "iteration": 107,
+  "iteration_name": "送出集合の確率の和を複合行の確信度として設計する",
+  "phase": "evaluate",
   "status": "running",
-  "current_lever": null,
-  "experiment_dir": null,
-  "experiment_deadline": null,
-  "updated_at": 1791112815,
+  "current_lever": "dispatched_set_confidence",
+  "experiment_dir": "results/20261004_225553",
+  "experiment_deadline": 1791134728,
+  "updated_at": 1791122190,
   "last_slack_ts": "1791097954.960449",
-  "iteration_thread_ts": "1791115456.981259",
+  "iteration_thread_ts": "1791120332.141279",
   "notion_toggle_created": true,
-  "last_commit": "e242518"
+  "last_commit": "a3e9801"
 }

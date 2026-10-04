@@ -7,6 +7,7 @@ from scipy.stats import fisher_exact
 
 from metrics import (
     apply_benjamini_hochberg,
+    build_dispatched_set_rows,
     compute_all_metrics,
     compute_auroc,
     compute_best_single_domain_baseline,
@@ -567,6 +568,63 @@ def test_compute_auroc_undefined_with_single_class() -> None:
     result = compute_auroc(results)
     assert result["auroc"] is None
     assert result["n_rows"] == 2
+
+
+def _set_result(
+    selected_domain: str,
+    expected_domains: list[str],
+    dispatched_domains: list[str],
+    confidence: float | None,
+    dispatched_confidence: float | None,
+) -> dict:
+    """Build a row carrying run_experiment.py's Iter107 `dispatched_confidence` field."""
+    row = _result(
+        selected_domain,
+        expected_domains,
+        dispatched_domains=dispatched_domains,
+        confidence=confidence,
+    )
+    row["dispatched_confidence"] = dispatched_confidence
+    return row
+
+
+def test_dispatched_set_ece_counts_set_hit_as_correct_when_rank1_is_wrong() -> None:
+    """A compound row whose rank 1 misses but whose dispatched set hits is correct at set level."""
+    results = [
+        _set_result("legal", ["medical", "finance"], ["legal", "medical"], 0.55, 1.0),
+    ]
+    set_rows = build_dispatched_set_rows(results)
+    assert compute_ece(results)["ece"] == pytest.approx(0.55, abs=1e-9)
+    assert compute_ece(set_rows)["ece"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_dispatched_set_ece_counts_disjoint_set_as_incorrect() -> None:
+    """A dispatched set with no expected domain is incorrect, so ECE equals its confidence."""
+    results = [_set_result("legal", ["medical"], ["legal", "finance"], 0.5, 0.8)]
+    set_rows = build_dispatched_set_rows(results)
+    assert compute_ece(set_rows)["ece"] == pytest.approx(0.8, abs=1e-9)
+    assert compute_brier_score(set_rows)["brier_score"] == pytest.approx(0.64, abs=1e-9)
+
+
+def test_dispatched_set_metrics_exclude_rows_without_dispatched_confidence() -> None:
+    """Null dispatched_confidence (fallback/dispatch_failed) and legacy rows are excluded."""
+    legacy_row = _result("medical", ["medical"], dispatched_domains=["medical"], confidence=0.9)
+    results = [
+        _set_result("medical", ["medical"], ["medical"], 0.9, 0.9),
+        _set_result("general", ["medical"], [], None, None),
+        legacy_row,
+    ]
+    set_ece = compute_ece(build_dispatched_set_rows(results))
+    assert set_ece["n_rows"] == 1
+
+
+def test_dispatched_set_auroc_ranks_set_hits_above_misses() -> None:
+    """Set-level AUROC uses dispatched_confidence as the score and the set hit as the label."""
+    results = [
+        _set_result("medical", ["medical"], ["medical", "legal"], 0.6, 0.95),
+        _set_result("legal", ["medical"], ["legal"], 0.7, 0.7),
+    ]
+    assert compute_auroc(build_dispatched_set_rows(results))["auroc"] == pytest.approx(1.0)
 
 
 def test_compute_tie_rate_detects_exact_top_two_tie() -> None:

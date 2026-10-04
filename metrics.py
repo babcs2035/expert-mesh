@@ -590,6 +590,34 @@ def compute_auroc(results: list[dict]) -> dict:
     return {"auroc": u_statistic / (n_positive * n_negative), "n_rows": len(rows)}
 
 
+def build_dispatched_set_rows(results: list[dict]) -> list[dict]:
+    """Rewrite rows so compute_ece/brier/auroc score the dispatched set instead of rank 1.
+
+    Iter107: compound rows dispatch to several domains, but `confidence` is
+    only the rank-1 probability, so the top-label ECE mixes a single-domain
+    confidence with a set-level outcome. Here confidence is
+    `dispatched_confidence` (probe probability mass on dispatched_domains,
+    written by run_experiment.py) and a row is correct when
+    dispatched_domains intersects expected_domains. The rewritten rows feed
+    the existing compute_* functions unchanged, so binning, null-exclusion
+    and tie handling stay identical to the top-label metrics. Rows predating
+    the field get confidence=None and are excluded (backward compatible).
+    """
+    set_rows = []
+    for r in results:
+        covered = bool(set(r.get("dispatched_domains") or []) & set(r["expected_domains"]))
+        # compute_* judge correctness as `selected_domain in expected_domains`,
+        # so encode the set outcome as membership of a boolean in [True].
+        set_rows.append(
+            {
+                "confidence": r.get("dispatched_confidence"),
+                "selected_domain": covered,
+                "expected_domains": [True],
+            }
+        )
+    return set_rows
+
+
 def compute_tie_rate(results: list[dict]) -> dict:
     """Fraction of probe rounds where the top-2 candidate confidences are exactly equal.
 
@@ -648,6 +676,7 @@ def compute_all_metrics(results: list[dict]) -> dict:
     for r in results:
         by_compound[len(r["expected_domains"]) > 1].append(r)
     domains = _observed_domains(results)
+    dispatched_set_rows = build_dispatched_set_rows(results)
 
     return {
         "total_questions": len(results),
@@ -670,6 +699,9 @@ def compute_all_metrics(results: list[dict]) -> dict:
         "ece": compute_ece(results),
         "brier_score": compute_brier_score(results),
         "auroc": compute_auroc(results),
+        "ece_dispatched_set": compute_ece(dispatched_set_rows),
+        "brier_score_dispatched_set": compute_brier_score(dispatched_set_rows),
+        "auroc_dispatched_set": compute_auroc(dispatched_set_rows),
         "tie_rate": compute_tie_rate(results),
         "confidence_dispersion": compute_confidence_dispersion(results),
     }
@@ -727,6 +759,15 @@ def print_summary(metrics: dict, output: TextIO) -> None:
     auroc = metrics["auroc"]
     auroc_str = f"{auroc['auroc']:.4f}" if auroc["auroc"] is not None else "undefined（単一クラスのみ）"
     print(f"AUROC（{auroc['n_rows']}行）: {auroc_str}", file=output)
+    set_ece = metrics["ece_dispatched_set"]
+    set_brier = metrics["brier_score_dispatched_set"]
+    set_auroc = metrics["auroc_dispatched_set"]["auroc"]
+    set_auroc_str = f"{set_auroc:.4f}" if set_auroc is not None else "undefined"
+    print(
+        f"送出集合の ECE / Brier / AUROC（{set_ece['n_rows']}行，dispatched_confidence 非nullのみ）: "
+        f"{set_ece['ece']:.4f} / {set_brier['brier_score']:.4f} / {set_auroc_str}",
+        file=output,
+    )
     tie_rate = metrics["tie_rate"]
     print(
         f"同点タイ率（probe上位2件が完全一致，{tie_rate['n_rows']}行）: {tie_rate['tie_rate']:.4f}",

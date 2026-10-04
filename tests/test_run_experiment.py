@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 import run_experiment
 from run_experiment import run_experiment as run_experiment_rows
 from http_client import PeerClient
@@ -73,6 +75,7 @@ async def test_run_experiment_records_dispatch_outcome(monkeypatch) -> None:
     assert record["used_fallback"] is False
     assert record["dispatch_failed"] is False
     assert record["answer_text"] == "specialist answer"
+    assert record["dispatched_confidence"] == pytest.approx(0.9)
     assert record["dispatch_candidates"] == [
         {
             "node_id": "expert",
@@ -110,6 +113,7 @@ async def test_run_experiment_records_fallback_outcome(monkeypatch) -> None:
     assert record["selected_domain"] == "general"
     assert record["selected_node_id"] == "requester"
     assert record["confidence"] is None
+    assert record["dispatched_confidence"] is None
     assert record["dispatch_candidates"] == []
 
 
@@ -143,6 +147,7 @@ async def test_run_experiment_records_dispatch_failure_outcome(monkeypatch) -> N
     assert record["selected_domain"] is None
     assert record["selected_node_id"] is None
     assert record["answer_text"] is None
+    assert record["dispatched_confidence"] is None
     assert record["dispatch_candidates"] == []
 
 

@@ -2965,6 +2965,19 @@ levers:
             確信度は node.py:232-239 → aggregator.py:87-91 で送出集合を決め，metrics.py:486-521 の ECE が読む．
             成功条件: 基準線 results/20261004_132607 に対し，ECE ≤ 0.040 かつ |Δtop1| < 0.25pt かつ Iter104 の C1〜C7 を満たす（partial は 0.040 < ECE ≤ 0.045）．"}
 
+  - {name: dispatched_set_confidence, values: ["sum_of_dispatched_probabilities"],
+     note: "[2026-10-04 Iter107・backlog B198/B201] 人間が承認した方向 (i)（B198）．報告用の確信度だけを変え，決定（selected_domain，dispatched_domains）は変えない．
+            単一レバー: 校正の評価に使う確信度を，rank 1 の確率 p_(1)（正誤は selected ∈ expected）だけの状態から，送出集合の確率の和 Σ_{d∈dispatched} p_d（正誤は dispatched ∩ expected ≠ ∅）を加えた状態へ変える．
+            変更箇所: run_experiment.py:143 の直後に dispatched_confidence（probe_candidates のうちドメインが dispatched_domains に入るものの confidence の和．fallback と dispatch_failed の行は null）を加える．
+            metrics.py:486-521 の compute_ece の近くに，集合の正誤で ECE を計算する関数を新しく設け，metrics.py:670 の付近に ece_dispatched_set（同じく Brier と AUROC の集合版）を加え，print_summary（metrics.py:723-724）に 1 行加える．
+            既存の confidence フィールドと metrics.json の ece，brier_score，auroc は定義も値も変えずに残す．API（http_server.py）のレスポンスは変えない．
+            固定する構成: models/domain_classifier.joblib（MD5 c7172ad37c10e1082a42481553ae25b0，k=2，λ=0.3，T=0.9426），dispatch_gap_threshold 0.36，dispatch_gap_max_k 4，max_confidence．
+            replay（.claude/research/_iter107_replay_setconf.py）: 共通の複合 730 行で ECE 0.1146 → 0.0745（差 −0.0401，bootstrap 95% CI [−0.0624, −0.0218]），共通 3,744 行で 0.0370 → 0.0289，単一 3,014 行で 0.0199 → 0.0189（CI は 0 をまたぐ）．
+            基準線 results/20261004_173104 からの事後計算: 複合行 0.1122 → 0.0694（−0.0429），共通行 0.0373 → 0.0288．接近行を除いた複合 609 行でも −0.05 程度が残る．
+            OOF（外側 5-fold，seed 104）は訓練集合が単一ラベルだけなので選択には使わず，単一行の非退行の確認にだけ使った（0.0198 → 0.0144，5 fold すべてで新 < 旧）．
+            到達条件: run_experiment.py と metrics.py は Dockerfile:23 でイメージに入り，本走は app コンテナの中で実行される（mise.toml:219）ので，イメージの再ビルドと deploy が要る．
+            成功条件: success_criteria (7) を参照．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #
@@ -3064,7 +3077,15 @@ success_criteria: "【2026-07-31 改訂】E1（評価集合の拡張）は Iter1
       軸①（ルーティング系）は決定論的なのでこのノイズ床は適用しない（差が出れば必ず何かが変わっている）．
   (6) 【新設】主要指標が基準線と小数点以下まで完全一致し，かつ McNemar の不一致ペアが 0 件の場合，
       『効果なし（rejected）』ではなく **『実験不成立（invalid）』** と判定し，レバーが読まれる
-      コードパスに到達していたかを先に検証すること（d0004 §4）．"
+      コードパスに到達していたかを先に検証すること（d0004 §4）．
+  (7) 【新設 2026-10-04・Iter107・B201】報告用の確信度だけを変え，決定を変えないレバー（例: dispatched_set_confidence）に適用する．
+      (1) の McNemar を主基準とする規定と (6) の『不一致 0 件なら invalid』は，このレバーには適用しない．
+      主基準: 本走の共通行（dispatch_failed を除く）の複合行で，ECE の新しい定義（送出集合の確率の和，正誤は送出集合と正解の交わり）が旧の定義（rank 1 の確率，正誤は selected ∈ expected）より 0.02 以上小さく，
+      行を対にした bootstrap（2000 回）の『新 − 旧』の 95% 信頼区間の上限が 0 未満であること．replay の予測は −0.040，replay と本走の揺らぎの床は新しい定義で ±0.6pt と見積もる．
+      非退行: 共通行の全体で新 ≤ 旧，単一行で新 ≤ 旧 + 0.005．旧の定義の ECE（共通行）は基準線の 0.0373 から +0.006 以内．
+      決定の不変: top1 の基準線との差が ±0.1pt 以内で，McNemar が有意でないこと．本走は埋め込みを Ollama で取り直すので，selected の不一致は 0 件にならず，16 行程度は出る（B200）．
+      C7 と ECE の判定帯は，新旧の両方の値を毎回併記し，どちらの定義を指すかを明記する．AUROC と Brier も新旧を併記する．
+      OOF は単一ラベルだけなので，複合行の選択には使えない．単一行の非退行の確認にだけ使う．"
 
 slack:
   channel: "#research-cycle"

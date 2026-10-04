@@ -123,6 +123,18 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         for r in result.dispatch_responses
     ]
 
+    # Set-level confidence for compound rows (Iter107): the dispatched set is
+    # judged correct when it intersects expected_domains, so its confidence is
+    # the probe probability mass on the dispatched domains rather than the
+    # rank-1 probability alone. Null exactly when `confidence` is null
+    # (fallback or dispatch_failed), matching metrics.py's exclusion rule.
+    dispatched_confidence: float | None = None
+    if confidence is not None:
+        dispatched_domain_set = set(dispatched_domains)
+        dispatched_confidence = sum(
+            c["confidence"] for c in probe_candidates if c["domain"] in dispatched_domain_set
+        )
+
     # Extract STP logprobs signal from the selected node's probe response.
     stp_logprobs: float | None = None
     if result.probe_responses and selected_node_id is not None:
@@ -141,6 +153,7 @@ async def _run_one(config: dict, node_id: str, row: dict, ollama_client: OllamaC
         "used_fallback": result.fallback_answer is not None,
         "dispatch_failed": result.dispatch_response is None and result.fallback_answer is None,
         "confidence": confidence,
+        "dispatched_confidence": dispatched_confidence,
         "confidence_logprobs_mean": stp_logprobs,
         "answer_text": answer_text,
         "duration_ms": duration_ms,
