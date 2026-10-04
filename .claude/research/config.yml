@@ -2978,6 +2978,22 @@ levers:
             到達条件: run_experiment.py と metrics.py は Dockerfile:23 でイメージに入り，本走は app コンテナの中で実行される（mise.toml:219）ので，イメージの再ビルドと deploy が要る．
             成功条件: success_criteria (7) を参照．"}
 
+  - {name: confident_learning_train_row_pruning, values: ["prune_by_noise_rate,cap=10%"],
+     note: "[2026-10-05 Iter108・backlog B204] levers を使い切ったので，B202 の申し送り（tavily-search による重点調査）を受けて追加した．
+            着想は Confident Learning（Northcutt, Jiang, Chuang, JAIR 2021，arXiv:1911.00068）である．
+            単一レバー: 分類器 artifact の訓練集合（LR と kNN の datastore の両方．data/classifier_train_iter94_dedup.jsonl の 2,275 行）から，信頼学習で検出した行を除いて作り直す．
+            OOF 確率: いまの構成（LR の temperature 較正，kNN k=2，λ=0.3，T=0.9426，StratifiedKFold 5 fold，seed 104）の OOF 補間分布．_iter105_replay_temp.py の run_outer_fold と apply_temperature を流用する．
+            除く行の規則（10 ドメインに一様．B115/B116）: cleanlab の find_label_issues(filter_by=prune_by_noise_rate) を既定の引数で使い，順位づけは self_confidence とする．上限は全体の 10%（227 行）で，超えたら self_confidence の低い順に 227 行を取る．T は 0.9426 に固定し，選び直さない．
+            cleanlab は uv run --with cleanlab で一時的に使い，pyproject.toml と uv.lock は変えない（ライセンスは cleanlab 2.9.0 のメタデータ上 Apache License 2.0 である．本番の依存に入れる場合は，依存の追加として確認する）．計算は CPU だけで行い，wafl500〜509 は使わない．
+            前提の弱さ: 訓練行のラベルは _DOMAIN_TASK_MAP から決定的に付き，Iter93 で写像との食い違いは 0 行だった．誤りは写像そのものが曖昧なタスク（japanese_civics，miscellaneous，professional_psychology，sociology など）に集まっている．
+            このため，信頼学習が検出するのは行の誤りではなくタスク写像の曖昧さになる見込みが高い．Iter92 では正しいラベルの civics 行を足すと recall が上がった．
+            Step 0 の足切り（eval は使わない）: 入れ子の CV で，外側 fold の訓練部分だけで内側 OOF と除去を行い，外側の検証部分の全行（除去しない）で評価する．
+            CV top1 が none を +1.0pt 以上上回り，かつ 5 fold のうち 4 fold 以上で上回るときだけ，replay と本走へ進む．届かなければ artifact を変えずにクローズする（Iter93 と同じ型）．
+            到達条件（rc-researcher の報告．実行フェーズで行番号を照合する）: http_server.py:428 → classifier.py:48 で artifact を読み，http_server.py:379 → classifier.py:66-69 → knn_interpolated_head.py:135-149 の predict_proba，
+            knn_label_distribution（120-133 行）が train_label_indices と train_weights を読む．前提は routing_method: supervised_classifier，confidence_signal_method: self_report，ドメインが classes_ に含まれること，dispatch_gap_threshold が null でないこと．
+            発火の証拠: 新しい artifact の MD5 が c7172ad37c10e1082a42481553ae25b0 と異なること，len(train_label_indices) = 2275 − 除いた行数，deploy 後の全ノードのコンテナ内で MD5 が一致すること．
+            成功条件: success_criteria (8) を参照．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #
@@ -3085,7 +3101,13 @@ success_criteria: "【2026-07-31 改訂】E1（評価集合の拡張）は Iter1
       非退行: 共通行の全体で新 ≤ 旧，単一行で新 ≤ 旧 + 0.005．旧の定義の ECE（共通行）は基準線の 0.0373 から +0.006 以内．
       決定の不変: top1 の基準線との差が ±0.1pt 以内で，McNemar が有意でないこと．本走は埋め込みを Ollama で取り直すので，selected の不一致は 0 件にならず，16 行程度は出る（B200）．
       C7 と ECE の判定帯は，新旧の両方の値を毎回併記し，どちらの定義を指すかを明記する．AUROC と Brier も新旧を併記する．
-      OOF は単一ラベルだけなので，複合行の選択には使えない．単一行の非退行の確認にだけ使う．"
+      OOF は単一ラベルだけなので，複合行の選択には使えない．単一行の非退行の確認にだけ使う．
+  (8) 【新設 2026-10-05・Iter108・B204】訓練集合の行を除くレバー（confident_learning_train_row_pruning）に適用する．
+      Step 0（CPU だけの入れ子 CV．eval は使わない）: CV top1 が none を +1.0pt 以上上回り，かつ 5 fold のうち 4 fold 以上で上回ること．満たさなければ artifact を変えずにクローズし，本走は行わない（artifact を変えていないので，絶対条件 (A) の『変更を適用したら本実験』には当たらない．Iter93 と同じ扱い）．
+      replay: 同じ eval キャッシュ上の『変種 − none』の対応のある比較を併記する．ノイズの床は B200（selected 16 行，top1 正味 ±2 行）とし，僅差の 49 行と kNN の 2 位・3 位の接近行を除いた部分集合でも確かめる．
+      主基準（本走）: 基準線 results/20261004_225553 に対し，共通行（dispatch_failed を除く）で Δtop1 ≥ +0.5pt（約 19 行）かつ McNemar 両側 p < 0.05．
+      非退行: Iter107 の C1〜C7（C1 は 20 指標，BH q=0.05 で有意な退行 0 件）．japanese_civics，sociology，high_school_psychology，moral_disputes の recall の差を併記する．
+      ECE は新旧の定義を併記し，判定は旧の定義で行う（B203 の A1-1．回答があるまでの扱い）．決定を変えるレバーなので本走を行う．"
 
 slack:
   channel: "#research-cycle"

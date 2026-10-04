@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 107,
-  "iteration_name": "送出集合の確率の和を複合行の確信度として設計する",
+  "iteration": 108,
+  "iteration_name": "信頼学習による訓練行の除去を事前 CV で足切りする",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "dispatched_set_confidence",
-  "experiment_dir": "results/20261004_225553",
-  "experiment_deadline": 1791134728,
-  "updated_at": 1791122190,
-  "last_slack_ts": "1791097954.960449",
-  "iteration_thread_ts": "1791120332.141279",
+  "current_lever": "confident_learning_train_row_pruning",
+  "experiment_dir": null,
+  "experiment_deadline": null,
+  "updated_at": 1791136217,
+  "last_slack_ts": "1791136136.238029",
+  "iteration_thread_ts": "1791134642.972679",
   "notion_toggle_created": true,
-  "last_commit": "a3e9801"
+  "last_commit": "177c94e"
 }
