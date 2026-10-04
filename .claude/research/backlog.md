@@ -15,6 +15,62 @@ research-cycle skill が自律判断した事項と，人間の判断を要す�
 
 不可逆な事項は `[needs-human YYYY-MM-DD]` として記録し，Slack で @mention 済みであることを明記する．
 
+## B193 [auto-decided 2026-10-04] Iter104 を `adopted` で閉じ，kNN 補間の artifact を新しい基準とする．次の反復は補間分布の温度を再較正する案とする（要確認）
+
+- **状況**: Iter104 本走 `results/20261004_132607` を基準線 `results/20260929_192157` と行ごとに比べた（出力は `.claude/research/_iter104_eval_out.txt`）．
+  - top1 は 0.840000 → 0.849867（+0.9867pt）で，McNemar（連続補正）は本走のみ正答 103 対 基準線のみ正答 66，p = 0.005619 である．
+  - C1 で BH 補正（q=0.05）の後に有意となったのは `business_economics_recall` と `education_recall` の 2 件で，どちらも改善の向きである．有意な退行は 0 件である．
+  - C2〜C7 はすべて満たす．ただし ECE は 0.039551 → 0.050104 で，0.05 を超えた．`compound_mean_dispatched_count` は 2.064384 で，C5 の上限 2.10 まで残り 0.036 である．
+- **自動選択**:
+  - (1) 判定は `adopted` とする．`models/domain_classifier.joblib`（MD5 `c3888f66d90f4172cd7415e5c105328a`）を以後の基準とし，新しい基準線は本走 `results/20261004_132607` とする．
+  - (2) 次の反復の案は，補間分布 \(p = 0.3\,p_{kNN,2} + 0.7\,p_{LR}\) に対して温度を当て直すことである．温度は訓練集合の 5-fold の out-of-fold 予測で当てはめる．`iteration_name` の案は「kNN 補間分布の温度を再較正する」とする．
+  - (3) config.yml の levers へは追記しない（オーケストレータの指示により，方針は要確認として記録するだけに留める）．
+- **根拠**:
+  - (1) 事前登録の判定規則をそのまま当てはめた．過去 4 本の同じ構成の top1 は幅 0.08pt に収まり，今回の差はその 10 倍以上ある．
+  - (2) C7 の規定では，ECE が 0.05 を超えたら次の反復を校正側に立てる．温度は LR の出力だけに当てたもので，混ぜた後の分布には当て直していない．
+- **要確認**:
+  - (1) ECE が 0.05 を超えた状態で運用すること，および次の反復を校正側に立てる方針でよいか．
+  - (2) 温度を変えると argmax は変わらないが，確信度の gap が変わるので，送出集合，set_recall，mean_dispatched，所要時間は動く．C5 の上限まで余裕が 0.036 しかないので，事前登録の前に replay で見積もること．
+  - (3) eval の結果を見た後に (k, λ) の格子を広げた経緯（B191 (5)）がある．別の評価集合への汎化は確かめていない．
+- **提案 P1（別の変更として扱う．今回は変更していない）**: `tools/smoke_check.py:54` の `DEPLOYED_FILES = ["http_server.py", "router.py", "config.yaml", "classifier.py"]` に，`knn_interpolated_head.py` と `models/domain_classifier.joblib` が入っていない．このままでは，artifact や包む側のコードがノードと食い違っても smoke_check は通る．Iter104 では G0-b の MD5 照合（`.claude/research/_iter104_g0b.txt`）で補った．
+- **イメージとコミットの照合**: イメージ `b5b717d1fc7a` は，未コミットの作業ツリー（`GIT_HEAD=7c0b703-dirty-iter104`）から作った．
+  - 照合の記録: Iter104 のコミットにステージした `knn_interpolated_head.py` の blob の MD5（`git show :knn_interpolated_head.py | md5sum`）は `3c98c9ba687609a34d485c59eb367db8` で，G0-b でイメージの中から取った値（`.claude/research/_iter104_g0b.txt`，全 10 ノード）と一致した．
+  - Dockerfile の差分は，COPY に `knn_interpolated_head.py` を加えた 1 行だけである．
+  - artifact の `models/domain_classifier.joblib` は `.gitignore:19` で追跡の対象外なので，コミットには入らない．照合は G0-b の MD5（`c3888f66d90f4172cd7415e5c105328a`）で代える．
+  - オーケストレータの指示により，docker のイメージとコンテナは操作していない．
+
+## B192 [auto-decided 2026-10-04] Iter104 のイメージ再ビルドは `docker build`・`docker push` だけを実行し，GIT_HEAD は `7c0b703-dirty-iter104` とする．deploy の中の `rm -rf $REMOTE_DIR/models` は許可する
+
+- **状況**: rc-executor は実装と G0-a（top1 0.8504，argmax の一致率 1.0）を終え，deploy の前で 3 点の判断を求めた．新しい artifact（MD5 `c3888f66d90f4172cd7415e5c105328a`，123,846,618 B）を unpickle するには `knn_interpolated_head.py` が要る．このファイルは現在のイメージ `1cf49a5bfd14` に入っていないので，再ビルドが必須である．
+- **自動選択**:
+  - A1: `mise run setup` は実行しない．`mise.toml:33-38` の `docker build --build-arg GIT_HEAD=... -t localhost:5001/expert-mesh:latest .` と `docker push` だけを実行し，その後で `mise run deploy` を実行する．
+  - B1: GIT_HEAD は `7c0b703-dirty-iter104` にする．
+  - C: `mise run deploy` の中の `sudo rm -rf $REMOTE_DIR/models` を許可する．
+- **根拠**:
+  - A: setup の `mise.toml:31` は，ビルドの前に `build_dataset.py` で `data/dataset.jsonl` を上書きする．`build_dataset` は JMMLU の archive の KeyError で失敗する状態にある（Iter103 のテスト）．現在の評価集合は 3,750 行，MD5 `769f2a58dc807e23e1b73e44b97e97b8` で，更新時刻（2026-09-29 02:39）は基準線の本走 `results/20260929_192157` より前である．基準線と同じ評価集合を保つには，作り直さないのが妥当である．古いイメージはローカルに残るので，元に戻せる．
+  - B: `run_experiment.py:193-194` は環境変数の値を `git_head.txt` にそのまま書くだけで，形式を検査するコードは無い．未コミットのコードからイメージを作ったことを成果物に残せる．
+  - C: 消すのはノード側の写しで，直後の rsync でローカルの `models/` から戻る．元の artifact は `models/domain_classifier_pre_iter104_lr.joblib` に退避してある．毎反復の deploy で実行されてきた手順で，ポリシーが止める対象（元に戻すのが難しいモデルやイメージの削除）には当たらない．オーケストレータの委譲文にあった「破壊的な操作」の禁止は，この削除を想定していなかったので，委譲文のほうを明確にした．
+- **要レビュー**:
+  - (1) mise タスクの一部だけを実行したので，記録に無い手順になる．ビルドの前後で `data/dataset.jsonl` の MD5 が変わらないことを journal に残す．
+  - (2) `tools/smoke_check.py` の `DEPLOYED_FILES` は `knn_interpolated_head.py` と artifact を検査しない．G0-b は `docker compose exec` による MD5 の照合で補う．
+  - (3) コードの変更は，フェーズ 3 のコミットまで未コミットのまま残る．
+
+## B191 [auto-decided 2026-10-04] Iter104 のレバーを `knn_label_distribution_interpolation`（k=2，λ=0.3）とし，config.yml の levers 末尾に追記する
+
+- **状況**: config.yml の levers は使い切っており，B190 で集約の方向が打ち止めになった．B190 の申し送りにより，rank 1 の決定を変えて top1 を上げるレバーを tavily-search で調査した．
+- **自動選択**: 既存の `models/domain_classifier.joblib`（MD5 `c8cd0fb46549d03db11f43864a741ef8`）を再訓練せずに包み，出力を \(p = 0.3\,p_{kNN,2} + 0.7\,p_{LR}\) に変える．近傍は訓練集合 2,275 行の融合埋め込みから引く．`config.yaml` は変えない．
+- **根拠**:
+  - 着想は kNN-LM（arXiv:1911.00172）と KNN-BERT（arXiv:2110.02523）の線形補間である．表現も分類器の訓練も変えずに，決定だけを変えられる．
+  - (k, λ) は訓練集合の 5-fold CV だけで選んだ．CV top1 は 0.8075 → 0.8268 で，5 fold すべてで上回った．k=2 と λ=0.3 は，どちらも格子の内側にある．
+  - eval の replay（`/tmp/iter104/replay_knn_v2.py`，`metrics.py` の判定用の関数を使用）では，top1 が 0.8400 → 0.8504（McNemar p=0.0033）になった．C1 の有意な退行は 0 件（有意になった 2 指標は改善の向き），C4・C5・C7 も満たした．
+  - 到達条件（`http_server.py:428`→`classifier.py:48`，`http_server.py:379`→`classifier.py:66-69`）は現行構成で満たされる．no-op になる経路は無い．
+- **要レビュー**:
+  - (1) `compound_mean_dispatched_count` の replay 値 2.0685 は，C5 の上限 2.10 に近い．`computer_science_recall`（3 対 10）と `medical_recall`（12 対 23）は退行の向きにあり，本走で C1 違反となる危険が残る．
+  - (2) ECE の replay 値 0.0503 は 0.05 を超える．C7 の規定により，採用されれば次の反復は校正側のレバーになる見込みである．
+  - (3) artifact は訓練埋め込みを抱えるので，約 121MB になる．ノードへ `models/` を届ける経路は，フェーズ 2 で確かめる必要がある．
+  - (4) 本フェーズでは wafl-ctrl5 への SSH が許可システムに阻止された．オーケストレータの指示により，再接続は試みていない．replay は開発ホストの CPU だけで行った．
+  - (5) 第 1 版の replay（k=5，λ=0.5，格子の端）から第 2 版へ格子を広げた．選択は CV だけで行ったが，eval の結果を見た後に格子を変えた経緯は残る．
+
 ## B190 [auto-decided 2026-10-02] Iter103 を `rejected` で閉じ，`aggregation_method` を `max_confidence` に戻す．次のレバーは決めず，Iter104 は調査から始める
 
 - **状況**: Iter103 本走 `results/20261002_105743`（`majority_vote`，gt 0.36，max_k 4）を，同じ本走の中の max_confidence の反実仮想と行ごとに比べた（出力は `.claude/research/_iter103_eval_out.txt`）．

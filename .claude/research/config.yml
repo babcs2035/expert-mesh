@@ -2934,6 +2934,21 @@ levers:
             P1: n=407，多数決のみ正答 17／反実仮想のみ正答 13，p=0.584665（満たさない）．
             P2: Δtop1 −0.3733pt（満たさない）．C1〜C7 は満たす．config.yaml:143 は max_confidence に戻した．
             集約の方向（llm_judge・k=2 と k=4 の majority_vote）は打ち止め．"}
+  - {name: knn_label_distribution_interpolation, values: ["k=2,lambda=0.3"],
+     note: "[2026-10-04 Iter104・backlog B191] levers を使い切ったので，B190 の申し送り（tavily-search による代替アプローチの調査）を受けて追加した．
+            着想は kNN-LM（Khandelwal ら，ICLR 2020，arXiv:1911.00172）と KNN-BERT（Li ら，2021，arXiv:2110.02523）の線形補間である．
+            単一レバー: 分類器 artifact の出力を LR 単体の p_LR から p = 0.3 p_kNN,2 + 0.7 p_LR へ変える．
+            p_kNN,k は，L2 正規化した融合埋め込みの cosine 類似度で上位 k 本の訓練行（data/classifier_train_iter94_dedup.jsonl の 2,275 行，
+            data/embcache_train_iter100_fused.npy）を取り，クラス均衡重みで投票したものである．
+            既存の models/domain_classifier.joblib（MD5 c8cd0fb46549d03db11f43864a741ef8）は再訓練せず，新設の KnnInterpolatedClassifier
+            （knn_interpolated_head.py）で包む．config.yaml は変えない．
+            根拠: 訓練集合の 5-fold CV（seed 104）だけで (k, lambda) を k∈{1,2,3,5,7}×lambda∈{0..0.7} から選び，CV top1 は 0.8075 → 0.8268
+            （5 fold すべてで上回る）．eval の replay（/tmp/iter104/replay_knn_v2.py）では top1 0.8400 → 0.8504，McNemar p=0.0033，
+            C1（20 指標，BH）の有意な退行は 0 件，compound_mean_dispatched_count 2.0685，ECE 0.0503 だった．
+            到達条件: http_server.py:428 → classifier.py:48 で artifact を読み，http_server.py:379 → classifier.py:66-69 で classes_ と
+            predict_proba を読む．routing_method: supervised_classifier（config.yaml:75）かつ confidence_signal_method: self_report であり，
+            ノードのドメインが classes_ に含まれること．現行構成は 3 つとも満たす．
+            成功条件: 基準線 results/20260929_192157 に対し Δtop1 ≥ +0.5pt，McNemar p<0.05，Iter101 の C1〜C7（C3 はレバー発火の証拠に置換）を満たす．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）

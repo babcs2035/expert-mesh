@@ -1,3 +1,288 @@
+## Iteration 104: kNN ラベル分布と LR 確率の線形補間
+
+### 調査 (Iter104)
+
+**実施場所の申告**: 本フェーズで行うのは，開発ホストでのリポジトリ読み取り，tavily-search による外部調査，分類器の CPU replay（実施場所は後述）だけである．wafl500〜509 には接続しない．
+
+**確認できた事実（途中経過．見出しはレバー確定後に正式名へ置き換える）**
+
+1. **集約の方向は打ち止め**．llm_judge（Iter48），固定 k=2 の majority_vote（Iter46），k=4 の majority_vote（Iter103）の 3 方式とも結果が出ている（journal.md の Iter103「判定」「学び」節）．max_confidence のもとでは，送出集合を変えるレバーは top1 に届かない（Iter102「判定」「学び」節）．
+2. **決定層の方向も打ち止め**．Iter97（OvO）と Iter98（ECOC）は closed．多クラス分解・較正・重み・訓練行を一巡しても CV は 0.79〜0.82 から動かず，記録には「残る説明変数は入力表現とラベルの張り方」とある（journal_archive.md 1352〜1392 行目，1763〜1794 行目）．
+3. **表現・データの方向で試した範囲**．埋め込みの差し替え（Iter79，80，89，99），prefix と連結（Iter81，82），融合（Iter100 で効果を確認，Iter101 で採用），hard negative（Iter84〜88），L2 正則化（Iter91），ラベルの写像と粒度（Iter92，93），重複の除去（Iter94），訓練行の増量（Iter95，96）．Iter101 の「次の一手」によれば精度の本線 3 本はいずれも打ち止めである（journal.md の Iter101「次の一手」節）．
+4. **rank 1 を決めるコード行**．`classifier.py:69` の `classifier.predict_proba([query_embedding])[0]`．分類器は `CalibratedClassifierCV`（temperature）で `LogisticRegression` を包んだもので，`config.yaml:156` の `classifier_model_path: models/domain_classifier.joblib` が指す．
+5. **到達条件**．`confidence_signal_method=self_report` かつ `routing_method: supervised_classifier`（`config.yaml:75`）のとき，`http_server.py` の `_estimate_probe_confidence()` は LLM を呼ばずに `estimate_confidence_classifier()` へ落ちる（Iter101 A1）．現行構成は両方を満たす．
+6. **副次的な観察**．融合で次元が 6,656 になり p/n は 2.93．ECE は 0.0318 → 0.0396 へ悪化し，温度 1 パラメータでは高次元側の過信を吸収しきれない可能性が指摘されている（journal_archive.md 442〜449 行目）．
+
+**候補（未検証）**: (c1) PCA などで次元を落としてから LR を学習する．(c2) 訓練集合の埋め込みに対する kNN のラベル分布を LR の確率と混ぜる．どちらも `classifier.py:69` で読まれる artifact の差し替えで単一レバーにできる見込みがある．
+
+**過去に試したかの確認（journal_archive.md・journal.md・config.yml・backlog.md を `kNN|k-NN|k近傍|PCA|次元削減|MLP|SVM|ensemble|アンサンブル|prototype|centroid|LDA|shrinkage` で grep）**
+
+- **c1（PCA）は試し済みで効果なし → 候補から外す**．Iter99 の分析で，fold ごとに訓練部分だけで PCA を学習した容量曲線が取られている（journal_archive.md 833〜847 行目）．qwen3-4b 2 ビューで 5120 次元 0.804396，PCA 1536 次元 0.804396（同値），768 次元 0.799121，512 次元 0.795165，128 次元 0.775824．次元を落としても CV top1 は上がらず，下がる一方である．融合 6,656 次元で同じことが起きない根拠は無いので，c1 は外す．
+- **c2（kNN 融合）は試されていない**．Iter97 の計画で「非線形ヘッド（RBF-SVM・MLP・kNN 融合）」として検討され，「5,120 次元 対 2,275 行の p≫n で過学習が濃厚」という理由で，実測なしに却下されている（backlog.md 962〜964 行目）．kNN の確率を LR と補間する形なら，追加のパラメータは近傍数 k と混合重み λ の 2 つで，学習される重みは増えない．過学習の懸念がそのまま当てはまるかは実測で確かめる．
+- 「ルーティング判定自体のアンサンブル化（複数分類器/埋め込みの多数決）」は見送りとして記録がある（backlog.md 3075 行目）．kNN と LR の補間はこれと近いので，見送った理由を確かめた．見送りの理由は「実装コスト中〜高，レイテンシとのトレードオフという新しい評価軸が要る」であり，対象は**複数の分類器または複数の埋め込み**の多数決である（backlog.md 3075〜3077 行目）．kNN の補間は，既に計算済みの同じ融合埋め込みを使い，訓練行（約 2,300 行）との内積を 1 回取るだけで，埋め込みや LLM の呼び出しは増えない．したがって見送りの理由はそのままは当てはまらない．
+- MLP と SVM を単体のヘッドとして試した記録は見つからなかった（ヒットしたのは LoRA の MLP 層と，文献で引いた SVM だけ）．
+
+**外部調査（tavily-search，2026-10-04）**
+
+- Khandelwal, Levy, Jurafsky, Zettlemoyer, Lewis, "Generalization through Memorization: Nearest Neighbor Language Models", ICLR 2020, arXiv:1911.00172（https://arxiv.org/abs/1911.00172）．事前学習済み LM の次単語分布に，同じ埋め込み空間での kNN 分布を線形補間する（\(p = \lambda p_{kNN} + (1-\lambda) p_{LM}\)）．再学習なしで Wikitext-103 の perplexity を下げた．本件の c2 はこの補間式をクラス分布に当てはめたものである．
+- Li, Song, Ma, Qiu, Huang, "KNN-BERT: Fine-Tuning Pre-Trained Models with KNN Classifier", 2021, arXiv:2110.02523（https://arxiv.org/abs/2110.02523）．テキスト分類で，線形分類器の出力に kNN 分類器を組み合わせると精度と頑健性が上がったと報告する．
+- "Revisiting k-NN for Fine-tuning Pre-trained Language Models", CCL 2023（https://aclanthology.org/2023.ccl-1.75.pdf）．PLM の分類器と kNN の確率を補間する方式を，テキスト分類で再評価している．
+- "Label Distribution Learning-Enhanced Dual-KNN for Text Classification", 2025, arXiv:2503.04869（https://arxiv.org/abs/2503.04869）．kNN をラベル分布の推定に使う近年の拡張．
+- 限定: これらはいずれも埋め込みを**微調整した**モデル上の結果である．本件のように凍結した埋め込みと LR の組で同じ利得が出るかは分からない（推測）．また上記の多くは訓練行が数万以上の設定で，約 2,300 行の本件では近傍の質が劣る可能性がある．効果の有無は replay で確かめる．
+
+**replay の実施場所**: config.yml 冒頭の (B) に従い，まず wafl-ctrl5 への SSH を 2 回試した（2026-10-04）．2 回とも許可システムの自動判定に阻止され，接続できなかった．代替として，Iter99〜101 の replay を行った場所を確かめた．Iter99 の分析で行った CV と PCA の容量曲線は「すべて開発ホストの CPU」で行われている（journal_archive.md 819 行目，928 行目）．そこで本反復の replay も**開発ホストの CPU**（`uv run`．埋め込みは計算済みのキャッシュ `data/embcache_{train,eval}_iter100_fused.npy` を読むだけで，再計算はしない．GPU と LLM は使わない）で行う．wafl500〜509 には接続しない．オーケストレータの指示により，wafl-ctrl5 への接続はこれ以上試みない（B191 の要レビューに記録する）．
+
+**artifact を参照するコードの網羅**（`grep -rn --include='*.py' -e 'domain_classifier' -e 'classifier_model_path' -e 'predict_proba' -e 'classes_' -e 'joblib.load'`．`.venv` と `__pycache__` は除外した）
+
+- 本走の経路: `http_server.py:428` が `load_domain_classifier(state.classifier_model_path)` で読み込み（`classifier.py:48` の `joblib.load`），`http_server.py:379` が `estimate_confidence_classifier(state.domain_classifier, state.domain, body.query_embedding)` を呼ぶ．`classifier.py:66` と `:68` が `classes_`，`:69` が `predict_proba([query_embedding])[0]` を読む．
+- 補助の経路: `scripts/run_central_experiment.py:243-244`（`predict_proba` と `classes_`），`scripts/mine_hard_negatives.py:344-346`（同じ 2 つ）．
+- `calibrated_classifiers_` など，ほかの属性を読む箇所は本走の経路にも補助の経路にも無い．ラッパーが提供すべき属性は `classes_` と `predict_proba(X)` の 2 つだけである．型注釈は `CalibratedClassifierCV`（`http_server.py:195`，`:263`，`classifier.py:40`，`:52`）だが，`classifier.py:11-19` に書かれているとおり duck typing で読んでいる．
+
+**replay 第 1 版（`/tmp/iter104/replay_knn.py`，結果 `/tmp/iter104/result.json`，`/tmp/iter104/near_dup_check.py`）**
+
+- 格子は k ∈ {5, 10, 20, 50} × λ ∈ {0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7}．訓練集合 2,275 行の 5-fold CV（seed 104）だけで点を選んだ．kNN の近傍は，CV では fold の訓練部分だけから，eval では訓練集合だけから引く（オーケストレータが漏れの無いことを確認済み）．
+- CV で k=5，λ=0.5 を選んだ（CV top1 0.8075 → 0.8237）．eval では top1 が 0.8389 → 0.8547 になった（基準 artifact の再現値との比較）．
+- 訓練行との最大 cosine 類似度が 0.90 以上の評価行（278 行）を除いても Δtop1 は +1.56pt で，利得は近重複に依存していない．
+- 問題点: k=5 は格子の端だった．ECE は 0.070，mean_k は 1.654 になった．ドメインごとの検定は recall の 10 指標だけを BH 補正しており，C1（precision と recall の計 20 指標）と同じではない．この補正で computer_science の recall が q=0.043 で有意に下がった．
+
+**replay 第 2 版（`/tmp/iter104/replay_knn_v2.py`，結果 `/tmp/iter104/result_v2.json`．開発ホスト CPU，約 50 秒）**
+
+格子の端を解消するため k を {1, 2, 3, 5, 7} に広げた．λ の格子は同じである．選ぶのは訓練集合の 5-fold CV だけで，同値のときは λ の小さい方を，次に k の大きい方を取る．eval の指標は，`metrics.py` の判定用の関数（`compute_top1_accuracy`，`compute_mcnemar_test`，`compute_domain_recall_mcnemar_test`，`compute_domain_precision_fisher_test`，`apply_benjamini_hochberg`，`compute_ece`，`compute_compound_coverage_metrics`）で求めた．基準線 `results/20260929_192157/results.jsonl` の各行について，`selected_domain`，`dispatched_domains`，`confidence` だけを新しい確率分布の決定（gap 0.36，max_k 4）で置き換えた．
+
+- **CV（選択に使う）**: LR 単体 0.8075．kNN 単体は k=1 から 7 の順に 0.7952，0.7635，0.7965，0.7996，0.8035．
+  - 最良は **k=2，λ=0.3 で 0.8268（+1.93pt）**．fold ごとの値は 0.835 / 0.820 / 0.842 / 0.826 / 0.811 で，5 fold すべてで同じ fold の LR 単体（0.820 / 0.787 / 0.829 / 0.807 / 0.796）を上回る．
+  - 次点は k=2，λ=0.4 の 0.8255，k=1，λ=0.2 の 0.8242，k=3 または 5 で λ=0.4〜0.5 の 0.8237 である．k=2 の周りでは λ=0.2〜0.5 がいずれも 0.822 以上で，選んだ点は孤立した山ではない．
+  - k=2 と λ=0.3 は，どちらも格子の内側にある．
+- **eval（選んだ 1 点のみ．判定には使わない参考値として，全格子点の最良は k=3，λ=0.4 の 0.8552）**:
+
+| 指標 | 基準線の本走（実測） | 基準 artifact の再現 | k=2，λ=0.3 | 条件 |
+|---|---|---|---|---|
+| top1 | 0.8400 | 0.8389 | **0.8504** | 主指標 |
+| McNemar（対 本走） | — | — | 新方式のみ正答 103，基準線のみ正答 64，p=0.0033 | p<0.05 |
+| 単一行の top1 | 0.8483 | 0.8477 | 0.8606 | 参考 |
+| 複合行の top1（730 行） | 0.8055 | 0.8027 | 0.8082（19 対 17，p=0.87） | C4 ≥ 0.780411 |
+| `compound_domain_set_recall` | 0.5788 | 0.5801 | 0.5904 | C5 ≥ 0.5400 |
+| `compound_mean_dispatched_count` | 1.9740 | 1.9699 | **2.0685** | C5 ≤ 2.10 |
+| ECE | 0.0396 | 0.0382 | **0.0503** | C7 ≤ 0.08 |
+| 全行の平均送出数 | 1.5331 | 1.5333 | 1.5765 | 参考 |
+
+- **C1（20 指標，BH q=0.05，対 本走）**: 有意と判定されたのは 2 指標で，どちらも**改善**の向きである．`business_economics_recall` は新方式のみ正答 17 対 基準線のみ正答 3（p=0.0037），`education_recall` は 38 対 14（p=0.0014）．**有意な退行は 0 件**である．
+  - 下がったが有意でない指標: `computer_science_recall` 3 対 10（p=0.096），`medical_recall` 12 対 23（p=0.091），`natural_science_recall` 6 対 10（p=0.45）．
+  - precision の 10 指標はすべて p ≥ 0.14 である．
+  - 第 1 版で問題になった computer_science の有意な退行は，k=2，λ=0.3 では起きなかった．比較の相手を「基準 artifact の再現」に替えても，有意となるのは `education_recall`（改善）だけである．
+- 基準 artifact の再現と本走の差は top1 で 0.11pt である（決定の一致率は 99.49%）．この差は，実行時の埋め込みとキャッシュの微小な差によるとみられる（推測）．
+
+### 計画 (Iter104)
+
+**仮説**: 凍結した融合埋め込み（6,656 次元）の上の線形分類器は，訓練行 2,275 行の局所的な構造を捉えきれていない．同じ埋め込み空間での近傍 2 本のラベル分布を LR の確率に混ぜると，LR の誤りの一部が近傍のラベルで覆る．その結果 rank 1 の決定が変わり，top1 が上がる．根拠は CV で +1.93pt（5 fold すべてで上回る），eval の replay で +1.04pt である．補間の形は kNN-LM（Khandelwal ら，ICLR 2020，arXiv:1911.00172）と KNN-BERT（Li ら，2021，arXiv:2110.02523）に倣う．
+
+**単一レバー**: `knn_label_distribution_interpolation`．分類器 artifact の出力を，LR 単体の \(p_{LR}\)（λ=0 に相当）から，次の補間分布へ変える．
+
+\[ p = \lambda \, p_{kNN,k} + (1-\lambda) \, p_{LR}, \quad k=2,\ \lambda=0.3 \]
+
+\(p_{kNN,k}\) は，L2 正規化した融合埋め込みの cosine 類似度で上位 k 本の訓練行を取り，そのラベルに `_extract_sample_weights()` と同じクラス均衡重みで票を入れて正規化したものである．
+
+**固定する構成（Iter101 の採用構成）**:
+
+- \(p_{LR}\) は既存の `models/domain_classifier.joblib`（MD5 `c8cd0fb46549d03db11f43864a741ef8`）を**再訓練せずに**そのまま包む．
+- 近傍の母集団は `data/classifier_train_iter94_dedup.jsonl` の 2,275 行で，埋め込みは `data/embcache_train_iter100_fused.npy` を使う．再埋め込みはしない．
+- 融合表現（`embedding_fusion_models`），`dispatch_gap_threshold` 0.36，`dispatch_gap_max_k` 4，`aggregation_method: max_confidence`，`confidence_threshold` と `dispatch_candidate_threshold` 0.0，評価集合 3,750 行，`config.yaml` の `classifier_model_path` はいずれも変えない．
+
+**レバーを読むコード行と到達条件**:
+
+- 読み込み: `http_server.py:428` が `load_domain_classifier(state.classifier_model_path)` を呼び，`classifier.py:48` の `joblib.load` が artifact を読む．
+- 推定: `http_server.py:379` が `estimate_confidence_classifier()` を呼び，`classifier.py:66`，`:68` が `classes_` を，`:69` が `predict_proba([query_embedding])[0]` を読む．
+- 到達条件: `routing_method: supervised_classifier`（`config.yaml:75`）かつ `confidence_signal_method: self_report` であること．このとき `_estimate_probe_confidence()` は LLM を呼ばずに上の経路へ落ちる（Iter101 A1）．加えて，ノードのドメインが `classes_` に含まれること．**現行構成は 3 つとも満たす**．
+- `predict_proba` の出力が変われば `probe_candidates` の確信度が変わり，max_confidence の rank 1 と gap 方式の送出集合がそのまま変わる．no-op になる経路は無い．
+
+**実装の仕様（フェーズ 2）**:
+
+1. リポジトリ直下に `knn_interpolated_head.py` を新設し，`KnnInterpolatedClassifier` を置く（`ecoc_head.py` と同じ理由である．joblib はクラスをモジュールの名前で直列化するので，訓練スクリプトとノードの両方から同じ名前で import できる場所に置く必要がある）．
+   - 保持するもの: `base_classifier`（既存の `CalibratedClassifierCV`），`train_embeddings_normalized`（float64，2,275 × 6,656），`train_label_indices`，`train_weights`，`k`，`interpolation_lambda`．
+   - `classes_` は `base_classifier.classes_` と同じ配列にする．
+   - `predict_proba(X)` は行和が 1 の (n, 10) 配列を返す．近傍の同順位は訓練行の添字が小さい方を取るなど，決定的な規則を決める．
+   - 本走の経路が読む属性は `classes_` と `predict_proba` だけである（上の網羅を参照）．`calibrated_classifiers_` などは提供しなくてよい．
+2. `scripts/build_knn_interpolated_classifier.py` を新設する．既存の artifact と訓練キャッシュを読み，ラッパーを組み立てて保存する．
+   - 引数: `--base-classifier`，`--train-cache`，`--train-data`，`--k 2`，`--interpolation-lambda 0.3`，`--output`．
+   - キャッシュのメタデータの `ids` と `domains` が `--train-data` の行と順序まで一致することを検査し，一致しなければ止める．
+3. 既存の artifact は `models/domain_classifier_pre_iter104_lr.joblib` へ退避する（MD5 `c8cd0fb46549d03db11f43864a741ef8` のまま）．新しい artifact を `models/domain_classifier.joblib` に置き，MD5 を journal に記録する．大きさは約 121MB の見込みである（float64 の埋め込み）．
+4. `Dockerfile:14` の COPY に `knn_interpolated_head.py` を追加する．`models/` をノードへ届ける経路（イメージに焼くかマウントか）は，Dockerfile に `models/` の COPY が見当たらないので，deploy 手順で確かめる．
+5. テストを追加する．行和が 1 になること，`classes_` が元の artifact と一致すること，λ=0 で元の artifact と出力が一致すること，joblib で往復しても出力が変わらないこと．
+
+**G0（本走の前に，すべて合格が条件）**:
+
+- **G0-a**: 新しい artifact で eval キャッシュの `predict_proba` を求める．top1（基準線の行の決定だけを差し替えたもの）が 0.8504 ± 0.0005 であり，argmax が `result_v2.json` の replay と 99.9% 以上一致すること．
+- **G0-b**: 全 10 ノードで artifact の MD5 が一致し，起動ログで読み込んだクラスが `KnnInterpolatedClassifier` であること．
+- **G0-c**: 予備 20 問で `probe_candidates` の確信度が，同じ問いのキャッシュ埋め込みで求めたオフラインの値と argmax で一致すること．`mean_duration_ms` が 3,041.7ms 以下であること．
+
+**成功条件と非退行条件（事前登録）**:
+
+- **基準線**: Iter101 の採用本走 `results/20260929_192157`．top1 0.8400，複合行の top1 0.805479，`compound_domain_set_recall` 0.578767，`compound_mean_dispatched_count` 1.973973，ECE 0.039551，`mean_duration_ms` 2197.84．
+- **判定規則**:
+  - `adopted`: Δtop1 ≥ +0.5pt（top1 ≥ 0.8450），McNemar p < 0.05，C1〜C7 をすべて満たす．
+  - `adopted_small`: Δtop1 ≥ +0.5pt だが p ≥ 0.05（要再現）．
+  - `partial`: +0.25pt ≤ Δtop1 < +0.5pt で，C1〜C7 を満たす．
+  - `negligible`: |Δtop1| < 0.25pt．
+  - `rejected`: Δtop1 ≤ −0.25pt，または C1〜C7 のどれかに違反．
+  - `invalid`: G0 に合格せず本走に至らない．
+- **非退行条件**: Iter101 の C1〜C7 を数値もそのまま使う（オーケストレータの決定 A1．replay の結果を見てから緩めることも締めることもしない）．
+  - **C1**: precision と recall の計 20 指標を BH 補正（q=0.05）し，有意な退行が 0 件．
+  - **C2**: `fallback_rate` 0.0，`dispatch_failure_rate` ≤ 0.005．
+  - **C3**: レバー発火の証拠（G0-a〜G0-c の記録と artifact の MD5）がすべて残っていること．Iter101 の C3 は light_model の起動ログが対象だったので，本反復のレバーに合わせて対象を置き換えた．
+  - **C4**: 複合行の top1 ≥ 0.780411．
+  - **C5**: `compound_domain_set_recall` ≥ 0.5400，`compound_mean_dispatched_count` ≤ 2.10．
+  - **C6**: `mean_duration_ms` ≤ 3041.7．単一層の中央値と p95，複合層の p25 と中央値を併記する．
+  - **C7**: ECE ≤ 0.08 を毎回併記する．0.05 を超えたら，C7 を満たしていても次の反復のレバーを校正側に立てる．
+
+**事前登録する予測**:
+
+- **P1（主予測）**: Δtop1 は +0.7〜+1.3pt（点推定 +1.0pt，top1 0.850 前後）．McNemar p < 0.05．replay では，基準 artifact の再現と本走の間に 0.11pt の差があるので，その幅を区間に含めた．
+- **P2**: C1 は満たす見込みが高い．ただし `computer_science_recall`（replay で 3 対 10）と `medical_recall`（12 対 23）が退行の向きにある．本走の揺れで有意に転じ，C1 違反で `rejected` となる見込みは 2 割から 3 割とみる（推測）．オーケストレータは第 1 版の結果から「C1 に抵触して rejected となる可能性が高い」とした．しかし第 2 版の k=2，λ=0.3 では，20 指標の補正で有意な退行は 0 件だった．そのため評価を「中程度の危険」に改める．
+- **P3**: `compound_mean_dispatched_count` は 2.03〜2.10 で，C5 の上限 2.10 に近い．超えれば `rejected` になる．C5 違反は C1 と並ぶ主な危険である．
+- **P4**: ECE は 0.045〜0.055 で，C7 は満たす．replay の値 0.0503 は 0.05 を超えるので，C7 の規定どおり，**次の反復のレバーを校正側（補間分布に対する温度校正の見直し）に立てる**見込みである．
+- **P5**: `mean_duration_ms` は基準線から ±5% 以内（C6 の内側）．kNN の追加の計算は，1 問ごとに 2,275 × 6,656 の内積で，CPU で数 ms とみる．
+
+**フェーズ 2 への申し送り**:
+
+- コードの変更は上の「実装の仕様」の 1〜5 に限る．`config.yaml` は変えない．
+- 埋め込みの再計算と LR の再訓練はしない．ラッパーの組み立てと G0-a は開発ホストの CPU で行える（`uv run`）．単一 GPU のサブ実験が必要になった場合は wafl-ctrl5 を使う．ただし本フェーズでは wafl-ctrl5 への SSH が許可システムに阻止された．
+- 本走は 3,750 問のフルスペックで行う．deploy の後，本走の前に G0-b と G0-c を行う．
+- 判定の比較相手は `results/20260929_192157`．C1 の計算は `metrics.py` の関数で行う（`scripts/_iter101_post_analysis.py` と同じ手順）．
+
+### Iteration 104 実装・実験（2026-10-04）
+
+**変更したファイル**（コミットはフェーズ 3 で行う）:
+
+- `knn_interpolated_head.py`（新設）: `KnnInterpolatedClassifier`．p = λ·p_kNN,k + (1−λ)·p_base を返す．`classes_` は base の値をそのまま返す．近傍の同順位は `argsort(kind="stable")` で添字の小さい訓練行を取る．λ=0 のときは base の出力をそのまま返す．
+- `scripts/build_knn_interpolated_classifier.py`（新設）: キャッシュのメタデータの `ids` と `domains` が訓練データと順序まで一致しなければ止める．重みは `scripts/train_domain_classifier.py:_extract_sample_weights()` を再利用した．
+- `tests/test_knn_interpolated_head.py`（新設，9 件）．
+- `Dockerfile` の 14 行目の COPY に `knn_interpolated_head.py` を追加した．
+- `config.yaml` は変えていない．
+
+**artifact とイメージ**:
+
+- 新しい `models/domain_classifier.joblib` は MD5 `c3888f66d90f4172cd7415e5c105328a`，123,846,618 B（k=2，λ=0.3，n_train=2275，dim=6656）である．
+- 退避した `models/domain_classifier_pre_iter104_lr.joblib` は MD5 `c8cd0fb46549d03db11f43864a741ef8`（元と一致），2,670,565 B である．
+- artifact は `mise run deploy` の rsync で各ノードの `models/` へ届き，`./models:/app/models:ro` でマウントされる．`knn_interpolated_head.py` はイメージに焼き込まれるので，イメージを再ビルドした．
+- 再ビルドは B192 の A1 に従い，`mise.toml` の 35 行目（`docker build`）と 38 行目（`docker push`）だけを実行した．`mise run setup` は実行していない．`--build-arg GIT_HEAD=7c0b703-dirty-iter104` を渡した（B192 の B1）．image は `b5b717d1fc7a`，push digest は `sha256:0a499d0e172319c7af21a09b64d46203a2872981e2dab9e1a23b1fc17f505868` である．
+- `data/dataset.jsonl` の MD5 は，ビルドの前後とも `769f2a58dc807e23e1b73e44b97e97b8`（3,750 行）で，イメージの中の値も同じである．ログは `.claude/research/_iter104_build.log`．
+
+**テストと lint**: `uv run pytest -q tests/test_knn_interpolated_head.py tests/test_classifier.py` は 16 passed．新設した 3 ファイルの `ruff check` は clean．全体のテストは実行していない（Iter103 の時点で，環境に依存する既知の失敗が 20 件ある）．
+
+**G0**:
+
+- **G0-a: 合格**（`/tmp/iter104/g0a_check.py`）．eval 3,750 行での top1 は 0.8504（`metrics.compute_top1_accuracy`），replay 第 2 版との argmax の一致率は 1.0（不一致 0 件），確率の最大絶対差は 0.0 だった．
+- **G0-b: 合格**（`.claude/research/_iter104_g0b.txt`）．wafl500〜509 の全 10 ノードで，`/app/models/domain_classifier.joblib` は `c3888f66…`，`/app/knn_interpolated_head.py` は `3c98c9ba687609a34d485c59eb367db8` で，ローカルと一致した．コンテナの中で artifact を `joblib.load` すると `KnnInterpolatedClassifier`（k=2，λ=0.3）だった．`http_server.py` は読み込んだクラス名をログに出さないので，起動ログの代わりにこの方法で確かめた．起動ログの traceback，ModuleNotFoundError，error の行は 0 件だった．`mise run deploy` は EXIT=0 で，`smoke_check` の hashes と probe は passed（probe の latency は 17ms）だった．
+- **G0-c: 合格**（`results/20261004_132357/preview20.jsonl`，`data/dataset_20.jsonl`）．オンラインとオフラインの argmax は 20/20 で一致し，`mean_duration_ms` は 995.95（上限 3,041.7）だった．dispatch の失敗と fallback は 0 件だった．確信度の差は最大 0.0117（business_economics-014）である．
+
+**本走**: `results/20261004_132607`（3,750 問，requester は wafl500，13:26:07 に起動し 15:47 に完了）．
+
+- `results.jsonl` は 3,750 行，MD5 は `11b01b94d04099ae7b34f726754bf00b`（wafl500 側と一致），`git_head.txt` は `7c0b703-dirty-iter104` である．
+- `mise run analyze -- 20261004_132607` と `uv run python metrics.py --results results/20261004_132607/results.jsonl --json`（出力は `metrics.json`）は，どちらも EXIT=0 だった．
+
+| 指標 | 値 |
+|---|---|
+| top1_accuracy | 0.849867（Wilson CI 0.838076〜0.860941） |
+| single_domain_top1_accuracy（3,020 行） | 0.860596 |
+| compound_domain_top1_accuracy（730 行） | 0.805479 |
+| compound_domain_set_recall | 0.589041 |
+| compound_mean_dispatched_count | 2.064384 |
+| compound_domain_jaccard_mean | 0.444521 |
+| ECE | 0.050104 |
+| Brier | 0.102122 |
+| AUROC | 0.848986 |
+| cohens_kappa | 0.844022 |
+| mean_duration_ms | 2253.224 |
+| fallback_rate | 0.0 |
+| dispatch_failure_rate | 0.0 |
+| tie_rate | 0.0 |
+| answer_quality_accuracy（axis23，3,020 行） | 0.584437 |
+| end_to_end_accuracy（axis23） | 0.4016 |
+
+**実行とログの上の異常**:
+
+- 全 10 ノードのログで，OOM，Traceback，ModuleNotFoundError，`dispatch_model_not_ready` は 0 件だった．
+- ローカルで `mise run start` の完了を待っていたバックグラウンドのタスクが，2 時間の上限に達して止められた（`compound-721` の表示の時点）．実験はコンテナの中で切り離して動いていたので止まっていない．`mise run start` は再起動せず，wafl500 のログと完了マーカーを直接ポーリングした．完了した後で，`mise run start` の最後の段と同じ `ssh ... cat` で `results.jsonl` と `run_experiment.log` をローカルへ写した．このため `_iter104_mainrun_start.log` の末尾は `[start] ERROR task failed` になっているが，実験の結果には影響していない．
+
+**要人間判断の事項**:
+
+- 実行の途中で「deploy の後に `docker image prune -a -f` を実行する」「実験の後に docker container を止める（image は残す）」という依頼が届いた．イメージの削除は，実装・実験フェーズの禁止事項（モデルやイメージの削除）に当たり，deploy の手順の変更は今回の単一レバーの範囲を超えるので，このフェーズでは実行も手順の変更もしていない．扱いは戻り値の選択肢で確認する．
+- `tools/smoke_check.py` の `DEPLOYED_FILES` に `knn_interpolated_head.py` と artifact が入っていない（別の提案として扱う．今回は変更していない）．
+- イメージは未コミットの作業ツリーから作った．フェーズ 3 のコミットの後で，コミットの内容とイメージの中身（`knn_interpolated_head.py` の MD5 `3c98c9ba…`）が一致することを確かめる必要がある．
+
+### Iteration 104 実行済み
+
+#### 計算の方法
+
+- スクリプトは `/tmp/iter104_eval.py`（一時ファイル）で，出力は `.claude/research/_iter104_eval_out.txt`（271 行）に保存した．`uv run` で実行し，EXIT=0 だった．
+- 比較の相手は基準線 `results/20260929_192157/results.jsonl` である．id は 3,750 行で完全に一致する．
+- top1 の対の比較には `metrics.compute_mcnemar_test`（連続補正つき）を使った．参考として，不一致の対に `scipy.stats.binomtest` の正確検定も当てた．
+- C1 には `compute_domain_recall_mcnemar_test`，`compute_domain_precision_fisher_test`，`apply_benjamini_hochberg`（q=0.05）を使った（`scripts/_iter101_post_analysis.py` と同じ手順）．C6 の分位点は `numpy.percentile` で求めた．
+
+#### 結果（本走 `results/20261004_132607` 対 基準線 `results/20260929_192157`）
+
+| 指標 | 基準線 | 本走 | Δ | 事前登録の予測 |
+|---|---|---|---|---|
+| top1 | 0.840000 | **0.849867** | **+0.9867pt（+37 行）** | P1: +0.7〜+1.3pt．的中 |
+| McNemar（連続補正） | — | 本走のみ正答 103，基準線のみ正答 66，chi2 7.6686，**p = 0.005619** | — | p < 0.05．的中 |
+| 参考: 正確二項検定 | — | p = 0.005461 | — | — |
+| 単一行の top1（3,020 行） | 0.848344 | 0.860596 | +1.2252pt（84 対 47） | — |
+| 複合行の top1（730 行） | 0.805479 | 0.805479 | 0（19 対 19） | — |
+| `compound_domain_set_recall` | 0.578767（845/1460） | 0.589041（860/1460） | +1.03pt | — |
+| `compound_mean_dispatched_count` | 1.973973 | 2.064384 | +0.0904 | P3: 2.03〜2.10．的中 |
+| overall mean_k | 1.533067 | 1.569600 | +2.4% | — |
+| 複合の k 分布 | {1: 479, 2: 21, 4: 230} | {1: 451, 2: 30, 4: 249} | — | — |
+| 単一の k 分布 | {1: 2546, 2: 67, 4: 407} | {1: 2507, 2: 90, 4: 423} | — | — |
+| ECE | 0.039551 | **0.050104** | +0.0106 | P4: 0.045〜0.055．的中 |
+| `mean_duration_ms` | 2197.842 | 2253.224 | +2.52% | P5: ±5% 以内．的中 |
+| `fallback_rate` / `dispatch_failure_rate` | 0.0 / 0.000267 | 0.0 / 0.0 | — | — |
+
+#### 事前登録条件の照合（C1〜C7，Iter101 と同じ閾値）
+
+| 条件 | 基準 | 実測 | 判定 |
+|---|---|---|---|
+| 主基準 | Δtop1 ≥ +0.5pt かつ McNemar p < 0.05 | +0.9867pt，p = 0.005619 | PASS |
+| C1 | 20 指標の BH 補正（q=0.05）後の有意な退行が 0 件 | 0 件（有意の 2 件はどちらも改善の向き） | PASS |
+| C2 | `fallback_rate` = 0.0，`dispatch_failure_rate` ≤ 0.005 | 0.0，0.0 | PASS |
+| C3 | G0-a〜G0-c の記録と artifact の MD5 | G0-a〜c はすべて合格．MD5 `c3888f66d90f4172cd7415e5c105328a` は全 10 ノードで一致 | PASS |
+| C4 | 複合 top1 ≥ 0.780411 | 0.805479 | PASS |
+| C5 | set_recall ≥ 0.5400 かつ mean_dispatched ≤ 2.10 | 0.589041 / 2.064384 | PASS（上限まで残り 0.036） |
+| C6 | `mean_duration_ms` ≤ 3041.7 | 2253.224 | PASS |
+| C7 | ECE ≤ 0.08 | 0.050104 | PASS．ただし 0.05 を超えたので，規定により次の反復のレバーは校正側に立てる |
+
+- **C1 の内訳**:
+  - BH 補正の後に有意となったのは `business_economics_recall`（本走のみ正答 17 対 基準線のみ正答 3，p = 0.00365）と `education_recall`（37 対 14，p = 0.00207）の 2 件で，どちらも改善の向きである．
+  - 改善の向きで補正の後に有意でないもの: `mathematics_recall` 10 対 1（p = 0.0159），`social_science_recall` 19 対 6（p = 0.0164）．
+  - 退行の向きのもの: `medical_recall` 12 対 24（p = 0.0668），`computer_science_recall` 3 対 10（p = 0.0961），`natural_science_recall` 6 対 9（p = 0.61），`general_recall` 3 対 5（p = 0.72）．いずれも補正の前でも p ≥ 0.05 である．
+  - precision の 10 指標は，すべて p ≥ 0.116 である．
+- **C6 の分位点**（括弧内は基準線）:
+  - 単一層: 中央値 539ms（511），p95 3,252.4ms（3,017.25）．
+  - 複合層: p25 7,583.5ms（7,460），中央値 8,795.5ms（8,732）．
+  - 全体: 中央値 569ms（545），p95 8,935ms（8,887），max 9,184ms（9,265）．
+
+#### 判定（分析フェーズ，2026-10-04）
+
+- **判定: `adopted`**．事前登録の判定規則（「計画 (Iter104)」）をそのまま当てはめた．閾値は緩めても締めてもいない．Δtop1 ≥ +0.5pt，McNemar p < 0.05，C1〜C7 をすべて満たす．
+- **採用構成**: `models/domain_classifier.joblib`（`KnnInterpolatedClassifier`，k=2，λ=0.3，MD5 `c3888f66d90f4172cd7415e5c105328a`）を以後の基準とする．元の LR の artifact は `models/domain_classifier_pre_iter104_lr.joblib`（MD5 `c8cd0fb46549d03db11f43864a741ef8`）として残す．新しい基準線は本走 `results/20261004_132607` である．
+- **雑音と信号の切り分け**:
+  - 同じ LR の artifact で走った過去の 4 本（Iter100 0.839467，Iter101 0.840000，Iter102 0.839467，Iter103 の反実仮想 0.839200）の top1 は，標本標準偏差が 0.034pt，幅が 0.08pt である．埋め込みが同じなら分類器の決定は決定的で，実行間の差は主に送出の失敗と埋め込みの微小な差から生じる．今回の +0.99pt はこの幅の 10 倍以上あり，対の検定でも p = 0.0056 である．したがって雑音ではなくレバーの効果とみる．
+  - replay との一致: replay は 103 対 64（top1 0.8504），本走は 103 対 66（0.849867）で，差は基準線のみ正答の 2 行（いずれも複合行）である．単一行の top1 は replay の 0.8606 と一致した．set_recall は replay 0.5904 に対し 0.589041（2 ドメイン分），mean_dispatched は 2.0685 に対し 2.064384 である．この差は，調査の時点で測った「基準 artifact の再現と本走の差 0.11pt」の範囲内にある．
+  - 雑音で説明できない範囲は「この評価集合の上での +1pt」までである．(k, λ) は CV だけで選んだが，eval の結果を見た後に格子を広げた経緯（B191 (5)）がある．別の評価集合への汎化は確かめていない．
+- **計画の仮説との一致**:
+  - 「近傍のラベル分布を混ぜると rank 1 の決定が変わり，top1 が上がる」は支持された．利得はすべて単一行で出た（84 対 47，正味 +37 行）．複合行は 19 対 19 で正味 0 である．
+  - 「線形分類器が局所的な構造を捉えきれていない」という機序は，直接には確かめていない．確かめたのは補間によって決定が変わり，その差し引きが正になったことまでである．
+  - recall の差し引きは education（+23 行），business_economics（+14），social_science（+13），mathematics（+9）が増え，medical（−12），computer_science（−7）が減った．recall が低いドメインが増えているので，kNN の票に入れたクラス均衡重みが小さいクラスへ決定を寄せた可能性がある（推測．重みを外した replay で確かめられる）．
+- **想定外の挙動**: 言語崩れ，発散，OOM は無い（全 10 ノードのログで 0 件）．予測していた変化として，確信度の分布が平らになり，gap 方式の送出数が増えた（4 件送出の行が複合 +19 行，単一 +16 行）．この分だけ `mean_duration_ms` が +2.5%，単一層の p95 が +235ms 増えた．
+- **後始末**: config.yaml は変えていないので，戻す設定は無い．イメージ `b5b717d1fc7a` は `GIT_HEAD=7c0b703-dirty-iter104` で作った．本走の `git_head.txt` もこの値のままである．フェーズ 3 のコミットに入れた `knn_interpolated_head.py` の MD5 は，イメージの中の値 `3c98c9ba687609a34d485c59eb367db8` と照合した（照合の結果は B193 に記録する）．
+
+#### 学び (Iter104)
+
+1. **実測せずに却下したレバーが効いた**．Iter97 の計画は，kNN 融合を「5,120 次元 対 2,275 行の p≫n で過学習が濃厚」という理由で，実測なしに却下していた．補間の形なら学習される重みは増えず，自由度は k と λ の 2 つだけである．過学習の議論はこの形にはそのまま当てはまらなかった．却下の理由が自由度の見積もりであるときは，その見積もりが候補の実際の形に当てはまるかを確かめる．
+2. **artifact を差し替えるレバーは，キャッシュの埋め込みを使った replay でほぼ正確に予測できる**．本走との差は 2 行（0.053pt）だった．分類器の側のレバーは，今後もこの replay で事前に絞り込める．ただし replay は事前登録の手段に留める（恒久ルール，B176）．
+3. **rank 1 を変えるレバーは，確信度の gap を通じて送出集合も動かす**．今回は mean_dispatched が 1.974 → 2.064 になり，C5 の上限 2.10 まで残り 0.036 である．次に校正（温度）を変える場合，argmax は変わらないが gap が変わるので，set_recall，mean_dispatched，所要時間は動く．C5 は replay で事前に見積もってから事前登録すること．
+4. **補間分布は温度校正の外にある**．温度は LR の出力だけに当てたもので，k=2 の kNN 分布（値は 0，約 0.5，1 に偏る）を 0.3 混ぜた後の分布には当て直していない．ECE が 0.0396 → 0.0501 になったのはこのためとみる（推測）．
+5. **待機の上限と実験の寿命を分けておくと，記録が壊れない**．ローカルの待機タスクが 2 時間で止められても，実験はコンテナの中で切り離して走り続け，結果は完了マーカーとノード側の MD5 で確かめられた．`_iter104_mainrun_start.log` の末尾の ERROR は，待機タスクが止められたことだけを示す．
+
 ## Iteration 103: 4 ノード送出行で多数決集約を再評価する
 
 ### 調査 (Iter103)
@@ -359,391 +644,4 @@ uv run python scripts/replay_dispatch_gap_policy.py --results results/20260929_1
 3. **予測利得が replay の分解能ちょうどのレバーは，本走しても判定が事前に分かる**．今回は約 2 時間 18 分の実機時間を使い，結果は予測と小数第 6 位まで一致した．恒久ルールとの関係は B176 の要レビュー (1) に残る．
 4. **`max_confidence` のもとでは，set_recall は top1 に届かない**．これを実機の本走で確かめた（送出先が変わった 5 行の正誤は不変）．次は，rank 1 の決定を変えるか，複数の回答を使う集約へ変えるレバーが要る．
 5. **`dispatch_failure_rate` は，k を増やすレバーで個々の送出の失敗を隠す**．送出単位の失敗率は別に数える（申し送り 3 (ii)）．
-
-## Iteration 101: 未使用の light_model を常駐から外して VRAM を空け，融合構成を運用可能にする
-
-### 調査 (Iter101)
-
-**実施場所の申告**: 本フェーズで行ったのは (a) 開発ホストでのリポジトリ読み取り，(b) tavily による外部調査，
-(c) **wafl500 / wafl502 への読み取り専用の SSH 接続**（`ollama ps`・`nvidia-smi --query-compute-apps`・
-`docker logs` の参照のみ）である．**モデルの起動・推論・設定変更は一切行っていない**ので，
-恒久ルール (B)（wafl500〜509 でサブ実験をしない）には抵触しない．計算を伴う作業は発生していない．
-
-**問い**: (Q1) `light_model` は現行構成の実行時経路で本当に呼ばれないか．(Q2) 呼ばれないなら，
-それを常駐から外すと VRAM はどれだけ空き，Iter100 の C6 違反（`mean_duration_ms` 9733.350）の機序に
-届くか．(Q3) Ollama が VRAM 不足のときに何をするか（無言の劣化の正体）．
-
-**A1（Q1: コード上の到達条件．`light_model` は実行時に呼ばれない）**
-- `http_server.py:364-370` の `_estimate_probe_confidence()` は，`confidence_signal_method` が
-  multi_sample / stp / semantic_entropy / p_true の**いずれでもない**とき（現行は `self_report`）に
-  `routing_method == supervised_classifier` の分岐へ落ち，`estimate_confidence_classifier()` を
-  呼ぶだけで返る．コード中のコメントも `# No LLM call:` と明言している．
-  すなわち `/probe` は LLM を一切呼ばない．
-- `light_model` の他の参照は 3 か所のみ: (i) `http_server.py:397` の**起動時 warmup**，
-  (ii) `node.py:233` の `_fallback_answer()`（`select_dispatch_targets()` が空集合を返したときだけ．
-  `confidence_threshold=0.0` の現行構成では発生せず，Iter100 本走 3,750 問で `fallback_rate=0.0` 実測），
-  (iii) mesh を使わない `scripts/run_central_experiment.py`（本走では未使用）．
-- **B172 (d) の根拠 2 はコード上は裏付けられた**．ただし本フェーズはコード読解までであり，
-  実ログでの 0 件確認は G0-a（予備 20 問）に残す．
-
-**A2（Q2: 実機の VRAM 実測．本フェーズの新しい一次データ）**
-2026-09-29 現在（Iter100 本走の直後，アイドル状態）の実測値である．
-
-| ノード | `ollama ps` の常駐モデル | `nvidia-smi` 実測 (MiB) |
-|---|---|---|
-| wafl500（入口・general） | expert-mesh-general-lora / qwen3-embedding:4b / ruri-v3-310m（すべて `100% GPU`） | 5,186 + 4,314 + 486 = **9,986 / 12,288** |
-| wafl502（peer・legal） | expert-mesh-legal-lora のみ | **5,186 / 12,288** |
-
-- **`light_model` はどちらのノードにも残っていない**．起動時に warmup で載ったものが，
-  その後の容量逼迫で追い出されたまま復帰していない（誰も呼ばないので復帰する契機が無い）と読める．
-- 起動直後の想定常駐量は，**入口ノード** = light 2,027 + expert 5,186 + qwen 4,314 + ruri 486
-  = **12,013 MiB**，**peer** = light 2,027 + expert 5,186 + qwen 4,314 = **11,527 MiB**．
-  物理 12,288 MiB に対する余裕はそれぞれ **275 MiB / 761 MiB** しかない．
-  CUDA コンテキスト（runner プロセスごとに数百 MiB）と KV キャッシュ（`ollama ps` の CONTEXT は 4096）を
-  加えれば**容易に超過する**．**`light_model` を外せば入口 9,986（余裕 2,302）・peer 9,500（余裕 2,788）**
-  となり，超過の余地が消える．
-
-**A3（Q2 の補強: ollama の GIN ログに残る「ロードの量子」）**
-wafl500 / wafl502 の `docker logs expert-mesh-ollama-1` を読み，所要時間を集計した（読み取りのみ）．
-
-| ノード | エンドポイント | 件数 | 中央値 | p95 | 最大 |
-|---|---|---|---|---|---|
-| wafl500 | `/api/embeddings` | 12,652 | 30.2ms | 79.9ms | 3,488ms |
-| wafl500 | `/api/chat` | 185 | 204.8ms | 8,380.6ms | 8,462.0ms |
-| wafl502 | `/api/chat` | 331 | 279.3ms | 8,429.0ms | 8,500.1ms |
-
-- **分布が明確に二峰である**: 生成呼び出しの中央値は 0.2〜0.3 秒なのに，p95 と最大値が
-  **8.4〜8.5 秒に集積している**．8.4 秒という一定値は生成量の分散では説明できず，
-  **5.3GB の expert モデルを読み直す固定コスト**とみるのが自然である．
-  すなわち Iter100 の裾（単一 p95 9,708ms・複合 p25 32,029ms）は，
-  **1 回あたり約 8.4 秒のモデル再ロードが 1〜4 回重なった形**として説明がつく．
-- **埋め込み自体は支配項ではない**（中央値 30ms×4 回＝約 120ms）．
-  これは「融合の内在コストは小さい」という Iter100 の分解（単一中央値 +299ms）と整合する．
-- **限界**: この GIN ログは Iter100 本走の全区間を覆っていない可能性があり（保持行数の制約），
-  再ロード回数の絶対値は主張できない．主張できるのは**二峰性と 8.4 秒の量子の存在**までである．
-
-**A4（Q3: 外部調査．Ollama は VRAM 不足を無言で劣化させる）**
-- Ollama 公式 FAQ（docs.ollama.com/faq，2026 参照）: `keep_alive` は負値で常駐，`0` で即時アンロード．
-  サーバ既定は `OLLAMA_KEEP_ALIVE`．**`/api/generate` の per-request `keep_alive` が既定を上書きする**．
-- SSD Nodes「Keep an Ollama model loaded in memory」（www.ssdnodes.com）: スケジューラは新規ロードに
-  メモリが足りないとき常駐モデルを**アンロードする．`keep_alive: -1` で載せたモデルも退避対象になる**．
-  → **`OLLAMA_KEEP_ALIVE=-1` は「絶対に退避しない」保証ではない**（本リポジトリの
-  docker-compose.yml のコメントが暗に前提していた読みは，この点で不正確である）．
-- ollama/ollama Issue #14258「GPU-to-CPU fallback happens silently with no user-visible warning」
-  （github.com/ollama/ollama/issues/14258）: VRAM に収まらないとき Ollama は**警告なしに CPU 実行へ落ちる**．
-  利用者に見えるのは「なぜか遅い」だけで，痕跡は debug ログにしか残らない．
-  → Iter100 の `dispatch_failure` 0 件・無言のレイテンシ劣化という観測と一致する．
-- ollama/ollama Issue #6008: `server.log` の `offloaded 42/81 layers to GPU` と
-  `ollama ps` の `PROCESSOR` 列（`100% GPU` / `48%/52% CPU/GPU`）が部分オフロードの判定材料になる
-  （modelfit.io / netray.co の 2026 年の解説も同じ手順を挙げる）．→ **G0 の検査項目に採用する**．
-- DEV Community「Ollama keep_alive: My Model Reloaded 214 Times in One Day」（dev.to，2026）:
-  **同時に載り切らない 2 モデルに `keep_alive: -1` を付けると事態は悪化し，部分 CPU オフロードで
-  生成が 42 tok/s → 6 tok/s（約 7 倍）に落ちた**という実測報告．対処は「GPU あたり常駐 1 モデル，
-  埋め込みは別ホストへ」．→ **Iter100 の複合 8.4s → 40.9s（約 4.9 倍）と同じ桁**である．
-  （注: 二次情報であり査読を経ていない．機序の傍証として扱い，判定には使わない．）
-- 総合すると，**「容量をわずかに超えた状態で常駐を宣言すると，退避・再ロードか部分 CPU オフロードの
-  どちらかが無言で起きる」**というのが Iter100 で観測された現象の最も素直な説明である．
-  Iter100 の `OLLAMA_MAX_LOADED_MODELS=4` は**スロット数**の上限であって容量の上限ではないため，
-  この失敗を防げなかった（Iter100 の学び 1 と同じ）．
-
-### 仮説 (Iter101)
-
-**主仮説 H1**: 現行構成で一度も呼ばれない `light_model`（約 2,027 MiB）を起動時 warmup から外すと，
-入口ノードで 12,013 → 9,986 MiB，peer で 11,527 → 9,500 MiB となり物理 12,288 MiB に対する余裕が
-2.3〜2.8GB に回復する．その結果，**A3 で観測した 8.4 秒のロード量子が消え**，
-`mean_duration_ms` は基準線 2,534.762ms 近傍（≤ 3,041.7ms）へ戻る．
-**表現（6,656 次元の融合特徴）と分類器 artifact は 1 ビットも変えない**ので，
-top1 は Iter100 実測 0.839467 を再現性の床 ±0.25pt の範囲で再現する．
-
-**対抗仮説（事前登録）**:
-- **A1'（既に退避済みで効果なし）**: `light_model` は本走の早い段階で追い出され，
-  残りの大半の区間では既に VRAM を占有していなかった．この場合レイテンシは改善せず C6 は再び FAIL する．
-  → G0-a/G0-vram の実測と，予備 20 問のレイテンシで本走前に検出できる．
-- **A2'（真因は KV キャッシュ／CUDA コンテキスト）**: 2.0GB 空けても
-  入口ノードの 3 モデル＋context 4096 が収まらず，部分 CPU オフロードが残る．
-  → `ollama ps` の `PROCESSOR` 列が `100% GPU` でない行として現れる（G0-b で検出）．
-- **A3'（真因は外部競合）**: 他ユーザーのジョブ（B169 の `namit` 等）の再来．
-  → 本走の**前後**に全 10 ノードで `nvidia-smi --query-compute-apps` を記録して切り分ける．
-- **A4'（fallback 経路の遅延）**: warmup を外すと，万一 fallback が発火したとき初回に
-  モデルロードの 8 秒前後が乗る．→ `fallback_rate` は Iter100 実測 0.0 であり，C2 で監視する．
-
-### 単一レバー (Iter101)
-
-**レバー**: `vram_budget_reallocation` = **`drop_unused_light_model_to_enable_fusion`**．
-**何を何から何へ**: 各ノードの起動時に `light_model`（`qwen3.5:4b-q4_K_M`）を warmup して
-VRAM に常駐させる挙動を，**warmup しない（常駐させない）**へ変える．
-
-**変更するファイルと設定キー**:
-1. `config.yaml` — **新キー `warmup_light_model: false` を 1 つ追加するだけ**
-   （省略時・`true` 時は従来と**ビット同一**．Iter99/Iter100 と同じ後方互換の型）．
-   **既存行は 1 行も変更しない**．とくに `embedding_fusion_models`（ruri 追加）は
-   **Iter100 のまま据え置き，ロールバックしない**．
-2. `http_server.py` — `create_app()` の `lifespan`（現 397〜401 行）で，フラグが偽のとき
-   `warmup_model(state.ollama_client, state.light_model)` を**呼ばず**，`warmed_models` からも外す．
-   構造化ログ `light_model_warmup_skipped` を 1 件出す（発火証拠になる）．
-3. `node.py` — `NodeState` 生成箇所（82 行付近）へ
-   `warmup_light_model=config.get("warmup_light_model", True)` の配線 1 行と，
-   `NodeState.__init__` の引数追加．
-4. `tests/test_http_server.py` — 2 件（既定＝`light` と `expert` の 2 回 warmup される／
-   `false` のとき `light` が warmup されない）．
-
-**レバーを読むコード行と到達条件（config.yml の必須事項）**: 読むのは
-`http_server.py` の `lifespan`（`create_app()` 内）1 か所のみ．到達条件は
-**deploy 後の各ノードのアプリ起動**であり，`routing_method` や `confidence_signal_method` の
-分岐には依存しない．**したがって Iter16/20/21/22/27 型の「設定を変えたが到達しない」失敗は構造的に起こらない**．
-発火証拠は (i) 起動ログの `light_model_warmup_skipped`，(ii) `ollama ps` に `light_model` 行が無いこと．
-
-**運用上の必須手順（これを怠ると変更が反映されない）**: `OLLAMA_KEEP_ALIVE=-1` は期限切れしないため，
-**deploy 時に ollama コンテナも再起動**して旧セッションの常駐状態を必ず捨てること．
-再起動しないと「前の起動で載った `light_model` が残ったまま」になり得る．
-
-**固定する構成（掃引しない）**: `embedding_fusion_models`（ruri 追加），
-`models/domain_classifier.joblib`（Iter100 の 6,656 次元・sha256 `e02c641185c28c…8e72bc1`．**再訓練しない**），
-`embedding_instruction`，`embedding_view_concat=true`，`dispatch_gap_threshold=0.36`，`dispatch_gap_max_k=4`，
-`dispatch_top_k=2`，`confidence_threshold=0.0`，`aggregation_method=max_confidence`，
-`docker-compose.yml` の `OLLAMA_MAX_LOADED_MODELS=4` と `OLLAMA_KEEP_ALIVE=-1`，
-評価集合（3,750 問）・訓練集合・`metrics.py`・`classifier.py`・`aggregator.py`・`expert_backend.py`．
-
-**禁止事項（単一レバーの境界）**: 埋め込みモデルの量子化変更，埋め込みの専用ノードへの分離，
-`num_ctx` / `OLLAMA_NUM_PARALLEL` / `OLLAMA_MAX_LOADED_MODELS` の掃引，`light_model` の差し替え，
-分類器の再訓練・正則化の変更，`dispatch_gap_threshold` の再較正，並列化（`asyncio.gather` 化）．
-**`config.yaml` の `light_model` キー自体は消さない**（fallback 経路と
-`scripts/run_central_experiment.py` が参照するため．常駐だけを外す）．
-
-### G0（実現性ゲート．本走の前に全項目を満たすこと）
-
-- **G0-a（本レバーの前提の実証．B172 の指定）**: 予備 20 問（単一 15 + 複合 5）を wafl500 入口で実行し，
-  **全 10 ノードの ollama ログに `light_model` への `/api/chat`・`/api/generate` が 0 件**であることを示す．
-  **偽なら本レバーは成立しない**ので本走へ進まず，次善案（`qwen3-embedding:4b` の量子化縮小）へ切り替える．
-- **G0-b**: 全 10 ノードの `ollama ps` に `light_model` 行が無く，必要モデル
-  （入口 3 本 = expert-general + qwen3-embedding:4b + ruri，peer 2 本 = expert + qwen3-embedding:4b）が
-  **すべて `PROCESSOR = 100% GPU`** であること（部分オフロード＝A2' の検出）．
-- **G0-vram-1（B172 (e) の必須項目）**: `nvidia-smi --query-compute-apps` の**実測値**の総和が
-  **≤ 12,288 MiB かつ余裕 ≥ 1,500 MiB**（予測: 入口 9,986／余裕 2,302，peer 9,500／余裕 2,788）．
-  公称サイズではなく実測値を使う．
-- **G0-vram-2（B172 (e) の必須項目）**: **本走の後にも**入口ノードと dispatch 先ノードで
-  `ollama ps` の行数が期待本数と一致すること（Iter100 はここで不一致だった）．
-- **G0-c**: 予備 20 問の `mean_duration_ms` が **≤ 3,041.7ms**．未達なら本走へ進まず機序を再診断する
-  （10 時間の本走を無駄にしないための早期検出．A1'/A2' はここで捕まる）．
-
-### 成功条件・非退行条件（事前登録 / Iter101）
-
-**基準線（精度・レイテンシとも）**: `results/20260928_160921/`（3,750 問，pre-Iter100 構成）．
-top1 = **0.833067**，`fallback_rate` 0.0，`dispatch_failure_rate` 0.000267，
-`mean_duration_ms` **2534.762**，`compound_domain_top1_accuracy` 0.790411，
-`compound_domain_set_recall` 0.567123，`compound_mean_dispatched_count` 1.950685，ECE **0.031774**．
-**参照点（同一表現の実測）**: Iter100 本走 `results/20260929_081612/` top1 **0.839467**，ECE 0.039556．
-**再現性の床は ±0.25pt．**
-
-- **判定**:
-  - **`adopted`**: Δtop1（対 0.833067）**≥ +0.5pt**（top1 ≥ **0.838067**）**かつ** McNemar p < 0.05
-    **かつ C1〜C7 をすべて満たす**（とくに **C6: `mean_duration_ms` ≤ 3041.7**）．
-  - Δtop1 ≥ +0.5pt だが McNemar p ≥ 0.05 → `adopted_small`（要再現）．
-  - **精度条件を満たすが C6 のみ違反** → `rejected`（理由は「運用コストでの不採用」．
-    この場合 **A1'/A2' が的中**したとみなし，次レバーは B172 の次善案 (i)
-    `qwen3-embedding:4b` の量子化縮小，または (ii) 埋め込みの専用ノード分離へ移す）．
-  - |Δtop1| < 0.25pt（＝融合の利得が再現しない）→ `negligible`．この場合は**表現ではなく実行基盤の
-    非決定性**を疑い，Iter100 の +0.640pt の再現性そのものを次の論点にする．
-  - Δtop1 ≤ −0.5pt または C1〜C5・C7 のいずれか違反 → `rejected`．
-  - G0 不合格で本走に至らなかった場合 → `invalid`（実現性）．
-- **必須の非退行条件**（1 つでも破れたら `rejected`）:
-  - **C1**: per-domain precision/recall 計 20 指標の BH 補正後（q=0.05）の有意退行が **0 件**．
-  - **C2**: `fallback_rate` が **0.0** のまま（A4' の監視を兼ねる），`dispatch_failure_rate` ≤ **0.005**．
-  - **C3**: レバー発火の証拠（起動ログの `light_model_warmup_skipped` と G0-a〜G0-vram-2）が
-    **すべて記録されていること**．
-  - **C4**: 複合設問 730 行の top1 が **≥ 0.780411**（基準 0.790411 から −1.0pt 以内）．
-  - **C5**: `compound_domain_set_recall` **≥ 0.5400**，`compound_mean_dispatched_count` **≤ 2.10**．
-  - **C6（本反復の主眼）**: `mean_duration_ms` **≤ 3041.7**（基準 2534.762 の +20%．B172 のとおり据え置き）．
-    **分位点も必ず併記する（B172 (e)）**: 単一層の中央値・p95，複合層の p25・中央値．
-    参考値（判定には使わない）: 基準線は単一中央値 838ms / 単一 p95 3,207ms / 複合中央値 9,070ms，
-    Iter100 は 1,137 / 9,708 / 43,074ms．**本反復の期待は単一中央値 1,100〜1,200ms・
-    単一 p95 3,200〜4,000ms・複合中央値 9,000〜11,000ms**（＝融合の内在コスト +299ms だけが乗った形）．
-  - **C7**: ECE ≤ **0.08**．**毎回併記する（B172 (c)）．0.05 を超えたら，C7 を満たしていても
-    次イテレーションのレバーを校正側（温度校正の見直し）に立てる**．
-    本反復は分類器 artifact を再訓練しないので **ECE は Iter100 の 0.039556 の再現**を見込む．
-- **参考値として併記**: Random 0.119467 / BestSingle / Oracle 1.0，`answer_quality`，`end_to_end`，
-  実行前後の全 10 ノードの `nvidia-smi` 占有記録（A3' の切り分け）．
-
-### 事前登録する予測 P1〜P4（Iter101）
-
-- **P1（主予測）**: `mean_duration_ms` が **2,600〜3,000ms** に着地する（C6 の内側）．
-  点推定 **2,834ms**（基準 2,534.762 + 融合の内在コスト約 299ms）．**80% 区間 2,500〜3,600ms**で，
-  区間の上端は C6 をはみ出す．符号の確信は「中程度」．
-- **P2**: top1 は **0.8375〜0.8415**（Iter100 実測 0.839467 ± 再現性の床 ±0.25pt）．
-  0.833067 近傍まで落ちるなら実行基盤の非決定性を疑う．
-- **P3**: G0-vram-1 の実測総和は**入口 9,900〜10,100 MiB・peer 9,400〜9,600 MiB**，
-  余裕はいずれも **2,200 MiB 以上**．
-- **P4**: 本走中の `/api/chat` の所要時間分布から **8.4 秒付近の第 2 の峰が消える**
-  （A3 の観測の裏返し．report-only だが機序の直接証拠になる）．
-
-### 実行フェーズへの申し送り (Iter101)
-
-- **使うホスト**: 本走・予備 20 問・deploy でのみ wafl500〜509 を触る．
-  分類器の再訓練は**行わない**ので wafl-ctrl5 での計算も原則不要．必要が生じた場合は wafl-ctrl5 を使う．
-- **artifact の保全**: `models/domain_classifier.joblib`（6,656 次元）と
-  `models/domain_classifier_pre_iter100_qwen3_4b.joblib` の**両方を保持する**（B172）．
-  本反復は前者をそのまま使い，**再訓練も差し替えもしない**．
-- **deploy 後・本走前に ollama コンテナを再起動**し，`ollama ps` で常駐状態を確認してから G0 を行う．
-- **本走は 3,750 問フルスペック**（恒久ルール (A)）．事前シミュレーションで代替しない．
-- 本走の**前後**に全 10 ノードの `nvidia-smi --query-compute-apps` と `ollama ps` を記録する（C3・A3'）．
-
-### Iteration 101 実行済み
-
-**判定: `adopted`**（事前登録の判定規則をそのまま適用．閾値は 1 つも緩めていない）．
-
-#### 変更（単一レバー）
-
-実装 commit `69db633`．`config.yaml` に新キー `warmup_light_model: false` を 1 行追加し，
-`http_server.py` の `lifespan` が偽のとき `warmup_model(..., state.light_model)` を呼ばずに
-構造化ログ `light_model_warmup_skipped` を出す．`node.py` に配線 1 行，`tests/test_http_server.py` に 2 件．
-**`light_model` キー自体・融合表現（6,656 次元）・`models/domain_classifier.joblib`・評価集合は 1 ビットも変えていない**．
-
-#### 結果（本走 `results/20260929_192157/`，3,750 問，約 2 時間 20 分）
-
-| 指標 | 基準線 `20260928_160921` | Iter100 `20260929_081612` | **Iter101** |
-|---|---|---|---|
-| top1_accuracy | 0.833067 | 0.839467 | **0.840000**（Wilson 95%CI [0.827919, 0.851385]） |
-| 単一 / 複合 top1 | 0.843377 / 0.790411 | — | **0.848344 (n=3020) / 0.805479 (n=730)** |
-| `mean_duration_ms` | 2534.762 | 9733.350 | **2197.842** |
-| `fallback_rate` | 0.0 | 0.0 | **0.0** |
-| `dispatch_failure_rate` | 0.000267 | — | **0.000267**（1/3750） |
-| ECE / Brier / AUROC | 0.031774 / — / — | 0.039556 | **0.039551 / 0.109451 / 0.831199** |
-| `compound_domain_set_recall` | 0.567123 | — | **0.578767** |
-| `compound_mean_dispatched_count` | 1.950685 | — | **1.973973** |
-
-- McNemar 対基準線: discordant 110（新のみ正解 68／旧のみ正解 42），chi2 = 5.6818，**p = 0.017142**．
-- McNemar 対 Iter100: discordant **わずか 4**（3/1），chi2 = 0.25，p = 0.6171．
-- per-domain 20 指標の BH 補正（q=0.05）後の有意退行 **0 件**（生 p で 0.05 を下回るのは
-  `education_recall` 0.0303（**改善**方向 25/11）と `business_economics_recall` 0.0442（退行方向 5/15）の
-  2 件のみで，いずれも BH 後に有意でない）．
-
-#### 事前登録条件の照合（C1〜C7）
-
-| 条件 | 基準 | 実測 | 判定 |
-|---|---|---|---|
-| 主基準 | Δtop1 ≥ +0.5pt かつ McNemar p < 0.05 | **+0.6933pt**，p = 0.017142 | **PASS** |
-| C1 | BH 後の有意退行 0 件 | 0 件 | PASS |
-| C2 | `fallback_rate` = 0.0，`dispatch_failure_rate` ≤ 0.005 | 0.0，0.000267 | PASS |
-| C3 | `light_model_warmup_skipped` と G0-a〜G0-vram-2 が全記録 | 全 10 ノードで確認．G0 全項目 PASS | PASS |
-| C4 | 複合 top1 ≥ 0.780411 | **0.805479**（基準 +1.507pt） | PASS |
-| C5 | set_recall ≥ 0.5400 **かつ** mean_dispatched ≤ 2.10 | **0.578767** / **1.973973** | PASS |
-| **C6** | `mean_duration_ms` ≤ 3041.7 | **2197.842**（基準比 **−13.3%**） | **PASS** |
-| C7 | ECE ≤ 0.08 | **0.039551**（**0.05 未満**） | PASS |
-
-**C6 の分位点（B172 (e) の必須併記）**．括弧内は基準線 / Iter100．
-
-- 単一層: 中央値 **511ms**（838 / 1,137），p95 **3017.25ms**（3,207 / 9,708）
-- 複合層: p25 **7,460ms**（7,888 / 32,029），中央値 **8,732ms**（9,070 / 43,074）
-- 全体の裾: p90 8,727 / p95 8,887 / p99 9,003 / **max 9,265ms**（基準線は max 13,097ms，Iter100 は 58,000ms）．
-  **20 秒を超える行は 0 件**（Iter100 は 717 件）．
-
-**C7 は 0.05 を超えていない**（0.039551．Iter100 の 0.039556 とビット単位でほぼ同一で，
-分類器 artifact を再訓練していないという申告と整合する）．よって **B172 (c) の「0.05 超なら次レバーを
-校正側に立てる」条項は発火しない**．
-
-#### 対抗仮説 A1'〜A4' の評価
-
-- **A1'（既に退避済みで効果なし）→ 反証**．レイテンシは Iter100 比で −77.4%，**基準線比でも −13.3%** 改善した．
-- **A2'（真因は KV キャッシュ／CUDA コンテキスト）→ 反証**．本走の**後**の `post_run_gpu_status.txt` で
-  全 10 ノード・計 21 個の `llama-server` が**すべて `PROCESSOR = 100% GPU`**，入口 5,186+4,314+486 = **9,986 MiB**
-  （余裕 2,302），peer 5,186+4,298 = **9,484 MiB**（余裕 2,804）．部分オフロード行は 1 行も無い．
-- **A3'（外部競合）→ 反証**．`post_run_gpu_status.txt` の `nvidia-smi --query-compute-apps` に現れた
-  プロセスは 21 個すべて `/usr/lib/ollama/llama-server` で，他ユーザーのプロセスは 0 件．
-  ただしこれは G0 時点と本走直後の 2 点観測であり，2 時間 20 分の全区間の証明ではない．
-  **max が 9,265ms で頭打ちし 20 秒超が 0 件**という分布の締まり方は，間欠的な外部競合とは整合しない．
-- **A4'（fallback 経路の遅延）→ 発動せず**．`fallback_rate` = 0.0 で `_fallback_answer()` は一度も通っていない．
-
-#### 事前登録予測 P1〜P4 の的中・外れ
-
-- **P1: 外れ（下振れ）**．予測 2,600〜3,000ms（80% 区間 2,500〜3,600ms）に対し実測 **2,197.8ms** で
-  **区間の下側に外れた**．「予測より良かった」で済ませず機序を追った結果が下記 M1・M2 である．
-- **P2: 的中**．top1 0.840 は予測区間 0.8375〜0.8415 の内側．
-- **P3: 的中**．入口 9,986（予測 9,900〜10,100）・peer 9,484（予測 9,400〜9,600），余裕はいずれも 2,200 MiB 以上．
-- **P4: 外れ**．「8.4 秒付近の第 2 の峰が消える」は**起きていない**（下記 M2）．
-
-#### 機序の特定（P1 が下振れした理由・調査フェーズ A3 の誤りの訂正）
-
-**M1: 速くなった分はすべて「生成」ではなく「ルーティングのオーバーヘッド」で説明できる．**
-`duration_ms` を `dispatch_gen_time_ms`（生成）とその差（probe＋埋め込み＋集約）に分解した．
-
-| | 生成 mean / median | オーバーヘッド mean / median / p95 |
-|---|---|---|
-| 基準線 | 1,798.0 / 232ms | **736.8 / 610 / 1,057ms** |
-| Iter100 | 8,267.5 / 946ms | 1,467.1 / 305 / 5,791ms |
-| **Iter101** | **1,783.2 / 228ms** | **414.6 / 299 / 675ms** |
-
-- 全体平均の差 2,534.8 − 2,197.8 = **336.9ms** に対し，オーバーヘッドの差が **322.2ms** を占め，
-  生成側の差は **−14.8ms** にすぎない．`answer_text` の平均長は 142.8 → 142.3 字でほぼ同一なので，
-  生成量の変化による交絡ではない．
-- すなわち**基準線それ自体が VRAM 逼迫の税を払っていた**．基準線の構成は入口 = light 2,027 + expert 5,186
-  + qwen 4,314 = 11,527 MiB で余裕はわずか 761 MiB であり，埋め込み呼び出しが遅く・ばらついていた
-  （オーバーヘッド p95 1,057ms → 675ms）．**本レバーは Iter100 の退行を戻しただけでなく，
-  Iter100 より前から存在していた潜在的なレイテンシ税も同時に取り除いた**．
-- 同時に，**事前登録が使った「融合の内在コスト +299ms」という見積もりが過大だった**ことも確定した．
-  この +299ms は Iter100 の単一中央値の増分から取ったものだが，その Iter100 自体が VRAM スラッシングの
-  只中にあった．2 本目の埋め込み（ruri，355MB）の真の追加費用は，オーバーヘッドが基準線より 322ms
-  **減っている**事実から，数十 ms の桁にとどまる．P1 の点推定 2,834ms は「汚染された内在コスト」と
-  「基準線は清潔だという誤った前提」の 2 つの誤りを同じ向きに積んでいた．
-
-**M2: 調査フェーズ A3 の「8.4 秒 = 5.3GB の expert 再ロードの量子」という読みは誤りだった．**
-
-- 8.4 秒付近の峰は Iter101 でも**消えていない**: 生成時間の p95 は k=1 層で 8,494ms，k≥2 層で 8,584ms．
-  7 秒以上の行は基準線 642 行 → Iter101 **599 行**でほとんど減っていない．
-- 正体は**長文回答の生成**である．生成 ≥7 秒の 517 行の `answer_text` の**中央値は 695 字**，
-  対して 7 秒未満の 3,233 行は**中央値 9 字**．回答長の分布が二峰であり，GIN ログの二峰性はこれを
-  見ていたにすぎない．`config.yaml` に 8.5 秒級のタイムアウトは無い（`dispatch_timeout_s` は 400.0）．
-- **それでもレバーは正しく効いた**．Iter100 で実際に壊れていたのは生成時間の**上位 10%**
-  （p90 = 42,431ms，20 秒超 717 行）であり，これは 8.4 秒の量子ではなく**余裕 275 MiB での本物の
-  スラッシング**だった．**機序の診断が部分的に誤っていても，レバーの選択（VRAM 予算を 2.0GB 空ける）は
-  正しかった**という形になっている．結果が良かったことを機序の正しさの証拠にしてはならない．
-
-#### Iter100 比 p = 0.617 の解釈
-
-3,750 問のうち**予測が食い違ったのは 4 行だけ**である．表現（6,656 次元）も分類器 artifact も 1 ビットも
-変えていないのだから，これは事前の想定どおりであり，**むしろ実験の内的妥当性（レバーが表現に触れて
-いないこと）の確認**として読むのが正しい．したがって次のように言える．
-
-> **融合表現の精度利得（対基準線 +0.69pt，McNemar p = 0.0171）は実在し，Iter101 はそれを
-> 基準線より速い運用条件（2,198ms < 2,535ms）で獲得した．**
-
-Iter100 の +0.640pt と Iter101 の +0.693pt は同一の表現から出た同一の効果であり，
-独立な 2 回の再現ではない（差は 4 行）．**利得の大きさの再現性は依然 1 回分の証拠しかない**．
-また **Iter100 の「複合設問に効いた」という解釈は B172 (b) で取り下げ済みであり，復活させない**．
-今回の層別の見え方（対基準線で単一 0.843377 → 0.848344 = +0.497pt，複合 0.790411 → 0.805479 = +1.507pt）も，B172 (b) が示した
-「複合行はもともと決定境界近傍に多く振れやすい」という機序に中立な説明で足りる．
-
-#### 学び
-
-1. **「基準線は清潔である」という前提を検証せずに差分の見積もりを立てると，予測は系統的に外れる．**
-   基準線 `20260928_160921` は余裕 761 MiB で走っており，オーバーヘッドに 322ms の税を払っていた．
-   P1 の外れはノイズではなく，基準線の汚染と「内在コスト」の汚染が同じ向きに積み上がった結果である．
-   **今後，レイテンシを主眼にするレバーでは，基準線側の資源余裕も併記してから区間を引くこと．**
-2. **ログの分位点の「峰」を機序に翻訳する前に，その峰の行を直接引いて属性を確かめること．**
-   A3 は GIN ログの 8.4 秒の集積を「5.3GB モデルの再ロード」と読んだが，実体は長文回答の生成だった．
-   `results.jsonl` の `answer_text` 長と突き合わせれば本走前に棄却できた誤りである．
-   **ログの集計だけで機序を確定させず，行レベルの属性と結合する**．
-3. **診断が誤っていてもレバーが当たることがある．** 本反復は「VRAM を 2.0GB 空ける」という処置が
-   正しく，その正しさの理由（本物のスラッシング）と，事前に信じていた理由（8.4 秒の再ロード量子）が
-   異なっていた．**採否判定と機序の確度は別々に記録する**．レバーは `adopted` だが，機序 A3 は反証済みである．
-4. **`OLLAMA_MAX_LOADED_MODELS` はスロット数であって容量ではない**（Iter100 の学び 1 の再確認）．
-   ノードの VRAM は「常駐モデルの実測合計 + 余裕 ≥ 1,500 MiB」という**会計**で管理する必要がある．
-   この運用規則を `docs/d0008` §5.6 に恒久化した．
-5. **未使用の常駐物を疑うのは安いレバーである．** 変更は config 1 行 + 実装十数行で，
-   再訓練も表現変更も伴わないのに，レイテンシを基準線比 −13.3% にした．
-   **表現・分類器を動かす前に，実行基盤に残っている「誰も呼ばない常駐物」を洗うこと．**
-
-#### 次の一手
-
-C6 が解消され ECE も 0.05 未満なので，B172 (c)・B172 の次善案 (i)(ii)（量子化縮小・埋め込みノード分離）は
-**いずれも発動しない**．一方 B115 (3) の精度本線は 3 本とも打ち止め（`compound_eval_set_expansion` は
-B149 で closed，`cross_domain_training_data_augmentation` は B145 で closed，
-`embedding_model_replacement` は `multilingual_e5_large` のみ残るが B167 で期待値が消えている）である．
-そこで **Iter81/82/83 で 3 度確認され「本研究の標準工程に組み込む」と宣言した恒常規則**
-——**特徴量を変えるレバーの後には必ず閾値較正の反復を 1 回挟む**——を適用する．
-Iter99/100 で表現が 2,048 → 6,656 次元へ変わったのに `dispatch_gap_threshold` は 2,048 次元用に
-較正した 0.36 のまま凍結されており，**較正の負債が 2 反復ぶん溜まっている**．
-本走 `results.jsonl` の `probe_candidates` からの決定論的 replay
-（`scripts/replay_dispatch_gap_policy.py`．gt=0.36 で set_recall 0.578767 を**完全再現**し忠実性を確認済み）で，
-gt を上げると **set_recall 0.5788 → 0.6747（+9.6pt）**の余地があることを実測した．
-詳細と次レバーの選定根拠は backlog **B174**．
 
