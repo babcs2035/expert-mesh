@@ -1,4 +1,4 @@
-"""Tests for the Iter104 kNN-interpolated classifier wrapper and its build-script input check."""
+"""Tests for the kNN-interpolated classifier wrapper (Iter104/105) and its build-script input check."""
 
 import joblib
 import numpy as np
@@ -15,8 +15,12 @@ _TRAIN_LABELS = ["medical", "medical", "legal", "legal", "general", "general"]
 _QUERIES = np.array([[1.0, 0.05], [0.1, 1.0], [-0.9, 0.2], [0.5, 0.5]])
 
 
+# A temperature below 1 (the Iter105 value), so the sharpening branch of predict_proba runs.
+_SHARPENING_TEMPERATURE = 0.9426
+
+
 def _build_wrapper(
-    base: LogisticRegression, k: int, interpolation_lambda: float
+    base: LogisticRegression, k: int, interpolation_lambda: float, temperature: float = 1.0
 ) -> KnnInterpolatedClassifier:
     """Wrap a fitted toy LogisticRegression with its own training points as the neighbour set."""
     class_to_index = {label: index for index, label in enumerate(base.classes_)}
@@ -27,6 +31,7 @@ def _build_wrapper(
         train_weights=np.ones(len(_TRAIN_LABELS)),
         k=k,
         interpolation_lambda=interpolation_lambda,
+        temperature=temperature,
     )
 
 
@@ -90,6 +95,72 @@ def test_invalid_k_is_rejected(base_classifier: LogisticRegression) -> None:
     """k larger than the number of training rows raises ValueError at construction."""
     with pytest.raises(ValueError):
         _build_wrapper(base_classifier, k=len(_TRAIN_LABELS) + 1, interpolation_lambda=0.3)
+
+
+def test_temperature_one_returns_plain_interpolation(base_classifier: LogisticRegression) -> None:
+    """With temperature=1 the output is exactly lambda * p_kNN + (1 - lambda) * p_base."""
+    wrapper = _build_wrapper(base_classifier, k=2, interpolation_lambda=0.3, temperature=1.0)
+    expected = 0.3 * wrapper.knn_label_distribution(_QUERIES) + 0.7 * np.asarray(
+        base_classifier.predict_proba(_QUERIES), dtype=np.float64
+    )
+    np.testing.assert_array_equal(wrapper.predict_proba(_QUERIES), expected)
+
+
+def test_temperature_scaled_rows_sum_to_one(base_classifier: LogisticRegression) -> None:
+    """With temperature != 1 every probability row still sums to 1."""
+    wrapper = _build_wrapper(
+        base_classifier, k=2, interpolation_lambda=0.3, temperature=_SHARPENING_TEMPERATURE
+    )
+    np.testing.assert_allclose(wrapper.predict_proba(_QUERIES).sum(axis=1), 1.0)
+
+
+def test_temperature_keeps_argmax(base_classifier: LogisticRegression) -> None:
+    """Temperature scaling (sharpening or flattening) leaves every row's argmax unchanged."""
+    reference = _build_wrapper(base_classifier, k=2, interpolation_lambda=0.3).predict_proba(
+        _QUERIES
+    )
+    for temperature in (_SHARPENING_TEMPERATURE, 2.0):
+        scaled = _build_wrapper(
+            base_classifier, k=2, interpolation_lambda=0.3, temperature=temperature
+        ).predict_proba(_QUERIES)
+        np.testing.assert_array_equal(scaled.argmax(axis=1), reference.argmax(axis=1))
+
+
+@pytest.mark.parametrize("temperature", [0.0, -0.5])
+def test_non_positive_temperature_is_rejected(
+    base_classifier: LogisticRegression, temperature: float
+) -> None:
+    """temperature <= 0 raises ValueError at construction."""
+    with pytest.raises(ValueError):
+        _build_wrapper(base_classifier, k=2, interpolation_lambda=0.3, temperature=temperature)
+
+
+def test_pickle_without_temperature_loads_as_one(
+    base_classifier: LogisticRegression, tmp_path
+) -> None:
+    """An Iter104-style pickle lacking `temperature` loads with temperature=1 and the same output."""
+    wrapper = _build_wrapper(base_classifier, k=2, interpolation_lambda=0.3)
+    expected = wrapper.predict_proba(_QUERIES)
+    del wrapper.__dict__["temperature"]
+    path = tmp_path / "iter104_style.joblib"
+    joblib.dump(wrapper, str(path))
+    loaded = joblib.load(str(path))
+    assert loaded.temperature == 1.0
+    np.testing.assert_array_equal(loaded.predict_proba(_QUERIES), expected)
+
+
+def test_joblib_round_trip_keeps_temperature_output(
+    base_classifier: LogisticRegression, tmp_path
+) -> None:
+    """Dumping and reloading a temperature-scaled wrapper keeps temperature and predict_proba."""
+    wrapper = _build_wrapper(
+        base_classifier, k=2, interpolation_lambda=0.3, temperature=_SHARPENING_TEMPERATURE
+    )
+    path = tmp_path / "knn_interpolated_temperature.joblib"
+    joblib.dump(wrapper, str(path))
+    loaded = joblib.load(str(path))
+    assert loaded.temperature == _SHARPENING_TEMPERATURE
+    np.testing.assert_array_equal(loaded.predict_proba(_QUERIES), wrapper.predict_proba(_QUERIES))
 
 
 def test_cache_order_mismatch_is_rejected() -> None:

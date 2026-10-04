@@ -1,3 +1,283 @@
+## Iteration 105: kNN 補間分布の温度を再較正する
+
+### 調査 (Iter105)
+
+**実施場所の申告**: 本フェーズで行ったのは，開発ホストでのリポジトリの読み取り，tavily（`tvly search`）による外部調査，開発ホストの CPU での replay（`uv run`．計算済みの埋め込みキャッシュを読むだけ）である．GPU，LLM，wafl500〜509 は使っていない．
+
+**位置づけ**: B193 と C7 の規定（ECE が 0.05 を超えたら，次の反復を校正側に立てる）による．Iter104 の本走 `results/20261004_132607` の ECE は 0.050104 だった．温度は LR の出力（`CalibratedClassifierCV(method="temperature")`）にしか当たっておらず，kNN 分布を 0.3 混ぜた後の分布には当て直していない（Iter104 の学び 4）．
+
+**確かめた事実**:
+
+1. **送出集合が確信度で決まる経路**（`aggregator.py:28-91` を Read で確認）．
+   - `node.py:232-239` が `select_dispatch_targets()` を呼び，`confidence_threshold`（`config.yaml:33`，0.0），`dispatch_candidate_threshold`（`:38`，0.0），`gap_threshold`（`:131`，0.36），`gap_max_k`（`:132`，4）を渡す．
+   - `aggregator.py:62` が確信度の降順で安定ソートする．`:71` と `:75-77` の閾値はどちらも 0.0 なので，10 ノードがすべて候補に残る．`:87-91` は，隣り合う順位の差が 0.36 未満の間，k を 4 まで増やす．
+   - 各ノードの確信度は `classifier.py:69` の `predict_proba` の自ドメイン列で，実体は `knn_interpolated_head.py:99-107` である．温度を変えると argmax は変わらないが，隣り合う順位の差が変わるので，送出集合は直接動く．
+   - `results.jsonl` の `confidence` は rank 1 の probe 確信度で，`metrics.py:486-521` の ECE はこれを読む．判定は `selected_domain in expected_domains`（複数の正解を許す）である．
+   - replay の `simulate_rows()` は `:87-91` の連鎖を再現している．違いは同順位の扱いだけで，replay はクラスの順，本番は peers.yaml の順に並べる．
+2. **単一ラベルの温度と，複数の正解を許す ECE の食い違い**（journal_archive.md 8973 行目）．複合行では，正解が 2 つあるため構造的に過小確信になる．Iter104 の本走では，単一行の符号付きギャップ（平均確信度 − 平均正答）が −0.031，複合行が −0.129 である．
+3. **過去の本走の ECE**（`results/*/metrics.json`）: 20260923_150540 0.0551，20260926_221822 0.0327，20260929_192157（Iter101）0.0396，20261002_105743（Iter103）0.0385，20261004_132607（Iter104）0.0501．同じ LR の artifact で走った Iter101 と Iter103 の差は 0.0011 である．
+4. **commit b1f5cb0**（2026-10-04）: 実験の後に `mise run stop` でコンテナを止め，deploy の最後に `docker image prune -a -f` を実行する．このため本走はモデルの再ロードから始まり，先頭の数十問の所要時間が伸びる見込みである（推測）．
+
+**外部調査（tavily，2026-10-04）**:
+
+- Guo, Pleiss, Sun, Weinberger, "On Calibration of Modern Neural Networks", ICML 2017, arXiv:1706.04599（https://arxiv.org/abs/1706.04599 ，https://proceedings.mlr.press/）．温度 T は検証集合の NLL を最小にして当てる．予測の順位を保つので accuracy は変わらない．T>1 で分布が平らになる．
+- Minderer ほか, "Revisiting the Calibration of Modern Neural Networks", NeurIPS 2021（proceedings.neurips.cc）．温度スケーリングを，追加の費用が小さい基準の校正法として扱っている．
+- Khandelwal ほか, kNN-LM, ICLR 2020, arXiv:1911.00172．補間 \(p = \lambda p_{kNN} + (1-\lambda) p_{LM}\) の出典である（Iter104 と同じ）．補間した後の分布を校正し直す手順は，検索の結果からは確かめられなかった．
+- 限定: Guo らは，過信する（T>1 が要る）深層ネットを主な対象にしている．本件の補間分布は，OOF でも eval でも過小確信の向きにある（下記）．そのため T<1（分布を鋭くする向き）になる．温度スケーリングの式はどちらの向きにも使える．
+
+**replay**（`/tmp/iter105/replay_temp.py`，写しは `.claude/research/_iter105_replay_temp.py`．結果は `.claude/research/_iter105_replay_result.json`．開発ホストの CPU で約 53 秒，EXIT=0）:
+
+- 方法: 温度は \(p_T \propto p^{1/T}\)（log p を logit とみなす）で当てる．OOF は訓練集合 2,275 行の外側 5-fold（seed 104）の補間分布である．k=2，λ=0.3 で，kNN の近傍は fold の訓練部分だけから引く．eval の指標は，基準線の各行の `selected_domain`，`dispatched_domains`，`confidence` だけを差し替えて，`metrics.py` の関数で求めた．
+- **T の選択（事前登録した唯一の規則．OOF の単一ラベル NLL 最小）**: T* = **0.9426**（探索範囲 [0.05, 20] の端ではない）．fold ごとの T は 0.869 / 0.952 / 0.899 / 1.010 / 0.972 である．OOF の NLL は 0.52657 → 0.52519，OOF の ECE は 0.0241 → 0.0198，符号付きギャップは −0.0195 → −0.0063．OOF の CV top1 は 0.8268 で，Iter104 の値と一致した．
+- **T=1 で基準線の本走をどこまで再現できるか**: selected の一致率は 99.573%（不一致 16 行），送出集合の一致率は 98.213%（不一致 67 行）．確信度の差は平均 0.0045，最大 0.226 である．top1 は 0.8504（本走は 0.849867），ECE は 0.050269（本走は 0.050104），`compound_mean_dispatched_count` は 2.068493（本走は 2.064384）．
+
+| 指標 | 本走（基準線） | replay T=1 | replay T*=0.9426 | 条件 |
+|---|---|---|---|---|
+| top1 | 0.849867 | 0.8504 | **0.8504**（T=1 との不一致 0） | \|Δ\| < 0.25pt |
+| McNemar（対 本走） | — | — | 8 対 6，p=0.789 | 参考 |
+| 複合行の top1 | 0.805479 | 0.808219 | 0.808219 | C4 ≥ 0.780411 |
+| ECE | 0.050104 | 0.050269 | **0.037124** | 主基準 |
+| ECE（単一 / 複合） | 0.0326 / 0.1292 | 0.0331 / 0.1316 | 0.0201 / 0.1146 | 参考 |
+| 符号付きギャップ（全体） | −0.0501 | −0.0503 | −0.0368 | 参考 |
+| `compound_domain_set_recall` | 0.589041 | 0.590411 | **0.574658** | C5 ≥ 0.5400 |
+| `compound_mean_dispatched_count` | 2.064384 | 2.068493 | **1.975342** | C5 ≤ 2.10 |
+| 全行の平均送出数 | 1.5696 | 1.5765 | 1.5245 | 参考 |
+| 複合の k 分布 | {1:451, 2:30, 4:249} | {1:450, 2:30, 4:250} | {1:472, 2:31, 4:227} | 参考 |
+| 単一の k 分布 | {1:2507, 2:90, 4:423} | {1:2502, 2:86, 4:432} | {1:2541, 2:91, 4:388} | 参考 |
+
+- **C1（20 指標，BH q=0.05）**: T* と本走の比較で有意は 0 件（最小の p は 0.48）．T* と T=1 の比較でも 0 件．argmax が変わらないので，C1 が動く経路は送出の失敗と埋め込みの微小な差だけである．
+- **参考値（選択には使わない）**:
+  - eval で ECE が最小になる T は 0.80（ECE 0.0150，mean_dispatched 1.8137，set_recall 0.5521）．
+  - eval で C5 の両方を満たす T の範囲は [0.75, 1.02]．
+  - OOF で ECE が最小になる T は 0.94．
+  - A2（複数の正解を許す判定に合わせた目的関数）: 訓練行はすべて単一ラベルなので，OOF の上では単一ラベルの NLL と一致し，別の値は出ない．eval の上で当てはめた値は選択に使えないので，近いものとして eval の ECE 最小（T=0.80）を併記するに留める．
+  - eval の過小確信（ギャップ −0.050）は OOF（−0.020）より大きい．主な原因は複合行の構造的な過小確信（−0.13）であり，単一ラベルの規則ではこれを吸収しきれない（推測）．
+- **replay の途中で起きた事故**: 初回のバッチで `replay_temp.py` への Write が「先に Read していない」として失敗した．続く Bash は写しただけの旧スクリプトを実行し，`/tmp/iter104/result_v2.json` を 16:40:15 に上書きした．CV の部分は乱数の種と入力が同じなので元と同じ値である．一方，eval の「基準 artifact の再現」の列は，いまの kNN 補間の artifact で求めた値に変わった．Iter104 の数値は journal の Iter104 節に残っている．このファイルは G0-a の照合元としては使えない（B194 に記録）．
+
+### 計画 (Iter105)
+
+**判断**: T* で ECE は 0.0130 下がる（no-op ではない）．C5 は mean_dispatched 1.975 で上限の内側にある．C1〜C7 を満たす見込みなので，このレバーを採る．代替案の調査（手順 3 の後段）は行わない．
+
+**仮説**: Iter104 の補間分布は，訓練集合の OOF でも eval でも過小確信の向きにある（平均確信度が平均正答を下回る）．OOF の単一ラベル NLL で当てはめた温度 T*=0.9426 で分布を鋭くすると，rank 1 の確信度が上がり，ECE は 0.050 から 0.037 前後へ下がる．argmax は変わらないので top1 は動かない．隣り合う順位の差が広がるので，gap 方式の送出数は減る（mean_dispatched 2.06 → 1.98）．その分 set_recall は約 1.4pt 下がる．
+
+**単一レバー**: `knn_interpolation_temperature`．`KnnInterpolatedClassifier.predict_proba()` の出力を，補間分布 \(p\)（T=1 に相当）から \(p_T \propto p^{1/T}\)，T=0.9426 へ変える．
+
+**固定する構成（Iter104 の採用構成）**: base の LR の artifact（再訓練しない），k=2，λ=0.3，近傍の母集団 `data/classifier_train_iter94_dedup.jsonl` と `data/embcache_train_iter100_fused.npy`，融合表現，`dispatch_gap_threshold` 0.36，`dispatch_gap_max_k` 4，`aggregation_method: max_confidence`，`confidence_threshold` と `dispatch_candidate_threshold` 0.0，評価集合 3,750 行（MD5 `769f2a58dc807e23e1b73e44b97e97b8`），`config.yaml` のすべて．
+
+**レバーを読むコード行と到達条件**:
+
+- 読み込み: `http_server.py:428` → `classifier.py:48`（`joblib.load`）．
+- 推定: `http_server.py:379` → `classifier.py:69` → `knn_interpolated_head.py:99-107`（温度を当てる場所）．
+- 送出: probe の確信度 → `node.py:232-239` → `aggregator.py:62`（ソート），`:87-91`（gap の連鎖）．rank 1 の確信度は `results.jsonl` の `confidence` に入り，`metrics.py:486-521` の ECE が読む．
+- 到達条件: `routing_method: supervised_classifier`（`config.yaml:75`），`confidence_signal_method: self_report`（`:74`），ノードのドメインが `classes_` に含まれること，`dispatch_gap_threshold` が null でないこと．**現行構成は 4 つとも満たす**．
+
+**実装の仕様（フェーズ 2）**:
+
+1. `knn_interpolated_head.py`: `KnnInterpolatedClassifier.__init__` に `temperature: float = 1.0` を加え，T ≤ 0 なら ValueError にする．`predict_proba()` は補間した後に \(p_T \propto \exp(\log(\max(p, 10^{-12}))/T)\) を行ごとに正規化して返す（最大値を引いてから exp を取る）．T=1 のときは現在の出力をそのまま返す．λ=0 の早期 return は，T=1 のときに限る．
+   - Iter104 の artifact（`temperature` 属性を持たない pickle）を読めるよう，`__setstate__` で既定値 1.0 を補う．
+   - 冒頭の docstring に温度の式と出典（Guo ら，2017）を加える．
+2. `scripts/build_knn_interpolated_classifier.py`: `--temperature`（既定 1.0）を加え，ラッパーに渡す．値の導出は `.claude/research/_iter105_replay_temp.py` で再現できる．
+3. artifact: 現在の `models/domain_classifier.joblib`（MD5 `c3888f66d90f4172cd7415e5c105328a`）を `models/domain_classifier_pre_iter105_knn.joblib` へ退避する．`--base-classifier models/domain_classifier_pre_iter104_lr.joblib --k 2 --interpolation-lambda 0.3 --temperature 0.9426` で作り直して新しい `models/domain_classifier.joblib` に置き，MD5 を journal に記録する．
+4. `knn_interpolated_head.py` はイメージに焼き込まれるので，イメージを再ビルドする（B192 と同じく `mise.toml` の `docker build` と `docker push` だけ．`GIT_HEAD=<HEAD>-dirty-iter105`）．b1f5cb0 により deploy の最後に prune が走るので，前のイメージ `b5b717d1fc7a` には，レジストリの digest `sha256:0a499d0e…` で戻る．
+5. テスト（`tests/test_knn_interpolated_head.py` に追加する）: T=1 で従来の出力と一致すること，T≠1 でも行和が 1 になること，T≠1 でも argmax が変わらないこと，T ≤ 0 で ValueError になること，`temperature` 属性を持たない pickle が T=1 で読めること，joblib で往復しても出力が変わらないこと．
+
+**G0（本走の前に，すべての合格を条件とする）**:
+
+- **G0-a**: 新しい artifact で eval キャッシュの `predict_proba` を求める．argmax が現在の artifact と 3,750/3,750 で一致すること．基準線の行の決定を差し替えた ECE が 0.0371 ± 0.0005，`compound_mean_dispatched_count` が 1.9753 ± 0.0030 であること（T を 4 桁に丸めた分の差を幅に含めた）．
+- **G0-b**: 全 10 ノードで artifact と `knn_interpolated_head.py` の MD5 がローカルと一致すること．コンテナの中で `joblib.load` した結果が `KnnInterpolatedClassifier` で，`temperature` が 0.9426 であること．
+- **G0-c**: 予備 20 問で，`probe_candidates` の確信度の argmax がオフラインの値（T を当てた後）と 20/20 で一致すること．確信度の差は最大 0.02 以内とする（Iter104 の G0-c の最大差は 0.0117）．`mean_duration_ms` は 3,041.7ms 以下であること．
+
+**成功条件と非退行条件（事前登録．以後は変えない）**:
+
+- **基準線**: Iter104 の採用本走 `results/20261004_132607`．top1 0.849867，複合行の top1 0.805479，`compound_domain_set_recall` 0.589041，`compound_mean_dispatched_count` 2.064384，ECE 0.050104，`mean_duration_ms` 2253.224．
+- **主基準**: argmax が変わらないレバーなので，ECE を主に見る．
+  - `adopted`: ECE ≤ 0.040，かつ |Δtop1| < 0.25pt，かつ C1〜C7 をすべて満たす．
+  - `partial`: 0.040 < ECE ≤ 0.045，かつ |Δtop1| < 0.25pt，かつ C1〜C7 を満たす．
+  - `negligible`: ECE > 0.045（下げ幅が 0.005 未満）で，C1〜C7 を満たす．
+  - `rejected`: Δtop1 ≤ −0.25pt，または C1〜C7 のどれかに違反．
+  - `invalid`: G0 に合格しない．または，本走の確信度の分布が基準線と変わらない（ECE の差が 0.001 未満で，かつ複合と単一の k 分布が基準線と同じ）．後者の場合は到達経路を先に調べる（success_criteria (6)）．
+- **閾値の根拠**: replay の予測は 0.0371 である．T=1 の replay と本走の ECE の差は 0.00017，同じ artifact で走った本走 2 本（Iter101 と Iter103）の差は 0.0011 である．0.040 は予測から 0.0029 上で，観測した実行間の差の約 2.6 倍の余裕がある．0.040 は Iter101 の水準（0.0396）にあたり，C7 の再較正の基準 0.05 とも十分に離れている．|Δtop1| の帯 0.25pt は，Iter104 の `negligible` の帯と同じ値にした．
+- **非退行条件**: Iter104 の C1〜C7 を数値もそのまま使う．
+  - **C1**: precision と recall の計 20 指標を BH 補正（q=0.05）し，有意な退行が 0 件．
+  - **C2**: `fallback_rate` 0.0，`dispatch_failure_rate` ≤ 0.005．
+  - **C3**: G0-a〜G0-c の記録と artifact の MD5 がすべて残っていること．
+  - **C4**: 複合行の top1 ≥ 0.780411．
+  - **C5**: `compound_domain_set_recall` ≥ 0.5400，`compound_mean_dispatched_count` ≤ 2.10．
+  - **C6**: `mean_duration_ms` ≤ 3041.7（絶対値の判定は変えない）．b1f5cb0 により本走がモデルの再ロードから始まるので，参考として，先頭 50 問を除いた平均と，単一層の中央値と p95，複合層の p25 と中央値を併記する．
+  - **C7**: ECE ≤ 0.08．
+
+**事前登録する予測**:
+
+- **P1（主予測）**: ECE は 0.035〜0.040（点推定 0.037）で，`adopted` になる．
+- **P2**: |Δtop1| < 0.1pt．argmax は変わらず，差は送出の失敗と埋め込みの微小な差だけから生じる（replay では本走と 8 対 6）．
+- **P3**: `compound_mean_dispatched_count` は 1.96〜1.99，`compound_domain_set_recall` は 0.570〜0.580．set_recall は約 1.4pt 下がるが，C5 の内側にとどまる．
+- **P4**: C1 の有意は 0 件．
+- **P5**: 全行の平均送出数が約 3% 減るので，先頭 50 問を除いた `mean_duration_ms` は基準線から −5%〜+2% に入る．再ロードを含めた全体の平均も C6 の内側に入る．
+- **P6**: 複合行の ECE は 0.11 前後に残る．単一ラベルで当てた温度では，複数の正解による過小確信は吸収しきれない．
+
+**フェーズ 2 への申し送り**:
+
+- コードの変更は，上の「実装の仕様」の 1，2，5 と，Dockerfile は変えずにイメージを再ビルドすることに限る．`config.yaml` は変えない．
+- G0-a は開発ホストの CPU で行える（`uv run`）．`/tmp/iter104/result_v2.json` は上書きされたので照合には使わない．照合元は `.claude/research/_iter105_replay_result.json` である．
+- deploy の後，本走の前に G0-b と G0-c を行う．本走は 3,750 問のフルスペックで行う．b1f5cb0 の手順により，analyze の後に `mise run stop` が走る．
+- 判定の比較相手は `results/20261004_132607`．C1 は `metrics.py` の関数で計算する．ECE には単一行と複合行の内訳と，符号付きギャップを併記する．
+- T を変えた場合の set_recall と所要時間のトレードオフ（参考格子）は `_iter105_replay_result.json` の `reference_not_for_selection` にある．T を選び直すことはしない．
+
+### Iteration 105 実装・実験（2026-10-04）
+
+**再ビルド前のイメージ（ロールバック用．deploy の末尾の prune で手元から消えるため，ビルドの前に記録した）**: `localhost:5001/expert-mesh:latest` の image ID は `sha256:b5b717d1fc7aeac6ff38cf67996d6526304db151a9913fedf6ea3e2a93a99459`（Created 2026-10-04T12:54:34+09:00，`GIT_HEAD=7c0b703-dirty-iter104`）である．RepoDigest とレジストリの v2 manifest の digest は `sha256:0a499d0e172319c7af21a09b64d46203a2872981e2dab9e1a23b1fc17f505868` である．戻すときは `localhost:5001/expert-mesh@sha256:0a499d0e…` を pull する．
+
+**変更したファイル**（`config.yaml` と Dockerfile は変えていない）:
+
+- `knn_interpolated_head.py`（MD5 `76e0d089a512f5b9c0c80be8f9a4a60c`）:
+  - `apply_temperature_to_proba()` を加えた．式は \(p_T \propto \exp(\log(\max(p, 10^{-12}))/T)\) で，行の最大値を引いてから exp を取り，行ごとに正規化する．replay の `apply_temperature()` と同じ式である．
+  - `KnnInterpolatedClassifier.__init__` に `temperature: float = 1.0` を加えた（T ≤ 0 なら ValueError）．`predict_proba()` は補間の後に温度を当て，T=1 のときは補間の結果をそのまま返す．
+  - `__setstate__` で，`temperature` を持たない Iter104 の pickle に 1.0 を補う．冒頭の docstring に式と出典（Guo ら，2017）を加えた．
+- `scripts/build_knn_interpolated_classifier.py`: `--temperature`（既定 1.0）を加え，ラッパーに渡す．
+- `tests/test_knn_interpolated_head.py`: 6 関数（parametrize を含めて 7 ケース）を加えた．T=1 で従来の出力と一致すること，T≠1 で行和が 1 になること，T≠1 で argmax が変わらないこと，T ≤ 0 で ValueError になること，`temperature` 属性の無い pickle が T=1 で読めること，joblib の往復で出力が変わらないことを確かめる．
+
+**テストと lint**: `uv run pytest -q tests/test_knn_interpolated_head.py tests/test_classifier.py` は 23 passed だった．warning は joblib の NumPy 2.5 の DeprecationWarning だけである．変更した 3 ファイルの `uv run ruff check` は All checks passed だった．
+
+**artifact**:
+
+- 退避: `models/domain_classifier_pre_iter105_knn.joblib`．MD5 `c3888f66d90f4172cd7415e5c105328a` で，元の artifact と一致した．
+- 新しい `models/domain_classifier.joblib`: MD5 `c7172ad37c10e1082a42481553ae25b0`．`--base-classifier models/domain_classifier_pre_iter104_lr.joblib --k 2 --interpolation-lambda 0.3 --temperature 0.9426` で作った（n_train=2275，dim=6656）．
+
+**イメージ**: `mise.toml` の `docker build`（`--build-arg GIT_HEAD=b1f5cb0-dirty-iter105`）と `docker push` だけを実行した．`mise run setup` は実行していない．ログは `.claude/research/_iter105_build.log` にある．
+
+- 新イメージの image ID は `sha256:b4a3373f69436b4ab3900d7273cc3adb156b029244fd5750507a966ef52d05c8`，push の digest は `sha256:a328caf4860b925c53cb394004cd6be92879cb325d1095663107c2b441a062e9` である．
+- イメージの中の `/app/knn_interpolated_head.py` の MD5 はローカルと一致した．
+- `data/dataset.jsonl` の MD5 は，ビルドの前後とも `769f2a58dc807e23e1b73e44b97e97b8` だった．
+
+**deploy**: `mise run deploy` は終了コード 0 で終わった（`.claude/research/_iter105_deploy.log`）．healthcheck と smoke_check（git-status，hashes，probe．probe の latency は 12ms）は通り，末尾の prune は全ノードと手元で実行された．
+
+**G0**:
+
+- **G0-a: 合格**（`.claude/research/_iter105_g0a.json`．スクリプトは `/tmp/iter105/g0a_check.py` で，replay の `simulate_rows()` と `summarize()` を再利用した）．
+  - argmax は旧 artifact と 3750/3750 で一致した．
+  - ECE は 0.037119（許容 0.0371±0.0005），`compound_mean_dispatched_count` は 1.975342（許容 1.9753±0.0030）だった．
+  - replay の式で旧 artifact に T を当てた値との差の最大は 0.0 だった．
+- **G0-b: 合格**（`.claude/research/_iter105_g0b.txt`）．
+  - wafl500〜509 の全 10 ノードで，`/app/models/domain_classifier.joblib`（`c7172ad3…`）と `/app/knn_interpolated_head.py`（`76e0d089…`）の MD5 がローカルと一致した．
+  - コンテナの中の `GIT_HEAD` は `b1f5cb0-dirty-iter105` だった．`joblib.load` の結果は `knn_interpolated_head.KnnInterpolatedClassifier` で，temperature=0.9426，k=2，λ=0.3 だった．
+  - `docker inspect` の `Image` の表示は，wafl500〜507 が digest（`a328caf4…`），wafl508〜509 が image ID（`b4a3373f…`）だった．どちらも今回のビルドを指す．
+- **G0-c: 合格**（`.claude/research/_iter105_g0c.txt` と `_iter105_g0c.json`．予備実行は `results/20261004_173015/preview20.jsonl`，`data/dataset_20.jsonl`，requester は wafl500）．
+  - オンラインとオフライン（T=0.9426 の後）の argmax は 20/20 で一致した．確信度の差は最大 0.0111（business_economics-014）だった．
+  - dispatch の失敗と fallback は 0 件，`mean_duration_ms` は 581.1 だった．
+
+**本走**: `results/20261004_173104`（3,750 問，`mise run start -- --dataset data/dataset.jsonl --output results.jsonl`，requester は wafl500）．17:31:04 に起動し，19:50 頃に完了した（EXIT=0．ログは `.claude/research/_iter105_mainrun_start.log`）．
+
+- `results.jsonl` は 3,750 行で，MD5 `d96dad0550d4750e34e39bc9dc63a3bf` はローカルと wafl500 側で一致した．`git_head.txt` は `b1f5cb0-dirty-iter105` である．
+- `mise run analyze -- 20261004_173104` は終了コード 0 で終わった（`.claude/research/_iter105_analyze.log`．`answer_quality_accuracy` 0.583113，`end_to_end_accuracy` 0.401067）．
+- `uv run python metrics.py --results results/20261004_173104/results.jsonl --json` の出力は `results/20261004_173104/metrics.json` に書いた．
+- その後，`mise run stop` で全ノードのコンテナを止めた（終了コード 0．削除はしていない）．
+
+**主要指標**（`metrics.json`，および replay の `summarize()` で同じ関数を両方の本走に当てた値．集計の記録は `.claude/research/_iter105_main_summary.json`）:
+
+| 指標 | Iter105 本走 | 基準線 20261004_132607 |
+|---|---|---|
+| top1 | 0.848267 | 0.849867 |
+| 複合行の top1 | 0.805479 | 0.805479 |
+| `compound_domain_set_recall` | 0.573288 | 0.589041 |
+| `compound_mean_dispatched_count` | 1.980822 | 2.064384 |
+| ECE | 0.037281（n=3,744） | 0.050104（n=3,750） |
+| ECE（単一 / 複合） | 0.02095 / 0.11222 | 0.03262 / 0.12915 |
+| 符号付きギャップ（全体 / 単一 / 複合） | −0.0365 / −0.0182 / −0.1122 | −0.0501 / −0.0310 / −0.1292 |
+| Brier | 0.100591（n=3,744） | 0.102122（n=3,750） |
+| `mean_duration_ms` | 2233.403 | 2253.224 |
+| 参考: 先頭 50 問を除いた平均 | 2254.678 | 2273.579 |
+| 参考: 先頭 50 問の平均 | 659.08 | 746.98 |
+| 参考: 単一層の中央値 / p95 | 535.5 / 3089.2 | 539.0 / 3252.4 |
+| 参考: 複合層の p25 / 中央値 | 7668.25 / 8785.0 | 7583.5 / 8795.5 |
+| `fallback_rate` | 0.0 | 0.0 |
+| `dispatch_failure_rate` | 0.0016（6 行） | 0.0 |
+| 参考: 全行の平均送出数 | 1.5243 | 1.5696 |
+| 参考: 複合の k 分布 | {1:470, 2:32, 4:228} | {1:451, 2:30, 4:249} |
+| 参考: 単一の k 分布 | {1:2540, 2:95, 4:385} | {1:2507, 2:90, 4:423} |
+
+- ECE と Brier の n が 3,744 なのは，`confidence` が null の行が 6 行あるためである．この 6 行は `dispatch_failed` の 6 行と同じ件数である．
+- C1（BH 補正の 20 指標）と McNemar は，このフェーズでは計算していない．フェーズ 3 で `metrics.py` の関数を使って計算する．
+- 実行上の異常: dispatch の失敗が 6 件あった（`medical-110`，`natural_science-002`，`natural_science-079`，`natural_science-109`，`medical-exp085-140`，`education-exp085-044`．いずれも単一行で，送出先は 1 件（`dispatched_domains` は medical / natural_science / education）．原因はこのフェーズでは調べていない）．fallback は 0 件で，ハング，OOM，エラーの終了は無かった．ポーリングでは複合行の区間（17:55〜19:31 頃）で進み方が約 7.5 行/分に落ちたが，wafl500 側の `results.jsonl` は更新され続けていた．
+
+### Iteration 105 実行済み
+
+#### 計算の方法
+
+- スクリプトは `.claude/research/_iter105_post_analysis.py` で，出力は `.claude/research/_iter105_post_analysis.json` に保存した．`uv run` で実行し，EXIT=0 だった．手順は `scripts/_iter101_post_analysis.py` に合わせた．
+- 比較の相手は基準線 `results/20261004_132607/results.jsonl` である．id は 3,750 行で完全に一致する．
+- top1 の対の比較には `metrics.compute_mcnemar_test`（連続補正つき．a=本走，b=基準線）を使った．C1 には `compute_domain_recall_mcnemar_test`，`compute_domain_precision_fisher_test`，`apply_benjamini_hochberg`（q=0.05）を使った．
+- 参考として，送出に失敗した 6 行を両方の run から除いた共通の 3,744 行で，`compute_ece` と `compute_brier_score` を当て直した．主の判定には事前登録どおり `metrics.json` の値を使う．
+- **一時スクリプトの退避**: `/tmp/iter105/{g0a_check.py,g0c_check.py,main_summary.py}` は再起動で消えうるので，`.claude/research/_iter105_g0a_check.py`，`_iter105_g0c_check.py`，`_iter105_main_summary.py` へ写した．写しの MD5 は元と一致した（`9ed511ab…`，`33c9a562…`，`873641cc…`）．G0-a の記録と主要指標の表は，これらで再現できる．`.claude/research/_iter10x_*` は過去の反復でも追跡していないので，写した 3 本と分析スクリプトもコミットせず，作業ツリーに残す（backlog B195）．
+- テストと lint は分析の時点で再実行した．`uv run pytest -q tests/test_knn_interpolated_head.py tests/test_classifier.py` は 23 passed，変更した 3 ファイルと分析スクリプトの `ruff check` は clean だった．作業ツリーの `knn_interpolated_head.py` の MD5 は `76e0d089a512f5b9c0c80be8f9a4a60c` で，G0-b でイメージの中から取った値と一致する．
+
+#### 結果（本走 `results/20261004_173104` 対 基準線 `results/20261004_132607`）
+
+| 指標 | 基準線 | 本走 | Δ | 事前登録の予測 |
+|---|---|---|---|---|
+| ECE（`metrics.json`．主基準） | 0.050104（n=3,750） | **0.037281**（n=3,744） | −0.0128 | P1: 0.035〜0.040．的中 |
+| 参考: ECE（共通の 3,744 行） | 0.049996 | 0.037281 | −0.0127 | — |
+| ECE（単一 / 複合．共通の行） | 0.03245 / 0.12915 | 0.02095 / 0.11222 | −0.0115 / −0.0169 | P6: 複合は 0.11 前後．的中 |
+| 符号付きギャップ（全体 / 単一 / 複合） | −0.0501 / −0.0310 / −0.1292 | −0.0365 / −0.0182 / −0.1122 | — | — |
+| Brier（`metrics.json`） | 0.102122（n=3,750） | 0.100591（n=3,744） | −0.0015 | — |
+| 参考: Brier（共通の 3,744 行） | 0.102235 | 0.100591 | −0.0016 | — |
+| top1 | 0.849867 | **0.848267** | **−0.16pt（−6 行）** | P2: \|Δ\| < 0.1pt．**外れ** |
+| McNemar（連続補正） | — | 本走のみ正答 0，基準線のみ正答 6，chi2 4.1667，p = 0.0412 | — | — |
+| 参考: top1（共通の 3,744 行） | 0.849626 | 0.849626 | 0 | — |
+| 複合行の top1 | 0.805479 | 0.805479 | 0 | — |
+| `compound_domain_set_recall` | 0.589041 | 0.573288 | −1.58pt | P3: 0.570〜0.580．的中 |
+| `compound_mean_dispatched_count` | 2.064384 | 1.980822 | −0.0836 | P3: 1.96〜1.99．的中 |
+| 全行の平均送出数 | 1.5696 | 1.5243 | −2.9% | P5 の前提（約 3% 減）と一致 |
+| `mean_duration_ms` | 2253.224 | 2233.403 | −0.88% | — |
+| 先頭 50 問を除いた平均 | 2273.579 | 2254.678 | −0.83% | P5: −5%〜+2%．的中 |
+
+- **top1 の −6 行の内訳**: 基準線のみ正答の 6 行は，`education-exp085-044`，`medical-110`，`medical-exp085-140`，`natural_science-002`，`natural_science-079`，`natural_science-109` で，本走で `dispatch_failed` になった 6 行と id で完全に一致した．本走のみ正答の行は 0 行である．失敗した 6 行を除いた共通の 3,744 行では，top1 は両方とも 0.849626 で同じ値になる．温度で正誤が変わった行は 1 行も無い．
+
+#### 事前登録条件の照合（C1〜C7，Iter104 と同じ閾値）
+
+| 条件 | 基準 | 実測 | 判定 |
+|---|---|---|---|
+| 主基準 | ECE ≤ 0.040 かつ \|Δtop1\| < 0.25pt | 0.037281，0.16pt | PASS |
+| C1 | 20 指標の BH 補正（q=0.05）後の有意な退行が 0 件 | 0 件（20 指標とも生の p ≥ 0.248） | PASS |
+| C2 | `fallback_rate` = 0.0，`dispatch_failure_rate` ≤ 0.005 | 0.0，0.0016 | PASS |
+| C3 | G0-a〜G0-c の記録と artifact の MD5 | `_iter105_g0a.json`，`_iter105_g0b.txt`，`_iter105_g0c.{txt,json}` がある．artifact の MD5 は `c7172ad37c10e1082a42481553ae25b0`（全 10 ノードで一致） | PASS |
+| C4 | 複合行の top1 ≥ 0.780411 | 0.805479 | PASS |
+| C5 | set_recall ≥ 0.5400 かつ mean_dispatched ≤ 2.10 | 0.573288 / 1.980822 | PASS（上限まで残り 0.119） |
+| C6 | `mean_duration_ms` ≤ 3041.7 | 2233.403 | PASS |
+| C7 | ECE ≤ 0.08 | 0.037281 | PASS．0.05 を下回ったので，校正側に立てる規定は解除される |
+
+- **C1 の内訳**: recall で差が出たのは `natural_science_recall`（本走のみ正答 0 対 基準線のみ正答 3，p = 0.248），`medical_recall`（0 対 2，p = 0.480），`education_recall`（0 対 1，p = 1.0）の 3 指標だけである．この 6 行は，送出に失敗した 6 行と同じである．ほかの 7 ドメインの recall は不一致 0 で，p = 1.0 である．precision の 10 指標はすべて p = 1.0 である（真陽性と選択数の差は，失敗した行の分の 1〜3 行だけ）．
+- **C6 の分位点**（括弧内は基準線）: 単一層の中央値 535.5ms（539.0），p95 3,089.2ms（3,252.4）．複合層の p25 7,668.25ms（7,583.5），中央値 8,785.0ms（8,795.5）．先頭 50 問の平均は 659.08ms（746.98）で，再ロードによる遅れは平均を押し上げていない．
+
+#### 事前登録の予測との照合
+
+- **P1（主予測）: 一致**．ECE は 0.037281 で，予測区間 0.035〜0.040 に入り，点推定 0.037 とほぼ同じ値である．replay の 0.037124 との差は 0.00016，G0-a の 0.037119 との差も 0.00016 である．
+- **P2: 不一致**．\|Δtop1\| は 0.16pt で，予測の 0.1pt 未満を超えた．argmax が変わらないこと自体は予測どおりで，差はすべて送出の失敗 6 行から生じた．予測は「送出の失敗と埋め込みの微小な差」を差の出どころに挙げていたが，失敗の件数を基準線の水準（0 行）で見込んでいた．このため，区間の幅が足りなかった．
+- **P3: 一致**．mean_dispatched は 1.980822，set_recall は 0.573288 で，どちらも区間の内側にある．
+- **P4: 一致**．C1 の有意は 0 件である．
+- **P5: 一致**．先頭 50 問を除いた平均は −0.83% で，全体の平均も C6 の内側にある．
+- **P6: 一致**．複合行の ECE は 0.112 で，0.11 前後に残った．
+
+#### 判定（分析フェーズ，2026-10-04）
+
+- **判定: `adopted`**．事前登録の判定規則（「計画 (Iter105)」）をそのまま当てはめた．閾値は緩めても締めてもいない．ECE は 0.037281 ≤ 0.040，\|Δtop1\| は 0.16pt < 0.25pt で，C1〜C7 をすべて満たす．G0 はすべて合格し，k の分布も基準線から動いているので，`invalid` には当たらない．
+- **採用構成**: `models/domain_classifier.joblib`（`KnnInterpolatedClassifier`，k=2，λ=0.3，T=0.9426，MD5 `c7172ad37c10e1082a42481553ae25b0`）を以後の基準とする．T=1 の artifact は `models/domain_classifier_pre_iter105_knn.joblib`（MD5 `c3888f66d90f4172cd7415e5c105328a`）として残す．新しい基準線は本走 `results/20261004_173104` とする．
+- **雑音と信号の切り分け**:
+  - ECE の −0.0128 は，同じ artifact で走った本走 2 本（Iter101 の 0.0396，Iter103 の 0.0385）の差 0.0011 の約 12 倍ある．replay の予測とは 0.00016 の差で一致した．したがって，雑音ではなく温度の効果とみる．共通の 3,744 行に揃えても −0.0127 で，n の違いは結論に効かない．
+  - 送出数の減少（set_recall −1.58pt，mean_dispatched −0.084）も replay の予測（0.5747，1.9753）に近く，温度の効果である．
+  - top1 の McNemar は p = 0.041 で，名目上は 0.05 を下回る．ただし不一致の 6 行は，すべて送出に失敗した行である．共通の行では top1 は完全に同じである．したがって，この差はレバーの効果ではない．温度 T は分類器の確率にしか効かないので，送出の失敗はインフラ側の事象と推定している（推定であり，ollama のログが無いので原因は確かめていない）．判定規則は McNemar ではなく \|Δtop1\| の帯で事前登録しているので，判定は変わらない．
+- **計画の仮説との一致**: 「補間分布は過小確信の向きにあり，T*=0.9426 で鋭くすると ECE が下がり，argmax は変わらず，送出数が減って set_recall が約 1.4pt 下がる」は，すべて支持された（set_recall の下げ幅は 1.58pt）．ECE の改善は主に単一行で出た（0.0326 → 0.0210）．複合行は 0.129 → 0.112 で，ギャップ −0.112 が残る．
+- **想定外の挙動**: 言語崩れ，発散，OOM は無い．送出の失敗が 6 行あった（基準線は 0 行）．送出先のノードの ollama が `/api/chat` に `500 Internal Server Error` を返し，app のログに `dispatch_model_not_ready` が出ていた（wafl503 で 2 件，wafl506 で 3 件，wafl501 で 1 件．ほかに wafl509 で，複合行 `social_science-121` の 4 送出のうち 1 件．これはほかの応答で補われた）．失敗は 17:47〜17:49 と 19:33〜19:35 の 2 つの時間帯に固まっていた．probe は正常で，振り分けも正しかった．
+- **後始末**: config.yaml は変えていないので，戻す設定は無い．`mise run stop` でコンテナは止めてある（削除はしていない）．
+
+#### 学び (Iter105)
+
+1. **argmax を変えない校正のレバーは，キャッシュの replay で本走の値まで予測できる**．ECE の差は 0.00016，set_recall と mean_dispatched も予測に近かった．argmax が変わらないので，top1 の差の出どころは送出の失敗だけになる．同じ型のレバーでは，本走は「インフラの揺れの中で予測が保たれるか」の確認になる．
+2. **単一ラベルで当てた温度では，複合行の過小確信は消えない**．複合行のギャップは −0.129 → −0.112 で，ほとんど残った．原因は，複数の正解を許す判定（`selected_domain in expected_domains`）と，rank 1 の単一ドメインの確信度との食い違いである．これを ECE から除くには，確信度の定義（たとえば上位の確率の和）か判定の側を変える必要があり，温度の再調整では届かない（推測）．
+3. **送出の失敗は，argmax を変えないレバーでも top1 の McNemar を「有意」にする**．今回は 0 対 6 で p = 0.041 だった．判定を \|Δtop1\| の帯で事前登録していたので，判定は揺れなかった．今後の対の比較では，`dispatch_failed` の行を除いた共通の行の値を必ず併記する．
+4. **ollama の 500 による送出の失敗は，原因が確かめられたものとしては Iter102 に続いて 2 回目である**（Iter103 の失敗 4 行については，journal に原因の記録が無い）．今回は 7 件が 2 つの時間帯に固まっていた．`mise run analyze` は app のログしか集めないので，ollama のログが残らず，原因を追えなかった．analyze で ollama のログも集める提案を B195 に残した．
+5. **levers は使い切った**．Iter106 は `current_lever=null` として調査・計画フェーズから始める（backlog B195．tavily-search で重点調査する）．
+6. **一時スクリプトは，結果を記録した時点で `.claude/research/` へ写す**．`/tmp` は再起動で消えうる．今回は 3 本を分析の時点で写した．G0 や集計のスクリプトは，実行フェーズのうちに写しておくと，記録の再現性が切れない．
+
 ## Iteration 104: kNN ラベル分布と LR 確率の線形補間
 
 ### 調査 (Iter104)
@@ -434,214 +714,4 @@ rc-executor は依頼の範囲（開発ホストでのコード変更とテス�
 3. **集約の方向（`aggregation_method`）は 3 方式とも打ち止めになった**．`llm_judge`（Iter48，rejected），固定 k=2 の `majority_vote`（Iter46，実質同等），k=4 の `majority_vote`（Iter103，rejected）である．送出集合を変えるレバーは，集約を変えても top1 に届かない（Iter102 の学び 3・4 と合わせる）．top1 を動かすには，rank 1 の決定（分類器と確信度の信号）を変える方向しか残っていない．
 4. **同じ本走の中での反実仮想は，生成の揺れを除いて集約の効果だけを測れる**．`dispatch_candidates` を残したので，今後の集約のレバー（重みつき投票など）は，本走をせずにこの `results.jsonl` で replay して事前に絞り込める．ただし，replay は事前登録の手段に留める（恒久ルール，B176）．
 5. **記録が途中で失われる事象は，今回も起きた**．分析を担当した subagent は，計算が終わった後，出力を読む前にターンを終えた．計算の出力をファイルに保存していたので，計算はやり直さずに済んだ（B179，B188 の対策が効いた）．
-
-## Iteration 102: 融合表現に合わせて dispatch gap 閾値を再較正する
-
-### 調査 (Iter102)
-
-**実施場所の申告**: 本フェーズで行ったのは，開発ホスト `gpu2` の CPU だけでの (a) 既存 `results.jsonl` に対する決定論的な replay と (b) コード読解である．wafl500〜509 と wafl-ctrl5 には接続していないので，恒久ルール (B) には抵触しない．外部調査は，前任の rc-researcher が tavily-search で取得した出力を Read で確認した．
-
-**経緯の申告**: 本フェーズを最初に担当した rc-researcher は，ファイルへの書き込みが 1 件も成功しなかった．本ブロックは，前任者の主張を以下のコマンド出力で検証し直してから記録したものである．前任者の (d) の数値（max_k 4→3 の利得 +0.1pt / 最大 +2.6pt）は誤りで，下記 A2 の値に差し替えた．
-
-**問い**: (Q1) 融合表現（6,656 次元）で確信度分布が動いた結果，送出予算を揃えても gt=0.36 は最適から外れているか．(Q2) B174 根拠 4 の +9.6pt は較正の負債の返済か，それとも送出予算の購入か．(Q3) set_recall の上昇がコード上で下流（最終回答・top1・end_to_end_accuracy）へ届く経路はあるか．
-
-**A1（Q1・Q2: 予算を揃えた replay．較正の負債はほぼ無い）**
-
-コマンド（既存スクリプトをそのまま使用．以下同様に `uv run`）:
-
-```bash
-uv run python scripts/replay_dispatch_gap_policy.py --results results/20260928_160921/results.jsonl --t-min 0.30 --t-max 0.62 --t-step 0.01 --max-k-values 4
-uv run python scripts/replay_dispatch_gap_policy.py --results results/20260929_192157/results.jsonl --t-min 0.30 --t-max 0.62 --t-step 0.01 --max-k-values 4
-```
-
-複合 mean_k と k の分布は，同スクリプトの `_load_rows`・`_sorted_candidates`・`_decide_k` を import する一時的なインライン Python（`uv run python - <<'EOF'`）で数えた．両ファイルとも 3,750 行（複合 730 行）である．
-
-| 構成 | gt | set_recall | 複合 mean_k | overall mean_k | 複合の k 分布 |
-|---|---|---|---|---|---|
-| pre-fusion `20260928_160921` | 0.36 | 0.567123 | 1.950685 | 1.537867 | {1: 484, 2: 22, 4: 224} |
-| pre-fusion | 0.60 | 0.654110 | 2.541096 | 1.959200 | {1: 355, 4: 375} |
-| pre-fusion | 0.62 | 0.663014 | 2.598630 | 1.990400 | {1: 341, 4: 389} |
-| fusion `20260929_192157` | 0.36 | **0.578767** | **1.973973** | 1.533067 | {1: 479, 2: 21, 4: 230} |
-| fusion | 0.362 | 0.579452 | 1.983562 | 1.536000 | {1: 478, 2: 19, 4: 233} |
-| fusion | 0.364 | 0.580822 | 1.995890 | 1.544533 | {1: 475, 2: 19, 4: 236} |
-| fusion | 0.60 | 0.674658 | 2.615068 | 1.981600 | {1: 337, 4: 393} |
-| fusion | 0.62 | 0.685616 | 2.684932 | 2.016000 | {1: 320, 4: 410} |
-
-- gt=0.36 の fusion 行は，Iter101 本走の `metrics.json`（set_recall 0.578767・compound mean_dispatched 1.973973）と一致する．replay は忠実である．
-- **融合の前後で，gt=0.36 の送出予算はほぼ同じ**である（overall mean_k 1.537867 → 1.533067，−0.3%）．
-- pre-fusion の予算（overall mean_k ≤ 1.537867）に揃えた中での最良は **gt=0.362 の 0.579452（+0.0685pt）**である．gt=0.364 は予算を超える．+0.0685pt は複合の expected_domains 総数 1,460（0.578767 × 1,460 = 845 から逆算）のうち **1 ドメイン**にあたり，replay の分解能そのものである．
-- **B174 根拠 4 の +9.6pt（gt 0.36 → 0.60）は送出予算の購入である**．overall mean_k は 1.533067 → 1.981600（+29.3%），複合 mean_k は 1.973973 → 2.615068（+32.5%）増える．同じ gt=0.60 を pre-fusion に当てても 0.654110 まで上がるので，この上昇は融合とは関係なく gt を緩めれば得られる．
-
-**A2（k の連鎖と dispatch_gap_max_k．前任者の値を訂正）**
-
-- gt 0.340〜0.390（0.002 刻み）と gt 0.60・0.62 では，複合の k は {1, 2, 4} しか取らない．k が 2 を超えると 4 まで連鎖する．gt 0.20〜1.00 の全域を見ると k=3 も現れる．
-- 同じ overall 予算での max_k=3 と max_k=4 の比較（fusion，gt 0.20〜1.00 を 0.002 刻み．各予算の上限の中で set_recall が最大になる点どうしを比べた）:
-
-| overall 予算の上限 | max_k=3 | max_k=4 | 差 |
-|---|---|---|---|
-| 1.533067（現行） | gt=0.490: 0.582877 (omk 1.525333) | gt=0.358: 0.578767 (omk 1.530933) | +0.41pt |
-| 1.60 | gt=0.552: 0.605479 | gt=0.384: 0.593151 | +1.23pt |
-| 1.70 | gt=0.636: 0.638356 | gt=0.428: 0.610274 | +2.81pt |
-| 1.80 | gt=0.714: 0.663699 | gt=0.490: 0.626027 | +3.77pt |
-| 1.9816 | gt=0.808: 0.695205 | gt=0.598: 0.674658 | +2.05pt |
-
-- 差が最大になるのは，max_k=3 の gt=0.716（omk 1.802667，0.665068）と max_k=4 の gt=0.490（omk 1.788000，0.626027）の組で，**+3.90pt** である．
-
-**A3（Q3: コード上の到達経路．現行の集約では set_recall に下流の消費者がいない）**
-
-- `config.yaml:143` は `aggregation_method: max_confidence` である．
-- `aggregator.py:104-119` の `select_best_dispatch_response()` は `max(dispatch_responses, key=lambda r: r.confidence)` を返す．docstring によれば，この confidence は /probe で計算した値と同じである．したがって，**rank 1 の送出が成功する限り，最終回答は常に rank 1 の回答になる**．追加で送出したノードの回答が採られるのは，rank 1 の送出が失敗したときだけである（Iter101 の `dispatch_failure_rate` は 0.000267）．
-- `node.py:131-141` は，選ばれた全 target へ `asyncio.gather` で並列に送出する．
-- すなわち，現行構成で set_recall を上げても，最終回答・top1・end_to_end_accuracy はコード上ほぼ動かず，送出数（ノード側の負荷と所要時間）だけが増える．B174 の「波及先は `end_to_end_accuracy`」という記述は，`max_confidence` のもとではコード上の経路をほとんど持たない．
-
-**A4（外部文献．出典は前任者の tavily-search の出力）**
-
-- "Harder Tasks Need More Experts: Dynamic Routing in MoE Models"，ACL 2024（ACL Anthology 2024.acl-long.696），arXiv:2403.07652．固定の top-k ではなく，ルーティング確率の高い順に expert を足していき，累積確率が閾値 p を超えた時点で止める top-p ルーティングを提案している．本研究の「連続する候補の gap」という基準に代わる，累積確信度という基準の候補になる．
-- 著者名は検索結果の抜粋に表示されておらず，未確認である（前任者は Huang et al. と記載していた）．
-- 本研究に当てはめても，`max_confidence` のもとでは送出集合が変わるだけで top1 は動かない点は，A3 と同じである．
-
-### 計画 (Iter102)
-
-- **仮説**: 融合表現で確信度分布が変わったので，送出予算を揃えたまま gt を変えれば set_recall が上がる（Iter83 学び 1 の恒常規則の 4 例目）．
-- **単一レバー**: `config.yaml` の `dispatch_gap_threshold` を 0.36 から変える．`matched_budget_sweep_for_fusion_6656_distribution` として，pre-fusion の overall 予算（1.537867）以内で最良の gt を探す．
-- **固定する構成**: Iter101 で採用した構成のすべて（融合埋め込み 6,656 次元，`light_model` の常駐解除，`dispatch_gap_max_k: 4`，`aggregation_method: max_confidence` など）．
-- **結果**: 予算以内で最良の gt=0.362 でも +0.0685pt（1 ドメイン）にとどまる．仮説は replay の段階で棄却された．
-
-### 判定 (Iter102)
-
-**予算を揃えた比較では変更なしで収束．本走しない．** `dispatch_gap_threshold` は 0.36 のまま据え置く．replay は決定論的なので実行間の雑音は無く，分解能は 1 ドメイン = 0.0685pt である．得られた利得はこの分解能ちょうどで，本走で確かめる対象にならない．予算を増やす案（gt=0.60〜0.62）と max_k 4→3 は別のレバーとして B175 に候補として残す．
-
-### 学び (Iter102)
-
-1. **閾値の再較正の利得は，送出予算を揃えて比べる**．B174 根拠 4 は，予算の異なる点どうし（overall mean_k 1.533 と 1.982）を比べたため，予算の購入（+29%）を較正の負債と取り違えた．
-2. **Iter83 学び 1 の恒常規則は，予算を揃えた replay で負債の存在を確認してから適用する**．特徴量を変えても，確信度分布の変化が gap 閾値の最適値を動かさない場合がある（今回は融合の前後で同じ gt の予算がほぼ同じだった）．この但し書きの追加は B175 の要レビューに提案した．
-3. **`aggregation_method=max_confidence` のもとでは，送出集合を変えるレバーは top1 も最終回答も動かさない**．set_recall を主基準にするレバーは，集約方法を変えない限り下流の効果を持たない．次は top1 を動かすレバーが要る．
-4. **検証していない数値は記録しない**．前任者の (d) の数値は，再計算すると前任者の値（+0.1pt / +2.6pt）と異なっていた（+0.41pt / +3.90pt）．
-
-### 計画の修正 (Iter102，B176)
-
-- **撤回**: 上の「判定 (Iter102)」のうち「本走しない」を撤回する．config.yml の 2026-09-23 恒久ルールに従い，replay は本走 1 点を絞り込むための事前登録の手段に留める（B176）．
-- **単一レバー**: `config.yaml:131` の `dispatch_gap_threshold` を 0.36 → 0.362 に変える．それ以外は Iter101 の採用構成のまま固定する．
-- **到達条件（B178 で訂正）**: `dispatch_policy=adaptive_confidence_gap` は config.yml の `levers` にあるレバーの名前であり，`config.yaml` のキーではない．実際の到達条件は「`dispatch_gap_threshold` が非 null」である．`aggregator.py:81` の `if gap_threshold is None: return candidates[:top_k]` を通り越し，`aggregator.py:87-91` の連鎖エスカレーションに入る．値は `node.py:228`（実行時）と `run_experiment.py:98`（`dispatched_domains` の再計算）が `config.get("dispatch_gap_threshold")` で渡す．`config.yaml:33` の `confidence_threshold` と `config.yaml:38` の `dispatch_candidate_threshold` がともに 0.0 なので，候補は常に 10 件すべてが残り，replay の前提と一致する．オーケストレータが 2026-10-01 に Read と grep で確認した．
-- **基準線**: `results/20260929_192157`（Iter101，gt=0.36）．top1 0.840000，set_recall 0.578767，複合 mean_dispatched 1.973973，`mean_duration_ms` 2197.842．
-- **評価集合（B177）**: 基準線と同じ評価集合の全体（3,750 行，うち複合 730 行）で本走する．1600 問の部分集合にはしない．`experiment_deadline` は，Iter101 本走の実際の所要時間にマージンを足して決める．
-- **事前登録の予測（replay．決定論的）**: set_recall 0.579452（+0.0685pt），複合 mean_k 1.983562，overall mean_k 1.536000，複合の k 分布 {1: 478, 2: 19, 4: 233}．top1 は 0.840000 から動かない（実行間の非決定性による揺れだけが出る）．
-- **発火の証拠**: replay で，gt=0.36 と gt=0.362 とで k が異なる行を列挙する．本走の `results.jsonl` で，それらの行の送出数が 0.362 側の予測と一致することを確認する．加えて，予備 20 問で全ノードが `dispatch_gap_threshold=0.362` を読み込んだことをログで確認する．
-- **判定規則**:
-  - G0 が不合格，または発火の証拠が無い → `invalid`．
-  - Δset_recall ≥ +0.5pt，かつ Δtop1 ≥ −0.25pt，かつ C1〜C7（Iter101 と同じ閾値）をすべて満たす → `adopted`．
-  - |Δset_recall| < 0.5pt，かつ C1〜C7 を満たす → `negligible`（0.36 に戻す）．
-  - それ以外 → `rejected`（0.36 に戻す）．
-
-### Iteration 102 実行済み
-
-**判定材料の要約（判定自体は分析フェーズの担当）**: 事前登録の判定規則（「計画の修正 (Iter102，B176)」）に当てはめると，|Δset_recall| = 0.0685pt < 0.5pt かつ C1〜C7 を満たすので **`negligible` の分岐**（0.36 に戻す）に当たる．ただし C3 のうち「閾値の読み込みをログで確認する」項目は，書いたとおりには満たせなかった（下記 C3 (d)）．その扱いは分析フェーズで決める．
-
-#### 変更（単一レバー）
-
-`config.yaml:131` の `dispatch_gap_threshold` を 0.36 → **0.362** に変えた（`state.json` の `last_commit` = `ec5a2ed`）．融合表現（6,656 次元），`models/domain_classifier.joblib`，評価集合，そのほかの設定は Iter101 の採用構成のままである．
-
-#### 実行の経過
-
-- **デプロイ（B183）**: `rc-executor` への委譲が許可システムに拒否されたため，ユーザーが手動で `mise run deploy` を実行した（2026-10-01 15:21Z）．全 10 ノード（wafl500〜509）の `smoke_check` で，`config.yaml`（閾値 0.362）と `classifier.py` のハッシュがローカルと一致した．分類器本体 `models/domain_classifier.joblib` の MD5 `c8cd0fb46549d03db11f43864a741ef8` も全ノードで一致した．
-- **交絡要因（B184）**: デプロイ中に `ollama/ollama:latest` が 0.35.0（RepoDigest `sha256:2a6e883b...`）へ更新された．基準線のときのバージョンは記録が無く分からない．
-- **G0（予備 20 問）**: GPU 利用率，VRAM の余裕，モデルのロード状態のすべてで合格した．
-- **本走**: 2026-10-01 15:36:16Z（epoch 1790868976）に起動し，17:54:25Z に終了コード 0 で終わった（約 2 時間 18 分）．3,750 行（うち複合 730 行）を処理した．起動直後に `rc-executor` が Tenbin の 500 エラーで止まったため，オーケストレータが状態を直接確認して `state.json` を更新した（B185）．
-- **集計**: `mise run analyze 20261002_003617`（終了コード 0．軸 2/3 は `axis23_metrics.json`，採点対象 3,020 行）と `metrics.compute_all_metrics` を使った．集計時の出力は `.claude/research/_iter102_metrics_out.txt` に残した．
-
-#### 結果（本走 `results/20261002_003617/` 対 基準線 `results/20260929_192157/`，id で完全一致する 3,750 行）
-
-| 指標 | 基準線（gt=0.36） | **本走（gt=0.362）** | 事前登録の予測 | Δ |
-|---|---|---|---|---|
-| top1_accuracy | 0.840000 | **0.839467** | 変化なし（揺れのみ） | −0.0533pt |
-| 単一 / 複合 top1 | 0.848344 / 0.805479 | **0.847682 / 0.805479** | — | −0.0662pt / 0 |
-| `compound_domain_set_recall` | 0.578767（845/1460） | **0.579452（846/1460）** | 0.579452 | **+0.0685pt** |
-| `compound_mean_dispatched_count` | 1.973973 | **1.983562** | 1.983562 | +0.009589 |
-| overall mean_k | 1.533067 | **1.536000** | 1.536000 | +11/3750 |
-| 複合の k 分布 | {1: 479, 2: 21, 4: 230} | **{1: 478, 2: 19, 4: 233}** | 同左 | — |
-| `fallback_rate` | 0.0 | **0.0** | — | 0 |
-| `dispatch_failure_rate` | 0.000267（1/3750） | **0.0008（3/3750）** | — | +2 行 |
-| ECE / Brier | 0.039551 / 0.109451 | **0.039497 / 0.109494** | — | — |
-| `mean_duration_ms`（全体 / 単一 / 複合） | 2197.842 / 791.132 / 8017.385 | **2199.809 / 781.837 / 8065.940** | — | +0.09% |
-
-- 決定論的に予測できる 4 項目（set_recall，複合 mean_dispatched，overall mean_k，複合の k 分布）は，replay の予測と**小数第 6 位まで一致**した．
-- **McNemar（対基準線）**: discordant 4（基準線のみ正解 3／本走のみ正解 1），chi2 = 0.25，p = 0.6171．**不一致の 4 行は `dispatch_failed` の 4 行とまったく同じ**である（本走で失敗した `medical-058`，`social_science-045`，`social_science-046` と，基準線で失敗した `social_science-exp085-092`）．top1 の −0.0533pt はこの失敗だけで説明でき，閾値で送出先が変わった 5 行は 1 行も正誤が変わっていない．
-
-#### 事前登録条件の照合（C1〜C7，Iter101 と同じ閾値）
-
-| 条件 | 基準 | 実測 | 判定 |
-|---|---|---|---|
-| 主基準 | Δset_recall ≥ +0.5pt かつ Δtop1 ≥ −0.25pt | +0.0685pt / −0.0533pt | `adopted` の基準に届かない（`negligible` の範囲） |
-| C1 | per-domain 20 指標の BH 後（q=0.05）の有意退行 0 件 | 0 件（20 検定すべて p = 1.0） | PASS |
-| C2 | `fallback_rate` = 0.0，`dispatch_failure_rate` ≤ 0.005 | 0.0，0.0008 | PASS |
-| C3 | 発火の証拠 | (a)〜(c) を確認．(d) は書いたとおりには満たせない | **注記つき**（下記） |
-| C4 | 複合 top1 ≥ 0.780411 | 0.805479 | PASS |
-| C5 | set_recall ≥ 0.5400 かつ mean_dispatched ≤ 2.10 | 0.579452 / 1.983562 | PASS |
-| C6 | `mean_duration_ms` ≤ 3041.7 | 2199.809 | PASS |
-| C7 | ECE ≤ 0.08 | 0.039497（0.05 未満．B172 (c) は発火しない） | PASS |
-
-**C3（発火の証拠）の内訳**:
-
-- **(a) `results.jsonl` での照合**: k が変わったのは，3,750 行のうち予測した 5 行（`computer_science-107`，`compound-253`，`compound-534`，`compound-546`，`social_science-exp085-107`）だけである．5 行とも k=4 になり，送出先のドメインも `iter102_fire_evidence.txt` の `top_k_domains_at_0.362` と一致した．ただし `dispatched_domains` は，`run_experiment.py:93-101` が開発ホストの `config` で `select_dispatch_targets()` をもう一度計算した値である．このため (a) だけでは，ノードが実際にそう送出したことの証拠にならない．
-- **(b) ノード側での照合（代わりの一次証拠）**: 各ノードの app ログで，要求ごとに `dispatch_done` と `dispatch_model_not_ready` を数えた．5 行はどれも 4 つのノードで `dispatch_done` が出ている．`dispatched_domains` の件数とノード側の送出数が食い違う行は，3,750 行のうち **0 行**だった．`POST /dispatch` の合計（200 と 503 の和）は 5,794 件で，基準線の 5,783 件より **+11 件**多い．これは事前登録した送出の増分 +11 と一致する．`results.jsonl` の sum(k) との差は，本走も基準線も 34 件である．この 34 件は `results.jsonl` に無い request_id 20 件から出ており，予備 20 問の分と考えられる．
-- **(c)** `light_model_warmup_skipped` は全 10 ノードで出ている（Iter101 のレバーは維持されている）．
-- **(d) 満たせなかった項目**: 「予備 20 問で全ノードが `dispatch_gap_threshold=0.362` を読み込んだことをログで確認する」．閾値を使うのは `node.py:228` だけで，値はログに出していない．app ログに `gap` という文字列は 0 件だった．したがって，この項目は書いたとおりには満たせない．代わりの証拠は，本走前の `smoke_check` でのハッシュ一致と (b) である．ノードが 0.36 のままなら，送出の合計は基準線と同じ 5,783 件前後になるはずなので，(b) はその可能性をほぼ否定する．
-
-**C6 の分位点（B172 (e) の必須併記）**．括弧内は基準線．
-
-- 単一層: 中央値 **511ms**（511），p95 **2,779ms**（3,017）
-- 複合層: p25 **7,515ms**（7,460），中央値 **8,742ms**（8,732）
-- 発火した 5 行の所要時間（基準線 → 本走）: 515 → 544，8,091 → 8,013，**7,074 → 8,911**（k が 1 → 4 になった `compound-534`），8,881 → 8,840，486 → 523ms．
-
-#### 送出の失敗の内訳（`dispatch_model_not_ready`）
-
-本走では，送出先の Ollama が `/api/chat` に `500 Internal Server Error` を返した件数が 4 件あった（app は `503 Service Unavailable` を返す）．
-
-| ノード | 時刻（UTC） | 行 | 結果への表れ方 |
-|---|---|---|---|
-| wafl501 | 15:38:19 | `computer_science-041`（k=4） | 一部の失敗．残る 3 つの送出は成功したので `dispatch_failed=False` |
-| wafl503 | 15:51:00 | `medical-058`（k=1） | `dispatch_failed=True` |
-| wafl509 | 15:55:03 | `social_science-045`（k=1） | `dispatch_failed=True` |
-| wafl509 | 15:55:05 | `social_science-046`（k=1） | `dispatch_failed=True` |
-
-- 基準線にも同じ事象が 2 件ある（wafl503 と wafl509 で 1 件ずつ）が，`dispatch_failed` の行は 1 行だけなので，1 件は一部の失敗だった．**送出単位の失敗率は 4/5,794（0.069%）対 2/5,783（0.035%）**である．件数が少なすぎて，差があるとは言えない．
-- `dispatch_failure_rate` は，送出先がすべて失敗した行しか数えない．k を増やすレバーでは，個々の送出の失敗がこの指標に表れにくくなる．
-- **wafl509 の Ollama ログ**: 2 件とも，slot が処理を始めてから約 2 秒（1.98s と 1.81s）で GIN が 500 を返し，その直後に `cancel task` が出ている．slot を解放した時点のトークン数からプロンプト長を引くと，**2 件とも 109 トークン生成した時点**で失敗していた（573 − 464，250 − 141）．原因を示すエラー文はログに無い．応答を組み立てる処理が失敗したと推定しているが，確かめていない．
-- wafl501 と wafl503 は，Ollama ログの最も古い行がそれぞれ 16:12Z と 17:14Z で，500 が出た時刻の部分は古い順に消えていた．ログの保存設定はノードによって違う（wafl501 は `json-file` の `max-size=10m`，`max-file=3`．wafl509 は上限なし）．`mise run analyze` は app のログしか回収しない．
-
-#### 交絡要因（B184）の評価
-
-閾値の効果は，(a) と (b) のとおり予測した 5 行と +11 件の送出だけに表れた．それ以外の 3,745 行は，k も正誤も基準線と同じである（失敗した 4 行を除く）．`mean_duration_ms` の差は +0.09% にとどまる．Ollama 0.35.0 への更新が全体に効いた形跡は見当たらない．ただし，失敗が 2 件から 4 件に増えたことがバージョンの違いによるのか偶然なのかは，この件数では切り分けられない．
-
-#### 限界（明記）
-
-- set_recall の改善 +0.0685pt は，複合 730 行で被覆したドメインが 1 つ増えただけ（845/1460 → 846/1460）である．事前登録の時点で，判定の閾値 0.5pt に届かないことは分かっていた．
-- 発火した 5 行の隣接 gap は 0.3606〜0.3615 で，閾値 0.362 との差がわずかしかない．5 行とも予測どおりになったので，これらの行では probe の確信度が実行の間で揺れなかったことになる．
-- 軸 2/3（`axis23_metrics.json`）は生成したが，基準線との比較はしていない（参考値であり判定には使わない）．
-
-#### 分析フェーズへの申し送り
-
-1. 正式な判定を行う．規則どおりなら `negligible` で，`dispatch_gap_threshold` を 0.36 に戻す．
-2. C3 (d) を，(b) で代えてよいかを決める．今後の事前登録では，ログで確認できない項目を証拠にしないこと．
-3. 改善の候補（レバーではなく計測の改善）: (i) `analyze` で ollama のログも回収する．(ii) 送出単位の失敗率を `metrics.py` に加える．(iii) 起動時に `dispatch_gap_threshold` など送出に関わる設定値をログに出す．
-4. Ollama 0.35.0 の「109 トークン目で 500」を追う場合は，wafl509 のログが残っているうちに回収する．
-
-**`state.json`**: `status` を `"running"` に戻した．
-
-#### 判定（分析フェーズ，2026-10-02）
-
-- **判定: `negligible`**．事前登録の判定規則（「計画の修正 (Iter102，B176)」）を当てはめた．|Δset_recall| = 0.0685pt（845/1460 → 846/1460）は閾値 0.5pt に届かず，C1〜C7 を満たす（C3 は下記のとおり）．`config.yaml:131` の `dispatch_gap_threshold` は 0.36 に戻した（ローカルのみ．ノードへの deploy はしていない）．
-- **雑音と信号の切り分け**: set_recall，複合 mean_dispatched，overall mean_k，複合の k 分布の 4 項目は，replay の予測と小数第 6 位まで一致した．これらは決定論的に決まる値で，実行間の揺れは無い．したがって +0.0685pt は雑音ではなく閾値の効果だが，大きさは 1 ドメイン分で，判定の閾値の 7 分の 1 未満である．top1 の −0.0533pt（2 行分）は McNemar p = 0.617 で有意でない．不一致の 4 行は `dispatch_failed` の 4 行と一致し，閾値で送出先が変わった 5 行の正誤は変わっていない．
-- **計画の仮説との一致**: 事前登録の予測（set_recall 0.579452，top1 は動かない）と一致した．A3 の予測（`max_confidence` のもとでは送出集合を変えても top1 が動かない）も，実機で確かめられた．
-- **C3 (d) の扱い（事前登録からの逸脱）**: 事前登録した (d)「予備 20 問で全ノードが閾値 0.362 を読み込んだことをログで確認する」は満たせなかった．閾値の値がログに出ないためである．分析フェーズは，(b) のノード側の照合を代わりの一次証拠として認め，C3 を満たすと判定した．**これは事前登録からの逸脱である**．代えてよいとした根拠は次の 2 点である．(1) (b) はノードが実際に送出した件数である．`POST /dispatch` が基準線より +11 件多く，予測の +11 と一致し，食い違う行は 0 行だった．ノードが 0.36 のままなら増分は 0 前後になるので，(b) は (d) よりも直接に読み込みを示す．(2) (d) は計画の時点で検証できない項目だった．この扱いはオーケストレータが承認した．
-- **交絡要因**: Ollama 0.35.0 への更新は，閾値が効いた 5 行以外の正誤と所要時間（+0.09%）に形跡を残していない．送出単位の失敗 4/5,794 対 2/5,783 は，件数が少なく差があるとは言えない．
-- **次の一手**: config.yml の levers は使い切っている（B174）．次のレバーは決めず，Iter103 は調査・計画フェーズから始める（B187）．
-
-#### 学び（分析フェーズ）
-
-1. **事前登録する発火の証拠は，計画の時点で取得できると確かめた項目に限る**．C3 (d) は，値をログに出す処理が無いことを確かめないまま書かれた．ノード側の送出件数（(b)）のように，現行のログで数えられる項目を書く．
-2. **`results.jsonl` の `dispatched_domains` は，ノードが実際に送出した証拠にならない**．`run_experiment.py:93-101` が開発ホストの config で再計算した値だからである．ノード側の証拠は，app ログの `dispatch_done` と `POST /dispatch` の件数で取る．
-3. **予測利得が replay の分解能ちょうどのレバーは，本走しても判定が事前に分かる**．今回は約 2 時間 18 分の実機時間を使い，結果は予測と小数第 6 位まで一致した．恒久ルールとの関係は B176 の要レビュー (1) に残る．
-4. **`max_confidence` のもとでは，set_recall は top1 に届かない**．これを実機の本走で確かめた（送出先が変わった 5 行の正誤は不変）．次は，rank 1 の決定を変えるか，複数の回答を使う集約へ変えるレバーが要る．
-5. **`dispatch_failure_rate` は，k を増やすレバーで個々の送出の失敗を隠す**．送出単位の失敗率は別に数える（申し送り 3 (ii)）．
 

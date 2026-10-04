@@ -1,15 +1,20 @@
-"""Build the Iter104 kNN-interpolated domain classifier artifact (no retraining, no embedding calls).
+"""Build the kNN-interpolated domain classifier artifact (Iter104; temperature since Iter105).
 
 Wraps an existing classifier artifact in `knn_interpolated_head.KnnInterpolatedClassifier`,
-using a precomputed training embedding cache as the neighbour population.
+using a precomputed training embedding cache as the neighbour population. No retraining and
+no embedding calls are made.
 
 Usage (module mode, from the repository root, CPU only):
     uv run python -m scripts.build_knn_interpolated_classifier \\
         --base-classifier models/domain_classifier_pre_iter104_lr.joblib \\
         --train-cache data/embcache_train_iter100_fused.npy \\
         --train-data data/classifier_train_iter94_dedup.jsonl \\
-        --k 2 --interpolation-lambda 0.3 \\
+        --k 2 --interpolation-lambda 0.3 --temperature 0.9426 \\
         --output models/domain_classifier.joblib
+
+`--temperature` (default 1.0 = no rescaling) is applied after the interpolation. The Iter105
+value 0.9426 is the out-of-fold single-label NLL minimizer reproduced by
+`.claude/research/_iter105_replay_temp.py`.
 
 The cache's `<cache>.meta.json` must list the same `ids` and `domains` as `--train-data`, in the
 same order; otherwise the embeddings would be paired with the wrong labels, so the script stops.
@@ -51,6 +56,7 @@ def main() -> None:
     parser.add_argument("--train-data", required=True)
     parser.add_argument("--k", type=int, required=True)
     parser.add_argument("--interpolation-lambda", type=float, required=True)
+    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -75,11 +81,12 @@ def main() -> None:
         train_weights=train_weights,
         k=args.k,
         interpolation_lambda=args.interpolation_lambda,
+        temperature=args.temperature,
     )
     joblib.dump(classifier, args.output)
     print(
         f"wrote {args.output}: n_train={len(rows)} dim={train_embeddings.shape[1]} "
-        f"k={args.k} lambda={args.interpolation_lambda}"
+        f"k={args.k} lambda={args.interpolation_lambda} temperature={args.temperature}"
     )
 
 

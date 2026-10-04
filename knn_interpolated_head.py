@@ -1,13 +1,22 @@
-"""Iter104 (knn_label_distribution_interpolation): wraps the production domain classifier and
-linearly interpolates its probabilities with a k-nearest-neighbour label distribution.
+"""Iter104 (knn_label_distribution_interpolation) and Iter105 (knn_interpolation_temperature):
+wraps the production domain classifier, linearly interpolates its probabilities with a
+k-nearest-neighbour label distribution, and then recalibrates the mixture with a temperature.
 
-    p = interpolation_lambda * p_kNN,k + (1 - interpolation_lambda) * p_base
+    p   = interpolation_lambda * p_kNN,k + (1 - interpolation_lambda) * p_base
+    p_T ∝ exp(log(max(p, 1e-12)) / temperature)        (row-normalized; p_T = p when T = 1)
 
 The interpolation form follows kNN-LM (Khandelwal et al., ICLR 2020, arXiv:1911.00172) and
 KNN-BERT (Li et al., 2021, arXiv:2110.02523), applied to the 10-domain class distribution.
 `p_kNN,k` takes the top-k training rows by cosine similarity (inner product of L2-normalized
 fused embeddings) and votes their labels with the same domain-balanced weights as
 `scripts/train_domain_classifier.py:_extract_sample_weights()`, then normalizes.
+
+The temperature step is temperature scaling (Guo et al., "On Calibration of Modern Neural
+Networks", ICML 2017, arXiv:1706.04599) with log p treated as the logit. It is applied after
+the interpolation because the base classifier's own temperature was fit before kNN mixing.
+It preserves each row's argmax; T < 1 sharpens and T > 1 flattens the distribution. The Iter105
+value is the single-label NLL minimizer on 5-fold out-of-fold mixtures of the training set
+(reproducible with `.claude/research/_iter105_replay_temp.py`).
 
 Why this module lives at the repository root: `joblib.dump`/`joblib.load` serialize a class by
 its module import path, so the build script (`scripts/build_knn_interpolated_classifier.py`)
@@ -34,11 +43,25 @@ def l2_normalize_rows(features: np.ndarray) -> np.ndarray:
     return features / np.maximum(norms, _MIN_NORM)
 
 
+# Floor on a probability before log(); a kNN vote of 0 would otherwise give log(0) = -inf.
+_PROB_FLOOR = 1e-12
+
+
+def apply_temperature_to_proba(proba: np.ndarray, temperature: float) -> np.ndarray:
+    """Return `proba` rescaled as p_T ∝ p^(1/temperature), row-normalized (argmax preserved)."""
+    logits = np.log(np.maximum(proba, _PROB_FLOOR)) / temperature
+    # Subtracting the row max before exp() keeps it from overflowing when temperature is small.
+    logits -= logits.max(axis=1, keepdims=True)
+    scaled = np.exp(logits)
+    return scaled / scaled.sum(axis=1, keepdims=True)
+
+
 class KnnInterpolatedClassifier:
     """Base classifier probabilities linearly interpolated with a weighted kNN label distribution.
 
     `base_classifier` is used as-is (not refit). Neighbour ties in similarity are broken in
     favour of the smaller training-row index (stable sort), so the output is deterministic.
+    `temperature` (> 0) rescales the interpolated distribution; 1.0 leaves it unchanged.
     """
 
     def __init__(
@@ -49,6 +72,7 @@ class KnnInterpolatedClassifier:
         train_weights: np.ndarray,
         k: int,
         interpolation_lambda: float,
+        temperature: float = 1.0,
     ) -> None:
         n_train = train_embeddings_normalized.shape[0]
         if train_label_indices.shape != (n_train,) or train_weights.shape != (n_train,):
@@ -60,6 +84,8 @@ class KnnInterpolatedClassifier:
             raise ValueError(f"k must be in [1, {n_train}], got {k}")
         if not 0.0 <= interpolation_lambda <= 1.0:
             raise ValueError(f"interpolation_lambda must be in [0, 1], got {interpolation_lambda}")
+        if not temperature > 0.0:
+            raise ValueError(f"temperature must be > 0, got {temperature}")
         n_classes = len(base_classifier.classes_)
         if train_label_indices.min() < 0 or train_label_indices.max() >= n_classes:
             raise ValueError(
@@ -75,6 +101,16 @@ class KnnInterpolatedClassifier:
         self.train_weights = np.asarray(train_weights, dtype=np.float64)
         self.k = int(k)
         self.interpolation_lambda = float(interpolation_lambda)
+        self.temperature = float(temperature)
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore a pickled instance, defaulting `temperature` to 1.0 for Iter104 artifacts.
+
+        Iter104 artifacts were pickled before `temperature` existed; without the default their
+        `predict_proba` would raise AttributeError instead of returning the uncalibrated mixture.
+        """
+        state.setdefault("temperature", 1.0)
+        self.__dict__.update(state)
 
     @property
     def classes_(self) -> np.ndarray:
@@ -97,14 +133,20 @@ class KnnInterpolatedClassifier:
         return distribution / distribution.sum(axis=1, keepdims=True)
 
     def predict_proba(self, X: list[list[float]] | np.ndarray) -> np.ndarray:
-        """Return the interpolated (n, n_classes) probabilities; each row sums to 1."""
+        """Return the interpolated, temperature-scaled (n, n_classes) probabilities; rows sum to 1."""
         base_proba = np.asarray(self.base_classifier.predict_proba(X), dtype=np.float64)
         if self.interpolation_lambda == 0.0:
-            return base_proba
-        knn_proba = self.knn_label_distribution(X)
-        return (
-            self.interpolation_lambda * knn_proba + (1.0 - self.interpolation_lambda) * base_proba
-        )
+            mixture = base_proba
+        else:
+            knn_proba = self.knn_label_distribution(X)
+            mixture = (
+                self.interpolation_lambda * knn_proba
+                + (1.0 - self.interpolation_lambda) * base_proba
+            )
+        if self.temperature == 1.0:
+            # Returned untouched so T=1 stays bit-identical to the Iter104 output.
+            return mixture
+        return apply_temperature_to_proba(mixture, self.temperature)
 
     def predict(self, X: list[list[float]] | np.ndarray) -> np.ndarray:
         """Return the class label with the highest interpolated probability for each row."""

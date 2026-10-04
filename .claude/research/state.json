@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 104,
-  "iteration_name": "kNN ラベル分布と LR 確率の線形補間",
+  "iteration": 105,
+  "iteration_name": "kNN 補間分布の温度を再較正する",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "knn_label_distribution_interpolation",
-  "experiment_dir": "results/20261004_132607",
-  "experiment_deadline": 1791099292,
-  "updated_at": 1791097431,
-  "last_slack_ts": "1791086058.108639",
-  "iteration_thread_ts": "1791051333.713889",
+  "current_lever": "knn_interpolation_temperature",
+  "experiment_dir": "results/20261004_173104",
+  "experiment_deadline": 1791113464,
+  "updated_at": 1791112498,
+  "last_slack_ts": "1791097954.960449",
+  "iteration_thread_ts": "1791100589.267809",
   "notion_toggle_created": true,
-  "last_commit": "7c0b703"
+  "last_commit": "c2ed154"
 }

@@ -2953,6 +2953,17 @@ levers:
             predict_proba を読む．routing_method: supervised_classifier（config.yaml:75）かつ confidence_signal_method: self_report であり，
             ノードのドメインが classes_ に含まれること．現行構成は 3 つとも満たす．
             成功条件: 基準線 results/20260929_192157 に対し Δtop1 ≥ +0.5pt，McNemar p<0.05，Iter101 の C1〜C7（C3 はレバー発火の証拠に置換）を満たす．"}
+  - {name: knn_interpolation_temperature, values: ["T=0.9426"],
+     note: "[2026-10-04 Iter105・backlog B194] B193 と C7 の規定（Iter104 の本走の ECE が 0.050104 で，0.05 を超えた）により，校正側に立てたレバーである．
+            単一レバー: KnnInterpolatedClassifier.predict_proba()（knn_interpolated_head.py:99-107）の出力を，補間分布 p（T=1）から p_T ∝ p^(1/T)，T=0.9426 へ変える．
+            argmax は変わらない．k=2，λ=0.3，base の LR，config.yaml はいずれも変えない．
+            T の選択規則（事前登録した唯一の規則）: 訓練集合の外側 5-fold（seed 104）の OOF 補間分布（近傍は fold の訓練部分だけから引く）に対する単一ラベルの NLL を最小にする値．
+            eval は選択に使わない．出典は Guo ら, ICML 2017, arXiv:1706.04599 である．
+            replay（.claude/research/_iter105_replay_temp.py）: T*=0.9426（fold ごとに 0.87〜1.01），eval の ECE 0.0503 → 0.0371，top1 0.8504（T=1 との不一致 0），
+            compound_mean_dispatched_count 2.0685 → 1.9753，set_recall 0.5904 → 0.5747，C1 の有意は 0 件．T=1 と本走の selected の一致率は 99.57%．
+            到達条件: routing_method: supervised_classifier，confidence_signal_method: self_report，ドメインが classes_ に含まれること，dispatch_gap_threshold が null でないこと．
+            確信度は node.py:232-239 → aggregator.py:87-91 で送出集合を決め，metrics.py:486-521 の ECE が読む．
+            成功条件: 基準線 results/20261004_132607 に対し，ECE ≤ 0.040 かつ |Δtop1| < 0.25pt かつ Iter104 の C1〜C7 を満たす（partial は 0.040 < ECE ≤ 0.045）．"}
 
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
