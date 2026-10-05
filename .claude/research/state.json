@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 108,
-  "iteration_name": "信頼学習による訓練行の除去を事前 CV で足切りする",
+  "iteration": 109,
+  "iteration_name": "訓練と評価のドメイン事前分布の差を EM で補正する",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "confident_learning_train_row_pruning",
+  "current_lever": "test_time_label_shift_prior_correction",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1791136217,
-  "last_slack_ts": "1791136136.238029",
-  "iteration_thread_ts": "1791134642.972679",
+  "updated_at": 1791137038,
+  "last_slack_ts": "1791164036.153749",
+  "iteration_thread_ts": "1791164036.153749",
   "notion_toggle_created": true,
-  "last_commit": "177c94e"
+  "last_commit": "a081899"
 }

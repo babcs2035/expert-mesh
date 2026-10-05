@@ -2994,6 +2994,18 @@ levers:
             発火の証拠: 新しい artifact の MD5 が c7172ad37c10e1082a42481553ae25b0 と異なること，len(train_label_indices) = 2275 − 除いた行数，deploy 後の全ノードのコンテナ内で MD5 が一致すること．
             成功条件: success_criteria (8) を参照．"}
 
+  - {name: test_time_label_shift_prior_correction, values: ["saerens_em_on_unlabeled_queries"],
+     note: "[2026-10-05 Iter109・backlog B207] levers を使い切ったので，B205 の申し送り（tavily-search による重点調査）を受けて追加した．
+            着想は Saerens, Latinne, Decaestecker（Neural Computation 14(1):21-41, 2002）と Alexandari, Kundaje, Shrikumar（ICML 2020, PMLR 119:222-232）である（書誌は tavily-search で確認した）．
+            単一レバー: 補間と温度を適用した後の確率に w_y = π_t(y)/π_s(y) を掛け，正規化し直す．π_s は訓練の OOF の平均確率，π_t はラベルなしの評価のクエリ（3,750 行）に対する EM の推定値とする．EM は収束まで回し，調整する値は持たない．
+            変更箇所: knn_interpolated_head.py の predict_proba（属性 class_prior_weights を足す．既定値は無補正），scripts/build_knn_interpolated_classifier.py（重みを artifact に書き込む）．
+            根拠: 評価の単一行は general 5.8%，legal 5.0%，他は 9.7〜11.6% で，LR の実効の事前分布（balanced でほぼ一様）とも，kNN の datastore の比（legal 3.4%）とも異なる．Iter92 の logit adjustment は訓練集合の中の偏りだけを扱った．
+            前提の弱さ: 主な誤り（education → business_economics など）は評価で同じ割合のクラスの間で起きており，補正で直る見込みは小さい．分類器は温度だけで較正しており，Alexandari らが推す bias 項つきの較正ではない．
+            Step 0: 評価キャッシュの上の replay で Δtop1 ≥ +0.5pt かつノイズの床（B200）を超えるときだけ本走へ進む．届かなければ artifact を変えずにクローズする．
+            到達条件: http_server.py:428 → classifier.py:48 で artifact を読み，http_server.py:378-380 → classifier.py:66-69 → knn_interpolated_head.py:135-149 の predict_proba が重みを掛ける．
+            発火の証拠: 新しい artifact の MD5 が c7172ad37c10e1082a42481553ae25b0 と異なること，class_prior_weights がすべて 1 ではないこと，deploy 後の全ノードのコンテナ内で MD5 が一致すること．
+            成功条件: success_criteria (9) を参照．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #
@@ -3107,7 +3119,12 @@ success_criteria: "【2026-07-31 改訂】E1（評価集合の拡張）は Iter1
       replay: 同じ eval キャッシュ上の『変種 − none』の対応のある比較を併記する．ノイズの床は B200（selected 16 行，top1 正味 ±2 行）とし，僅差の 49 行と kNN の 2 位・3 位の接近行を除いた部分集合でも確かめる．
       主基準（本走）: 基準線 results/20261004_225553 に対し，共通行（dispatch_failed を除く）で Δtop1 ≥ +0.5pt（約 19 行）かつ McNemar 両側 p < 0.05．
       非退行: Iter107 の C1〜C7（C1 は 20 指標，BH q=0.05 で有意な退行 0 件）．japanese_civics，sociology，high_school_psychology，moral_disputes の recall の差を併記する．
-      ECE は新旧の定義を併記し，判定は旧の定義で行う（B203 の A1-1．回答があるまでの扱い）．決定を変えるレバーなので本走を行う．"
+      ECE は新旧の定義を併記し，判定は旧の定義で行う（B203 の A1-1．回答があるまでの扱い）．決定を変えるレバーなので本走を行う．
+  (9) 【新設 2026-10-05・Iter109・B207】出力の確率にクラスの事前分布の補正を掛けるレバー（test_time_label_shift_prior_correction）に適用する．
+      Step 0（replay）: 同じ評価キャッシュの上の『補正 − 無補正』で，Δtop1 ≥ +0.5pt かつノイズの床（B200: top1 の正味 ±2 行）を超えること．満たさなければ artifact を変えずにクローズし，本走は行わない（Iter93，Iter108 と同じ扱い）．
+      Step 0 では π_s，π_t，ドメインごとの重み，EM の収束，argmax が変わった行数とその向きを記録する．π_t と評価の実際の分布との差は診断のためだけに記録し，選択には使わない．
+      主基準（本走）: 基準線 results/20261004_225553 に対し，共通行（dispatch_failed を除く）で Δtop1 ≥ +0.5pt かつ McNemar の両側 p < 0.05．
+      非退行: Iter107 の C1〜C7（C1 は 20 指標，BH q=0.05 で有意な退行 0 件）．legal と general の recall の差を併記する．ECE は新旧の定義を併記し，判定は旧の定義で行う（B203 の A1-1）．決定を変えるレバーなので本走を行う．"
 
 slack:
   channel: "#research-cycle"

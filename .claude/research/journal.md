@@ -1,3 +1,136 @@
+## Iteration 109: 訓練と評価のドメイン事前分布の差を EM で補正する
+
+このブロックは，rc-researcher の報告をもとにオーケストレータが挿入した（rc-researcher はツールの呼び出しの形式を誤り，記録の前にツールを使えなくなった．起動モードは tenbin）．ドメインの分布，Iter92 の記録の位置，文献の書誌は，オーケストレータが確かめ直した．
+
+### 調査・計画
+
+#### 調査
+
+- Iter92 で logit adjustment（Menon ら，ICLR 2021，arXiv:2007.07314）を検討した（`journal_archive.md:4397`，`9750`）．訓練の実効重みは 10 ドメインで揃えてあるので，原理的な補正量はほぼ 0 とした．このときは訓練集合の中の偏りだけを扱い，訓練と評価の分布の差は扱っていない．
+- ドメインの分布（評価は `results/20261004_225553/results.jsonl` の `expected_domains` が 1 つの行，訓練は `data/classifier_train_iter94_dedup.jsonl`．オーケストレータが数え直した）:
+
+| ドメイン | 評価の単一行 | 割合 | 訓練 | 割合 |
+|---|---|---|---|---|
+| business_economics，mathematics，medical，natural_science | 各 350 | 各 11.6% | 各 250 | 各 11.0% |
+| education | 350 | 11.6% | 238 | 10.5% |
+| history_culture | 350 | 11.6% | 210 | 9.2% |
+| computer_science | 301 | 10.0% | 250 | 11.0% |
+| social_science | 294 | 9.7% | 250 | 11.0% |
+| general | 175 | 5.8% | 250 | 11.0% |
+| legal | 150 | 5.0% | 77 | 3.4% |
+| 計 | 3,020 | — | 2,275 | — |
+
+- 評価の残りの 730 行は複合行である．
+- 実効の事前分布: LR は balanced な重みで学習するのでほぼ一様で，kNN の datastore は訓練行数の比を持つ（legal 3.4%）．補間後の分布の実効的な事前分布は，どちらとも一致しないと見込む（推定．Step 0 で OOF の平均確率として実測する）．
+- Saerens, Latinne, Decaestecker, "Adjusting the Outputs of a Classifier to New a Priori Probabilities: A Simple Procedure", Neural Computation 14(1):21–41, 2002（DOI 10.1162/089976602753284446）．事後確率を出す分類器について，ラベルなしの新しいデータから事前分布を EM で推定し，出力を補正し直す手順である（書誌は tavily-search で確認した．本文は読んでいない）．
+- Alexandari, Kundaje, Shrikumar, "Maximum Likelihood with Bias-Corrected Calibration is Hard-To-Beat at Label Shift Adaptation", ICML 2020, PMLR 119:222–232．事後確率を bias 項つきの温度スケーリングなどで較正してから EM（最尤推定）を使うと，BBSE などの代替法に対して強い基準線になる．ICML の発表スライドは，尤度が凹なので EM は大域最適に収束すると述べる（tavily-search の抜粋で確認した）．
+- 注意: Pisa 大学の発表資料（pesaresi_molinari.pdf）には，SLD（Saerens らの EM）が期待外れの結果を出すことがあるという記述がある（抜粋だけを確認した）．較正が不十分な事後確率では，推定が崩れうる．本リポジトリの分類器は温度 T=0.9426 だけで較正しており，bias 項は無い．
+
+#### 仮説
+
+補間後の分布の事前分布を，ラベルなしの評価のクエリから EM で推定した事前分布に合わせると，general を過剰に選ぶ誤りが減り，単一行の top1 が上がる．主な誤り（education → business_economics など）は，評価で同じ割合（11.6%）を持つクラスの間で起きているので，効果は小さいと見込む（推測）．Step 0 で落ちる可能性が高い．
+
+#### 単一レバー
+
+- `test_time_label_shift_prior_correction`: `saerens_em_on_unlabeled_queries`．
+- 補間と温度を適用した後の確率に w_y = π_t(y) / π_s(y) を掛け，正規化し直す．π_s は訓練の OOF の平均確率，π_t はラベルなしの評価のクエリ（単一行と複合行の 3,750 行）に対する EM の推定値とする．EM は収束まで回し，調整する値は持たない．
+- 変更箇所: `knn_interpolated_head.py` の `predict_proba`（属性 `class_prior_weights` を足す．既定値は無補正），`scripts/build_knn_interpolated_classifier.py`（重みを artifact に書き込む）．
+- 固定する構成: Iter105 の artifact（MD5 `c7172ad37c10e1082a42481553ae25b0`，k=2，λ=0.3，T=0.9426）と Iter107 の報告用フィールド，`dispatch_gap_threshold` 0.36，`dispatch_gap_max_k` 4，max_confidence．`_DOMAIN_TASK_MAP` と評価集合の定義は変えない（B206 の A1-1）．
+
+#### Step 0（replay による足切り）
+
+- `_iter105_replay_temp.py` の関数（`run_outer_fold`，`apply_temperature`，`simulate_rows`，`summarize`，`c1_tests`）を流用し，同じ評価キャッシュの上で「補正 − 無補正」を比べる．出力は `.claude/research/_iter109_replay_prior.{py,json}` とする．
+- 進む条件: Δtop1 が +0.5pt 以上で，ノイズの床（B200: top1 の正味 ±2 行）を超えること．満たさなければ artifact を変えずにクローズする（Iter93，Iter108 と同じ扱い）．
+- 記録する値: π_s，π_t，ドメインごとの重み，EM の反復回数と収束，argmax が変わった行数とその向き，複合行の送出集合の変化．π_t と評価の実際の分布との差は診断のためだけに記録し，選択には使わない．
+
+#### 到達条件
+
+- `http_server.py:428` → `classifier.py:48` で artifact を読み，`http_server.py:378-380` → `classifier.py:66-69` → `knn_interpolated_head.py:135-149` の `predict_proba` が重みを掛ける（行番号は Iter108 の実行フェーズで照合済み．変更後に確かめ直す）．
+- 発火の証拠: 新しい artifact の MD5 が `c7172ad37c10e1082a42481553ae25b0` と異なること，`class_prior_weights` がすべて 1 ではないこと，deploy 後の全ノードのコンテナの中で MD5 が一致すること．
+
+#### 成功条件（事前登録．config.yml の success_criteria (9)）
+
+- 主基準（本走）: 基準線 `results/20261004_225553` の共通行（dispatch_failed を除く）で，Δtop1 ≥ +0.5pt かつ McNemar の両側 p < 0.05．
+- 非退行: Iter107 の C1〜C7．legal と general の recall の差を併記する．ECE は新旧を併記し，判定は旧の定義で行う（B203 の A1-1）．決定を変えるレバーなので本走を行う（B203 の A2-2）．
+
+#### 未確認の点
+
+- 2 本の文献の本文（書誌と抜粋だけを確かめた）．
+- ラベルなしの評価のクエリから事前分布を推定することの扱い（B207 の要レビュー）．
+- 複合行 730 行の送出集合への影響．
+
+### Iteration 109 実装・実験（2026-10-05）
+
+#### Step 0（replay による足切り）: 不通過
+
+- スクリプトは `.claude/research/_iter109_replay_prior.py`，出力は `_iter109_replay_prior.json`，ログは `_iter109_step0.log` である．開発ホストの CPU だけで実行した（wafl500〜509 は使っていない）．`_iter105_replay_temp.py` の `run_outer_fold`，`apply_temperature`，`simulate_rows`，`summarize`，`c1_tests` を流用した．統計量は `metrics.py` の `compute_mcnemar_test`，`compute_precision_recall_per_domain` を呼んだ．
+- π_s は，外側 5-fold（seed 104）の OOF 補間分布に artifact の温度 T=0.9426 を当てた確率の平均である（OOF top1 0.826813）．π_t は，artifact の `predict_proba` の出力（補間と温度を適用済み）の 3,750 行に Saerens らの EM を当てて求めた．初期値は π_s で，停止条件は各成分の変化が 1e-10 未満になることとした．45 回の反復で収束した．
+- 比較の範囲は，基準線 `results/20261004_225553` の共通行（confidence が非 null．`_iter107_main_summary.py` と同じ条件）の 3,748 行である．無補正の replay と本走の一致は，selected が 0.995731（16 行が不一致），送出集合が 0.984258（59 行が不一致）だった．
+
+| ドメイン | π_s | π_t（EM） | w = π_t/π_s | 補正前の eval の平均予測 | eval の実際（診断用．複合行は等分） |
+|---|---|---|---|---|---|
+| business_economics | 0.1120 | 0.1437 | 1.2831 | 0.1357 | 0.1125 |
+| computer_science | 0.1099 | 0.1045 | 0.9514 | 0.1051 | 0.0995 |
+| education | 0.0976 | 0.0793 | 0.8126 | 0.0974 | 0.1128 |
+| general | 0.0999 | 0.0375 | 0.3749 | 0.0501 | 0.0653 |
+| history_culture | 0.0971 | 0.1416 | 1.4587 | 0.1261 | 0.1125 |
+| legal | 0.0429 | 0.0597 | 1.3921 | 0.0531 | 0.0608 |
+| mathematics | 0.1132 | 0.1033 | 0.9127 | 0.1058 | 0.1125 |
+| medical | 0.1069 | 0.1547 | 1.4470 | 0.1353 | 0.1139 |
+| natural_science | 0.1160 | 0.1009 | 0.8697 | 0.1062 | 0.1125 |
+| social_science | 0.1045 | 0.0747 | 0.7150 | 0.0853 | 0.0976 |
+
+- 実際の分布の列は診断のためだけに記録し，選択には使っていない．
+
+| 指標（共通行 3,748） | 無補正 | 補正 | 差 |
+|---|---|---|---|
+| top1（全体） | 0.850320 | 0.841515 | −0.8805pt（正味 −33 行） |
+| top1（単一行 3,018） | 0.860504 | 0.854539 | −0.5964pt（正味 −18 行） |
+| top1（複合行 730） | 0.808219 | 0.787671 | −2.0548pt（正味 −15 行） |
+| compound_domain_set_recall | 0.574658 | 0.554110 | −2.0548pt |
+| compound_mean_dispatched_count | 1.975342 | 1.934247 | −0.041096 |
+| ECE（`summarize` の値） | 0.037125 | 0.018875 | −0.018250 |
+
+- argmax が変わった行は 186 行である．向きは，誤→正が 50，正→誤が 83，誤→誤が 42，正→正（複合行）が 11 だった．
+- 単一行で多い変化（[正解] 旧→新）: [education] education→medical 12，[medical] education→medical 11，[education] education→history_culture 8，[education] education→legal 7，[education] education→business_economics 6，[social_science] social_science→legal 6，[medical] natural_science→medical 5．
+- 複合行の送出集合は 145 行で変わった．送出数の変化は，4→4 が 45，4→1 が 43，1→4 が 34，2→1 が 8，2→4 が 8，4→2 が 6，1→2 が 1 である．
+- recall の差（補正 − 無補正）: legal +0.98pt（0.5588→0.5686），general −3.49pt（0.4159→0.3810）．ほかに education −8.87pt，medical +6.36pt，social_science −2.97pt，history_culture +2.23pt，natural_science −1.83pt．
+- McNemar（補正 対 無補正）: 全体は 50 対 83 で p=0.00552，単一行は 44 対 62 で p=0.0987，複合行は 6 対 21 で p=0.00705．C1 の BH 補正で有意になったのは 7 指標（education_recall，general_recall，general_precision，history_culture_recall，medical_recall，natural_science_recall，social_science_recall）である．
+- 進む条件（Δtop1 ≥ +0.5pt かつ正味の行数がノイズの床 ±2 行を超える）を満たさない．計画どおり artifact，`config.yaml`，`knn_interpolated_head.py`，`scripts/build_knn_interpolated_classifier.py` は変えず，deploy，G0，本走は行わなかった．experiment_dir は null のままである．
+
+### Iteration 109 実行済み（2026-10-05）
+
+**判定: rejected（success_criteria (9) の Step 0 で不通過．本走しない）**
+
+| 項目 | 値 |
+|---|---|
+| top1（共通行 3,748．無補正 / 補正） | 0.850320 / 0.841515 |
+| Δtop1 | −0.88pt，正味 −33 行（進む条件は +0.5pt 以上かつ正味 +3 行以上） |
+| McNemar（誤→正 / 正→誤） | 全体 50 / 83，p=0.0055（二項の正確検定でも 0.0053）．単一行 44 / 62，p=0.099．複合行 6 / 21，p=0.0071 |
+| C1（BH，q=0.05） | 有意な変化 7 指標．education_recall −8.87pt，general_recall −3.49pt，social_science_recall −2.97pt，natural_science_recall −1.83pt が退行の向き |
+| legal / general の recall | +0.98pt / −3.49pt |
+| ECE（`summarize` の値） | 0.0371 → 0.0189（判定には使わない） |
+
+- ノイズとの切り分け: replay は決定論的なので，無補正と補正の差はレバーだけから生じる．B200 の床（top1 の正味 ±2 行）の 16 倍以上の差である．replay と本走の selected の不一致 16 行がすべて補正の側に有利に働いたと仮定しても，正味 −17 行で下がる向きは変わらない．全体の McNemar は悪化の向きで有意である．単一行だけでは p=0.099 なので，単一行の悪化は有意とまでは言わない．
+- 仮説との照合: 「general を過剰に選ぶ誤りが減り，単一行の top1 が上がる」は支持されなかった．general の重みは 0.375 まで下がったが，general の recall も下がり，単一行の top1 は −0.60pt だった．計画の「効果は小さく，Step 0 で落ちる可能性が高い」という見込みとは，落ちる点で一致し，効果の大きさ（悪化が有意になること）で一致しない．
+
+**解釈（事実と推定を分ける）**:
+
+- (a) π_t は評価の実際の分布から離れた（事実）．実際の分布（診断用．複合行は等分）との全変動距離は，π_s が 0.056，補正前の eval の平均予測が 0.064，EM の π_t が 0.106 で，EM が最も遠い．10 クラスのすべてで「π_t − 平均予測」の符号は「平均予測 − π_s」の符号と一致した．EM は平均予測のずれを打ち消さずに，同じ向きへ広げた．仮に実際の分布を使った場合の比 π_actual/π_s と EM の重みを比べると，legal（1.418 / 1.392）だけが近く，general（0.654 / 0.375）と history_culture（1.159 / 1.459），medical（1.065 / 1.447）は行き過ぎ，education（1.156 / 0.813）は向きが逆である（この比は診断のためだけに計算し，選択には使っていない）．
+- (b) 較正と前提（推定）．EM の不動点は「補正後の平均事後確率 = π_t」なので，平均予測のずれがすべて事前分布の差から来るという前提（label shift．p(x|y) が訓練と評価で同じ）に依存する．ここでの平均予測のずれは，クラスの割合の差よりも，クラスごとの取り違え（education の行が medical や business_economics へ流れる）から来ている見込みが強い．温度だけの較正にはクラスごとの bias 項が無いので，この取り違えによるクラス別の偏りが較正の後も残り，EM がそれを事前分布の差として増幅した，と考えるのが (a) の事実と整合する．bias 項つきの較正（Alexandari らの BCTS）で崩れが止まるかは確かめていない．取り違えが写像の曖昧さ（Iter108 の学び 1）に由来するなら，較正を変えても label shift の前提は満たされない見込みである（推定）．
+- (c) education が下がった理由．事実: 補正前の分類器は eval で education に平均 0.0974 の確率しか置かず，実際の割合（0.1128）を下回る．education の recall は 0.50 と全クラスで最も低い．EM は education の π_t を 0.0793 へ下げ，重みは 0.813 になった．education→medical の argmax の変化は全体で 46 行あり，単一行では正解 education の行が education から medical，history_culture，legal，business_economics へ計 33 行移った（正→誤）．一方，正解 medical の行が education→medical で 11 行直った．推定: education の行の多くは他クラスとの差が小さく（僅差の行），1 を下回る重みで容易に順位が入れ替わる．分類器が education を当てにくいこと自体が，EM には「評価に education が少ない」と見え，さらに当てにくくする方向へ働いた．
+- ECE が 0.0371 から 0.0189 へ下がったのは，平均の確信度が平均の正解率へ寄った（gap −0.037 → −0.019）ためで，top1 の悪化とは別の現象である．ECE は (9) の判定に使わない．
+
+**採用構成は変えない**: Iter105 の artifact（MD5 `c7172ad37c10e1082a42481553ae25b0`）に Iter107 の報告用フィールドを加えたもの．基準線は `results/20261004_225553` のままとする．
+
+**学び**:
+
+1. 取り違えに偏りのある分類器では，Saerens らの EM は平均予測のずれを事前分布の差として増幅する．本リポジトリでは π_t が実際の分布から π_s よりも遠くへ離れた（全変動距離 0.106 対 0.056）．誤りの根がクラスの割合ではなくタスクの写像の曖昧さにあるという Iter108 の見立てと整合する．
+2. 当てにくいクラス（education，recall 0.50）ほど EM で重みが下がり，さらに当てにくくなる．事前分布の補正は，recall の低いクラスを持つ分類器では退行の向きに働きうる．
+3. 補正後の ECE の低下は top1 の改善を意味しない．Step 0 を top1 と正味の行数で事前登録していたので，ECE に引きずられずに判定できた．CPU だけの replay で，deploy と本走を使わずに棄却できた（Iter93，Iter108 と同じ型）．
+
+**次の一手**: levers は再び使い切りになった．bias 項つきの較正と EM の組み合わせは，(b) の推定から label shift の前提そのものが崩れている見込みがあり，B207 の要レビュー（評価のクエリから π_t を推定してよいか）も未回答なので，確信を持って選べない．Iter110 は調査・計画フェーズから始める（B208）．B206（写像の見直し）と B207（π_t の推定の扱い）は人間の回答待ちのままである．
+
 ## Iteration 108: 信頼学習による訓練行の除去を事前 CV で足切りする
 
 このブロックは，rc-researcher の報告をもとにオーケストレータが挿入した（rc-researcher は 3 回の委譲のどれでも，記録の前にツールを使えなくなった．起動モードは tenbin）．
@@ -280,42 +413,4 @@
 5. 送出の失敗（Ollama の 500，`dispatch_model_not_ready`）は 4 回目の再発である（Iter102，103，105，107）．
 
 **次の一手**: config.yml の levers は再び使い切りになった．Iter106 では再探索で新しいレバーを定義できず，人間が方向を与えた．このため，次のレバーは自分では確定せず，Iter108 は調査・計画フェーズから始める（B202）．評価の手順に関わる 2 つの判断は B203 で人間に尋ねる．
-
-## Iteration 106: kNN 類似度の中心化と ABTT を replay で検証する
-
-**実施場所の申告**: 本フェーズで行ったのは，開発ホストでのリポジトリの読み取り，tavily（`tvly search`）による外部調査，開発ホストの CPU での replay（`uv run`．計算済みの埋め込みキャッシュを読むだけ）である．GPU，LLM，wafl500〜509 は使っていない．本走と deploy は行っていない．
-
-**位置づけ**: config.yml の levers は Iter105 で使い切った（B195）．オーケストレータは方向 (i)（複数の正解を許す確信度．ECE の定義が変わる）を保留し，方向 (ii)（rank 1 の決定を変えて top1 を上げる）を採ると自動で判断した（B196）．調査・計画フェーズは 3 回委譲した．1 回目と 2 回目は，subagent が途中でシェルのコマンドを実行できなくなり，ファイルへの書き込みの前に終わった．3 回目で replay を完了した．
-
-**確かめた事実**:
-
-1. 過去の打ち止めとは重ならない．E7 の whitening（`router.py:670-742`）は `routing_method=embedding` の経路でしか読まれず，kNN 成分には一度も当てられていない（d0004:302，journal_archive.md 36553〜36678 行目）．Iter99 の PCA は LR の入力に対する操作である．k は Iter104 で {1, 2, 3, 5, 7} を掃引済みである．
-2. kNN 成分の類似度の計算は `knn_interpolated_head.py:122-123` だけである（L2 正規化と内積）．融合埋め込みは (2275, 6656) で，各ブロックのノルムは 1，全体は 2 である．訓練行どうしの cosine は平均 0.618（p5 0.558，p95 0.705）で，狭い帯に詰まっている．
-
-**外部調査（tavily，2026-10-04）**:
-
-- Wang, Chao, Weinberger, van der Maaten, "SimpleShot: Revisiting Nearest-Neighbor Classification for Few-Shot Learning", 2019, arXiv:1911.04623（https://arxiv.org/abs/1911.04623 ）．CL2N（中心化と L2 正規化）の出典である．論文には，L2 正規化の後の中心化は精度をそれ以上は上げない，という趣旨の記述がある．
-- Mu, Viswanath, "All-but-the-Top: Simple and Effective Postprocessing for Word Representations", ICLR 2018（https://openreview.net/ ）．平均と上位の主成分を取り除く後処理（ABTT）である．
-- "Centering versus Scaling for Hubness Reduction"（ofai.at），"An Evaluation of Hubness Reduction Methods for Entity Alignment"（dbs.uni-leipzig.de）．中心化を hubness の低減策として扱う．
-
-**replay**（`.claude/research/_iter106_replay_center.py`，結果は `_iter106_replay_result.json`）:
-
-- 固定した構成は LR の artifact，k=2，λ=0.3，T=0.9426，外側 5-fold（seed 104）である．平均と主成分は fold の訓練部分だけから求めた．
-- 再現の確認: 現行の OOF CV top1 は 0.826813（Iter105 の 0.8268 と一致）．eval の `predict_proba` は現 artifact との最大の絶対差が 0.0 である．
-- 選択規則（事前登録）: CV top1 が現行を上回り，かつ 5 fold のうち 4 fold 以上で上回ること．主候補は cl2n，ほかの 4 つは参考候補である．
-
-| 変種 | CV top1 | 上回った fold 数 | 規則 | eval の N_2 の歪度 / 最大出現回数 | eval 共通 3,744 行の top1 | eval の ECE |
-|---|---|---|---|---|---|---|
-| none（現行） | 0.826813 | — | — | 3.29 / 39 | 0.850160 | 0.0371 |
-| cl2n（主候補） | 0.822857 | 1 | 不適合 | 3.68 / 53 | 0.849092 | 0.0353 |
-| block_center | 0.822418 | 1 | 不適合 | 3.48 / 49 | 0.847756 | 0.0351 |
-| abtt1 | 0.828571 | 2 | 不適合 | 4.30 / 60 | 0.848825 | 0.0347 |
-| abtt3 | 0.829011 | 2 | 不適合 | 4.72 / 64 | 0.849359 | 0.0376 |
-| abtt10 | 0.829451 | 3 | 不適合 | 6.13 / 78 | 0.848558 | 0.0452 |
-
-- 基準線の本走 `results/20261004_173104` の共通 3,744 行の top1 は 0.849626 である．none の再現に対する McNemar は，どの変種でも p ≥ 0.29 で，C1（20 指標，BH q=0.05）の有意はどの変種でも 0 件である．
-- 中心化で hubness が下がるという前提は成り立たなかった．N_2 の歪度と最大出現回数は，どの変種でも現行より大きい．
-- 未解決: none の再現と本走とで selected_domain が共通行で 16 行（全行で 22 行）異なる．`predict_proba` は一致するので，差は分類器の外（同順位の並べ方，送出の失敗など）で生じている．原因は調べていない．
-
-**判定**: 事前登録の規則を満たす候補が無いので，新しいレバーを定義しない（要人間判断: 実行可能な新レバーを定義できない）．skill の早期終了の手順により，フェーズ 2 と 3 は行わない．config.yml の levers は変えていない．採用構成は Iter105（`models/domain_classifier.joblib`，MD5 `c7172ad37c10e1082a42481553ae25b0`，T=0.9426）のままである．次の方向は B197 で人間の判断を仰ぐ．
 

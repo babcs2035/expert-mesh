@@ -1,3 +1,41 @@
+## Iteration 106: kNN 類似度の中心化と ABTT を replay で検証する
+
+**実施場所の申告**: 本フェーズで行ったのは，開発ホストでのリポジトリの読み取り，tavily（`tvly search`）による外部調査，開発ホストの CPU での replay（`uv run`．計算済みの埋め込みキャッシュを読むだけ）である．GPU，LLM，wafl500〜509 は使っていない．本走と deploy は行っていない．
+
+**位置づけ**: config.yml の levers は Iter105 で使い切った（B195）．オーケストレータは方向 (i)（複数の正解を許す確信度．ECE の定義が変わる）を保留し，方向 (ii)（rank 1 の決定を変えて top1 を上げる）を採ると自動で判断した（B196）．調査・計画フェーズは 3 回委譲した．1 回目と 2 回目は，subagent が途中でシェルのコマンドを実行できなくなり，ファイルへの書き込みの前に終わった．3 回目で replay を完了した．
+
+**確かめた事実**:
+
+1. 過去の打ち止めとは重ならない．E7 の whitening（`router.py:670-742`）は `routing_method=embedding` の経路でしか読まれず，kNN 成分には一度も当てられていない（d0004:302，journal_archive.md 36553〜36678 行目）．Iter99 の PCA は LR の入力に対する操作である．k は Iter104 で {1, 2, 3, 5, 7} を掃引済みである．
+2. kNN 成分の類似度の計算は `knn_interpolated_head.py:122-123` だけである（L2 正規化と内積）．融合埋め込みは (2275, 6656) で，各ブロックのノルムは 1，全体は 2 である．訓練行どうしの cosine は平均 0.618（p5 0.558，p95 0.705）で，狭い帯に詰まっている．
+
+**外部調査（tavily，2026-10-04）**:
+
+- Wang, Chao, Weinberger, van der Maaten, "SimpleShot: Revisiting Nearest-Neighbor Classification for Few-Shot Learning", 2019, arXiv:1911.04623（https://arxiv.org/abs/1911.04623 ）．CL2N（中心化と L2 正規化）の出典である．論文には，L2 正規化の後の中心化は精度をそれ以上は上げない，という趣旨の記述がある．
+- Mu, Viswanath, "All-but-the-Top: Simple and Effective Postprocessing for Word Representations", ICLR 2018（https://openreview.net/ ）．平均と上位の主成分を取り除く後処理（ABTT）である．
+- "Centering versus Scaling for Hubness Reduction"（ofai.at），"An Evaluation of Hubness Reduction Methods for Entity Alignment"（dbs.uni-leipzig.de）．中心化を hubness の低減策として扱う．
+
+**replay**（`.claude/research/_iter106_replay_center.py`，結果は `_iter106_replay_result.json`）:
+
+- 固定した構成は LR の artifact，k=2，λ=0.3，T=0.9426，外側 5-fold（seed 104）である．平均と主成分は fold の訓練部分だけから求めた．
+- 再現の確認: 現行の OOF CV top1 は 0.826813（Iter105 の 0.8268 と一致）．eval の `predict_proba` は現 artifact との最大の絶対差が 0.0 である．
+- 選択規則（事前登録）: CV top1 が現行を上回り，かつ 5 fold のうち 4 fold 以上で上回ること．主候補は cl2n，ほかの 4 つは参考候補である．
+
+| 変種 | CV top1 | 上回った fold 数 | 規則 | eval の N_2 の歪度 / 最大出現回数 | eval 共通 3,744 行の top1 | eval の ECE |
+|---|---|---|---|---|---|---|
+| none（現行） | 0.826813 | — | — | 3.29 / 39 | 0.850160 | 0.0371 |
+| cl2n（主候補） | 0.822857 | 1 | 不適合 | 3.68 / 53 | 0.849092 | 0.0353 |
+| block_center | 0.822418 | 1 | 不適合 | 3.48 / 49 | 0.847756 | 0.0351 |
+| abtt1 | 0.828571 | 2 | 不適合 | 4.30 / 60 | 0.848825 | 0.0347 |
+| abtt3 | 0.829011 | 2 | 不適合 | 4.72 / 64 | 0.849359 | 0.0376 |
+| abtt10 | 0.829451 | 3 | 不適合 | 6.13 / 78 | 0.848558 | 0.0452 |
+
+- 基準線の本走 `results/20261004_173104` の共通 3,744 行の top1 は 0.849626 である．none の再現に対する McNemar は，どの変種でも p ≥ 0.29 で，C1（20 指標，BH q=0.05）の有意はどの変種でも 0 件である．
+- 中心化で hubness が下がるという前提は成り立たなかった．N_2 の歪度と最大出現回数は，どの変種でも現行より大きい．
+- 未解決: none の再現と本走とで selected_domain が共通行で 16 行（全行で 22 行）異なる．`predict_proba` は一致するので，差は分類器の外（同順位の並べ方，送出の失敗など）で生じている．原因は調べていない．
+
+**判定**: 事前登録の規則を満たす候補が無いので，新しいレバーを定義しない（要人間判断: 実行可能な新レバーを定義できない）．skill の早期終了の手順により，フェーズ 2 と 3 は行わない．config.yml の levers は変えていない．採用構成は Iter105（`models/domain_classifier.joblib`，MD5 `c7172ad37c10e1082a42481553ae25b0`，T=0.9426）のままである．次の方向は B197 で人間の判断を仰ぐ．
+
 ## Iteration 105: kNN 補間分布の温度を再較正する
 
 ### 調査 (Iter105)

@@ -1,0 +1,447 @@
+{
+  "config": {
+    "temperature": 0.9426,
+    "cv_seed": 104,
+    "n_outer_folds": 5,
+    "n_train": 2275,
+    "n_eval_em": 3750,
+    "n_common": 3748,
+    "classes": [
+      "business_economics",
+      "computer_science",
+      "education",
+      "general",
+      "history_culture",
+      "legal",
+      "mathematics",
+      "medical",
+      "natural_science",
+      "social_science"
+    ]
+  },
+  "prior_source": {
+    "business_economics": 0.11202101947570849,
+    "computer_science": 0.10985772481700151,
+    "education": 0.09758904295308898,
+    "general": 0.09988825279372472,
+    "history_culture": 0.09709883654153838,
+    "legal": 0.042881969661562346,
+    "mathematics": 0.1131966102899716,
+    "medical": 0.10692455354150378,
+    "natural_science": 0.1160221860329694,
+    "social_science": 0.10451980389293149
+  },
+  "oof_top1": 0.8268131868131868,
+  "train_count_share": {
+    "business_economics": 0.10989010989010989,
+    "computer_science": 0.10989010989010989,
+    "education": 0.10461538461538461,
+    "general": 0.10989010989010989,
+    "history_culture": 0.09230769230769231,
+    "legal": 0.033846153846153845,
+    "mathematics": 0.10989010989010989,
+    "medical": 0.10989010989010989,
+    "natural_science": 0.10989010989010989,
+    "social_science": 0.10989010989010989
+  },
+  "mean_pred_eval_uncorrected": {
+    "business_economics": 0.13567015639835242,
+    "computer_science": 0.10511729229842916,
+    "education": 0.09737883278373619,
+    "general": 0.05007322564892977,
+    "history_culture": 0.12612244424652883,
+    "legal": 0.05310125666715294,
+    "mathematics": 0.10575305786934078,
+    "medical": 0.13530205098715442,
+    "natural_science": 0.10619398366459229,
+    "social_science": 0.08528769943578221
+  },
+  "prior_target_em": {
+    "business_economics": 0.14372981280664932,
+    "computer_science": 0.10452010627476024,
+    "education": 0.07930017173367775,
+    "general": 0.037452426747522825,
+    "history_culture": 0.14163628316920235,
+    "legal": 0.05969542603730562,
+    "mathematics": 0.10331040672924267,
+    "medical": 0.15471786382985178,
+    "natural_science": 0.10090968729365897,
+    "social_science": 0.07472781537812914
+  },
+  "weights": {
+    "business_economics": 1.2830611029907366,
+    "computer_science": 0.951413352578232,
+    "education": 0.8125929851755725,
+    "general": 0.3749432560890253,
+    "history_culture": 1.4586815683276604,
+    "legal": 1.3920868492851477,
+    "mathematics": 0.9126634310391114,
+    "medical": 1.4469816212026227,
+    "natural_science": 0.8697447509305161,
+    "social_science": 0.7149632184028893
+  },
+  "em": {
+    "n_iter": 45,
+    "converged": true,
+    "tolerance": 1e-10
+  },
+  "diagnostic_not_for_selection": {
+    "actual_single_row_share": {
+      "business_economics": 0.11589403973509933,
+      "computer_science": 0.09966887417218544,
+      "education": 0.11589403973509933,
+      "general": 0.057947019867549666,
+      "history_culture": 0.11589403973509933,
+      "legal": 0.04966887417218543,
+      "mathematics": 0.11589403973509933,
+      "medical": 0.11589403973509933,
+      "natural_science": 0.11589403973509933,
+      "social_science": 0.09735099337748344
+    },
+    "actual_all_rows_share_compound_split_evenly": {
+      "business_economics": 0.11253333333333333,
+      "computer_science": 0.09946666666666666,
+      "education": 0.1128,
+      "general": 0.06533333333333333,
+      "history_culture": 0.11253333333333333,
+      "legal": 0.0608,
+      "mathematics": 0.11253333333333333,
+      "medical": 0.11386666666666667,
+      "natural_science": 0.11253333333333333,
+      "social_science": 0.0976
+    },
+    "pi_t_minus_actual_all": {
+      "business_economics": 0.031196479473315983,
+      "computer_science": 0.005053439608093582,
+      "education": -0.03349982826632225,
+      "general": -0.0278809065858105,
+      "history_culture": 0.029102949835869016,
+      "legal": -0.0011045739626943801,
+      "mathematics": -0.009222926604090659,
+      "medical": 0.04085119716318511,
+      "natural_science": -0.011623646039674362,
+      "social_science": -0.022872184621870864
+    }
+  },
+  "agreement_none_vs_actual": {
+    "selected_agreement": 0.9957310565635006,
+    "dispatched_set_agreement": 0.9842582710779082,
+    "n_selected_mismatch": 16,
+    "n_dispatched_mismatch": 59,
+    "max_abs_conf_diff": 0.24127359826374806,
+    "mean_abs_conf_diff": 0.0045559185440646206
+  },
+  "summary_actual_common": {
+    "top1": 0.8497865528281751,
+    "top1_single": 0.8605036447978794,
+    "top1_compound": 0.8054794520547945,
+    "ece": 0.037400736153500695,
+    "ece_single": 0.02112279018130816,
+    "ece_compound": 0.11222306659075912,
+    "signed_gap": {
+      "mean_conf": 0.8131490601982864,
+      "mean_acc": 0.8497865528281751,
+      "gap": -0.03663749262988869
+    },
+    "signed_gap_single": {
+      "mean_conf": 0.8421489450743641,
+      "mean_acc": 0.8605036447978794,
+      "gap": -0.018354699723515333
+    },
+    "signed_gap_compound": {
+      "mean_conf": 0.6932563854640353,
+      "mean_acc": 0.8054794520547945,
+      "gap": -0.1122230665907592
+    },
+    "compound_domain_set_recall": 0.5732876712328767,
+    "compound_mean_dispatched_count": 1.9808219178082191,
+    "mean_k_all": 1.524546424759872,
+    "k_dist_compound": {
+      "4": 228,
+      "1": 470,
+      "2": 32
+    },
+    "k_dist_single": {
+      "1": 2538,
+      "4": 385,
+      "2": 95
+    }
+  },
+  "summary_none": {
+    "top1": 0.8503201707577375,
+    "top1_single": 0.8605036447978794,
+    "top1_compound": 0.8082191780821918,
+    "ece": 0.03712515317810172,
+    "ece_single": 0.020061232083901058,
+    "ece_compound": 0.1146411598503047,
+    "signed_gap": {
+      "mean_conf": 0.8134879860861371,
+      "mean_acc": 0.8503201707577375,
+      "gap": -0.03683218467160032
+    },
+    "signed_gap_single": {
+      "mean_conf": 0.8424920538573771,
+      "mean_acc": 0.8605036447978794,
+      "gap": -0.01801159094050231
+    },
+    "signed_gap_compound": {
+      "mean_conf": 0.693578018231887,
+      "mean_acc": 0.8082191780821918,
+      "gap": -0.11464115985030476
+    },
+    "compound_domain_set_recall": 0.5746575342465754,
+    "compound_mean_dispatched_count": 1.9753424657534246,
+    "mean_k_all": 1.5248132337246532,
+    "k_dist_compound": {
+      "4": 227,
+      "1": 472,
+      "2": 31
+    },
+    "k_dist_single": {
+      "1": 2539,
+      "4": 388,
+      "2": 91
+    }
+  },
+  "summary_corrected": {
+    "top1": 0.8415154749199573,
+    "top1_single": 0.8545394300861497,
+    "top1_compound": 0.7876712328767124,
+    "ece": 0.018874938092904154,
+    "ece_single": 0.01359816810873365,
+    "ece_compound": 0.07669191024866912,
+    "signed_gap": {
+      "mean_conf": 0.8229311848817529,
+      "mean_acc": 0.8415154749199573,
+      "gap": -0.018584290038204387
+    },
+    "signed_gap_single": {
+      "mean_conf": 0.8484658732789045,
+      "mean_acc": 0.8545394300861497,
+      "gap": -0.006073556807245195
+    },
+    "signed_gap_compound": {
+      "mean_conf": 0.7173644868233913,
+      "mean_acc": 0.7876712328767124,
+      "gap": -0.0703067460533211
+    },
+    "compound_domain_set_recall": 0.5541095890410959,
+    "compound_mean_dispatched_count": 1.9342465753424658,
+    "mean_k_all": 1.5130736392742796,
+    "k_dist_compound": {
+      "4": 220,
+      "1": 488,
+      "2": 22
+    },
+    "k_dist_single": {
+      "1": 2545,
+      "2": 89,
+      "4": 384
+    }
+  },
+  "delta": {
+    "top1": -0.008804695837780208,
+    "top1_single": -0.005964214711729698,
+    "top1_compound": -0.020547945205479423,
+    "ece": -0.018250215085197568,
+    "compound_domain_set_recall": -0.020547945205479534,
+    "compound_mean_dispatched_count": -0.041095890410958846,
+    "mean_k_all": -0.011739594450373536
+  },
+  "changes": {
+    "n_argmax_changed": 186,
+    "transitions": {
+      "wrong->correct": 50,
+      "wrong->wrong": 42,
+      "correct->wrong": 83,
+      "correct->correct": 11
+    },
+    "net_top1_rows": -33,
+    "pairs": {
+      "education->medical": 46,
+      "education->history_culture": 19,
+      "education->legal": 15,
+      "natural_science->medical": 13,
+      "education->business_economics": 11,
+      "social_science->history_culture": 11,
+      "social_science->legal": 7,
+      "mathematics->business_economics": 6,
+      "general->medical": 6,
+      "general->business_economics": 6,
+      "general->history_culture": 5,
+      "social_science->medical": 5,
+      "business_economics->medical": 4,
+      "mathematics->medical": 4,
+      "natural_science->history_culture": 3,
+      "social_science->business_economics": 3,
+      "computer_science->medical": 3,
+      "general->computer_science": 2,
+      "general->social_science": 2,
+      "natural_science->computer_science": 2,
+      "general->mathematics": 2,
+      "business_economics->history_culture": 2,
+      "general->education": 1,
+      "general->legal": 1,
+      "computer_science->business_economics": 1,
+      "education->natural_science": 1,
+      "legal->history_culture": 1,
+      "social_science->mathematics": 1,
+      "computer_science->history_culture": 1,
+      "social_science->education": 1,
+      "general->natural_science": 1
+    },
+    "pairs_single_with_truth": {
+      "[education] education->medical": 12,
+      "[medical] education->medical": 11,
+      "[education] education->history_culture": 8,
+      "[education] education->legal": 7,
+      "[education] education->business_economics": 6,
+      "[social_science] social_science->legal": 6,
+      "[medical] natural_science->medical": 5,
+      "[general] general->history_culture": 4,
+      "[legal] education->legal": 4,
+      "[business_economics] education->business_economics": 3,
+      "[education] social_science->history_culture": 3,
+      "[medical] general->medical": 3,
+      "[natural_science] natural_science->medical": 3,
+      "[history_culture] social_science->history_culture": 3,
+      "[computer_science] general->computer_science": 2,
+      "[general] education->legal": 2,
+      "[general] general->business_economics": 2,
+      "[social_science] social_science->history_culture": 2,
+      "[social_science] education->legal": 2,
+      "[medical] social_science->medical": 2,
+      "[business_economics] general->business_economics": 2,
+      "[mathematics] mathematics->business_economics": 2,
+      "[business_economics] mathematics->business_economics": 1,
+      "[business_economics] education->history_culture": 1,
+      "[education] general->medical": 1,
+      "[education] general->education": 1,
+      "[general] general->social_science": 1,
+      "[general] general->legal": 1,
+      "[general] natural_science->computer_science": 1,
+      "[general] general->mathematics": 1,
+      "[general] natural_science->history_culture": 1,
+      "[legal] education->history_culture": 1,
+      "[mathematics] general->mathematics": 1,
+      "[medical] education->history_culture": 1,
+      "[social_science] social_science->business_economics": 1,
+      "[social_science] education->history_culture": 1,
+      "[medical] business_economics->medical": 1,
+      "[medical] general->business_economics": 1,
+      "[education] natural_science->medical": 1,
+      "[education] mathematics->business_economics": 1,
+      "[education] social_science->medical": 1,
+      "[education] social_science->legal": 1,
+      "[business_economics] social_science->business_economics": 1,
+      "[business_economics] social_science->history_culture": 1,
+      "[business_economics] education->medical": 1,
+      "[natural_science] natural_science->computer_science": 1,
+      "[mathematics] mathematics->medical": 1,
+      "[history_culture] education->history_culture": 1,
+      "[history_culture] general->history_culture": 1,
+      "[history_culture] business_economics->history_culture": 1,
+      "[social_science] social_science->medical": 1,
+      "[social_science] social_science->education": 1,
+      "[social_science] general->social_science": 1,
+      "[social_science] education->medical": 1,
+      "[general] general->natural_science": 1,
+      "[general] general->medical": 1
+    },
+    "n_compound_dispatched_set_changed": 145,
+    "compound_k_change": {
+      "4->4": 45,
+      "4->1": 43,
+      "2->1": 8,
+      "4->2": 6,
+      "1->4": 34,
+      "2->4": 8,
+      "1->2": 1
+    }
+  },
+  "mcnemar_all": {
+    "discordant_a_only": 50,
+    "discordant_b_only": 83,
+    "discordant_pairs": 133,
+    "chi2_statistic": 7.6992481203007515,
+    "p_value": 0.005524383307810687
+  },
+  "mcnemar_single": {
+    "discordant_a_only": 44,
+    "discordant_b_only": 62,
+    "discordant_pairs": 106,
+    "chi2_statistic": 2.7264150943396226,
+    "p_value": 0.0987006078521504
+  },
+  "mcnemar_compound": {
+    "discordant_a_only": 6,
+    "discordant_b_only": 21,
+    "discordant_pairs": 27,
+    "chi2_statistic": 7.2592592592592595,
+    "p_value": 0.007053637888068565
+  },
+  "recall_diff": {
+    "business_economics": {
+      "recall_none": 0.917004048582996,
+      "recall_corrected": 0.9271255060728745,
+      "diff": 0.010121457489878471
+    },
+    "computer_science": {
+      "recall_none": 0.8539325842696629,
+      "recall_corrected": 0.851685393258427,
+      "diff": -0.0022471910112359383
+    },
+    "education": {
+      "recall_none": 0.5,
+      "recall_corrected": 0.4112903225806452,
+      "diff": -0.08870967741935482
+    },
+    "general": {
+      "recall_none": 0.4158730158730159,
+      "recall_corrected": 0.38095238095238093,
+      "diff": -0.03492063492063496
+    },
+    "history_culture": {
+      "recall_none": 0.854251012145749,
+      "recall_corrected": 0.8765182186234818,
+      "diff": 0.022267206477732837
+    },
+    "legal": {
+      "recall_none": 0.5588235294117647,
+      "recall_corrected": 0.5686274509803921,
+      "diff": 0.009803921568627416
+    },
+    "mathematics": {
+      "recall_none": 0.7591093117408907,
+      "recall_corrected": 0.7469635627530364,
+      "diff": -0.012145748987854255
+    },
+    "medical": {
+      "recall_none": 0.7992047713717694,
+      "recall_corrected": 0.8628230616302187,
+      "diff": 0.06361829025844934
+    },
+    "natural_science": {
+      "recall_none": 0.7200811359026369,
+      "recall_corrected": 0.7018255578093306,
+      "diff": -0.018255578093306246
+    },
+    "social_science": {
+      "recall_none": 0.5707762557077626,
+      "recall_corrected": 0.541095890410959,
+      "diff": -0.029680365296803624
+    }
+  },
+  "c1_significant": [
+    "education_recall",
+    "general_recall",
+    "general_precision",
+    "history_culture_recall",
+    "medical_recall",
+    "natural_science_recall",
+    "social_science_recall"
+  ],
+  "c1_min_p": 2.2975887858933675e-10,
+  "passed": false,
+  "pass_rule": "delta_top1 >= +0.005 and net_top1_rows > 2 (common rows)"
+}
