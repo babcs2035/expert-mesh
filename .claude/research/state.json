@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 109,
-  "iteration_name": "訓練と評価のドメイン事前分布の差を EM で補正する",
+  "iteration": 110,
+  "iteration_name": "取り違えの多いクラス対を文字 n-gram で並べ直す",
   "phase": "evaluate",
   "status": "running",
-  "current_lever": "test_time_label_shift_prior_correction",
+  "current_lever": "confusable_pair_lexical_rerank",
   "experiment_dir": null,
   "experiment_deadline": null,
-  "updated_at": 1791137038,
+  "updated_at": 1791167114,
   "last_slack_ts": "1791164036.153749",
-  "iteration_thread_ts": "1791164036.153749",
+  "iteration_thread_ts": "1791168389.255849",
   "notion_toggle_created": true,
-  "last_commit": "a081899"
+  "last_commit": "cb5a294"
 }

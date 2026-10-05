@@ -3006,6 +3006,25 @@ levers:
             発火の証拠: 新しい artifact の MD5 が c7172ad37c10e1082a42481553ae25b0 と異なること，class_prior_weights がすべて 1 ではないこと，deploy 後の全ノードのコンテナ内で MD5 が一致すること．
             成功条件: success_criteria (9) を参照．"}
 
+  - {name: confusable_pair_lexical_rerank, values: ["char_1-3gram_tfidf_lr,top4_pairs,mix=0.5"],
+     note: "[2026-10-05 Iter110・backlog B209/B210] levers を使い切ったので，B208 の申し送り（tavily-search による重点調査）を受けて追加した．
+            着想は Hinton, Vinyals, Dean（arXiv:1503.02531，2015）の specialist model（generalist の上位候補に限り，取り違えの多いクラスの集合に特化したモデルで決め直す）である．
+            M6（同じ埋め込みの上で対ごとに分類器を作っても新しい情報は増えない）を受けて，埋め込みとは別の入力（クエリの文字 n-gram）を使う点が異なる．
+            単一レバー: 分類器の出力を，補間と温度の後の確率 p から，取り違えの多い対に限って並べ直した p' へ変える．
+            対の選び方（事前登録．評価のラベルとクエリは使わない）: 訓練の外側 5-fold（seed 104）の OOF で，いまの構成の誤答を順序なしの対に集計し，行数の多い順に最大 4 対を取る（5 行未満の対は取らない）．
+            対ごとの語彙モデル: その 2 クラスの訓練行だけで，TfidfVectorizer(analyzer=char, ngram_range=(1,3), sublinear_tf=True) を query[:200] に当て，LogisticRegression(C=1.0, class_weight=balanced) を訓練する．C は選び直さない．
+            発火の条件と並べ直し: p の上位 2 クラスが選んだ対に一致する行だけで，2 クラスの質量 m = p_a + p_b を保ち，対の中の比を s_a = 0.5 p_a/m + 0.5 r_a に変える（r_a は語彙モデルの確率）．他のクラスは変えない．
+            混合の重みは 0.5 に固定し，学習しない（訓練行の少ない条件でスタッキングが単体を下回った報告がある．arXiv:2504.08527 が引く Fabien ら）．
+            変更箇所（案．実装フェーズで確かめる）: knn_interpolated_head.py と同じ形の包み（classes_ と predict_proba を持ち，内側に現行の KnnInterpolatedClassifier を持つ）を新設し，対と語彙モデルを artifact に書き込む．
+            分類器の入口は埋め込みだけを受け取るので，classifier.py:51-70 の estimate_confidence_classifier に query_summary を渡す引数を足し，http_server.py:378-380 から body.query_summary を渡す．
+            query_summary はクエリの先頭 200 文字（node.py:34，node.py:211）で，protocol.py:26 にすでにあるので，プロトコルは変えない．訓練と replay でも query[:200] を使い，本番と揃える．
+            固定する構成: 内側の artifact（MD5 c7172ad37c10e1082a42481553ae25b0，k=2，λ=0.3，T=0.9426），dispatch_gap_threshold 0.36，dispatch_gap_max_k 4，max_confidence，埋め込み，config.yaml，data/classifier_train_iter94_dedup.jsonl．
+            前提の弱さ: 写像の曖昧な対（japanese_civics など）では文面に 2 クラスの手がかりが両方あり，語彙でも分けられない見込みが高い（Uma ら，Frontiers in AI 2022 からの推定）．上位 2 候補に正解が無い行は直らない．
+            埋め込みと語彙特徴の併用の効果は，短文・日本語の査読つきの対照実験では確かめられなかった．このため Step 0a の誤答行の重なりで早く足切りする．
+            到達条件: http_server.py:428 → classifier.py:48 で artifact を読み，http_server.py:378-380 → classifier.py:66-69 → 新しい包みの predict_proba が並べ直す．前提は routing_method: supervised_classifier，confidence_signal_method: self_report，ドメインが classes_ に含まれること．
+            発火の証拠: 新しい artifact の MD5 が c7172ad37c10e1082a42481553ae25b0 と異なること，本走で並べ直しが発火した行数が 0 でないこと，deploy 後の全ノードのコンテナ内で MD5 が一致すること．
+            成功条件: success_criteria (10) を参照．"}
+
 # 研究フロンティア（README「既知の制約と今後の課題」由来．新規実装や実データセット整備を伴うため，
 # levers を試し切ってから，または backlog 経由で人間判断のうえ着手する）
 #
@@ -3124,7 +3143,14 @@ success_criteria: "【2026-07-31 改訂】E1（評価集合の拡張）は Iter1
       Step 0（replay）: 同じ評価キャッシュの上の『補正 − 無補正』で，Δtop1 ≥ +0.5pt かつノイズの床（B200: top1 の正味 ±2 行）を超えること．満たさなければ artifact を変えずにクローズし，本走は行わない（Iter93，Iter108 と同じ扱い）．
       Step 0 では π_s，π_t，ドメインごとの重み，EM の収束，argmax が変わった行数とその向きを記録する．π_t と評価の実際の分布との差は診断のためだけに記録し，選択には使わない．
       主基準（本走）: 基準線 results/20261004_225553 に対し，共通行（dispatch_failed を除く）で Δtop1 ≥ +0.5pt かつ McNemar の両側 p < 0.05．
-      非退行: Iter107 の C1〜C7（C1 は 20 指標，BH q=0.05 で有意な退行 0 件）．legal と general の recall の差を併記する．ECE は新旧の定義を併記し，判定は旧の定義で行う（B203 の A1-1）．決定を変えるレバーなので本走を行う．"
+      非退行: Iter107 の C1〜C7（C1 は 20 指標，BH q=0.05 で有意な退行 0 件）．legal と general の recall の差を併記する．ECE は新旧の定義を併記し，判定は旧の定義で行う（B203 の A1-1）．決定を変えるレバーなので本走を行う．
+  (10) 【新設 2026-10-05・Iter110・B210】取り違えの多い対に限り，上位 2 候補を語彙モデルで並べ直すレバー（confusable_pair_lexical_rerank）に適用する．Step 0 は CPU だけで行い，本番を変えない．評価のラベルとクエリは 0c まで使わない．
+      Step 0a: 訓練の外側 5-fold（seed 104）の OOF で，選んだ対の行に限り，語彙モデルの誤答行といまの分類器の誤答行の重なり（AGREE）を測る．AGREE が 85% 以上なら新しい情報は増えないとみなしてクローズする（M6 の OvO 87.6% / ECOC 93.9% と同じ尺度）．
+      Step 0b: 入れ子 CV（外側 fold の訓練部分だけで対の選択と語彙モデルの訓練を行う）で，OOF top1 が none を +0.5pt 以上上回り，かつ 5 fold のうち 4 fold 以上で上回ること．
+      Step 0c: 同じ評価キャッシュの上の replay の共通行 3,748 行で，Δtop1 ≥ +0.5pt かつ正味 +3 行以上（B200 のノイズの床 ±2 行を超える）．McNemar を併記する．発火した行数，対ごとの改善と悪化の行数を記録する．
+      どの段でも満たさなければ artifact を変えずにクローズし，本走は行わない（Iter93，Iter108，Iter109 と同じ扱い）．
+      主基準（本走）: 基準線 results/20261004_225553 に対し，共通行（dispatch_failed を除く）で Δtop1 ≥ +0.5pt かつ McNemar の両側 p < 0.05．top1 の正味の行数を併記する．
+      非退行: Iter107 の C1〜C7（C1 は 20 指標，BH q=0.05 で有意な退行 0 件）．選んだ対の 2 クラスの recall の差を併記する．ECE は新旧の定義を併記し，判定は旧の定義で行う（B203 の A1-1）．決定を変えるレバーなので本走を行う．"
 
 slack:
   channel: "#research-cycle"

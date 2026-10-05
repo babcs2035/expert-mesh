@@ -1,3 +1,83 @@
+## Iteration 110: 取り違えの多いクラス対を文字 n-gram で並べ直す
+
+このブロックの前半（「判断」の行まで）は，rc-researcher の報告をもとにオーケストレータが挿入した（rc-researcher はツールの呼び出しの形式を誤り，記録の前にツールを使えなくなった．起動モードは tenbin）．「文献調査」以降は，再委譲した rc-researcher が書いた．見出しは iteration_name の案に合わせて書き換えた（state.json への反映はオーケストレータが行う）．
+
+### Iteration 110 調査・計画（2026-10-05）
+
+- 調査: tavily-search は実行できなかった（skill の読み込みまでは成功した）．外部の出典は無い．
+- 確かめた事実: M6（`journal_archive.md` 2628〜2702 行目）により，同じ埋め込みの上で対ごとに分類器を作っても新しい情報は増えない（OvO と ECOC の誤答行の重なり AGREE 87.6% / 93.9%）．訓練ファイル `data/classifier_train_iter94_dedup.jsonl` は `query` を持つので，語彙特徴は写像を変えずに作れる．
+- 過去の試行との照合（オーケストレータが grep で確かめた．キーワード: tf-idf，n-gram，bm25，lexical，語彙特徴，char_wb，bag of words）: 語彙特徴を分類の入力として実装した記録は無い．Iter54 の調査で「education 関連キーワードの TF-IDF」が候補に挙がったが，rc-reflector が argmax の反転率 15〜30% のおそれを指摘し，実装していない（`journal_archive.md:23129`）．Iter59 の BM25 は retrieve-then-rerank の文献例として触れただけである（`journal_archive.md:20432`）．n-gram の重なり率は echo の除去（データの掃除）で使ったもので，分類の特徴ではない．
+- 候補 C1（未確定）: `confusable_pair_lexical_rerank`．訓練の OOF の混同行列で決めた対に限り，上位 2 候補を文字 n-gram の TF-IDF の LR で並べ直す．対象の候補は Iter108 の 2a の education → business_economics（japanese_civics）37 行，education → medical 16 行，education → history_culture 16 行，medical → education 11 行．
+- Step 0 の案（CPU だけで，本番を変えない．評価のラベルとクエリは 0c まで使わない）: 0a は訓練の外側 5-fold（seed 104）の OOF で語彙特徴の LR と現行の分類器の誤答行の重なりを測り，AGREE が 85% 以上ならクローズする．0b は入れ子 CV で OOF top1 が none を +0.5pt 以上かつ 4/5 fold 以上で上回ること．0c は replay の共通行 3,748 行で Δtop1 が +0.5pt 以上かつ正味 +3 行以上（B200 の床 ±2 行を超える）．McNemar を併記する．
+- 未確認: 外部の文献の裏付け．写像が曖昧な対（心理学や哲学など）では語彙も 2 クラスで共有されている見込みがあり，その場合は語彙特徴でも新しい情報は増えない（推定）．
+- 判断: 文献の裏付けが無いので，levers には追記していない（B209）．
+- 文献調査（rc-researcher の再委譲，tavily-search，検索ごとに追記する）:
+  - 検索 1（問い (a)，埋め込みと TF-IDF の併用）: 査読つきの対照実験は見つからなかった．見つかったのは解説記事「How to Combine LLM Embeddings + TF-IDF + Metadata in One Scikit-learn Pipeline」（Iván Palomares Carrascosa，MachineLearningMastery.com，2026，https://machinelearningmastery.com/how-to-combine-llm-embeddings-tf-idf-metadata-in-one-scikit-learn-pipeline ）と，プレプリント「A Hybrid TF–IDF and SBERT Approach for Enhanced Text Classification Performance」（preprints.org 202510.2427，2025，著者は抜粋に無い，https://www.preprints.org/manuscript/202510.2427 ）である．いずれも併用の手順を示すが，効果の大きさは抜粋からは確かめられない．短文や日本語の事例は無い．
+  - 検索 2（問い (a) の補足，疎と密の特徴の相補性）: 上のプレプリント（preprints.org 202510.2427）の表 2 では，TF–IDF と SBERT を併用した線形 SVM の accuracy が 0.892 である．ただし本文は ablation の数値を「同種の研究と整合する現実的な改善」と書いており，実測値かどうかを抜粋からは判断できないので，根拠には使わない．「Comparison and Combination of Sentence Embeddings Derived from Different Supervision Signals」（*SEM 2022，著者は抜粋に無い，https://aclanthology.org/2022.starsem-1.12.pdf ）は，STS を語の重なりの比で分けると，SBERT は表層が似た文対の意味の差をよく捉えると報告する．語彙の重なりと埋め込みの判断が食い違う領域があることの傍証にとどまり，分類での利得は示さない．
+  - 検索 3（問い (b)，混同行列で決めた対に特化した分類器）: 結果の多くは混同行列の解説だった．関連するのは「Training Highly Multiclass Classifiers」（Gupta, Bengio, Weston，JMLR 15，2014，https://jmlr.org/papers/volume15/gupta14a/gupta14a.pdf ）だけである．一度訓練した分類器から経験的なクラス混同確率の行列を求め，それを使って再訓練する逐次の手順を述べる．混同行列を使って取り違えの多い対に資源を寄せる考え方の前例になるが，同じ特徴の上での再訓練なので，M6 の制約（新しい情報が増えない）は解かない．
+  - 検索 4（問い (b) の補足，specialist model）: 「Distilling the Knowledge in a Neural Network」（Hinton, Vinyals, Dean，arXiv:1503.02531，2015，https://arxiv.org/abs/1503.02531 ）は，generalist が取り違えるクラスの集合（generalist の共分散行列の列を K-means でまとめる）ごとに specialist を作り，generalist の上位 n 候補に関わる specialist だけを使って top1 を決める 2 段の手順を示す．C1 の「混同で決めた対に限って上位候補を並べ直す」形の直接の前例である．ただし specialist は generalist の重みから再訓練するので表現そのものが変わる．C1 は表現を変えず，埋め込みとは別の入力（文字 n-gram）を足す点が異なる．Hinton の講演（YouTube「Distilling the Knowledge in a Neural Network - Geoffrey Hinton」）では，generalist が候補を外した場合は specialist でも回復しないと述べている．C1 で言えば，正解が上位 2 候補に入っていない行は直らない．
+  - 検索 5（問い (c)，ラベルの定義が重なるクラス）: 「Scaling and Disagreements: Bias, Noise, and Ambiguity」（Uma ら，Frontiers in Artificial Intelligence 2022，PMC9012579，https://pmc.ncbi.nlm.nih.gov/articles/PMC9012579 ）は，カテゴリが互いに排他でなく重なる注釈の方式では，1 つを選ばされた注釈者の選択はほぼ無作為になると報告する（Uma ら 2021b の分析を引く）．この場合の誤りはラベルの側にあり，入力の特徴をどう増やしても減らない（Bayes 誤差の側）．本件で言えば，写像が曖昧なタスク（japanese_civics など）の行は同じクエリの文面に 2 クラスの手がかりが両方あるので，語彙特徴でも分けられない見込みが高い（推定．文献は分類器の特徴の追加を直接は検証していない）．
+  - 検索 6（問い (a) の日本語の事例）: 「Integrated ensemble of BERT- and features-based models for authorship attribution in Japanese literary works」（arXiv:2504.08527，2025，著者は抜粋に無い，https://arxiv.org/html/2504.08527v1 ）は，日本語の文書で BERT と文体の特徴量のモデルを統合する．関連研究として，Fabien らが BERT の出力と文体・文構造の特徴を LR でスタッキングしたところ，著者あたりの訓練例が 100 以下の場合を含む 4 データセットで，ほとんどのスコアが BERT 単体を下回ったと引いている．訓練行の少ないクラス（本件の legal 77 行など）でスタッキングの学習器が過学習すると，併用は逆効果になりうる．統合の利得の大きさは抜粋からは確かめられない．
+  - 調査のまとめ: C1 の形（generalist の上位候補に限り，取り違えの多いクラスの集合に特化したモデルで並べ直す）は Hinton ら 2015 に直接の前例がある．埋め込みと語彙特徴の併用の効果は，査読つきの短文・日本語の対照実験では確かめられなかった（プレプリントと解説記事だけ）．小さい訓練集合ではスタッキングが単体を下回る報告がある（arXiv:2504.08527 が引く Fabien ら）．ラベルの定義が重なる行では，特徴を増やしても誤りは減らない見込みが高い（Uma ら 2022）．文献だけでは効果の有無を決められないので，判断は Step 0a（誤答行の重なり）の実測に委ねる．
+- 到達経路の確認（コードを読んで確かめた）: いまの分類器の入口は埋め込みだけを受け取る（`classifier.py:51-70` の `estimate_confidence_classifier`，`knn_interpolated_head.py:135` の `predict_proba(X)`）．プローブのリクエストは `query_summary` を持ち（`protocol.py:26`），中身はクエリの先頭 200 文字である（`node.py:34` の `QUERY_SUMMARY_MAX_LENGTH = 200`，`node.py:211`）．`http_server.py:378-380` は現在 `body.query_embedding` だけを渡している．訓練のクエリの長さは中央値 103 文字，90 パーセンタイル 238 文字，最大 1,239 文字なので，訓練と replay でも語彙特徴は `query[:200]` から作り，本番と揃える．プロトコル（API のスキーマ）は変えずに済む．
+- 判断: C1 を採る（B210）．config.yml の levers 末尾に `confusable_pair_lexical_rerank` を追記し，success_criteria に (10) を新設した．
+- 仮説: 取り違えの多い対では，埋め込みが 2 クラスを近くに置くので，同じ埋め込みの上で決定層を変えても情報は増えない（M6）．文字 n-gram は埋め込みとは別の経路の情報（固有の用語，表記）を持つので，対の中の並びを一部直せる．ただし，写像が曖昧で文面に 2 クラスの手がかりが両方ある行（japanese_civics など）は直らない（Uma ら 2022 からの推定）．
+- 単一レバー: 分類器の出力を，いまの補間と温度の後の確率 p から，次の並べ直しを加えた p' へ変える．
+  - 対の選び方（事前登録．評価のラベルとクエリは使わない）: 訓練の外側 5-fold（seed 104）の OOF で，いまの構成の誤答を順序なしの対に集計し（両方向の和），行数の多い順に最大 4 対を取る．ただし 5 行未満の対は取らない．
+  - 対ごとの語彙モデル: その 2 クラスの訓練行だけで，`TfidfVectorizer(analyzer="char", ngram_range=(1, 3), sublinear_tf=True)` を `query[:200]` に当て，`LogisticRegression(C=1.0, class_weight="balanced")` を訓練する．C は選び直さない．
+  - 発火の条件: p の上位 2 クラスが選んだ対に一致する行だけ．
+  - 並べ直し: 2 クラスの質量 m = p_a + p_b は保ち，対の中の比を s_a = 0.5 · p_a / m + 0.5 · r_a に変える（r_a は語彙モデルの確率）．p'_a = m · s_a，p'_b = m · (1 − s_a)，他のクラスは変えない．重みを学習しないのは，訓練行の少ない条件でスタッキングの学習器が単体を下回った報告（arXiv:2504.08527 が引く Fabien ら）があるためである．
+- 固定する構成: `models/domain_classifier.joblib` の中身（MD5 c7172ad37c10e1082a42481553ae25b0，k=2，λ=0.3，T=0.9426．新しい artifact はこれを内側に包む），dispatch_gap_threshold 0.36，dispatch_gap_max_k 4，max_confidence，埋め込み，`config.yaml`，訓練ファイル `data/classifier_train_iter94_dedup.jsonl`．
+- 期待効果: 上限は「正解が上位 2 候補に入っていて，対が選ばれた行」に限られる（Hinton の講演の指摘のとおり，上位 2 候補を外した行は直らない）．Iter108 の 2a の候補（合計 80 行）が上限の目安で，そのうち写像の曖昧な行は直らない見込みなので，Δtop1 は +0.5pt 前後が上限と見る（推定）．
+- 成功条件: success_criteria (10) を参照．Step 0a（OOF で語彙モデルと現行の誤答行の重なり AGREE が 85% 以上ならクローズ），0b（入れ子 CV の OOF top1 が none を +0.5pt 以上，かつ 4/5 fold 以上で上回る），0c（replay の共通行 3,748 行で Δtop1 ≥ +0.5pt かつ正味 +3 行以上，McNemar を併記）の 3 段を満たしたときだけ本走へ進む．本走の主基準は基準線 results/20261004_225553 に対し Δtop1 ≥ +0.5pt かつ McNemar の両側 p < 0.05．
+- Step 0a の AGREE の定義（測る前にオーケストレータが確定した．success_criteria (10) は分母を書いていないため）: 対象の行は，外側 5-fold（seed 104）の OOF で発火の条件（温度後の p の上位 2 クラスが選んだ対に一致）を満たし，かつ正解がその対に含まれる行とする．判定に使う AGREE は「いまの分類器の誤答行のうち，語彙モデル（同じ fold の訓練部分の 2 クラスの行だけで学習）も誤る行の割合」とする．語彙モデルで直せる行の上限が 1 − AGREE になるので，この向きを判定に使う．逆向き（語彙モデルの誤答のうち，いまの分類器も誤る割合）と，対ごとの内訳は併記するだけにする．0a の対の選択は非入れ子の OOF で行い，入れ子にするのは 0b からである．
+
+### Iteration 110 実装・実験（2026-10-05）
+
+- 実行者についての注記: Step 0a と 0b のスクリプトの作成と実行は，rc-executor に委譲せずオーケストレータが行った（SKILL.md「1 イテレーションの進め方」の手順違反．B211 に記録）．開発ホストの CPU だけで実行し，artifact，`config.yaml`，本番のコードは変えていない．`_iter105_replay_temp.py` の `load_cache`，`run_outer_fold`，`apply_temperature` を流用した．
+- Step 0a の結果（`_iter110_step0a.py`，`_iter110_step0a.json`，CPU のみ）: OOF top1 0.8268．選ばれた対は education|medical（誤答 51 行），medical|natural_science（43），education|social_science（31），business_economics|education（29）．発火 697 行，対象 644 行（正解が対の外の発火 53 行は対象外）．いまの分類器の誤答 122 行，語彙モデルの誤答 142 行，両方の誤答 59 行．**AGREE = 59/122 = 48.4%**（逆向き 41.5%）で閉じる条件（≥ 85%）を満たさないので，0b へ進む．直せる行の上限は 63 行．
+  - 読み: AGREE が低いことは，語彙モデルが独立な情報を持つ証拠とは限らない．対象の行での語彙モデルの正解率は 71.7〜85.5% で，medical|natural_science では 73.8%（いまの分類器は 82.9%）とむしろ弱い．弱い語彙モデルの誤りは，雑音であってもいまの分類器の誤りと重ならないので，AGREE を下げる．M6 の OvO/ECOC は同じ埋め込みの上の分類器同士で正解率も近かったので，AGREE の尺度をそのまま比べられない点に注意する．
+  - 診断（判定に使わない．対の選択に検証行が漏れている）: 並べ直した OOF top1 は 0.8286（+0.18pt，wrong→correct 10 行，correct→wrong 6 行）．漏れがある条件でも 0b の基準 +0.5pt に届いておらず，0b は通らない見込み（推定）．
+- Step 0b の結果（`_iter110_step0b.py`，`_iter110_step0b.json`，CPU のみ．入れ子 CV で，対の選択と語彙モデルの学習は外側の訓練部分だけで行った）: 外側 top1 の平均は none 0.8268 → 並べ直し 0.8290（**+0.22pt**）．fold ごとの差は 0.00 / +0.66 / −0.22 / +0.66 / 0.00pt で，**上回ったのは 2/5 fold**．正味は合計 +5 行（wrong→correct 12 行，correct→wrong 7 行．rc-evaluator が `_iter110_step0b.json` の fold ごとと対ごとの値から数え直して訂正した．当初は 16 行と 11 行と書いていた）．進む条件（平均 +0.5pt 以上かつ 4/5 fold 以上）を両方とも満たさないので**不通過**．0c と本走は行わず，artifact を変えずにクローズする（success_criteria (10)）．
+  - 選ばれた対は fold で変わった（education|medical と medical|natural_science は全 fold，business_economics|education は 4 fold，education|legal と education|social_science は 3 fold と 2 fold）．
+  - 対ごとの遷移（5 fold の合計）: education|medical 発火 176 行で +7/−4，medical|natural_science 217 行で +0/−1，business_economics|education 110 行で +3/−0，education|legal 45 行で +2/−1，education|social_science 94 行で +0/−1．
+  - 読み: 0a の「直せる行の上限 63 行」のうち実際に直ったのは 12 行で，7 行の正答が崩れた（rc-evaluator が訂正した．当初は 16 行と 11 行）．語彙モデルの対象の行での正解率（71.7〜85.5%）がいまの分類器と同程度かそれ以下なので，混合の重み 0.5 では argmax を動かすことが少なく，動かした行も両方向に割れる．0a の AGREE 48.4% は独立な情報ではなく，主に語彙モデルの誤りの雑音を測っていたと読むのが実測に整合する（推定）．文字 n-gram の側からも，取り違えの多い対を分ける情報は Step 0 の閾値を超えるほどには増えない．
+- 暫定の読み（判定は rc-evaluator が `### Iteration 110 実行済み` で行う）: success_criteria (10) の規則どおりなら，`confusable_pair_lexical_rerank` は Step 0b で棄却となる（Iter93，Iter108，Iter109 と同じ扱い）．levers は再び使い切った状態に戻る．B209 の要レビューと 0a の申し送りに従い，status=converged を要人間判断として扱う（backlog B211）．
+
+### Iteration 110 実行済み（2026-10-05）
+
+**判定: rejected（success_criteria (10) の Step 0b で不通過．0c と本走は行わない）**
+
+| 項目 | 値 |
+|---|---|
+| 0a の AGREE（いまの分類器の誤答のうち語彙モデルも誤る割合） | 59/122 = 48.4%（逆向き 41.5%）．閉じる条件 ≥ 85% を満たさず通過 |
+| 0b の外側 top1（none / 並べ直し） | 0.8268 / 0.8290（+0.22pt．進む条件は +0.5pt 以上） |
+| 0b の fold ごとの差 | 0.00 / +0.66 / −0.22 / +0.66 / 0.00pt（上回った fold は 2/5．進む条件は 4/5 以上） |
+| 0b の遷移（5 fold の合計） | 誤→正 12 行，正→誤 7 行，正味 +5 行．二項の正確検定の両側 p = 0.36 |
+
+- 数値の訂正: 実装・実験の節と B211 は 0b の遷移を「+16/−11」と書いていたが，`_iter110_step0b.json` の fold ごとの値（1+3+1+3+4 / 1+0+2+0+4）と対ごとの値（7+0+3+2+0 / 4+1+0+1+1）のどちらでも 12 / 7 になる．正味 +5 行と判定は変わらない．
+- ノイズとの切り分け: fold の差の標準偏差は 0.41pt，標準誤差は 0.18pt で，平均 +0.22pt は標準誤差の約 1.2 倍にとどまる．fold あたり 455 行なので，1 行が 0.22pt にあたり，fold の差は −1〜+3 行の範囲で動いただけである．遷移 12 対 7 も二項の揺らぎの範囲である（p = 0.36）．ノイズの範囲内と判定する．
+- B200 の床（正味 ±2 行）との関係: B200 の床は，replay と本走の比較（3,748 行，埋め込みの取り直しによる揺らぎ）から得た尺度で，同じキャッシュの上で決定論的に計算する CV には当てはまらない．CV では fold の間の分散と，不一致の行の二項の揺らぎがノイズの尺度になる．0c に進んでいれば B200 の床を使う設計だった．
+- 仮説との照合: 「文字 n-gram は埋め込みとは別の経路の情報を持ち，対の中の並びを一部直せる」は，直る向きの行（12 行）が出た点では否定されないが，Step 0b の閾値を超える大きさでは支持されなかった．計画の「Δtop1 は +0.5pt 前後が上限」という見込みに対し，実測はその半分以下だった．
+- 想定外の挙動: medical|natural_science は全 fold で選ばれ，217 行で発火したが，直った行は 0 行，崩れた行は 1 行だった．この対では語彙モデルの正解率（73.8%）がいまの分類器（82.9%）を下回る．
+
+**解釈（事実と推定を分ける）**:
+
+- (a) 事実: 対象の行での語彙モデルの正解率は 71.7〜85.5% で，いまの分類器（74.7〜84.7%）と同程度かそれ以下だった．
+- (b) 推定: 0a の AGREE 48.4% は，語彙モデルが独立な情報を持つことよりも，弱いモデルの誤りが雑音として散ったことを主に測っていた．AGREE は，正解率の近い 2 つの分類器（M6 の OvO/ECOC）どうしで比べたときだけ，情報の重なりの尺度になる．
+- (c) 推定: 写像の曖昧な行では文面に 2 クラスの手がかりが両方あり（Uma ら 2022），語彙でも分けられない．education を含む対で直った行が多かった（education|medical +7/−4，business_economics|education +3/−0）ことは，一部の行に固有の用語の手がかりがあることと整合するが，量は小さい．
+
+**採用構成は変えない**: Iter105 の artifact（MD5 `c7172ad37c10e1082a42481553ae25b0`）に Iter107 の報告用フィールドを加えたもの．基準線は `results/20261004_225553` のままとする．
+
+**学び**:
+
+1. AGREE（誤答行の重なり）は，比べる 2 つの分類器の正解率が近いときだけ，新しい情報の有無の尺度になる．正解率の低いモデルと比べると，雑音で AGREE が下がり，0a を素通りする．今後この型の足切りを置くときは，語彙モデル単体の正解率がいまの分類器以上であることを条件に加える．
+2. 取り違えの多い対に限っても，文字 n-gram の TF-IDF の LR は埋め込みの分類器と同程度かそれ以下の正解率しか出さない．固有の用語の手がかりは一部の行にしか無い．
+3. 写像を固定した条件では，決定層（M6），訓練行の除去（Iter108），訓練行の追加（B161），kNN 類似度の前処理（Iter106），事前分布の補正（Iter109），別の入力の特徴（Iter110）の 6 系統が，すべて Step 0 の閾値に届かなかった．
+4. 記録の数値は，一次資料の JSON から数え直してから書く（今回，遷移の行数を 16 / 11 と誤記していた）．
+
+**次の一手**: 調査・計画フェーズからの再探索（Iter108〜110）が 3 回続けて Step 0 で棄却されたので，手順 7-3 の条件に当たると判断する．ただし converged は研究の結論の確定に近いので自動では設定せず，要人間判断とする（B212）．回答があるまでは，次のイテレーションを調査・計画フェーズから始める（`current_lever=null`）．B206（写像の見直し）と B207（π_t の推定の扱い）は回答待ちのままである．
+
 ## Iteration 109: 訓練と評価のドメイン事前分布の差を EM で補正する
 
 このブロックは，rc-researcher の報告をもとにオーケストレータが挿入した（rc-researcher はツールの呼び出しの形式を誤り，記録の前にツールを使えなくなった．起動モードは tenbin）．ドメインの分布，Iter92 の記録の位置，文献の書誌は，オーケストレータが確かめ直した．
@@ -276,141 +356,4 @@
 4. cleanlab 2.9.0 のライセンスは Apache License 2.0 である（実行フェーズで確認）．
 
 **次の一手**: levers は再び使い切りになった．Iter109 は調査・計画フェーズから始める（B205）．評価ラベルの写像を見直す方向は，評価集合の定義を変えるので，人間の判断を仰ぐ（B206）．
-
-## Iteration 107: 送出集合の確率の和を複合行の確信度として設計する
-
-### 経緯（B198〜B200）
-
-- B198（人間の決定）: 方向 (i)（複合行に合った確信度．例: 送った上位 k のドメインの確率の和）を承認．ECE は基準線 `results/20261004_173104/results.jsonl` から新旧の両方の定義で計算し，過去と比べられるようにする．あわせて replay と本走の selected_domain の不一致（共通行で 16 行）を調べる．
-- B199: 調査・計画フェーズを「第 1 段の診断 → 第 2 段のレバー設計」に分けて委譲する．
-- B200（第 1 段の結果）: 不一致は入力の埋め込みの違い（本走は実行時に Ollama で埋め込む）だけから生じ，決定経路の差は無い（3,744 行のすべてで本番の `select_dispatch_targets` が再現）．16 行は k=2 の近傍の入れ替わり 8 行と，上位 2 つの僅差による argmax の反転 8 行．第 2 段の条件: (1) 効果は同じ eval キャッシュ上の「変種 − replay の none」の対応のある比較で測る，(2) 選択 16 行・top1 正味 ±2 行・複合行 ECE ±0.3pt をノイズの床とする，(3) 僅差 49 行と kNN の 2 位・3 位の接近行を除いた部分集合でも効果を確かめる．
-
-### 第 2 段（レバー設計）
-
-#### 調査
-
-- 旧来の ECE（`metrics.py:486-521`）は，確信度を `confidence`（rank 1 の確率．`run_experiment.py:143`）とし，正誤を `selected_domain ∈ expected_domains` とする top-label の ECE である（Guo ら，ICML 2017，arXiv:1706.04599）．複合行では送出集合が複数のドメインを持つのに，確信度は rank 1 の確率だけなので，過小確信（ギャップ −0.112）になる．
-- Mortier ら "On the Calibration of Probabilistic Classifier Sets"（AISTATS 2023，PMLR v206）は，確信度に基づく ECE の拡張を扱う．集合の確率の和を「集合が正解を含む確率」と読む解釈は，抄録の範囲から推定したもので，本文では確かめていない．
-- "Set Learning for Accurate and Calibrated Models"（ICLR 2024）は，ECE は予測器の小さな摂動で大きく揺れうると指摘している（Kakade & Foster 2004，Foster & Hart 2018 を引用）．ノイズの床を置く根拠の一つにした．
-- 本走の `probe_candidates` は全行で 10 ドメインの確率を持ち（和は 1±4e-16，最大値は `confidence` と一致），基準線の results.jsonl からコードを変えずに新しい ECE を事後計算できる．
-
-#### 仮説
-
-送出集合の確率の和を確信度とし，正誤を「送出集合 ∩ 正解 ≠ ∅」とすれば，確信度と正誤の母集団が一致する．その結果，複合行の過小確信が縮み，複合行の ECE が下がる．単一行は大半が k=1 なので，ほとんど動かない（推定．送出数の分布は未確認）．
-
-#### 単一レバー
-
-- `dispatched_set_confidence`: 報告用の確信度を，`confidence`（p_(1)）だけの状態から，`dispatched_confidence`（Σ_{d∈dispatched} p_d）を加えた状態へ変える．決定は変えない．
-- 変更箇所: `run_experiment.py:143` の直後に `dispatched_confidence` を加える（fallback と dispatch_failed の行は null）．`metrics.py` に集合の正誤で ECE を計算する関数と `ece_dispatched_set`（Brier と AUROC の集合版も）を加え（`metrics.py:670` の付近），`print_summary`（`metrics.py:723-724`）に 1 行加える．
-- 既存の `confidence`，`ece`，`brier_score`，`auroc` と，API のレスポンスは変えない．
-
-#### 固定する構成
-
-`models/domain_classifier.joblib`（MD5 `c7172ad37c10e1082a42481553ae25b0`，k=2，λ=0.3，T=0.9426），`dispatch_gap_threshold` 0.36，`dispatch_gap_max_k` 4，max_confidence．
-
-#### replay による予測
-
-`.claude/research/_iter107_replay_setconf.py`（出力は `_iter107_replay_setconf.json`，要点は `_iter107_design_notes.md`）．ECE は旧 → 新で，括弧内は「新 − 旧」の行を対にした bootstrap（2000 回）の 95% CI である．top1 は none 変種と同じ（決定を変えないので差は 0）．
-
-| 範囲 | 行数 | replay | 基準線の本走からの事後計算 |
-|---|---|---|---|
-| 共通行 | 3,744 | 0.0370 → 0.0289（−0.0081 [−0.0154, −0.0025]） | 0.0373 → 0.0288（−0.0085） |
-| 単一行 | 3,014 | 0.0199 → 0.0189（−0.0010 [−0.0089, +0.0025]） | 0.0210 → 0.0196（−0.0014） |
-| 複合行 | 730 | 0.1146 → 0.0745（−0.0401 [−0.0624, −0.0218]） | 0.1122 → 0.0694（−0.0429 [−0.0639, −0.0231]） |
-| 接近行を除いた複合行 | 609 | 0.1226 → 0.0719（−0.0507 [−0.0747, −0.0302]） | 0.1224 → 0.0707（−0.0516） |
-| OOF（単一ラベル） | 2,275 | 0.0198 → 0.0144（5 fold すべてで新 < 旧） | — |
-
-- 複合行の符号付きギャップは −0.1146 → −0.0745（replay）で，過小確信は残る．
-- 接近行は，上位 2 つの差が 0.02 未満の 49 行と，kNN の 2 位と 3 位の類似度の差が 1e-3 未満の 376 行である．
-- replay − 本走（複合行）は旧 +0.0024，新 +0.0052 で，新の定義では B200 の床（±0.3pt）を超える．床を ±0.6pt と見積もり直した（1 回の比較に基づく）．予測される効果 −4.0pt はその約 7 倍である．
-- OOF は訓練集合が単一ラベルだけなので，選択には使わず，単一行の非退行の確認にだけ使った．
-
-#### 成功条件（事前登録．config.yml の success_criteria (7)）
-
-- 主基準: 本走の共通行の複合行で，新の ECE ≤ 旧の ECE − 0.02，かつ「新 − 旧」の 95% CI の上限 < 0．
-- 非退行: 共通行の全体で新 ≤ 旧，単一行で新 ≤ 旧 + 0.005，旧の定義の ECE（共通行）≤ 0.0373 + 0.006 = 0.0433．C1〜C6 は Iter105 の値のまま．
-- 決定の不変: \|Δtop1\| ≤ 0.1pt，かつ McNemar が有意でない．(1) の McNemar を主基準とする規定と (6) の invalid の規定は適用しない．埋め込みの取り直しで selected の不一致が 16 行程度は出る．
-- C7，ECE の判定帯，AUROC，Brier は新旧の両方を併記し，どちらの定義かを明記する．
-
-#### 実験の計画
-
-- `run_experiment.py` と `metrics.py` は `Dockerfile:23` でイメージに入り，本走は app コンテナの中で実行される（`mise.toml:219`）．このため，イメージの再ビルドと deploy が要る．
-- G0: 短い動作確認（数十問）で，`dispatched_confidence` が results.jsonl に出ることと，`ece_dispatched_set` が metrics.json に出ることを確かめる．あわせて，`dispatched_confidence` が `probe_candidates` からの事後計算と一致することも確かめる．`tools/smoke_check.py:54` の `DEPLOYED_FILES` に 2 つのファイルが無いので，イメージの中の MD5 を手で照合する．
-- 本走: 3,750 行で行い，基準線 `results/20261004_173104` と (7) で比べる．基準線の事後計算は既に (7) の主基準を満たしているので，本走はこれが新しいフィールドの実装でも再現するかを確かめる位置づけである．
-
-### Iteration 107 実装・実験（2026-10-04〜05）
-
-**再開の経緯**: 前のセッションは本走を起動した後，記録を残す前に中断した．23:19 の `[start] ERROR sh exited with non-zero status` は，ローカルの待機ループの SSH が切れただけで，本走（wafl500 の PID 787025，`docker compose exec -d`）は継続していた．二重には起動していない．この節は，rc-executor の報告をもとにオーケストレータが追記した（rc-executor は追記の前にツールを使えなくなった）．
-
-**変更**（未コミット）: `run_experiment.py`（+13），`metrics.py`（+41），`tests/test_metrics.py`（+58），`tests/test_run_experiment.py`（+5）．既存の `confidence`，`ece`，`brier_score`，`auroc` は変えていない．`pytest` は 63 件が通り，`ruff check` も通った．`ruff format --check` は 3 つのファイルを指摘したが，HEAD の時点から未整形だった行だけなので整形していない．
-
-**イメージの照合**: コンテナの中の MD5 はローカルと一致した（`run_experiment.py` `3fee3ec39dfaeae2ccfdb4d116038867`，`metrics.py` `34de20337e6335d4dbbd7e78ad0c3b4f`）．10 ノードのイメージの digest は `sha256:c9f5224177257cf488b4fe66b948823d73dbbea693b2333d5fe6b34a7352e072` で揃っている．`git_head.txt` は `a3e9801-dirty-iter107`，`data/dataset.jsonl` の MD5 は `769f2a58dc807e23e1b73e44b97e97b8`（ビルドの前後で同じ）．
-
-**G0**（`results/20261004_225309/preview20.jsonl`，20 行）: 20 行のすべてに `dispatched_confidence` があり，`probe_candidates` からの事後計算との不一致は 0 行，`ece_dispatched_set` も出力された．20 行とも単一行で送出先が 1 つだったので，複合の送出の照合は本走の 740 行で行った（不一致 0 行，null の規則の違反 0 行）．
-
-**本走**: `results/20261004_225553`（22:55:53 開始，01:14 に `results.jsonl.done`，3,750 行．期限の前に完了）．`mise run analyze`，`metrics.py --json`，`mise run stop` はいずれも exit 0．集計は `.claude/research/_iter107_main_summary.{py,json,out}`．
-
-共通行（両方の実行で `confidence` が非 null の 3,744 行）での新旧の ECE（CI は行を対にした bootstrap 2000 回，seed 107 の「新 − 旧」の 95% 区間）:
-
-| 範囲 | n | ECE 旧 | ECE 新 | 新 − 旧 [95% CI] | 符号付きギャップ 旧 → 新 |
-|---|---|---|---|---|---|
-| 共通行 | 3,744 | 0.037281 | 0.028756 | −0.008525 [−0.015309, −0.002286] | −0.0365 → −0.0288 |
-| 単一行 | 3,014 | 0.020953 | 0.019582 | −0.001370 [−0.009046, +0.003058] | −0.0182 → −0.0189 |
-| 複合行 | 730 | 0.112223 | 0.069354 | −0.042869 [−0.064626, −0.023781] | −0.1122 → −0.0694 |
-| 接近行を除いた複合行 | 609 | 0.122354 | 0.070718 | −0.051637 [−0.073291, −0.028434] | −0.1224 → −0.0707 |
-
-| 範囲 | Brier 旧 → 新 | AUROC 旧 → 新 | top1（本走 / 基準線） | McNemar（b_only / a_only，p） | selected の不一致 |
-|---|---|---|---|---|---|
-| 共通行 | 0.100591 → 0.057541 | 0.84924 → 0.81890 | 0.849626 / 0.849626 | 0 / 0，p=1.0 | 0 |
-| 単一行 | 0.090644 → 0.054863 | 0.86295 → 0.83962 | 0.860319 / 0.860319 | 0 / 0，p=1.0 | 0 |
-| 複合行 | 0.141659 → 0.068602 | 0.80827 → 0.74047 | 0.805479 / 0.805479 | 0 / 0，p=1.0 | 0 |
-| 接近行を除いた複合行 | 0.138649 → 0.069238 | 0.80339 → 0.72123 | 0.822660 / 0.822660 | 0 / 0，p=1.0 | 0 |
-
-全行（`metrics.json`）: top1 0.849333 [0.83753, 0.86042]（基準線 0.848267），ECE 旧 0.037401 / 新 0.028884（3,748 行），Brier 旧 0.100528 / 新 0.057525，AUROC 旧 0.849260 / 新 0.818719，dispatch_failure_rate 0.000533（2 行．基準線は 6 行），fallback_rate 0，compound_mean_dispatched_count 1.980822（基準線と同じ）．軸 2 / 3 は answer_quality_accuracy 0.58609（3,020 行），end_to_end_accuracy 0.40587．
-
-**異常と未確認の点**:
-
-- ノードのログに traceback，OOM，CUDA error は無い．`dispatch_model_not_ready`（Ollama の 500）が wafl503（23:11:49）と wafl506（23:13:31）で 1 件ずつあった．本走の dispatch_failed の 2 行に当たると推定するが，request_id は照合していない．
-- **共通行で selected_domain の不一致が 0 行，旧の ECE が基準線と 6 桁まで一致した**．B200 の見込み（16 行程度）とは違う．B200 の 16 行は「replay と本走」の差であり，「本走と本走」の差ではないので，同じハードウェアの Ollama の埋め込みが決定的なら説明はつく（推定）．新しい実行である根拠は，`dispatched_confidence` の有無，dispatch_failed の行数（2 と 6），`mean_duration_ms`，`git_head` の違いである．一方，`request_id` と `probe_candidates` の確率値の行ごとの照合は行っていない．rc-evaluator はこれを判定の前に確かめること．
-
-### Iteration 107 実行済み（2026-10-05）
-
-この節は，rc-evaluator の報告をもとにオーケストレータが追記した（rc-evaluator は書き込みの前にツールを使えなくなった）．照合のスクリプトは `.claude/research/_iter107_verify.py` と `_iter107_auroc.py`（読み取りだけ．コミットしない）．
-
-**照合（本走が今回の実行の出力か）**:
-
-- `request_id` は 3,750 行のすべてで基準線と異なる．`dispatched_confidence` は本走の 3,750 行にあり，基準線には無い．`answer_text` の一致は 2,347 / 3,750 行で，生成は非決定的である．以上から，本走は基準線の写しではない（オーケストレータも `request_id` と `dispatched_confidence` を再確認した）．
-- 一方，共通 3,744 行の `confidence` と `probe_candidates` の 10 ドメインの確信度は，基準線と完全に一致した（最大差 0.0）．同じイメージ，同じ artifact，同じハードウェアでは，Ollama の埋め込みと分類器の出力が決定的だと推定する．B200 の 16 行は replay と本走の差であり，本走どうしの差ではなかった．success_criteria (7) の「selected の不一致は 16 行程度は出る」という見込みは誤りだった．
-- dispatch_failed の 2 行は，ログの `dispatch_model_not_ready` と `request_id` で対応した（`medical-110` は wafl503 の 23:11:49，`natural_science-079` は wafl506 の 23:13:31）．基準線で失敗した 6 行のうち 4 行は，本走では成功して正答だった．
-
-**判定: adopted**（success_criteria (7)．ECE は共通行の値）:
-
-| 条件 | 基準 | 実測 | 判定 |
-|---|---|---|---|
-| 主基準 | 複合行で新 ≤ 旧 − 0.02 = 0.092223，かつ CI の上限 < 0 | 0.069354，CI [−0.064626, −0.023781] | PASS |
-| 非退行（全体） | 新 ≤ 旧 | 0.028756 ≤ 0.037281 | PASS |
-| 非退行（単一行） | 新 ≤ 旧 + 0.005 = 0.025953 | 0.019582 | PASS |
-| 非退行（旧の定義） | ≤ 0.0433 | 0.037281 | PASS |
-| 決定の不変（共通行） | \|Δtop1\| ≤ 0.1pt，McNemar が有意でない | Δ 0，0 / 0，p = 1.0 | PASS |
-| C1 | BH 補正後の有意な退行 0 件 | 不一致は本走だけが正答の 4 行だけで，退行の向きの差は無い | PASS（推論．関数での再計算はしていない） |
-| C2 | fallback 0，dispatch_failure_rate ≤ 0.005 | 0，0.000533 | PASS |
-| C3 | G0 の記録と MD5 | `_iter107_g0_*` があり，ローカルの MD5 は一致する．イメージの中の artifact の MD5 の記録は無いが，probe の出力 37,500 値が基準線とビット単位で一致する | PASS（注記つき） |
-| C4 | 複合行の top1 ≥ 0.780411 | 0.805479 | PASS |
-| C5 | set_recall ≥ 0.54，mean_dispatched ≤ 2.10 | 0.573288，1.980822 | PASS |
-| C6 | mean_duration_ms ≤ 3041.7 | 2223.79 | PASS |
-| C7 | ECE ≤ 0.08（新旧の併記） | 旧 0.037401，新 0.028884（metrics.json，3,748 行） | PASS |
-
-- 根拠: 複合行の ECE は 0.112 → 0.069（−4.29pt）で，replay の予測（−4.01pt）と合う．揺らぎの床（±0.6pt）の約 7 倍である．決定は全行で不変である．
-- 注記: 全行の top1 は 0.848267 → 0.849333（+0.107pt）で，帯の 0.1pt をわずかに超える．差の 4 行はすべて基準線だけで送出に失敗した行で，レバーとは関係が無い（全行の McNemar は 4 / 0，連続補正つきで p ≈ 0.13）．(7) の主基準が共通行を指定しているので，決定の不変も共通行で判定した．
-- 採用の意味: `dispatched_confidence` と `ece_dispatched_set` を報告に加える．既存の `confidence` と `ece` は変えていないので，過去の結果とは旧の定義で比べられる．
-
-**学び**:
-
-1. 同じ構成の本走どうしでは，probe の確率まで一致した（推定: 決定的）．決定を変えない報告用のレバーでは，基準線の results.jsonl からの事後計算が本走の値と一致した．同じ型のレバーで本走（約 2.3 時間）を事後計算で置き換えるかは，手順の変更なので B203 で人間に尋ねる．
-2. 単一行の送出数（失敗を除く 3,018 行）は，k=1 が 2,538 行（84.1%），k=2 が 95 行，k=4 が 385 行で，k=3 は 0 行である．B201 の推定「単一行の大半は k=1」は確かめられた．k≥2 の 480 行では，確信度の平均が 0.509 → 0.963，正答率が 0.527 → 0.985 と大きく動くが，両方が一緒に動くので，単一行の ECE はほとんど変わらない．k=3 が出ない理由は確かめていない．
-3. 複合行の送出数（730 行）は，k=1 が 470 行，k=2 が 32 行，k=4 が 228 行である．k=4 の行の正答率は，旧の定義で 0.570，新の定義で 0.969 である．
-4. 新の定義では AUROC が下がる（共通行 0.849 → 0.819，複合行 0.808 → 0.740）．新の定義の誤り 251 行（旧は 563 行）のうち 233 行は k=1 で，「1 つに自信を持って送って外した行」に誤りが集まる．k≥2 の行は確率の和が 0.95 前後に詰まるので，k の内側の AUROC も低い（共通行で k=2 が 0.57，k=4 が 0.73，k=1 が 0.81）．正例の率が 85% から 93% へ変わるので，新旧の AUROC と Brier は同じ尺度で比べられない．新の定義は送出数を増やすほど確信度も正誤も甘くなるので，送出数を変えるレバーとは独立に読めない．今後も新旧を併記する．
-5. 送出の失敗（Ollama の 500，`dispatch_model_not_ready`）は 4 回目の再発である（Iter102，103，105，107）．
-
-**次の一手**: config.yml の levers は再び使い切りになった．Iter106 では再探索で新しいレバーを定義できず，人間が方向を与えた．このため，次のレバーは自分では確定せず，Iter108 は調査・計画フェーズから始める（B202）．評価の手順に関わる 2 つの判断は B203 で人間に尋ねる．
 
