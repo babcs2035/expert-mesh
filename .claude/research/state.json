@@ -1,15 +1,15 @@
 {
   "repo": "expert-mesh",
-  "iteration": 110,
-  "iteration_name": "取り違えの多いクラス対を文字 n-gram で並べ直す",
-  "phase": "evaluate",
+  "iteration": 111,
+  "iteration_name": "写像を固定した 6 系統の外で代替のレバーを探す",
+  "phase": "research",
   "status": "running",
-  "current_lever": "confusable_pair_lexical_rerank",
+  "current_lever": null,
   "experiment_dir": null,
   "experiment_deadline": null,
   "updated_at": 1791167114,
-  "last_slack_ts": "1791164036.153749",
-  "iteration_thread_ts": "1791168389.255849",
+  "last_slack_ts": "1791169612.438079",
+  "iteration_thread_ts": "1791171592.993019",
   "notion_toggle_created": true,
-  "last_commit": "cb5a294"
+  "last_commit": "5ad1b42"
 }
